@@ -75,9 +75,12 @@ cron(每小时) → flock 防重入 → 对每个 source：
   3. 选态：states/<source>/ 里 valid_time == T 的快照；缺则降级（§5）
   4. 组装 run 目录（/scratch/frd_muziyao/yd-loop/runs/<source>/<T>/）：
      input 模板（几何/参数/calib，随本仓固定版本）+ 新 forcing + 重戳后的 cfg.ic
-  5. sbatch 单作业，作业内顺序两次 SHUD：
-     a. 状态短跑：START=0, END=0.5（12h）→ 末态 = valid_time T+12h 的快照
-     b. 预报长跑：START=0, END=7.0 → yd.rivqdown.dat（DT_QR_DOWN=180，3h 步长）
+  5. sbatch 单作业，作业内顺序两次 SHUD（START/END 单位为天，规则而非常量：
+     设 S = (cycle_time − tsd.forc 起始日 00:00 UTC)/86400——00Z 轮 S=0，12Z 轮
+     S=0.5 或 0，取决于 producer 把 Time_Day 锚在 cycle 时刻还是当日零点，
+     **须实测钉死**，见 §9；IC header 分钟同步重戳为 S×1440）：
+     a. 状态短跑：START=S, END=S+0.5（12h）→ 末态 = valid_time T+12h 的快照
+     b. 预报长跑：START=S, END=S+7.0 → yd.rivqdown.dat（DT_QR_DOWN=180，3h 步长）
   6. 收尾（作业成功后）：
      - 短跑末态负残差归零 + 阈值 QC → states/<source>/<T+12h>.cfg.ic + 元数据
        （producer_cycle、模型包 checksum——供下轮血缘校验）
@@ -146,6 +149,7 @@ cron(每小时) → flock 防重入 → 对每个 source：
 | 项 | 手段（oracle：node-22 实机） |
 |---|---|
 | forcing 最小接线 | 对一个历史 cycle 跑三段 CLI，抽 3 站 CSV 与 canonical 格点值对照 IDW 权重手算 |
+| **12Z 轮时间锚定** | 对一个 12Z 历史 cycle 实跑 produce，人工核对 `.tsd.forc` 起始日头与首行 Time_Day，钉死 §4 的 S 取 0.5 还是 0（防整条曲线静默平移半天） |
 | 两段跑 warm-start 接力 | 连续两轮实跑：断言第二轮消费的快照 valid_time == 其 T、血缘匹配；比对第二轮 [0,12h] 流量与第一轮长跑同窗段一致性 |
 | 负残差 QC | 用真实短跑末态验证清零/阈值行为（含构造超阈值拒绝样例） |
 | 降级/熔断 | 删除精确快照 → 断言取旧+degraded 标记；清空 states → 断言拒跑+status.json 告警位 |
@@ -154,8 +158,11 @@ cron(每小时) → flock 防重入 → 对每个 source：
 
 ## 10. 开放项
 
-1. **SHUD 二进制版本**：必须与 zhaochen 率定所用版本一致（CRYOSPHERE 等特性开关影响状态
-   语义）——向 zhaochen 确认其编译版本/commit，钉进模型包 checksum。
+1. **SHUD 二进制版本与末态写出机制**：必须与 zhaochen 率定所用版本一致（CRYOSPHERE 等
+   特性开关影响状态语义）——向 zhaochen 确认其编译版本/commit，钉进模型包 checksum。
+   同场确认：该二进制在 END 时刻把末态写到哪个文件、由哪个 para 键控制（交付的
+   `yd.cfg.para` 无 NWM patch 的 `Update_IC_STEP` 键，短跑末态可捕获目前是**假设**，
+   由 §9"两段跑接力"实测兜底）。
 2. **契约确认**：双源目录布局（`output/<T>/<source>/`）与时间基准（forcing/产物均为 UTC，
    viewer 展示转北京时间）需与 zhaochen / viewer 侧三方对齐——viewer 契约文档已同步改。
 3. **bootstrap 状态过旧（~2025-01）**：可选补救——向 zhaochen 要 2025-01 至今的历史
