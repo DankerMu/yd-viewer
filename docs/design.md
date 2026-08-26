@@ -18,11 +18,11 @@ yd 流域由外部计算团队（zhaochen 方）用 SHUD 完成计算，服务�
 |---|---|
 | 更新形态 | 滚动更新；时次下拉可选，窗口 = 最新时次往前 **7 天** |
 | 架构 | **无库直读**：无 PG/ingest，直接读 SHUD 原生二进制产物 |
-| 产物来源 | 计算随迁客户服务器本地落盘，无跨机传输链路 |
-| 接口契约 | 直读 SHUD 原生输出 + 完成标记（见 §4 产物契约） |
+| 产物来源 | 由本仓 yd 循环预报环产出（node-22，双源 IFS+GFS、7 天时效、12h 节律，见 [compute-loop-design.md](compute-loop-design.md)）；最终随整仓迁客户服务器本地落盘，无跨机传输链路 |
+| 接口契约 | 直读 SHUD 原生输出 + 完成标记（见 §4 产物契约）；cycle 目录含 source 维度 |
 | 27 角色 | 同款实例读 NFS `/home/ghdc/yd`，作为交付验证 oracle |
 | 暴露方式 | 客户侧 IP+端口直访；27 侧暂挂 `test.nwm.ac.cn/yd` |
-| 功能范围 | **仅核心**：河网地图 + 河段点击流量过程线 + 时次下拉；无气象代站图层、无面雨量、无单元变量染色 |
+| 功能范围 | **仅核心**：河网地图 + 河段点击流量过程线（IFS/GFS 双源两条曲线，按可用性出线）+ 时次下拉；无气象代站图层、无面雨量、无单元变量染色 |
 | 代码组织 | 独立仓库（本仓库），与 NWM 主仓分离；前端组件按需一次性拷贝，不做共享包 |
 | 访问控制 | 查看器不带登录，交给客户网络层 |
 | 系统名称 | **水文预报系统** |
@@ -48,14 +48,16 @@ yd 流域由外部计算团队（zhaochen 方）用 SHUD 完成计算，服务�
 
 ```
 <products_root>/                     # 客户机自定；27 侧为 /home/ghdc/yd（22 视图 /ghdc/data/yd）
-  input/yd/gis/{river,domain,seg}.*  # 流域几何（随 basin 包，已存在）
-  output/<YYYYMMDDHH>/               # 每轮预报一个目录，命名按北京时间
+  input/yd/gis/{river,domain,seg}.*  # 流域几何（随模型包，已存在）
+  output/<YYYYMMDDHH>/<source>/      # 每轮 × 每源（ifs|gfs）一个目录，cycle 命名按 UTC
     yd.rivqdown.dat                  # SHUD 原生二进制河道流量（唯一必需产物）
-    DONE                             # 计算完成后最后写入；无此标记不展示
+    meta.json                        # degraded 标记、血缘摘要
+    DONE                             # 本源本轮写完后最后写入；无此标记不展示
+  status.json                        # 循环健康状态（viewer 据此显示更新时间/停更提示）
 ```
 
-待计算方确认的契约条款：目录命名与 .dat 内部时间的基准（北京时间 vs UTC）、
-DONE 最后写入、SHUD 版本升级/格式变化提前通知、旧时次清理归计算方。
+时间基准已定：cycle 与 .dat 内部均为 UTC，viewer 展示转北京时间。
+模型包（几何/率定/SHUD 版本）变更条款对 zhaochen 方，见 products-contract.md。
 
 ## 5. 服务架构（无状态，只读）
 
@@ -69,8 +71,9 @@ API（全部相对路径，供根路径与反代子路径两种部署形态共�
 | `GET api/meta` | 标题、底图 URL、边界 bbox、窗口天数 |
 | `GET api/geometry/rivers` | 河网 GeoJSON（含 index/down/length/width） |
 | `GET api/geometry/boundary` | 流域边界 GeoJSON |
-| `GET api/cycles` | 7 天窗口内时次列表（倒序） |
-| `GET api/cycles/{id}/reaches/{rid}/discharge` | 单河段流量序列（m³/s） |
+| `GET api/cycles` | 7 天窗口内时次列表（倒序），每时次附可用 source 列表 |
+| `GET api/cycles/{id}/reaches/{rid}/discharge` | 单河段流量序列（m³/s），按可用 source 返回一或两组曲线 |
+| `GET api/status` | 透传 status.json（更新时间、停更提示） |
 
 守护性行为：产物列数 ≠ 河网段数时返回 409 并明说"产物与几何来自不同流域构建"；
 时次滑出窗口返回 404；解析失败返回 502，不画错数据。
@@ -86,7 +89,8 @@ Vite + React + TypeScript + MapLibre GL + ECharts。m11 组件与流域/代站�
 - 布局：顶栏（系统名"水文预报系统" + 时次下拉）+ 全屏地图 + 浮动曲线面板；
 - 地图：底图（配置的栅格瓦片 URL，可为空 → 素底 + 流域边界）+ 河网线图层（宽度按 zoom/河宽），
   点击河段高亮并拉取该时次流量序列；
-- 曲线：ECharts 时间轴折线，标题"河段 #id"，单位 m³/s；
+- 曲线：ECharts 时间轴折线，标题"河段 #id"，单位 m³/s，IFS/GFS 双系列图例（缺源时单线）；
+  顶栏含数据更新时间/停更提示（来自 `api/status`）；
 - 构建以相对路径为 base（`./`），fetch 一律相对 URL —— `/yd/` 子路径与根路径同一份产物。
 
 ## 7. 部署形态
@@ -111,8 +115,8 @@ Vite + React + TypeScript + MapLibre GL + ECharts。m11 组件与流域/代站�
 | 前端 | tsc + build 门禁；交互走 27 实机浏览器验证 |
 | 端到端 | 27 部署后 live receipt：`/yd/` 加载几何、时次列表、点击出曲线 |
 
-注：zhaochen 尚未产出滚动预报产物（当前是 25 年率定长跑），27 端到端在其首轮
-按契约落盘后才能闭环；在此之前用合成产物在 27 做同构验证。
+注：27 端到端在循环预报环（compute-loop-design.md）首轮按契约落盘后才能真产物闭环；
+在此之前用合成产物在 27 做同构验证。
 
 ## 9. 里程碑
 
@@ -120,14 +124,14 @@ Vite + React + TypeScript + MapLibre GL + ECharts。m11 组件与流域/代站�
 2. **M2 前端**：核心三件套 + 构建门禁（本地）
 3. **M3 打包**：Dockerfile + 离线 bundle 脚本 + 部署文档
 4. **M4 27 staging**：部署 + nginx `/yd/` + live receipt（合成产物）
-5. **M5 契约闭环**：计算方确认契约并首轮落盘 → 真产物 receipt → 出客户交付包
+5. **M5 契约闭环**：循环预报环首轮真产物落盘 → 27 真产物 receipt → 出客户交付包
 
 ## 10. 开放项
 
 1. 客户服务器能否联外网（底图/镜像拉取）——待问客户；默认离线设计。
-2. 产物契约条款（§4）待与计算方过一遍；27 侧还需他们把每轮产物按契约落到
-   `/ghdc/data/yd/output/`（现在其作业在 `/scratch/zhaochen/...`）。
-3. 27 上 yd-viewer 的端口号与天地图 key 的配置来源（部署时定）。
+2. 27 实例数据源由本仓循环预报环（node-22）按契约落盘 `/ghdc/data/yd/output/`，
+   不再依赖 zhaochen 落产物；对 zhaochen 只剩模型包条款（见 products-contract.md）。
+3. 27 上 yd-viewer 的端口号与天地图 key（用新申请、域名绑定的 key，勿用已泄漏旧 key）。
 
 ## 11. 风险
 
