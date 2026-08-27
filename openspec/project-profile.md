@@ -47,6 +47,11 @@ Verification matrix:
 - `openspec/changes/<name>/**` -> `bash scripts/check-stage-pipeline-log.sh origin/master` -> 该 change 在 `docs/stage-pipeline-log.jsonl` 有条目
 - 默认构建+测试 -> 上述 producer + viewer + openspec 三条 -> CI 四个 job 全绿
 
+Mutation-testing hazards（本仓已实测绊倒过多个独立 agent，写进每份要求变异证明的 brief）:
+- 复制 `producer/` 到 scratch 做变异时必须 `rsync --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache'`。带 `.venv` 复制会让 `yd_producer` 解析回仓库原文件，变异全部"存活"——假阴性，且看起来像好消息。
+- 跑之前先断言 `yd_producer.__file__` 落在 scratch 副本里，再用一个必然变红的控制变异校准。
+- scratch 目录名取唯一（含 issue/round 标识），并发 agent 共用通用路径会互相覆写脚本。
+
 Domain risk packs:
 - Geospatial / CRS / shapefile sidecars（`.prj` 自定义 Albers、重投影、GeoJSON 产物）
 - Time series / forcing / temporal boundaries（cycle 00/12、0–168h、`Time_Day=0` 锚、T+12 相对/绝对时间头）
