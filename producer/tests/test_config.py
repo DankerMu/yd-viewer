@@ -86,9 +86,10 @@ SPEC_PINNED_TOP_LEVEL_KEYS = (
 # --- 第二本账：从 fixture 手工转录的必需 key 全集 ----------------------------
 #
 # 来源：`openspec/changes/m2-producer-core/tasks.md` →「### Issue #2 fixture（任务
-# 1.1–1.2）」→「TOML key schema」代码块。config 侧 tasks.md:42-70，local 侧
-# tasks.md:91-112（行号以 PR head c8e7a7c 为准；块标题是稳定锚点）。下面两份清单按
-# 该代码块的**阅读顺序**排列，逐行转录。
+# 1.1–1.2）」→「TOML key schema」代码块。**权威锚点是该块标题**，不是行号：下面各处的
+# tasks.md 行号（config 侧 42-70、local 侧 91-112）只是撰写时的位置提示，文件上游插入
+# 内容导致行号漂移不使本转录失效，按块标题重新定位即可。下面两份清单按该代码块的
+# **阅读顺序**排列，逐行转录。
 #
 # 维护规则（round 3 的失败就出在这里，不要重蹈）：这两份清单是 `_required_keys` 的
 # **独立第二本账**，MUST 手工对着 fixture 维护，MUST NOT 由 `_required_keys` 的输出
@@ -237,6 +238,135 @@ CONFIG_REQUIRED_KEYS = _required_keys(Config)
 LOCAL_REQUIRED_KEYS = _required_keys(LocalConfig)
 
 
+# --- 类型错误轴的推导器（第一本账，带类型）----------------------------------
+
+_SCALAR_TYPES = (str, int, bool)
+
+
+def _scalar_leaves(cls: type, prefix: str = "") -> list[tuple[str, type]]:
+    """从 dataclass 树推导 **(点分路径, 标注类型)**——类型错误轴的推导器。
+
+    与 `_required_keys` 同源同走法，只是多带一份类型信息：新增任何标量字段即自动新增
+    一条类型错误用例，不必编辑测试。round 4 R4-TE-01 的成因就是本轴此前**没有推导器**，
+    只有手挑的单例，而 `_require_scalar(..., "str")` 一个单例都没抽到——10 个 `str` 字段
+    的类型守卫可以被整体换成裸 `_require` 而 95 条测试全绿。
+
+    verifier 的更正（`verify-r4.md`「Proposed closure — verified, with one correction」），
+    逐字照搬：把这条推导**驱动自 `PINNED_CONFIG_KEYS`/`PINNED_LOCAL_KEYS` 行不通**——
+    那两份清单只带点分名、不带类型信息，无从判断 33 个 key 里哪 10 个是 `str` 标量。
+    **dataclass 树是唯一带类型的来源。**
+
+    非标量叶子（`tuple[int, ...]`、`tuple[str, ...]`、`dict[str, str | int]`）**显式跳过**，
+    不属于本轴：它们走 `_require_list`/`_require_table` 而非 `_require_scalar`，"无歧义错
+    类型"的形态也不同（非 list、元素类型错、非 table），已由本文件的列表/表用例分别覆盖。
+    这里写成显式的 `field_type in _SCALAR_TYPES` 白名单判定，而不是"取不到类型就算了"，
+    是为了让跳过是一个有理由的决定，而非真值性事故——后者正是本 PR 前四轮盲区的成因。
+
+    判定用**类型对象相等**而非 `issubclass`：`issubclass(bool, int)` 为真，会把 bool 字段
+    误并入 int；而 `tuple[int, ...]` / `str | int` 这类 GenericAlias、UnionType 与类型对象
+    比较恒为 False，天然落在白名单外。
+    """
+    hints = typing.get_type_hints(cls)
+    leaves: list[tuple[str, type]] = []
+    for field in dataclasses.fields(cls):
+        path = f"{prefix}.{field.name}" if prefix else field.name
+        field_type = hints[field.name]
+        if isinstance(field_type, type) and dataclasses.is_dataclass(field_type):
+            leaves.extend(_scalar_leaves(field_type, path))
+        elif field_type in _SCALAR_TYPES:
+            leaves.append((path, field_type))
+    return leaves
+
+
+CONFIG_SCALAR_LEAVES = _scalar_leaves(Config)
+LOCAL_SCALAR_LEAVES = _scalar_leaves(LocalConfig)
+
+# 每个标量类型的"无歧义错类型"替换值。**刻意不跨 int/bool 互试**：Python 里 bool 是 int
+# 的子类，拿 `true` 去试 int 字段、或拿 `1` 去试 bool 字段，断言的都是本轴契约没有要求的
+# 行为——`isinstance(True, int)` 为真，一个只写 `isinstance(v, int)` 的实现放行 `true` 并
+# 不违反"类型错误 fail closed"这条契约本身。bool/int 必须互斥是**另一条**契约，由
+# `test_config_bool_is_not_accepted_as_int` 等负例单独钉死，不在本轴内重复表达。
+# 于是：`str` 字段用 int 试探，`int` 与 `bool` 字段一律用 str 试探。
+_WRONG_VALUE_BY_TYPE: dict[type, Any] = {
+    str: 5,
+    int: "not-an-int",
+    bool: "not-a-bool",
+}
+
+
+# --- 第三本账：fixture dict 的点分闭包 --------------------------------------
+#
+# `VALID_CONFIG`/`VALID_LOCAL` 是与 `PINNED_*_KEYS`、`_required_keys` 都不同形状的第三份
+# 转录（嵌套 dict of 值 vs 扁平点分清单 vs dataclass 树）。它之所以是**真正的第三本账**，
+# 不是因为形状不同，而是因为它**自身独立承重**：其中每一个 key 都被 round-trip 用例
+# （`test_load_config_returns_all_fields` / `test_load_local_returns_all_site_fields`）逐值
+# 钉死，想靠删 key 让一次漂移变绿，必然在别处变红。
+#
+# 它封掉的残留（round 4 实测）：协同漂移——同时把 `_required_keys` 退回只走叶子、并从两份
+# pinned 清单里删掉 8 个表 key——原本 87 条全绿，round 3 的 `_DEFAULT_SLURM_FIELDS` 缺陷
+# 可以原样复活且无人可见。加上下面两条闭包断言后该漂移变红。
+#
+# 不解析 fixture markdown：那只是换一套自带盲区的推导器，并把测试绑死在文档排版上。
+
+# `local.toml` 的 `[slurm]` 表在本 schema 里只钉到表本身：**表内键集的唯一权威是
+# `config.slurm.required_fields`**（tasks.md「TOML key schema」块下方 `[slurm].required_fields`
+# 一节，撰写时位于 tasks.md:81-85），已由 `SLURM_REQUIRED_FIELDS` 驱动的那组用例覆盖，装载器
+# 不对该表另设静态 schema。因此凡是遍历 fixture 的走查都 MUST 在此止步。
+#
+# 这是账本内部的一处**硬编码例外**，而硬编码例外正是前三个盲区的搭建方式，所以它必须写明
+# 权威出处：未来若有人想把别的 key 塞进 stop 来抹平一次真实漂移，得先推翻上面这条权威。
+_LOCAL_WALK_STOP = ("slurm",)
+
+
+def _dotted_closure(
+    data: Mapping[str, Any], prefix: str = "", stop: tuple[str, ...] = ()
+) -> list[str]:
+    """把嵌套 fixture dict 展开成点分 key 清单（表本身也产出一条），按阅读顺序。"""
+    keys: list[str] = []
+    for key, value in data.items():
+        path = f"{prefix}.{key}" if prefix else key
+        keys.append(path)
+        if isinstance(value, dict) and path not in stop:
+            keys.extend(_dotted_closure(value, path, stop))
+    return keys
+
+
+def _fixture_scalar_leaves(
+    data: Mapping[str, Any], prefix: str = "", stop: tuple[str, ...] = ()
+) -> list[tuple[str, type]]:
+    """fixture dict 里的标量叶子及其**实际值类型**：表递归、列表跳过、其余全收。
+
+    这里的取舍规则 MUST 是**排除法**（非表非列表即标量），MUST NOT 复用 `_scalar_leaves`
+    的 `_SCALAR_TYPES` 白名单。实测过：两边共用该白名单时，从白名单里删掉 `bool` 会让
+    2 条 bool 用例**整体消失**而套件仍 112 全绿——两本账共用同一个盲区，正是 round 3 的
+    失败形态。排除法让 fixture 侧的规则由 fixture 里实际有什么决定，收窄白名单立刻变红。
+    """
+    leaves: list[tuple[str, type]] = []
+    for key, value in data.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            if path not in stop:
+                leaves.extend(_fixture_scalar_leaves(value, path, stop))
+        elif not isinstance(value, list):
+            leaves.append((path, type(value)))
+    return leaves
+
+
+def _type_names(leaves: list[tuple[str, type]]) -> dict[str, str]:
+    return {path: leaf_type.__name__ for path, leaf_type in leaves}
+
+
+def _with(data: Mapping[str, Any], dotted_key: str, value: Any) -> dict[str, Any]:
+    """深拷贝后把某个点分 key 换成给定值。"""
+    clone = copy.deepcopy(dict(data))
+    node: Any = clone
+    parts = dotted_key.split(".")
+    for part in parts[:-1]:
+        node = node[part]
+    node[parts[-1]] = value
+    return clone
+
+
 def _loaded_config(tmp_path: Path, data: Mapping[str, Any] | None = None) -> Config:
     return load_config(
         _write_toml(tmp_path / "config.toml", VALID_CONFIG if data is None else data)
@@ -252,6 +382,34 @@ def test_config_required_keys_match_pinned_schema():
 
 def test_local_required_keys_match_pinned_schema():
     assert LOCAL_REQUIRED_KEYS == list(PINNED_LOCAL_KEYS)
+
+
+def test_config_fixture_closure_matches_pinned_schema():
+    """第三本账：`VALID_CONFIG` 的点分闭包 == pinned 清单（集合与顺序都相等）。"""
+    assert _dotted_closure(VALID_CONFIG) == list(PINNED_CONFIG_KEYS)
+
+
+def test_local_fixture_closure_matches_pinned_schema():
+    closure = _dotted_closure(VALID_LOCAL, stop=_LOCAL_WALK_STOP)
+    assert closure == list(PINNED_LOCAL_KEYS)
+
+
+def test_config_scalar_leaves_agree_with_fixture_value_types():
+    """类型推导器 MUST NOT 静默收窄。
+
+    参数化用例数由 `_scalar_leaves` 决定：推导器一旦漏掉某个类型（例如白名单里丢掉
+    `bool`），对应用例会**整体消失**而不是变红——空掉的参数化是绿的。这里拿独立承重的
+    fixture dict 里标量值的**实际类型**作对照，把"少了一条用例"变成一条红测试。
+    """
+    assert _type_names(CONFIG_SCALAR_LEAVES) == _type_names(
+        _fixture_scalar_leaves(VALID_CONFIG)
+    )
+
+
+def test_local_scalar_leaves_agree_with_fixture_value_types():
+    assert _type_names(LOCAL_SCALAR_LEAVES) == _type_names(
+        _fixture_scalar_leaves(VALID_LOCAL, stop=_LOCAL_WALK_STOP)
+    )
 
 
 def test_spec_pinned_keys_stay_top_level():
@@ -409,7 +567,50 @@ def test_whole_file_failures_carry_no_field_path(tmp_path, loader):
     assert excinfo.value.path is None
 
 
-# --- 类型错误 ----------------------------------------------------------------
+# --- 类型错误 fail closed（类型推导驱动参数化）------------------------------
+#
+# 断言同样以 `ConfigError.path` 为准，并要求消息里出现反引号包裹的点分路径（反引号是
+# 必要的：pytest 的 tmp_path 目录名由测试名与参数拼出，裸子串探测会被目录名恒真满足）。
+#
+# 第三条断言取 `期望 {类型名}` 而非裸类型名，是刻意的：消息里同时出现期望类型与实际类型，
+# 裸子串对"把期望与实际写反"的实现恒真——`str` 字段填 int 时，正确消息与颠倒消息都同时
+# 含 "str" 与 "int"，逐类型逐字段都是如此。裸子串在本轴上零判别力，属于本 PR 反复出现的
+# "偶然判别力"形态，故此处绑定 `期望` 一词。这不触及 pre-adjudicated 的
+# `_require` -> `return None` 处置（那条涉及的是缺字段消息的 `缺少` 一词）。
+
+
+@pytest.mark.parametrize(
+    ("dotted_key", "annotated"),
+    CONFIG_SCALAR_LEAVES,
+    ids=[path for path, _ in CONFIG_SCALAR_LEAVES],
+)
+def test_config_scalar_type_error_fails_closed(tmp_path, dotted_key, annotated):
+    data = _with(VALID_CONFIG, dotted_key, _WRONG_VALUE_BY_TYPE[annotated])
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(_write_toml(tmp_path / "config.toml", data))
+
+    _assert_locates(excinfo, dotted_key)
+    assert f"期望 {annotated.__name__}" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("dotted_key", "annotated"),
+    LOCAL_SCALAR_LEAVES,
+    ids=[path for path, _ in LOCAL_SCALAR_LEAVES],
+)
+def test_local_scalar_type_error_fails_closed(tmp_path, dotted_key, annotated):
+    config = _loaded_config(tmp_path)
+    data = _with(VALID_LOCAL, dotted_key, _WRONG_VALUE_BY_TYPE[annotated])
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    _assert_locates(excinfo, dotted_key)
+    assert f"期望 {annotated.__name__}" in str(excinfo.value)
+
+
+# --- 类型错误：单例（非标量轴与 bool/int 互斥，均不在上方推导轴内）-----------
 
 
 def test_config_reach_count_must_be_int(tmp_path):

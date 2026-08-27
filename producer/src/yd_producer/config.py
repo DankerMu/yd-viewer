@@ -14,7 +14,7 @@ f000 特例）、`docs/products-contract.md` §5（`forecast_days`/`output_inter
 gfs)` 字段名相同而顺序相反，`RawSourceConfig` 的 `variables`/`bundles` 相邻且同为
 `tuple[str, ...]`——位置构造下互换实参是静默的，下游（#6 raw 完整性判定、#20 覆盖守卫）
 只会看到"raw 永远缺"而非一条红测试。字段名、类型、`dataclasses.fields` 顺序与 `hash()`
-均不受影响。
+均不受影响；`__match_args__` 变为空元组，位置式 `match` 解构不再可用。
 """
 
 import os
