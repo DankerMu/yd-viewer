@@ -50,11 +50,12 @@ Minimal mergeable slice: 分段解析与 roundtrip（4.1）——格式层独立
 ## 5. 执行器抽象：JobExecutor 协议与 fake
 
 - [ ] 5.1 定义 `JobExecutor` 协议（submit/poll、job ID/partition/终态/起止时间语义）与进程内 fake（成功/失败/超时可编排），接口契约测试
+- [ ] 5.2 实现 Slurm 生产执行器（`sbatch`/`sacct` 封装，参数全部装配自 `local.toml`、零内置默认）；本阶段不做行为测试（M4 oracle），本地判据 = 参数装配纯函数检查 + 协议一致性
 
 依赖：组 1（Slurm 字段结构）
 §13.1 归属：控制器（支撑）
-Suggested fixture level: compact - 进程内接口契约测试，无文件 fixture
-Minimal mergeable slice: atomic - 协议与 fake 是单一小模块单一验证路径（接口契约测试），拆分无独立价值
+Suggested fixture level: compact - 进程内接口契约与参数装配测试，无文件 fixture
+Minimal mergeable slice: 协议与 fake（5.1）——接口层独立合并保绿，生产执行器为后继
 
 ## 6. forcing-chain（二）：科学计算依赖引入
 
