@@ -51,6 +51,8 @@ Mutation-testing hazards（本仓已实测绊倒过多个独立 agent，写进�
 - 复制 `producer/` 到 scratch 做变异时必须 `rsync --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache'`。带 `.venv` 复制会让 `yd_producer` 解析回仓库原文件，变异全部"存活"——假阴性，且看起来像好消息。
 - 跑之前先断言 `yd_producer.__file__` 落在 scratch 副本里，再用一个必然变红的控制变异校准。
 - scratch 目录名取唯一（含 issue/round 标识），并发 agent 共用通用路径会互相覆写脚本。
+- 连续变异体若只差一个**等长字符串字面量**，源文件大小不变；同一秒内写入时 CPython 判定 `.pyc` 仍有效（校验依据只有源文件 mtime 秒级时间戳 + 字节大小），直接复用旧字节码——这一轮报出来的是**上一个变异体**的结果。每个变异体之间 `export PYTHONDONTWRITEBYTECODE=1` 并清掉 `__pycache__`。这类假结果最阴险的地方是它自洽：数字稳定、可复现，只是对应错了变异体。
+- 控制变异要挑真能变红的。已实测的**近等价变异体**反例：`_require` 改成 `return None` 在 77 与 95 两个规模下都全绿——`None` 继续流进 `_require_scalar`/`_require_table`，照样抛 `ConfigError`、照样带对的 `path`，只是措辞退化。校准失败要如实说并换一个，别默默重掷。
 
 Domain risk packs:
 - Geospatial / CRS / shapefile sidecars（`.prj` 自定义 Albers、重投影、GeoJSON 产物）
