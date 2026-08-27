@@ -30,15 +30,18 @@ VALID_CONFIG: dict[str, Any] = {
     "output_interval_minutes": 60,
     "checkpoint_hours": [12],
     "reach_count": 3988,
-    "cycle": {"hours": [0, 12], "lead_hours_start": 0, "lead_hours_end": 168},
+    "cycle": {"hours": [0, 12]},
     "variants": {"gfs": "input/models/yd_gfs", "ifs": "input/models/yd_ifs"},
     "raw": {
         "ifs": {
+            "lead_hours": [0, 3, 6],
             "variables": ["fixture-var-a", "fixture-var-b"],
             "bundles": ["fixture-ifs-{lead}.grib2"],
             "f000_special": False,
         },
         "gfs": {
+            # 与 ifs 刻意取不同的 lead 集：lead 全集逐源，两源共用即缺陷
+            "lead_hours": [0, 6, 12],
             "variables": ["fixture-var-c", "fixture-var-d"],
             "bundles": ["fixture-gfs-{lead}.grib2"],
             "f000_special": True,
@@ -86,13 +89,13 @@ PINNED_CONFIG_KEYS = (
     "checkpoint_hours",
     "reach_count",
     "cycle.hours",
-    "cycle.lead_hours_start",
-    "cycle.lead_hours_end",
     "variants.gfs",
     "variants.ifs",
+    "raw.ifs.lead_hours",
     "raw.ifs.variables",
     "raw.ifs.bundles",
     "raw.ifs.f000_special",
+    "raw.gfs.lead_hours",
     "raw.gfs.variables",
     "raw.gfs.bundles",
     "raw.gfs.f000_special",
@@ -121,7 +124,7 @@ SLURM_REQUIRED_FIELDS = tuple(VALID_CONFIG["slurm"]["required_fields"])
 def _render_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, int):
+    if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
         return json.dumps(value)
@@ -222,10 +225,10 @@ def test_load_config_returns_all_fields(tmp_path):
     assert config.checkpoint_hours == (12,)
     assert config.reach_count == 3988
     assert config.cycle.hours == (0, 12)
-    assert config.cycle.lead_hours_start == 0
-    assert config.cycle.lead_hours_end == 168
     assert config.variants.gfs == "input/models/yd_gfs"
     assert config.variants.ifs == "input/models/yd_ifs"
+    assert config.raw.ifs.lead_hours == (0, 3, 6)
+    assert config.raw.gfs.lead_hours == (0, 6, 12)
     assert config.raw.ifs.variables == ("fixture-var-a", "fixture-var-b")
     assert config.raw.ifs.bundles == ("fixture-ifs-{lead}.grib2",)
     assert config.raw.ifs.f000_special is False
@@ -233,6 +236,18 @@ def test_load_config_returns_all_fields(tmp_path):
     assert config.raw.gfs.bundles == ("fixture-gfs-{lead}.grib2",)
     assert config.raw.gfs.f000_special is True
     assert config.slurm.required_fields == SLURM_REQUIRED_FIELDS
+
+
+def test_raw_sources_carry_independent_lead_hours(tmp_path):
+    """lead 全集逐源：两源取不同 lead 集时各自原样返回，不共用、不互串。"""
+    data = copy.deepcopy(VALID_CONFIG)
+    data["raw"]["ifs"]["lead_hours"] = [0, 3, 6, 9]
+    data["raw"]["gfs"]["lead_hours"] = [0, 1]
+
+    config = _loaded_config(tmp_path, data)
+
+    assert config.raw.ifs.lead_hours == (0, 3, 6, 9)
+    assert config.raw.gfs.lead_hours == (0, 1)
 
 
 def test_load_local_returns_all_site_fields(tmp_path):
@@ -251,6 +266,15 @@ def test_load_local_returns_all_site_fields(tmp_path):
 
 
 # --- 缺字段 fail closed（schema 驱动参数化）---------------------------------
+#
+# 断言以结构化的 `ConfigError.path` 为准（与措辞解耦）；同时要求消息里出现反引号
+# 包裹的点分路径，因为运维读的是消息。反引号是必要的：pytest 的 tmp_path 目录名由
+# 测试名与参数拼出，裸子串探测会被目录名恒真地满足。
+
+
+def _assert_locates(excinfo, dotted_key: str) -> None:
+    assert excinfo.value.path == dotted_key
+    assert f"`{dotted_key}`" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("missing_key", CONFIG_REQUIRED_KEYS)
@@ -260,7 +284,7 @@ def test_config_missing_required_key_fails_closed(tmp_path, missing_key):
     with pytest.raises(ConfigError) as excinfo:
         load_config(path)
 
-    assert missing_key in str(excinfo.value)
+    _assert_locates(excinfo, missing_key)
 
 
 @pytest.mark.parametrize("missing_key", LOCAL_REQUIRED_KEYS)
@@ -271,7 +295,20 @@ def test_local_missing_required_key_fails_closed(tmp_path, missing_key):
     with pytest.raises(ConfigError) as excinfo:
         load_local(path, config)
 
-    assert missing_key in str(excinfo.value)
+    _assert_locates(excinfo, missing_key)
+
+
+def test_whole_file_failures_carry_no_field_path(tmp_path):
+    """整文件级失败不指向具体字段，`path` MUST 为 None（避免误导定位）。"""
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(tmp_path / "config.toml")
+    assert excinfo.value.path is None
+
+    broken = tmp_path / "broken.toml"
+    broken.write_text('forecast_days = "unterminated\n', encoding="utf-8")
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(broken)
+    assert excinfo.value.path is None
 
 
 # --- 类型错误 ----------------------------------------------------------------
@@ -284,8 +321,8 @@ def test_config_reach_count_must_be_int(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_config(_write_toml(tmp_path / "config.toml", data))
 
+    _assert_locates(excinfo, "reach_count")
     message = str(excinfo.value)
-    assert "reach_count" in message
     assert "int" in message
     assert "str" in message
 
@@ -297,9 +334,8 @@ def test_config_cycle_hours_must_be_list(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_config(_write_toml(tmp_path / "config.toml", data))
 
-    message = str(excinfo.value)
-    assert "cycle.hours" in message
-    assert "list[int]" in message
+    _assert_locates(excinfo, "cycle.hours")
+    assert "list[int]" in str(excinfo.value)
 
 
 def test_config_f000_special_must_be_bool(tmp_path):
@@ -309,9 +345,8 @@ def test_config_f000_special_must_be_bool(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_config(_write_toml(tmp_path / "config.toml", data))
 
-    message = str(excinfo.value)
-    assert "raw.gfs.f000_special" in message
-    assert "bool" in message
+    _assert_locates(excinfo, "raw.gfs.f000_special")
+    assert "bool" in str(excinfo.value)
 
 
 def test_config_nested_table_type_error_names_dotted_path(tmp_path):
@@ -321,7 +356,19 @@ def test_config_nested_table_type_error_names_dotted_path(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_config(_write_toml(tmp_path / "config.toml", data))
 
-    assert "raw.ifs.variables" in str(excinfo.value)
+    # 列表元素错：`path` 取字段本身（不带下标），下标只出现在人读消息里
+    _assert_locates(excinfo, "raw.ifs.variables")
+    assert "下标 1" in str(excinfo.value)
+
+
+def test_config_lead_hours_must_be_int_list(tmp_path):
+    data = copy.deepcopy(VALID_CONFIG)
+    data["raw"]["gfs"]["lead_hours"] = ["6"]
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(_write_toml(tmp_path / "config.toml", data))
+
+    _assert_locates(excinfo, "raw.gfs.lead_hours")
 
 
 def test_local_slurm_value_type_error_names_dotted_path(tmp_path):
@@ -332,7 +379,69 @@ def test_local_slurm_value_type_error_names_dotted_path(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_local(_write_toml(tmp_path / "local.toml", data), config)
 
-    assert "slurm.cpus" in str(excinfo.value)
+    _assert_locates(excinfo, "slurm.cpus")
+
+
+# --- 类型判别负例：bool 不是 int，float/table 不是 slurm 标量 ----------------
+
+
+def test_config_bool_is_not_accepted_as_int(tmp_path):
+    """TOML `true` MUST NOT 被当作 int（Python 里 bool 是 int 子类）。"""
+    data = copy.deepcopy(VALID_CONFIG)
+    data["forecast_days"] = True
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(_write_toml(tmp_path / "config.toml", data))
+
+    _assert_locates(excinfo, "forecast_days")
+    assert "bool" in str(excinfo.value)
+
+
+def test_config_bool_is_not_accepted_as_int_list_element(tmp_path):
+    data = copy.deepcopy(VALID_CONFIG)
+    data["checkpoint_hours"] = [True]
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(_write_toml(tmp_path / "config.toml", data))
+
+    _assert_locates(excinfo, "checkpoint_hours")
+    assert "bool" in str(excinfo.value)
+
+
+def test_config_table_field_holding_scalar_is_rejected(tmp_path):
+    """表类型字段填标量 -> 报错且定位到该表本身，而非表内某个子字段。"""
+    data = copy.deepcopy(VALID_CONFIG)
+    data["cycle"] = 5
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(_write_toml(tmp_path / "config.toml", data))
+
+    _assert_locates(excinfo, "cycle")
+    assert "table" in str(excinfo.value)
+
+
+def test_local_slurm_float_value_rejected(tmp_path):
+    """`cpus = 8.5` MUST NOT 流到 Slurm 提交行。"""
+    config = _loaded_config(tmp_path)
+    data = copy.deepcopy(VALID_LOCAL)
+    data["slurm"]["cpus"] = 8.5
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    _assert_locates(excinfo, "slurm.cpus")
+    assert "float" in str(excinfo.value)
+
+
+def test_local_slurm_table_value_rejected(tmp_path):
+    config = _loaded_config(tmp_path)
+    data = copy.deepcopy(VALID_LOCAL)
+    data["slurm"]["partition"] = {"a": 1}
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    _assert_locates(excinfo, "slurm.partition")
 
 
 # --- 文件级失败 --------------------------------------------------------------
@@ -377,6 +486,27 @@ def test_broken_toml_local_raises_config_error(tmp_path):
     assert "TOML" in str(excinfo.value)
 
 
+@pytest.mark.parametrize("encoding", ["gbk", "utf-16"])
+@pytest.mark.parametrize("loader", ["config", "local"])
+def test_non_utf8_file_raises_config_error(tmp_path, loader, encoding):
+    """非 UTF-8 存盘 MUST NOT 外泄 `UnicodeDecodeError`（它是 ValueError 子类，既非
+    OSError 也非 TOMLDecodeError，不会被其它 except 子句捕获）。"""
+    config = _loaded_config(tmp_path)
+    path = tmp_path / f"{loader}-{encoding}.toml"
+    path.write_bytes('# 中文注释\nyd_root = "/fixture/yd"\n'.encode(encoding))
+
+    with pytest.raises(ConfigError) as excinfo:
+        if loader == "config":
+            load_config(path)
+        else:
+            load_local(path, config)
+
+    message = str(excinfo.value)
+    assert str(path) in message
+    assert "UTF-8" in message
+    assert excinfo.value.path is None
+
+
 # --- required_fields 自身的合法性 -------------------------------------------
 
 
@@ -387,7 +517,7 @@ def test_empty_required_fields_rejected(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_config(_write_toml(tmp_path / "config.toml", data))
 
-    assert "slurm.required_fields" in str(excinfo.value)
+    _assert_locates(excinfo, "slurm.required_fields")
 
 
 def test_duplicate_required_fields_rejected(tmp_path):
@@ -400,9 +530,8 @@ def test_duplicate_required_fields_rejected(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_config(_write_toml(tmp_path / "config.toml", data))
 
-    message = str(excinfo.value)
-    assert "slurm.required_fields" in message
-    assert SLURM_REQUIRED_FIELDS[0] in message
+    _assert_locates(excinfo, "slurm.required_fields")
+    assert SLURM_REQUIRED_FIELDS[0] in str(excinfo.value)
 
 
 def test_non_string_required_fields_rejected(tmp_path):
@@ -412,7 +541,7 @@ def test_non_string_required_fields_rejected(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_config(_write_toml(tmp_path / "config.toml", data))
 
-    assert "slurm.required_fields" in str(excinfo.value)
+    _assert_locates(excinfo, "slurm.required_fields")
 
 
 # --- local.[slurm] 键集：唯一权威是 config.slurm.required_fields -------------
@@ -427,11 +556,11 @@ def test_local_slurm_missing_declared_field_fails_closed(tmp_path, missing_field
     with pytest.raises(ConfigError) as excinfo:
         load_local(_write_toml(tmp_path / "local.toml", data), config)
 
-    assert missing_field in str(excinfo.value)
+    _assert_locates(excinfo, f"slurm.{missing_field}")
 
 
 def test_local_slurm_extra_key_is_not_silently_ignored(tmp_path):
-    """现场把 `partition` 误写成 `partiton` 必须报错并指名多余键。"""
+    """现场把 `partition` 误写成 `partiton` 必须报错并同时指名缺项与多余键。"""
     config = _loaded_config(tmp_path)
     data = copy.deepcopy(VALID_LOCAL)
     data["slurm"]["partiton"] = data["slurm"].pop("partition")
@@ -439,7 +568,21 @@ def test_local_slurm_extra_key_is_not_silently_ignored(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_local(_write_toml(tmp_path / "local.toml", data), config)
 
-    assert "partiton" in str(excinfo.value)
+    # 缺项与多余项并存：消息两者都报，`path` 取确定性的第一项（先缺项）
+    _assert_locates(excinfo, "slurm.partition")
+    assert "`slurm.partiton`" in str(excinfo.value)
+
+
+def test_local_slurm_pure_extra_key_locates_that_key(tmp_path):
+    """只多不缺时 `path` 指向该多余键本身。"""
+    config = _loaded_config(tmp_path)
+    data = copy.deepcopy(VALID_LOCAL)
+    data["slurm"]["qos"] = "normal"
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    _assert_locates(excinfo, "slurm.qos")
 
 
 def test_local_slurm_keyset_follows_added_required_field(tmp_path):
@@ -471,11 +614,24 @@ def test_local_slurm_keyset_follows_removed_required_field(tmp_path):
     assert dropped not in local.slurm
 
 
-def test_loader_source_has_no_second_slurm_keyset():
-    """键集第二次写死在装载器代码里即双权威——本用例把这条约束钉在源码上。"""
-    source = Path(load_config.__globals__["__file__"]).read_text(encoding="utf-8")
-    for name in SLURM_REQUIRED_FIELDS:
-        assert name not in source
+def test_local_slurm_keyset_shares_no_name_with_production_fields(tmp_path):
+    """键集权威唯一的行为判据：与生产五字段零重名的 `required_fields` 照样装载成功。
+
+    代码里若还残留一份 partition/account/cpus/memory/walltime 的固定字段清单（无论
+    以字面量还是拼接方式写死），本用例必然失败——它不依赖源码文本扫描。
+    """
+    zero_overlap = ["alpha", "beta"]
+    assert not set(zero_overlap) & set(SLURM_REQUIRED_FIELDS)
+
+    config_data = copy.deepcopy(VALID_CONFIG)
+    config_data["slurm"]["required_fields"] = zero_overlap
+    local_data = copy.deepcopy(VALID_LOCAL)
+    local_data["slurm"] = {"alpha": "a-value", "beta": 2}
+
+    config = _loaded_config(tmp_path, config_data)
+    local = load_local(_write_toml(tmp_path / "local.toml", local_data), config)
+
+    assert local.slurm == {"alpha": "a-value", "beta": 2}
 
 
 # --- 零默认值 ----------------------------------------------------------------

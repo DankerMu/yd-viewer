@@ -7,7 +7,8 @@ f000 特例）、`docs/products-contract.md` §5（`forecast_days`/`output_inter
 
 设计约束（design.md D4/D5）：只用 stdlib `tomllib`；dataclass 显式校验；任何必需
 字段缺失或类型错误一律 fail closed；代码中零内置现场默认值——所有 dataclass 字段
-都没有默认值，缺字段只能走报错路径。全部失败路径收敛到公开异常 `ConfigError`。
+都没有默认值，缺字段只能走报错路径。全部失败路径收敛到公开异常 `ConfigError`，涉及
+具体字段的失败以 `ConfigError.path` 暴露该字段的完整点分路径。
 """
 
 import os
@@ -36,9 +37,17 @@ class ConfigError(Exception):
     """配置装载失败。
 
     `load_config` 与 `load_local` 的全部失败路径都收敛到本类型：文件缺失、TOML 语法
-    错误、必需字段缺失、类型错误、`[slurm]` 键集不匹配。裸 `KeyError`/`TypeError`/
-    `OSError`/`tomllib.TOMLDecodeError` 不会外泄。
+    错误、编码错误、必需字段缺失、类型错误、`[slurm]` 键集不匹配。裸 `KeyError`/
+    `TypeError`/`OSError`/`tomllib.TOMLDecodeError`/`UnicodeDecodeError` 不会外泄。
+
+    `path` 是出错字段的完整点分路径（如 `raw.gfs.variables`），供调用方与测试机检
+    定位；整文件级失败（文件不存在、编码错误、TOML 语法错误）为 `None`。消息里同时
+    保留人读的点分路径。
     """
+
+    def __init__(self, message: str, path: str | None = None) -> None:
+        super().__init__(message)
+        self.path = path
 
 
 # --- config.toml（版本化业务规则）------------------------------------------
@@ -46,11 +55,13 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class CycleConfig:
-    """cycle 与预报 lead 窗口（compute-loop §7.1）。"""
+    """cycle 起报时刻（compute-loop §7.1）。
+
+    lead 全集逐源声明在 `raw.<source>.lead_hours`，此处不再另设窗口端点——两处并存
+    即第二权威。
+    """
 
     hours: tuple[int, ...]
-    lead_hours_start: int
-    lead_hours_end: int
 
 
 @dataclass(frozen=True)
@@ -63,8 +74,13 @@ class VariantsConfig:
 
 @dataclass(frozen=True)
 class RawSourceConfig:
-    """单个 source 的 raw 完整性规则（compute-loop §7.1）。"""
+    """单个 source 的 raw 完整性规则（compute-loop §7.1）。
 
+    `lead_hours` 是该源本轮**预期 lead 的全集**（逐源，而非两源共用）：预期文件集 =
+    `lead_hours` × `bundles`，没有全集就无法发现中间某个 lead 缺失。
+    """
+
+    lead_hours: tuple[int, ...]
     variables: tuple[str, ...]
     bundles: tuple[str, ...]
     f000_special: bool
@@ -162,18 +178,19 @@ def _is_scalar(value: Any, expected: str) -> bool:
 def _require(table: Mapping[str, Any], key: str, prefix: str) -> Any:
     path = _child(prefix, key)
     if key not in table:
-        raise ConfigError(f"缺少必需配置项 `{path}`")
+        raise ConfigError(f"缺少必需配置项 `{path}`", path)
     return table[key]
 
 
 def _require_scalar(
     table: Mapping[str, Any], key: str, prefix: str, expected: str
 ) -> Any:
+    path = _child(prefix, key)
     value = _require(table, key, prefix)
     if not _is_scalar(value, expected):
         raise ConfigError(
-            f"配置项 `{_child(prefix, key)}` 类型错误："
-            f"期望 {expected}，实际 {_type_name(value)}"
+            f"配置项 `{path}` 类型错误：期望 {expected}，实际 {_type_name(value)}",
+            path,
         )
     return value
 
@@ -197,13 +214,15 @@ def _require_list(
     value = _require(table, key, prefix)
     if not isinstance(value, list):
         raise ConfigError(
-            f"配置项 `{path}` 类型错误：期望 list[{expected}]，实际 {_type_name(value)}"
+            f"配置项 `{path}` 类型错误：期望 list[{expected}]，实际 {_type_name(value)}",
+            path,
         )
     for index, item in enumerate(value):
         if not _is_scalar(item, expected):
             raise ConfigError(
-                f"配置项 `{path}[{index}]` 类型错误："
-                f"期望 {expected}，实际 {_type_name(item)}"
+                f"配置项 `{path}` 下标 {index} 的元素类型错误："
+                f"期望 {expected}，实际 {_type_name(item)}",
+                path,
             )
     return tuple(value)
 
@@ -223,11 +242,12 @@ def _require_str_list(
 def _require_table(
     table: Mapping[str, Any], key: str, prefix: str = ""
 ) -> Mapping[str, Any]:
+    path = _child(prefix, key)
     value = _require(table, key, prefix)
     if not isinstance(value, dict):
         raise ConfigError(
-            f"配置项 `{_child(prefix, key)}` 类型错误："
-            f"期望 table，实际 {_type_name(value)}"
+            f"配置项 `{path}` 类型错误：期望 table，实际 {_type_name(value)}",
+            path,
         )
     return value
 
@@ -244,17 +264,22 @@ def _read_toml(path: str | os.PathLike[str], missing_message: str) -> dict[str, 
         raise ConfigError(f"读取配置文件失败：{location}（{exc.strerror}）") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"配置文件 TOML 语法错误：{location}（{exc}）") from exc
+    except UnicodeDecodeError as exc:
+        # tomllib 先把字节按 UTF-8 解码再解析；非 UTF-8 存盘（GBK 注释、UTF-16）抛
+        # UnicodeDecodeError，它是 ValueError 而非 OSError/TOMLDecodeError 的子类，
+        # 必须单独收敛。本子句放在 TOMLDecodeError 之后：后者同为 ValueError 子类，
+        # 顺序颠倒会让语法错误的专有消息被泛化子句遮蔽。
+        raise ConfigError(
+            f"配置文件编码错误：{location} 不是 UTF-8（{exc.reason}），"
+            "请以 UTF-8 重新存盘"
+        ) from exc
 
 
 # --- config.toml 装配 --------------------------------------------------------
 
 
 def _build_cycle(table: Mapping[str, Any]) -> CycleConfig:
-    return CycleConfig(
-        hours=_require_int_list(table, "hours", "cycle"),
-        lead_hours_start=_require_int(table, "lead_hours_start", "cycle"),
-        lead_hours_end=_require_int(table, "lead_hours_end", "cycle"),
-    )
+    return CycleConfig(hours=_require_int_list(table, "hours", "cycle"))
 
 
 def _build_variants(table: Mapping[str, Any]) -> VariantsConfig:
@@ -266,6 +291,7 @@ def _build_variants(table: Mapping[str, Any]) -> VariantsConfig:
 
 def _build_raw_source(table: Mapping[str, Any], prefix: str) -> RawSourceConfig:
     return RawSourceConfig(
+        lead_hours=_require_int_list(table, "lead_hours", prefix),
         variables=_require_str_list(table, "variables", prefix),
         bundles=_require_str_list(table, "bundles", prefix),
         f000_special=_require_bool(table, "f000_special", prefix),
@@ -282,14 +308,17 @@ def _build_raw(table: Mapping[str, Any]) -> RawConfig:
 def _build_slurm_schema(table: Mapping[str, Any]) -> SlurmSchema:
     required_fields = _require_str_list(table, "required_fields", "slurm")
     if not required_fields:
-        raise ConfigError("配置项 `slurm.required_fields` 不得为空列表")
+        raise ConfigError(
+            "配置项 `slurm.required_fields` 不得为空列表", "slurm.required_fields"
+        )
     duplicates = sorted(
         {name for name in required_fields if required_fields.count(name) > 1}
     )
     if duplicates:
         raise ConfigError(
             "配置项 `slurm.required_fields` 存在重复项："
-            + "、".join(f"`{name}`" for name in duplicates)
+            + "、".join(f"`{name}`" for name in duplicates),
+            "slurm.required_fields",
         )
     return SlurmSchema(required_fields=required_fields)
 
@@ -310,15 +339,15 @@ def _build_config(data: Mapping[str, Any]) -> Config:
 def load_config(path: str | os.PathLike[str]) -> Config:
     """装载版本化 `config.toml`。
 
-    任何必需字段缺失或类型错误都抛 `ConfigError`，错误信息含该字段的完整点分路径；
-    绝不返回带默认值的半成品对象。
+    任何必需字段缺失或类型错误都抛 `ConfigError`，错误信息与 `ConfigError.path` 都
+    含该字段的完整点分路径；绝不返回带默认值的半成品对象。
     """
     location = os.fspath(path)
     data = _read_toml(path, f"配置文件不存在：{location}")
     try:
         return _build_config(data)
     except ConfigError as exc:
-        raise ConfigError(f"{location}：{exc}") from exc
+        raise ConfigError(f"{location}：{exc}", exc.path) from exc
 
 
 # --- local.toml 装配 ---------------------------------------------------------
@@ -346,6 +375,8 @@ def _build_local_slurm(
     missing = sorted(set(required_fields) - set(table))
     extra = sorted(set(table) - set(required_fields))
     if missing or extra:
+        # 缺项与多余项同时报出（现场把 `partition` 误写成 `partiton` 时两者并存）；
+        # 机检用的 `path` 取确定性的第一项：先缺项，无缺项则取多余项。
         parts = []
         if missing:
             parts.append("缺少 " + "、".join(f"`slurm.{name}`" for name in missing))
@@ -353,15 +384,17 @@ def _build_local_slurm(
             parts.append("多余 " + "、".join(f"`slurm.{name}`" for name in extra))
         raise ConfigError(
             "`[slurm]` 的键集必须与 config.toml 的 `slurm.required_fields` 完全一致："
-            + "；".join(parts)
+            + "；".join(parts),
+            _child("slurm", missing[0] if missing else extra[0]),
         )
     values: dict[str, str | int] = {}
     for name in required_fields:
         value = table[name]
+        path = _child("slurm", name)
         if not (_is_scalar(value, "str") or _is_scalar(value, "int")):
             raise ConfigError(
-                f"配置项 `slurm.{name}` 类型错误："
-                f"期望 str 或 int，实际 {_type_name(value)}"
+                f"配置项 `{path}` 类型错误：期望 str 或 int，实际 {_type_name(value)}",
+                path,
             )
         values[name] = value
     return values
@@ -396,4 +429,4 @@ def load_local(path: str | os.PathLike[str], config: Config) -> LocalConfig:
     try:
         return _build_local(data, config)
     except ConfigError as exc:
-        raise ConfigError(f"{location}：{exc}") from exc
+        raise ConfigError(f"{location}：{exc}", exc.path) from exc
