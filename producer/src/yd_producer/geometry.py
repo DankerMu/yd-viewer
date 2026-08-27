@@ -10,10 +10,12 @@
 * **路径绑定**：`read_shapefile` 打开的每个文件都属于调用方点名的那一组 shapefile。
   旁文件只替换调用方路径的**最后一个** `.shp` 后缀得到（`yd.riv.shp` -> `yd.riv.shx`，
   而不是 `yd.shx`）；调用方给的 `.shp` 自身只做校验，绝不二次推导。后缀必须是**小写**
-  `.shp`：旁文件按小写后缀推导，若同时接受 `RIVERS.SHP` 就会在大小写敏感文件系统上
-  去找根本不存在的 `RIVERS.shx`，在大小写不敏感文件系统上则可能读到另一组同名小写
-  文件（几何来自一组、属性/CRS 来自另一组）。故非小写后缀一律 fail closed，
-  由调用方改名，行为与文件系统大小写敏感性无关。
+  `.shp`：早先的旁文件推导一律拼小写后缀，若同时接受 `RIVERS.SHP`，在大小写敏感
+  文件系统（CI ubuntu、node-22）上就会去找根本不存在的 `RIVERS.shx`；同目录若并存
+  一组小写 `rivers.*`，还会退化成跨组配对（几何来自 `RIVERS.SHP`、属性/CRS 来自
+  `rivers.dbf`/`rivers.prj`）。大小写不敏感文件系统上构造不出这种误配（同名仅大小写
+  不同的两组文件无法共存），但拒绝发生在**字符串**层、任何 `is_file()` 之前，因此
+  非小写后缀一律 fail closed 由调用方改名，行为与文件系统大小写敏感性无关。
 * **轴序**：到 EPSG:4326 的 transformer 必须 `always_xy=True`，输出为 (lon, lat)。
   pyproj 默认按 CRS 权威轴序返回 (lat, lon)，而 GeoJSON 要求 (lon, lat)。
 
@@ -174,12 +176,17 @@ def read_shapefile(shp_path: str | Path) -> tuple[CRS, list[Feature]]:
     crs = load_prj_crs(prj_file)
 
     _check_shx_structure(shx_file)
-    # 几何与属性表分开打开，使损坏时的报错能精确指向出错的那个文件
+    # 几何与属性表分开打开，使 .dbf 损坏时的报错不会误伤 .shp/.shx。
+    # 几何读取同时消费 .shp 负载与 .shx 索引：结构先验放行后仍失败的输入
+    # （如记录区被改写但大小/对齐/声明长度俱合法的 .shx），无法把责任判给其中
+    # 某一个文件，故消息同时点名两者——宁可多报一个路径，也不冤枉一个完好文件。
     try:
         with shapefile.Reader(shp=str(shp_file), shx=str(shx_file)) as reader:
             shapes = reader.shapes()
     except Exception as exc:
-        raise GeometryError(f"shapefile 几何读取失败: {shp_file}") from exc
+        raise GeometryError(
+            f"shapefile 几何读取失败（.shp 负载或 .shx 索引损坏）: {shp_file} 或 {shx_file}"
+        ) from exc
     try:
         with shapefile.Reader(dbf=str(dbf_file)) as reader:
             records = [record.as_dict() for record in reader.records()]

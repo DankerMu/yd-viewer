@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pathlib
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -459,9 +460,10 @@ def test_read_shapefile_rejects_non_lowercase_shp_suffix(
     """完整的**全大写** shapefile 组也必须被拒，且理由是后缀规则而非缺文件。
 
     旁文件按小写后缀推导，接受 `RIVERS.SHP` 在大小写敏感文件系统（CI ubuntu、
-    node-22）上会去找不存在的 `RIVERS.shx`，在大小写不敏感文件系统上则可能悄悄
-    读到旁边的小写组。拒绝发生在**字符串**层、任何 `is_file()` 之前，因此本用例
-    在 APFS 与 ext4 上行为一致。
+    node-22）上会去找不存在的 `RIVERS.shx`；同目录并存一组小写 `rivers.*` 时更会
+    退化成跨组配对。大小写不敏感文件系统上构造不出这种误配（同名仅大小写不同的
+    两组文件无法共存），但拒绝发生在**字符串**层、任何 `is_file()` 之前，因此本
+    用例在 APFS 与 ext4 上行为一致。
     """
     upper_dir = tmp_path / "upper"
     upper_dir.mkdir()
@@ -525,6 +527,78 @@ def test_read_shapefile_shx_declared_length_mismatch_names_the_shx(
         read_shapefile(baseline.rivers_shp)
     assert str(shx) in str(excinfo.value)
     assert str(baseline.rivers_shp) not in str(excinfo.value)
+
+
+def test_read_shapefile_shx_shorter_than_header_names_the_shx(
+    baseline: SyntheticBaseline,
+) -> None:
+    """只有「短于 100 字节头」这一条能判的 `.shx`：92 字节且声明长度自洽。
+
+    92 字节时 `(92 - 100) % 8 == 0`（Python 取模为非负），把头部 24-28 字节改写成
+    大端 46（=92/2）后声明长度也与实际一致——另外两条结构校验都放行，唯有最小长度
+    这一条能判。删掉最小长度分支，本用例就会掉进 pyshp 的几何读取失败，报错不再
+    单独点名 `.shx`。
+    """
+    shx = sidecar(baseline.rivers_shp, ".shx")
+    raw = shx.read_bytes()[:92]
+    shx.write_bytes(raw[:24] + struct.pack(">i", len(raw) // 2) + raw[28:])
+    with pytest.raises(GeometryError) as excinfo:
+        read_shapefile(baseline.rivers_shp)
+    assert str(shx) in str(excinfo.value)
+    assert str(baseline.rivers_shp) not in str(excinfo.value)
+    assert type(excinfo.value) is GeometryError
+
+
+def test_read_shapefile_shx_record_area_misaligned_names_the_shx(
+    baseline: SyntheticBaseline,
+) -> None:
+    """只有「记录区非 8 字节整数倍」这一条能判的 `.shx`：尾部多 4 字节且声明长度自洽。
+
+    合法 `.shx` 追加 4 字节后长度 128，把头部声明字数同步改写成 64 使声明长度与实际
+    一致，文件也远长于 100 字节头——唯有对齐这一条能判。删掉该分支，这份结构损坏的
+    `.shx` 会被静默接受（pyshp 按前 N 条记录照读），与 fail closed 契约直接冲突。
+    """
+    shx = sidecar(baseline.rivers_shp, ".shx")
+    raw = shx.read_bytes() + b"\x00" * 4
+    assert (len(raw) - 100) % 8 == 4
+    shx.write_bytes(raw[:24] + struct.pack(">i", len(raw) // 2) + raw[28:])
+    with pytest.raises(GeometryError) as excinfo:
+        read_shapefile(baseline.rivers_shp)
+    assert str(shx) in str(excinfo.value)
+    assert str(baseline.rivers_shp) not in str(excinfo.value)
+    assert type(excinfo.value) is GeometryError
+
+
+@pytest.mark.parametrize(
+    ("label", "mutate"),
+    [
+        ("all_ones", lambda raw: raw[:100] + b"\xff" * (len(raw) - 100)),
+        (
+            "repeat_record_0",
+            lambda raw: raw[:100] + raw[100:108] * ((len(raw) - 100) // 8),
+        ),
+    ],
+)
+def test_read_shapefile_structurally_valid_but_corrupt_shx_names_both_files(
+    baseline: SyntheticBaseline, label: str, mutate
+) -> None:
+    """记录区被改写但大小/对齐/声明长度俱合法：结构先验放行，报错必须同时点名两者。
+
+    这类输入的责任无法判给单个文件——失败可能来自 `.shp` 负载，也可能来自 `.shx`
+    索引。单点名 `.shp` 就会冤枉一个字节完好的文件（Round 1 D1 的误归属类），单点名
+    `.shx` 则会漏掉真正损坏的 `.shp`；契约取「两个都报」。
+    """
+    shx = sidecar(baseline.rivers_shp, ".shx")
+    raw = shx.read_bytes()
+    mutated = mutate(raw)
+    assert len(mutated) == len(raw)
+    assert mutated[:100] == raw[:100]
+    shx.write_bytes(mutated)
+    with pytest.raises(GeometryError) as excinfo:
+        read_shapefile(baseline.rivers_shp)
+    assert str(shx) in str(excinfo.value)
+    assert str(baseline.rivers_shp) in str(excinfo.value)
+    assert type(excinfo.value) is GeometryError
 
 
 #: 在子解释器里跑的探针：脚本自身以 `assert False` 开头，若 `-O` 未生效会立刻炸掉，
