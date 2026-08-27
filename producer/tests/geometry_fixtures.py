@@ -272,3 +272,27 @@ def write_synthetic_baseline(
         domain_anchors=domain_anchors,
         domain_indices=domain_indices,
     )
+
+
+def write_layer_with_null_shape(shp_path: Path, wkt: str) -> Path:
+    """写一个含 **NULL 几何**（shapeType 0）的合法折线图层。
+
+    NULL 是 ESRI 规范允许的记录类型（属性行无几何时 ArcGIS 就这么写），`.shx`
+    索引与 `.dbf` 记录都与之一一对应、字节完好；损坏只在 `.shp` 负载一侧——
+    GeoJSON 无法表示 NULL，几何解析必然失败。供「几何不可解析」的归属回归使用。
+    """
+    shp_path = Path(shp_path)
+    shp_path.parent.mkdir(parents=True, exist_ok=True)
+    with shapefile.Writer(
+        shp=str(shp_path),
+        shx=str(sidecar(shp_path, ".shx")),
+        dbf=str(sidecar(shp_path, ".dbf")),
+        shapeType=shapefile.POLYLINE,
+    ) as writer:
+        writer.field("Index", "N", 10, 0)
+        writer.line([[(1.0e6, 2.0e6), (1.1e6, 2.1e6)]])
+        writer.record(1)
+        writer.null()
+        writer.record(2)
+    _write_prj(shp_path, wkt)
+    return shp_path

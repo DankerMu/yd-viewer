@@ -7,6 +7,7 @@ lon/lat 锚点提供，测试断言被测工具能把 Albers 米制坐标还原�
 
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 import struct
@@ -20,6 +21,7 @@ from geometry_fixtures import (
     SyntheticBaseline,
     sidecar,
     write_empty_layer,
+    write_layer_with_null_shape,
     write_synthetic_baseline,
 )
 from shapely.geometry import Polygon
@@ -156,6 +158,9 @@ def test_load_prj_crs_empty_file_raises(baseline: SyntheticBaseline) -> None:
     with pytest.raises(GeometryError) as excinfo:
         load_prj_crs(baseline.rivers_prj)
     assert str(baseline.rivers_prj) in str(excinfo.value)
+    # 诊断必须是「空文件」而不是「WKT 不可解析」：空 `.prj` 的现场处置是补投影
+    # 定义，与内容写坏了不是一回事；去掉空值分支后 pyproj 会把它报成解析失败。
+    assert "为空" in str(excinfo.value)
 
 
 def test_load_prj_crs_garbage_wkt_raises(baseline: SyntheticBaseline) -> None:
@@ -336,7 +341,15 @@ def test_read_shapefile_missing_sidecar_raises(
     victim.unlink()
     with pytest.raises(GeometryError) as excinfo:
         read_shapefile(baseline.rivers_shp)
-    assert str(victim) in str(excinfo.value)
+    message = str(excinfo.value)
+    assert str(victim) in message
+    # 诊断必须是「缺文件」，且**只**点名缺的那个：没有这道先验，缺 `.shp` 会掉进
+    # 几何读取失败并连带点名字节完好的 `.shx`（冤枉完好文件），缺 `.shx`/`.dbf`
+    # 也会被报成内容损坏，把「补文件」误导成「修文件」。
+    assert "缺少必需文件" in message
+    for other in (".shp", ".shx", ".dbf"):
+        if other != suffix:
+            assert str(sidecar(baseline.rivers_shp, other)) not in message
     assert type(excinfo.value) is GeometryError
 
 
@@ -703,3 +716,156 @@ def test_load_prj_crs_accepts_utf8_bom(baseline: SyntheticBaseline) -> None:
     read_crs, features = read_shapefile(baseline.rivers_shp)
     assert read_crs == crs
     assert len(features) == len(baseline.river_anchors)
+
+
+# --- 失败归属：组完整性（几何数 vs 记录数）必须点名整组候选 -----------------
+
+
+def _assert_names_whole_group(message: str, baseline: SyntheticBaseline) -> None:
+    """数量不一致的责任无法判给单个文件，消息必须点名 `.shp`/`.shx`/`.dbf` 三者。"""
+    for suffix in (".shp", ".shx", ".dbf"):
+        path = sidecar(baseline.rivers_shp, suffix)
+        assert str(path) in message, f"消息漏掉 {suffix}: {message}"
+
+
+def test_read_shapefile_dbf_header_count_mismatch_names_whole_group(
+    baseline: SyntheticBaseline,
+) -> None:
+    """`.dbf` 头部记录数被改写：`.shp`/`.shx` 字节完好，但三者责任不可判。
+
+    单点名 `.shp` 就会冤枉两个完好文件并漏掉真正损坏的 `.dbf`（Round 3 R3-F1 的
+    误归属类）。该分支同时是「删不得」的：没有它，末尾 `zip(strict=True)` 会抛裸
+    `ValueError`，冲破单一公开异常契约——故本用例也钉住异常类型。
+    """
+    dbf = sidecar(baseline.rivers_shp, ".dbf")
+    raw = bytearray(dbf.read_bytes())
+    raw[4:8] = struct.pack("<I", 0)
+    dbf.write_bytes(bytes(raw))
+
+    with pytest.raises(GeometryError) as excinfo:
+        read_shapefile(baseline.rivers_shp)
+    message = str(excinfo.value)
+    assert f"({len(baseline.river_anchors)})" in message
+    assert "(0)" in message
+    _assert_names_whole_group(message, baseline)
+    assert type(excinfo.value) is GeometryError
+
+
+def test_read_shapefile_doctored_shx_count_mismatch_names_whole_group(
+    baseline: SyntheticBaseline,
+) -> None:
+    """`.shx` 丢掉一条记录、头部声明长度又被改自洽：`.shp`/`.dbf` 字节完好。
+
+    结构先验的三条（最小长度 / 8 字节对齐 / 声明长度）全部放行，pyshp 也照读出
+    N-1 条几何而不报错，失败只表现为数量不等——责任落在 `.shx` 上，若这条消息只
+    点名 `.shp` 与 `.dbf`，就恰好漏掉了唯一损坏的那个文件。故点名整组。
+    """
+    shx = sidecar(baseline.rivers_shp, ".shx")
+    raw = shx.read_bytes()[:-8]
+    shx.write_bytes(raw[:24] + struct.pack(">i", len(raw) // 2) + raw[28:])
+
+    with pytest.raises(GeometryError) as excinfo:
+        read_shapefile(baseline.rivers_shp)
+    message = str(excinfo.value)
+    assert f"({len(baseline.river_anchors) - 1})" in message
+    assert f"({len(baseline.river_anchors)})" in message
+    _assert_names_whole_group(message, baseline)
+    assert type(excinfo.value) is GeometryError
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root 无视文件权限位，构造不出不可读的 .shx",
+)
+def test_read_shapefile_unreadable_shx_names_the_shx(
+    baseline: SyntheticBaseline,
+) -> None:
+    """`.shx` 存在但不可读（权限位）：`stat` 成功、`open` 抛 `PermissionError`。
+
+    不转换就会外泄成调用方 `except GeometryError` 接不住的 `OSError`，且消息不含
+    路径；责任明确在 `.shx`，不得点名完好的 `.shp`。
+    """
+    shx = sidecar(baseline.rivers_shp, ".shx")
+    shx.chmod(0o000)
+    try:
+        with pytest.raises(GeometryError) as excinfo:
+            read_shapefile(baseline.rivers_shp)
+    finally:
+        shx.chmod(0o644)
+    assert str(shx) in str(excinfo.value)
+    assert str(baseline.rivers_shp) not in str(excinfo.value)
+    assert type(excinfo.value) is GeometryError
+
+
+# --- 与文件无关的失败：点名 CRS / 几何类型 ----------------------------------
+
+
+#: 工程坐标系（LOCAL_CS）：`.prj` 本身完全合法可解析，但与 WGS84 之间不存在
+#: 任何大地基准关系，pyproj 构造 transformer 时抛 `ProjError`。厂区/局部坐标
+#: 的现场资料里确实会出现这种 `.prj`。
+_ENGINEERING_PRJ_WKT = (
+    'LOCAL_CS["Arbitrary",LOCAL_DATUM["Unknown",0],'
+    'UNIT["metre",1],AXIS["X",EAST],AXIS["Y",NORTH]]'
+)
+
+
+def test_to_wgs84_transformer_rejects_untransformable_crs(
+    baseline: SyntheticBaseline,
+) -> None:
+    """`.prj` 可解析但不可转到 WGS84：`ProjError` 必须转成 `GeometryError`。
+
+    责任范围内没有文件——`.prj` 读取与解析都成功了，出错的是 CRS 与 WGS84 的关系，
+    故消息点名该 CRS 而不点名任何路径。
+    """
+    baseline.rivers_prj.write_text(_ENGINEERING_PRJ_WKT, encoding="utf-8")
+    crs = load_prj_crs(baseline.rivers_prj)
+    assert crs.type_name == "Engineering CRS"
+
+    with pytest.raises(GeometryError) as excinfo:
+        to_wgs84_transformer(crs)
+    assert "EPSG:4326" in str(excinfo.value)
+    assert type(excinfo.value) is GeometryError
+
+
+class _RaisingTransformer:
+    """`transform` 必然抛异常的 transformer 替身。
+
+    `reproject_geometry` 的 transformer 是**调用方传入的公开参数**，调用方可以给
+    任意 `Transformer`（含 `Transformer.from_pipeline` 构造的）；已实测 pyproj 的
+    正常构造路径在空几何、三维、超界坐标、`GeometryCollection` 下都不抛异常，找不到
+    天然的失败输入，故在这个公开接缝上注入一个会抛的 transformer，钉住「原生异常
+    不外泄」这条契约。
+    """
+
+    def transform(self, *args: object, **kwargs: object) -> tuple[float, ...]:
+        raise RuntimeError("proj pipeline exploded")
+
+
+def test_reproject_geometry_converts_transformer_failure() -> None:
+    """重投影过程中的原生异常必须转成 `GeometryError`，消息点名几何类型。"""
+    geom = Polygon([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 0.0)])
+    with pytest.raises(GeometryError) as excinfo:
+        reproject_geometry(geom, _RaisingTransformer())
+    assert geom.geom_type in str(excinfo.value)
+    assert type(excinfo.value) is GeometryError
+
+
+def test_read_shapefile_null_geometry_names_only_the_shp(
+    baseline: SyntheticBaseline, tmp_path
+) -> None:
+    """NULL 几何（shapeType 0）无法转成 GeoJSON：责任只在 `.shp` 负载。
+
+    `.shx` 索引与 `.dbf` 记录都与该记录一一对应且字节完好，数量也相等——三条结构
+    校验、两次读取、组完整性守卫全部放行，唯有几何解析能判。消息不得点名这两个
+    完好的旁文件。
+    """
+    layer = write_layer_with_null_shape(
+        tmp_path / "nulls" / "nulls.shp", baseline.prj_wkt
+    )
+    with pytest.raises(GeometryError) as excinfo:
+        read_shapefile(layer)
+    message = str(excinfo.value)
+    assert str(layer) in message
+    assert str(sidecar(layer, ".shx")) not in message
+    assert str(sidecar(layer, ".dbf")) not in message
+    assert type(excinfo.value) is GeometryError

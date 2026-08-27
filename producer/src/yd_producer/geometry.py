@@ -3,8 +3,11 @@
 设计纪律：
 
 * **fail closed**：`.prj` 缺失/为空/编码非 UTF-8/不可解析，或 `.shp`/`.shx`/`.dbf`
-  缺失/损坏，一律抛 `GeometryError` 且消息含**真正出错**的那个文件路径；不回退任何
-  默认 CRS，不返回半成品几何。
+  缺失/损坏，一律抛 `GeometryError`；不回退任何默认 CRS，不返回半成品几何。
+* **失败归属**：每条 `GeometryError` 的消息点名该失败**责任范围内**的文件路径——
+  责任可判到单个文件时只点名那一个，不可判时点名**全部候选**（宁可多报一个路径，
+  也不冤枉一个完好文件，更不能漏掉真正损坏的那个）；与文件无关的失败（CRS 不可
+  转换、几何重投影失败）不点名任何文件，改为点名出错的 CRS / 几何类型。
 * **单一公开异常**：本模块对外只有 `GeometryError`；pyproj 的 `CRSError`、pyshp 的
   `ShapefileException`、以及 `UnicodeDecodeError` 等原生异常一律转换，不外泄。
 * **路径绑定**：`read_shapefile` 打开的每个文件都属于调用方点名的那一组 shapefile。
@@ -152,8 +155,10 @@ def reproject_geometry(geom: BaseGeometry, transformer: Transformer) -> BaseGeom
 def read_shapefile(shp_path: str | Path) -> tuple[CRS, list[Feature]]:
     """读取一组 shapefile，返回 `(crs, [(record_dict, geometry), ...])`。
 
-    只做「几何 + DBF 记录 -> 内存对象」，不解释字段语义、不做数量校验
-    （`reach_id` 语义与要素一致性属 prepare-variants 的 GeoJSON 生成任务）。
+    只做「几何 + DBF 记录 -> 内存对象」，不解释字段语义：`reach_id` 等字段语义、
+    以及「要素数是否符合业务预期」属 prepare-variants 的 GeoJSON 生成任务。
+    这里唯一的数量检查是**组完整性**守卫——几何数与属性记录数必须一一对应，
+    否则这一组文件互不匹配，配对结果无意义，必须 fail closed（见下方注释）。
 
     `shp_path` 必须以**小写** `.shp` 结尾，否则抛 `GeometryError` 并点名该路径
     （见模块文档 路径绑定）；`.shx`/`.dbf`/`.prj` 只替换该最后一个后缀得到，
@@ -193,10 +198,17 @@ def read_shapefile(shp_path: str | Path) -> tuple[CRS, list[Feature]]:
     except Exception as exc:
         raise GeometryError(f"shapefile 属性表读取失败: {dbf_file}") from exc
 
+    # 组完整性守卫。几何数由 .shp 负载与 .shx 索引共同决定（pyshp 按索引记录条数取
+    # 几何），记录数由 .dbf 头部决定；三者任一被改坏都可能只表现为数量不等而各自读取
+    # 无误——例如 .dbf 头部记录数被改写、.shx 被截断后又把头部声明长度改自洽、或是一份
+    # 陈旧/错配的兄弟 .dbf。责任无法判给其中某一个，故与上面的几何读取失败同规则：
+    # 点名全部候选，宁可多报一个路径，也不冤枉一个完好文件、更不漏掉真正损坏的那个。
+    # 该分支不可删：删掉后末尾的 zip(..., strict=True) 会抛裸 ValueError，冲破本模块
+    # 「单一公开异常」契约。两个数量本身保留在消息里，是最直接的诊断线索。
     if len(shapes) != len(records):
         raise GeometryError(
-            f"shapefile 几何数({len(shapes)})与属性记录数({len(records)})不一致: "
-            f"{shp_file}"
+            f"shapefile 几何数({len(shapes)})与属性记录数({len(records)})不一致，"
+            f"该组文件互不匹配: {shp_file} 或 {shx_file} 或 {dbf_file}"
         )
 
     try:
