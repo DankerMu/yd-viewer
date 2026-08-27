@@ -59,7 +59,7 @@ Minimal mergeable slice: 协议与 fake（5.1）——接口层独立合并保�
 
 ## 6. forcing-chain（二）：科学计算依赖引入
 
-- [ ] 6.1 引入 numpy/xarray/cfgrib 并 `uv lock`，加 import 冒烟测试，确保 CI producer job 绿（必要时 CI 补 eccodes 系统依赖，作为依赖引入的伴生动作显式提交）
+- [x] 6.1 引入 numpy/xarray/cfgrib 并 `uv lock`，加 import 冒烟测试，确保 CI producer job 绿（必要时 CI 补 eccodes 系统依赖，作为依赖引入的伴生动作显式提交）
 
 依赖：无
 §13.1 归属：DB-free 链（支撑）
