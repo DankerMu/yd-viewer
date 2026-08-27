@@ -9,6 +9,12 @@ f000 特例）、`docs/products-contract.md` §5（`forecast_days`/`output_inter
 字段缺失或类型错误一律 fail closed；代码中零内置现场默认值——所有 dataclass 字段
 都没有默认值，缺字段只能走报错路径。全部失败路径收敛到公开异常 `ConfigError`，涉及
 具体字段的失败以 `ConfigError.path` 暴露该字段的完整点分路径。
+
+全部 dataclass 一律 `kw_only=True` 构造：`VariantsConfig(gfs, ifs)` 与 `RawConfig(ifs,
+gfs)` 字段名相同而顺序相反，`RawSourceConfig` 的 `variables`/`bundles` 相邻且同为
+`tuple[str, ...]`——位置构造下互换实参是静默的，下游（#6 raw 完整性判定、#20 覆盖守卫）
+只会看到"raw 永远缺"而非一条红测试。字段名、类型、`dataclasses.fields` 顺序与 `hash()`
+均不受影响。
 """
 
 import os
@@ -53,7 +59,7 @@ class ConfigError(Exception):
 # --- config.toml（版本化业务规则）------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class CycleConfig:
     """cycle 起报时刻（compute-loop §7.1）。
 
@@ -64,7 +70,7 @@ class CycleConfig:
     hours: tuple[int, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class VariantsConfig:
     """两个模型变体相对 `yd_root` 的路径（compute-loop §6.1）。"""
 
@@ -72,7 +78,7 @@ class VariantsConfig:
     ifs: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class RawSourceConfig:
     """单个 source 的 raw 完整性规则（compute-loop §7.1）。
 
@@ -86,7 +92,7 @@ class RawSourceConfig:
     f000_special: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class RawConfig:
     """IFS/GFS 两份 source 规则。"""
 
@@ -94,7 +100,7 @@ class RawConfig:
     gfs: RawSourceConfig
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class SlurmSchema:
     """Slurm 资源配置字段结构（compute-loop §5）：只声明字段名，值在 `local.toml`。
 
@@ -105,7 +111,7 @@ class SlurmSchema:
     required_fields: tuple[str, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Config:
     """`config.toml` 的类型化视图；全部字段必需，无可选项、无默认值。"""
 
@@ -122,7 +128,7 @@ class Config:
 # --- local.toml（gitignored 现场值）-----------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class NwmLocal:
     """NWM raw 根、checkout 根与解释器路径（compute-loop §5）。"""
 
@@ -131,7 +137,7 @@ class NwmLocal:
     python: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class CronLocal:
     """cron lock 与日志位置（compute-loop §5）。"""
 
@@ -139,7 +145,7 @@ class CronLocal:
     log_dir: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class LocalConfig:
     """`local.toml` 的类型化视图；全部字段必需，无可选项、无默认值。
 

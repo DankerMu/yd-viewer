@@ -83,34 +83,71 @@ SPEC_PINNED_TOP_LEVEL_KEYS = (
     "reach_count",
 )
 
-# fixture「TOML key schema」逐字钉死的必需叶子 key（点分路径）
+# --- 第二本账：从 fixture 手工转录的必需 key 全集 ----------------------------
+#
+# 来源：`openspec/changes/m2-producer-core/tasks.md` →「### Issue #2 fixture（任务
+# 1.1–1.2）」→「TOML key schema」代码块。config 侧 tasks.md:42-70，local 侧
+# tasks.md:91-112（行号以 PR head c8e7a7c 为准；块标题是稳定锚点）。下面两份清单按
+# 该代码块的**阅读顺序**排列，逐行转录。
+#
+# 维护规则（round 3 的失败就出在这里，不要重蹈）：这两份清单是 `_required_keys` 的
+# **独立第二本账**，MUST 手工对着 fixture 维护，MUST NOT 由 `_required_keys` 的输出
+# 反向生成或"照着跑出来的结果补齐"。round 3 时它们照抄了推导器的输出，而推导器只走
+# dataclass 叶子、表达不出"表本身也是必需 key"，于是两本账共用同一个盲区，8 个表 key
+# 无人覆盖、6 个内置默认值变异体全部存活。同理 MUST NOT 让测试去解析 fixture markdown
+# ——那只是换一套有自己盲区的推导器，并把测试绑死在文档排版上。
+#
+# 表 key 与叶子 key 同为必需项：fixture 写明"全部 key 必需"，整表缺失是独立于表内字段
+# 缺失的现场故障。两处转录细节：
+# - `raw` 在 fixture 里没有字面表头，它是 `[raw.ifs]`/`[raw.gfs]` 的隐含父表，按 TOML
+#   语义在 `[raw.ifs]` 处首次出现，故转录在 `raw.ifs` 之前；
+# - `local` 侧只钉 `slurm` 表本身，表内键名不属于本 schema——其键集的唯一权威是
+#   `config.slurm.required_fields`（tasks.md:81-85），由下方 SLURM_REQUIRED_FIELDS 驱动。
 PINNED_CONFIG_KEYS = (
+    # tasks.md:43-47 顶层标量（spec cli-config 反引号钉死，不得加表前缀）
     "forecast_days",
     "output_interval_minutes",
     "checkpoint_hours",
     "reach_count",
+    # tasks.md:49-50 [cycle]
+    "cycle",
     "cycle.hours",
+    # tasks.md:52-54 [variants]
+    "variants",
     "variants.gfs",
     "variants.ifs",
+    # tasks.md:56-60 [raw.ifs]（`raw` 为其隐含父表）
+    "raw",
+    "raw.ifs",
     "raw.ifs.lead_hours",
     "raw.ifs.variables",
     "raw.ifs.bundles",
     "raw.ifs.f000_special",
+    # tasks.md:62-66 [raw.gfs]
+    "raw.gfs",
     "raw.gfs.lead_hours",
     "raw.gfs.variables",
     "raw.gfs.bundles",
     "raw.gfs.f000_special",
+    # tasks.md:68-69 [slurm]
+    "slurm",
     "slurm.required_fields",
 )
 
 PINNED_LOCAL_KEYS = (
+    # tasks.md:92-94 顶层标量
     "yd_root",
     "scratch_root",
     "shud_binary",
+    # tasks.md:96-99 [nwm]
+    "nwm",
     "nwm.raw_root",
     "nwm.checkout_root",
     "nwm.python",
+    # tasks.md:101-107 [slurm]：只钉表本身，键集权威在 config
     "slurm",
+    # tasks.md:109-111 [cron]
+    "cron",
     "cron.lock_path",
     "cron.log_dir",
 )
@@ -165,16 +202,24 @@ def _without(data: Mapping[str, Any], dotted_key: str) -> dict[str, Any]:
 
 
 def _required_keys(cls: type, prefix: str = "") -> list[str]:
-    """从 dataclass 树推导必需 key 清单——新增字段即自动新增一条参数化用例。"""
+    """从 dataclass 树推导必需 key 清单——新增字段即自动新增一条参数化用例。
+
+    **表本身也产出一条 key**，再递归表内字段：`[cycle]` 整表缺失与 `cycle.hours` 缺失
+    是两种不同的现场故障。只枚举叶子时，「整表缺失就填一份内置默认」的实现无人能发现
+    （round 3 F1：6 个此形态的变异体在 77 条测试下全部存活，其中一个把 partition/
+    account/cpus/memory/walltime 五字段清单重新写死回代码里）。
+
+    本函数只是第一本账，且只能表达 dataclass 树表达得出的东西；第二本账
+    `PINNED_CONFIG_KEYS`/`PINNED_LOCAL_KEYS` 必须独立按 fixture 手工维护——见其上方注释。
+    """
     hints = typing.get_type_hints(cls)
     keys: list[str] = []
     for field in dataclasses.fields(cls):
         path = f"{prefix}.{field.name}" if prefix else field.name
+        keys.append(path)
         field_type = hints[field.name]
         if isinstance(field_type, type) and dataclasses.is_dataclass(field_type):
             keys.extend(_required_keys(field_type, path))
-        else:
-            keys.append(path)
     return keys
 
 
@@ -210,9 +255,17 @@ def test_local_required_keys_match_pinned_schema():
 
 
 def test_spec_pinned_keys_stay_top_level():
-    """`forecast_days` 等四个 key 由 spec 反引号钉死在顶层，不得被加表前缀。"""
+    """`forecast_days` 等四个 key 由 spec 反引号钉死在顶层，不得被加表前缀。
+
+    两条断言缺一不可。自 `_required_keys` 开始产出表路径起，只断言"在清单里"已不足以
+    判别：把 `forecast_days` 做成一张表后，`forecast_days` 仍会作为表路径出现在清单里
+    （实测 old=['forecast_days.days']、new=['forecast_days', 'forecast_days.days']）。
+    第二条断言要求它下面没有子路径，即它必须是叶子标量本身，判别力回到原理性。
+    """
     for key in SPEC_PINNED_TOP_LEVEL_KEYS:
         assert key in CONFIG_REQUIRED_KEYS
+        nested = [k for k in CONFIG_REQUIRED_KEYS if k.startswith(f"{key}.")]
+        assert not nested, f"`{key}` 被做成了表：{nested}"
 
 
 # --- 齐备装载 ----------------------------------------------------------------
@@ -476,6 +529,23 @@ def test_local_slurm_float_value_rejected(tmp_path):
 
     _assert_locates(excinfo, "slurm.cpus")
     assert "float" in str(excinfo.value)
+
+
+def test_local_slurm_bool_value_rejected(tmp_path):
+    """`cpus = true` MUST NOT 落进 `LocalConfig.slurm`（Python 里 bool 是 int 子类）。
+
+    放行后 Slurm 提交行会渲染成 `--cpus-per-task=True`。守卫必须走 `_is_scalar` 的 bool
+    判别；写成 `isinstance(value, (str, int))` 即失守，而该写法在本用例之前全绿。
+    """
+    config = _loaded_config(tmp_path)
+    data = copy.deepcopy(VALID_LOCAL)
+    data["slurm"]["cpus"] = True
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    _assert_locates(excinfo, "slurm.cpus")
+    assert "bool" in str(excinfo.value)
 
 
 def test_local_slurm_table_value_rejected(tmp_path):
@@ -789,6 +859,29 @@ def test_dataclass_tree_reaches_every_nested_dataclass():
     walked = _dataclass_tree(Config) + _dataclass_tree(LocalConfig)
 
     assert {klass.__name__ for klass in walked} == EXPECTED_DATACLASSES
+
+
+@pytest.mark.parametrize(
+    "klass",
+    # dict.fromkeys 去重：`RawSourceConfig` 在树里出现两次（raw.ifs / raw.gfs）
+    list(dict.fromkeys(_dataclass_tree(Config) + _dataclass_tree(LocalConfig))),
+    ids=lambda klass: klass.__name__,
+)
+def test_dataclass_rejects_positional_construction(klass):
+    """全部 dataclass MUST 只接受关键字构造（`kw_only=True`）。
+
+    `VariantsConfig(gfs, ifs)` 与 `RawConfig(ifs, gfs)` 用同一对字段名而顺序相反，
+    `RawSourceConfig` 的 `variables`/`bundles` 相邻且同为 `tuple[str, ...]`：位置构造下
+    互换实参不会报错，下游（#6 raw 完整性判定、#20 覆盖守卫）拿到的是一份"raw 永远缺"
+    的静默错配，而不是一条红测试。
+
+    实参个数刻意取满字段数：少给实参时未加 `kw_only` 的类也会因"缺必需位置参数"而抛
+    `TypeError`，那是偶然判别力。给满实参时，只有 `kw_only=True` 能让它抛。
+    """
+    args = [object()] * len(dataclasses.fields(klass))
+
+    with pytest.raises(TypeError):
+        klass(*args)
 
 
 def test_no_dataclass_field_carries_a_default():
