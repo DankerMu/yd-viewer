@@ -3,7 +3,11 @@ name = "yd-producer"
 version = "0.1.0"
 description = "yd basin SHUD forecast producer: node-22 compute loop (IFS/GFS dual-source)"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pyproj>=3.7.2",
+    "pyshp>=3.1.6",
+    "shapely>=2.1.2",
+]
 
 [dependency-groups]
 dev = [
