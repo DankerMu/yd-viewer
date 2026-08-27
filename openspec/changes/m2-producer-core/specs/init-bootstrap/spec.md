@@ -16,15 +16,15 @@
 - **THEN** 拒绝退出，无任何写入
 
 ### Requirement: 扫描窗内确定各源首轮
-`init` MUST 以执行时刻往前 7 天为扫描窗，对每个 source 找到窗内最早的完整 00Z/12Z raw cycle 作为该源首轮 T；某源窗内无完整 cycle 时 MUST 不为该源建链并明确报告，另一源不受影响。
+`init` MUST 以执行时刻往前 7 天为扫描窗，对每个 source 找到窗内最早的完整 00Z/12Z raw cycle 作为该源首轮 T；任一 source 窗内无完整 cycle 时 MUST 整体拒绝且不写任何状态（fail closed，等待 raw 补齐后重跑；compute-loop §6.2）。
 
 #### Scenario: 双源各自首轮
 - **WHEN** raw fixture 中 GFS 与 IFS 窗内最早完整 cycle 不同
 - **THEN** 两源分别以各自最早完整 cycle 为首轮 T
 
-#### Scenario: 单源窗内无完整 raw
+#### Scenario: 单源窗内无完整 raw 即整体拒绝
 - **WHEN** 窗内 IFS 无任何完整 cycle 而 GFS 有
-- **THEN** 只建立 GFS 状态链，IFS 被明确报告为未建链
+- **THEN** init 拒绝退出，`states/` 下无任何文件
 
 ### Requirement: 首态生成
 `init` MUST 从两个变体内各自同源率定末态复制首态，重戳到该源首轮 T，写为 `states/<source>/<T>.cfg.ic`；MUST NOT 运行 SHUD，MUST NOT 写任何 `DONE`。

@@ -30,11 +30,15 @@ forcing 生产 MUST 将 canonical 格点直接作为 SHUD forcing 站点（bindi
 - **THEN** registry 文件只存在于 work 内，work 清理后不留任何 registry 残留
 
 ### Requirement: SHUD 输入组装与固定参数
-组装器 MUST 在 work 内由模型变体与 forcing 包组装完整 SHUD 运行目录，并固定覆盖 `START=0`、`END=7`、`DT_QR_DOWN=60`、`Update_IC_STEP=720`、`BINARY_OUTPUT=1`、`ASCII_OUTPUT=0`；00Z 与 12Z MUST 使用同一套参数。
+组装器 MUST 在 work 内由模型变体、forcing 包与本轮 warm-start 状态组装完整 SHUD 运行目录：运行目录的初始条件 MUST 为 `states/<source>/<T>.cfg.ic` 的内容，MUST 覆盖模型变体自带的率定末态 `cfg.ic`；MUST NOT 以变体自带初态运行日常 cycle。组装 MUST 固定覆盖 `START=0`、`END=7`、`DT_QR_DOWN=60`、`Update_IC_STEP=720`、`BINARY_OUTPUT=1`、`ASCII_OUTPUT=0`；00Z 与 12Z MUST 使用同一套参数。
 
 #### Scenario: 参数覆盖
 - **WHEN** 对合成变体与 forcing 包执行组装（cycle 分别为 00Z 与 12Z）
 - **THEN** 运行目录的 SHUD 参数文件中六项参数为固定值，两种 cycle 无差异
+
+#### Scenario: warm-start 状态覆盖变体初态
+- **WHEN** 以内容可区分的 T 状态 fixture 与自带不同内容 `cfg.ic` 的合成变体执行组装
+- **THEN** 运行目录的初始条件文件字节等于 T 状态，不等于变体率定末态
 
 ### Requirement: 快照模块可追溯
 每个从 NWM 复制的模块 MUST 在文件头部记录来源 `NWM@8ae9b8f2` 与原仓相对路径；快照 MUST NOT 包含 DB/scheduler 分支代码。

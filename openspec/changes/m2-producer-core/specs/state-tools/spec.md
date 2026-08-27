@@ -23,7 +23,7 @@
 - **THEN** 检查失败并指明缺失段
 
 ### Requirement: 重戳到目标 cycle
-重戳 MUST 只改写状态时间头为目标 cycle T 对应值，数据区 MUST 保持不变。
+重戳 MUST 只改写状态时间头为目标 cycle 对应的绝对值，数据区 MUST 保持不变。同一重戳函数服务 init 首态与发布前 T+12 checkpoint 定戳两条路径（compute-loop §9.2）。
 
 #### Scenario: 重戳保数据
 - **WHEN** 将率定末态重戳到指定 T

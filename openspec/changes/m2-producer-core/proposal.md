@@ -7,9 +7,8 @@
 ## What Changes
 
 - 在 `producer/` uv 项目内实现 `yd-producer` CLI 三入口（`prepare`/`init`/`run`）与 `config.toml`/`local.toml` 双层配置装载；
-- 从 NWM 公开仓（DankerMu/SHUD-NWM，pin `8ae9b8f29c8b72c574e8cbd95f2994160bd42832`）精简快照 DB-free canonical converter、file-backend direct-grid forcing、object-store/path 基础函数、IFS/GFS source 与 raw manifest 数据结构，连同其最小测试，逐模块记录来源 commit；
+- 从 NWM 公开仓（DankerMu/SHUD-NWM，pin `8ae9b8f29c8b72c574e8cbd95f2994160bd42832`）精简快照 DB-free canonical converter、file-backend direct-grid forcing、object-store/path 基础函数、IFS/GFS source 与 raw manifest 数据结构、T+12 checkpoint tracker 与漏采补跑，连同其最小测试，逐模块记录来源 commit；
 - 实现 `cfg.ic` 原生分段解析、重戳、负残差处理与结构检查；
-- 实现 T+12 checkpoint tracker 与 12 小时漏采补跑；
 - 实现 IFS/GFS raw 完整性扫描与本轮临时 raw manifest 生成；
 - 实现 `run` 控制器：严格前沿推进、非阻塞 flock、Slurm 提交封装、NFS 提交顺序与崩溃恢复、14 天保留清理；
 - 实现 `prepare` 的变体生成编排（NWM mapping-builder 薄外壳，fail-closed）与 `rivers.geojson`/`boundary.geojson` 生成；
