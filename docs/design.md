@@ -281,13 +281,63 @@ NWM 源码中的旧天地图 key 不得复制。node-27 通过运行时配置注
 
 ## 10. 里程碑
 
-1. **M1 文档与契约**：本方案、计算环、产物契约、agent ops 四份文档一致。
-2. **M2 producer 基础**：prepare/init/run CLI、DB-free canonical/direct-grid、状态工具和本地测试。
-3. **M3 viewer**：v2 解析、四个 API、m11 最小 UI 快照、前端构建门禁。
-4. **M4 node-22 真计算**：00Z/12Z、IFS/GFS、T+12 接力和真实 DAT receipt。
-5. **M5 node-27 真闭环**：旁路部署、Nginx `/yd/`、真实地图与曲线 receipt。
+阶段验证遵循 [agent-ops.md](agent-ops.md) §11.1 的 oracle 路由；产物语义以 [products-contract.md](products-contract.md) 为准；本地绿不能替代 node-22/node-27 receipt。
 
-客户交付包和客户侧 producer 迁移不属于本期 M1–M5。
+### M1 文档与契约
+
+本方案、[compute-loop-design.md](compute-loop-design.md)、[products-contract.md](products-contract.md)、[agent-ops.md](agent-ops.md) 四份文档定稿且互相一致。
+
+oracle：文档一致性检查（agent-ops §11.1）。
+
+### M2 producer 基础
+
+node-22 producer 的以下本地可验证代码：
+
+- `prepare`/`init`/`run` 三入口 CLI 与 `config.toml`/`local.toml` 装载（[compute-loop-design.md](compute-loop-design.md) §5–6）；`prepare` 薄外壳只用 NWM 活动解释器、缺失即 fail closed（agent-ops §7.2）；
+- NWM 快照模块及其最小测试：DB-free canonical converter、direct-grid forcing、object-store/path 基础函数、raw manifest 结构，记录来源 commit（同 §4.2）；
+- `cfg.ic` 原生分段解析、重戳、负残差处理与结构检查（同 §8）；
+- T+12 tracker 与 12 小时漏采补跑（同 §9）；
+- IFS/GFS raw 完整性扫描与临时 manifest（同 §7）；
+- 控制器：前沿推进、flock、Slurm 提交封装、NFS 提交顺序与崩溃恢复、保留与清理（同 §10–12）。
+
+阶段门禁：本地测试全绿（[compute-loop-design.md](compute-loop-design.md) §13.1）。其中 direct-grid、forcing、SHUD、T+12、Slurm 按 agent-ops §11.1 的最终 oracle 在 M4 的 node-22 真运行；M2 通过不构成对这些能力的验证。
+
+### M3 viewer
+
+- v2 DAT 解析与 m³/day → m³/s 换算（本方案 §4）；
+- `DONE` 目录契约枚举与 7 天窗口（§5、[products-contract.md](products-contract.md)）；
+- 四个 API：cycles、map/latest、reach 曲线、health（§6）；几何作为同源静态文件提供；
+- m11 最小 UI 快照：曲线窗、底图切换、色带、hover/selected，记录来源 commit（§7）；
+- 前端构建门禁（§9.1）。
+
+阶段门禁：本地测试与构建（§9.1）。M3 不依赖 node-22 真产物，可与 M2 并行推进；按 agent-ops §12 末句，没有 node-22 真产物时可用合成数据开发 viewer，但不得计作 M4/M5 完成。地图与曲线的最终 oracle 在 M5。
+
+### M4 node-22 真计算
+
+- 现场填写 `local.toml`（[compute-loop-design.md](compute-loop-design.md) §5、§14）；
+- 经授权执行一次性 `prepare` 与 `init`：二者改变长期状态，须现场 receipt，不得由 cron 调用（agent-ops §8.1）；
+- 至少实跑一个 00Z 和一个 12Z，IFS/GFS 均覆盖，全部满足 §9.2 与 [compute-loop-design.md](compute-loop-design.md) §13.2；
+- 按 [products-contract.md](products-contract.md) §8 与 agent-ops §10 设置发布目录权限；
+- 安装 cron + `flock` 接管日常 `run`，最终分钟点现场确定（agent-ops §8.2、compute-loop §14）。
+
+oracle：node-22 真运行 receipt（agent-ops §11.2）。
+
+### M5 node-27 真闭环
+
+- 以 node-27 `nwm` 身份实际读取验证同一 NFS（agent-ops §10、§12 步骤 4）；
+- 现场确认独立端口并注入天地图等 env 配置（§11、agent-ops §9.2）；
+- 构建/加载 yd 镜像并以只读挂载旁路启动；部署为对外动作，须明确授权（agent-ops §9.2）；
+- 回环 health 通过后，经授权修改 Nginx `/yd/` location，`nginx -t` 后 reload（agent-ops §9.3）；
+- 浏览器 receipt 全部满足 §9.3，并复核 NWM `/`、`/ops` 与 display API 不受影响。
+
+oracle：node-27 live receipt（agent-ops §11.3）。
+
+### 依赖与边界
+
+- M4 依赖 M2：CLI 未实现并通过本地测试前，禁止手工拼出等价生产流程（agent-ops §8.1）；
+- M5 依赖 M3、M4，顺序遵循 agent-ops §12 标准发布顺序，每步留 receipt；
+- 本期 M1–M5 固定同一套基线模型、SHUD 二进制和河网；升级须走干净 staging 根（[compute-loop-design.md](compute-loop-design.md) §6.1、[products-contract.md](products-contract.md) §9）；
+- 客户交付包和客户侧 producer 迁移不属于本期 M1–M5。
 
 ## 11. 尚待现场确定
 
