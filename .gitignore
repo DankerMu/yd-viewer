@@ -12,3 +12,7 @@ local.toml
 
 # Local agent tooling
 .claude/
+
+# subagent-workflow ephemeral state
+.workplans/
+.review-gate.json
