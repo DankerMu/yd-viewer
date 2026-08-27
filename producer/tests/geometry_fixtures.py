@@ -210,6 +210,24 @@ def _write_layer(
     return indices
 
 
+def write_empty_layer(shp_path: Path, wkt: str) -> Path:
+    """写一个 0 要素的合法折线图层（含 `.shx`/`.dbf`/`.prj`），供无误报回归使用。
+
+    0 要素时 `.shx` 只有 100 字节头、记录区为空，是结构先验的边界情形。
+    """
+    shp_path = Path(shp_path)
+    shp_path.parent.mkdir(parents=True, exist_ok=True)
+    with shapefile.Writer(
+        shp=str(shp_path),
+        shx=str(sidecar(shp_path, ".shx")),
+        dbf=str(sidecar(shp_path, ".dbf")),
+        shapeType=shapefile.POLYLINE,
+    ) as writer:
+        writer.field("Index", "N", 10, 0)
+    _write_prj(shp_path, wkt)
+    return shp_path
+
+
 def write_synthetic_baseline(
     directory: Path,
     *,

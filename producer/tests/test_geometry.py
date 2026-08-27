@@ -7,7 +7,10 @@ lon/lat 锚点提供，测试断言被测工具能把 Albers 米制坐标还原�
 
 from __future__ import annotations
 
+import pathlib
 import shutil
+import subprocess
+import sys
 
 import pytest
 from geometry_fixtures import (
@@ -15,6 +18,7 @@ from geometry_fixtures import (
     AlbersParams,
     SyntheticBaseline,
     sidecar,
+    write_empty_layer,
     write_synthetic_baseline,
 )
 from shapely.geometry import Polygon
@@ -448,19 +452,35 @@ def test_read_shapefile_rejects_non_shp_path(
     assert type(excinfo.value) is GeometryError
 
 
-def test_read_shapefile_accepts_uppercase_shp_suffix(
-    baseline: SyntheticBaseline, tmp_path
+@pytest.mark.parametrize("name", ["RIVERS.SHP", "rivers.Shp"])
+def test_read_shapefile_rejects_non_lowercase_shp_suffix(
+    baseline: SyntheticBaseline, tmp_path, name: str
 ) -> None:
+    """完整的**全大写** shapefile 组也必须被拒，且理由是后缀规则而非缺文件。
+
+    旁文件按小写后缀推导，接受 `RIVERS.SHP` 在大小写敏感文件系统（CI ubuntu、
+    node-22）上会去找不存在的 `RIVERS.shx`，在大小写不敏感文件系统上则可能悄悄
+    读到旁边的小写组。拒绝发生在**字符串**层、任何 `is_file()` 之前，因此本用例
+    在 APFS 与 ext4 上行为一致。
+    """
     upper_dir = tmp_path / "upper"
     upper_dir.mkdir()
-    upper_shp = upper_dir / "RIVERS.SHP"
+    upper_shp = upper_dir / name
+    stem = upper_shp.name[: -len(upper_shp.suffix)]
+    upper_case = upper_shp.suffix.isupper()
     shutil.copyfile(baseline.rivers_shp, upper_shp)
     for suffix in (".shx", ".dbf", ".prj"):
+        cased = suffix.upper() if upper_case else suffix
         shutil.copyfile(
-            sidecar(baseline.rivers_shp, suffix), upper_dir / f"RIVERS{suffix}"
+            sidecar(baseline.rivers_shp, suffix), upper_dir / f"{stem}{cased}"
         )
-    _, features = read_shapefile(upper_shp)
-    assert [record["Index"] for record, _ in features] == list(baseline.river_indices)
+        assert (upper_dir / f"{stem}{cased}").is_file()
+
+    with pytest.raises(GeometryError) as excinfo:
+        read_shapefile(upper_shp)
+    assert str(upper_shp) in str(excinfo.value)
+    assert "小写" in str(excinfo.value)
+    assert type(excinfo.value) is GeometryError
 
 
 # --- 失败归属：损坏的 .shx 必须点名 .shx ------------------------------------
@@ -480,6 +500,89 @@ def test_read_shapefile_corrupt_shx_names_the_shx(
     assert str(shx) in str(excinfo.value)
     assert str(baseline.rivers_shp) not in str(excinfo.value)
     assert type(excinfo.value) is GeometryError
+
+
+@pytest.mark.parametrize("extra_bytes", [1, 7])
+def test_read_shapefile_shx_with_partial_record_names_the_shx(
+    baseline: SyntheticBaseline, extra_bytes: int
+) -> None:
+    """尾部多出不足一条 8 字节记录的碎片：索引记录区长度非法，必须点名 `.shx`。"""
+    shx = sidecar(baseline.rivers_shp, ".shx")
+    shx.write_bytes(shx.read_bytes() + b"\x00" * extra_bytes)
+    with pytest.raises(GeometryError) as excinfo:
+        read_shapefile(baseline.rivers_shp)
+    assert str(shx) in str(excinfo.value)
+    assert str(baseline.rivers_shp) not in str(excinfo.value)
+
+
+def test_read_shapefile_shx_declared_length_mismatch_names_the_shx(
+    baseline: SyntheticBaseline,
+) -> None:
+    """记录区长度合法、但头部声明长度与实际不符（丢掉整条记录）也要点名 `.shx`。"""
+    shx = sidecar(baseline.rivers_shp, ".shx")
+    shx.write_bytes(shx.read_bytes()[:-8])
+    with pytest.raises(GeometryError) as excinfo:
+        read_shapefile(baseline.rivers_shp)
+    assert str(shx) in str(excinfo.value)
+    assert str(baseline.rivers_shp) not in str(excinfo.value)
+
+
+#: 在子解释器里跑的探针：脚本自身以 `assert False` 开头，若 `-O` 未生效会立刻炸掉，
+#: 保证本用例不会因为「断言其实还在跑」而假绿。argv[1]=tests 目录，argv[2]=工作目录。
+_DASH_O_PROBE = """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from geometry_fixtures import sidecar, write_synthetic_baseline
+from yd_producer.geometry import GeometryError, read_shapefile
+
+assert False, "-O 未生效：assert 仍在执行"
+
+base = write_synthetic_baseline(Path(sys.argv[2]) / "baseline", river_count=3, unit_count=2)
+shx = sidecar(base.rivers_shp, ".shx")
+shx.write_bytes(shx.read_bytes()[:50])
+try:
+    read_shapefile(base.rivers_shp)
+except GeometryError as exc:
+    message = str(exc)
+else:
+    raise SystemExit("未抛 GeometryError")
+if str(shx) not in message:
+    raise SystemExit("报错未点名 .shx: " + message)
+if str(base.rivers_shp) in message:
+    raise SystemExit("报错误伤完好的 .shp: " + message)
+"""
+
+
+def test_shx_attribution_survives_python_dash_o(tmp_path) -> None:
+    """`python -O` 下（pyshp 内部 assert 被剥除）截断 `.shx` 仍须点名 `.shx`。
+
+    先前实现依赖 pyshp 的 `assert len(offsets_) == self.numShapes`；`-O` 一开，截断
+    索引被读成 0 条记录，报错退化成「几何数(0)与属性记录数(3)不一致」并点名**完好的**
+    `.shp`——归属错误。结构先验不含任何 `assert`，故与 `-O` 无关。
+    """
+    tests_dir = str(pathlib.Path(__file__).parent)
+    completed = subprocess.run(
+        [sys.executable, "-O", "-c", _DASH_O_PROBE, tests_dir, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_read_shapefile_valid_shx_passes_structure_check(tmp_path) -> None:
+    """无误报：生成器写出的合法 `.shx`（含 0 要素图层）必须原样通过结构先验。"""
+    baseline = write_synthetic_baseline(tmp_path / "sizes", river_count=2, unit_count=1)
+    for shp in (baseline.rivers_shp, baseline.domain_shp):
+        crs, features = read_shapefile(shp)
+        assert crs is not None
+        assert len(features) > 0
+
+    empty = write_empty_layer(tmp_path / "empty.shp", baseline.prj_wkt)
+    crs, features = read_shapefile(empty)
+    assert features == []
 
 
 # --- .prj 编码：非 UTF-8 fail closed / BOM 前缀可读 --------------------------
