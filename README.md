@@ -1,9 +1,12 @@
 # 水文预报系统（yd-viewer）
 
-只消费 SHUD 计算产物的流域展示服务：河网地图 + 河段流量过程线 + 时次选择。
-无数据库、无写路径，最终交付部署于客户服务器（离线优先）。
+独立的 yd 流域 SHUD 预报与展示项目：node-22 从 NWM 共享 NFS 只读取得 raw，并在 yd scratch 完成 IFS/GFS 双源计算，通过 yd NFS 发布 SHUD 原生产物；node-27 运行无数据库 viewer，展示最新河网流量与河段双源过程线。
 
-- 设计方案：[docs/design.md](docs/design.md)
-- 产物目录契约（对计算方）：[docs/products-contract.md](docs/products-contract.md)
+当前阶段目标：**node-22 真计算 → NFS → node-27 真展示**。客户侧 producer 迁移待运行环境明确后另行设计。
 
-状态：方案阶段。实现里程碑见 design.md §9。
+- 总体设计：[docs/design.md](docs/design.md)
+- node-22 计算环：[docs/compute-loop-design.md](docs/compute-loop-design.md)
+- producer/viewer 文件契约：[docs/products-contract.md](docs/products-contract.md)
+- 节点登录、部署与验证纪律：[docs/agent-ops.md](docs/agent-ops.md)
+
+状态：方案已定稿，尚未开始实现。里程碑见 [docs/design.md §10](docs/design.md#10-里程碑)。

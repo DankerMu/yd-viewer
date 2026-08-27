@@ -1,140 +1,300 @@
 # 水文预报系统（yd-viewer）设计方案
 
-状态：方案（已与需求方对齐结论，未开始实现）
-日期：2026-08-26
+状态：方案已定稿，尚未开始实现
+日期：2026-08-27
 
-## 1. 背景与边界
+## 1. 当前目标与边界
 
-yd 流域由外部计算团队（zhaochen 方）用 SHUD 完成计算，服务对象是地方客户。
-本项目交付一个**只消费 SHUD 计算产物的前端展示服务**：
+本期交付并验收一条独立的 yd 真数据闭环：
 
-- 最终部署在**客户自己的服务器**上，我们交付后**无法登录运维**；
-- 同款实例旁路部署在 node-27 作为唯一实跑验证 oracle；
-- 与 NWM 现有服务**零耦合**：不动 27 的 `/`、`/ops`、PG、ingest 任何一处。
+```text
+NWM 已下载 raw GRIB（只读）
+  → node-22 yd producer（IFS/GFS 双源 SHUD）
+  → NFS YD_ROOT
+  → node-27 yd-viewer
+  → https://test.nwm.ac.cn/yd/
+```
 
-## 2. 已拍板决策（grill 收敛结论）
+本期完成标准是 **node-22 真计算 → NFS → node-27 真展示**，不是客户侧部署：
+
+- node-22 运行本仓 producer，产出 yd 自己的 IFS/GFS 预报；
+- node-27 运行本仓 viewer，直接读取同一份 NFS 产物；
+- NWM 仅提供只读 raw 数据、一次性 direct-grid builder，以及本仓精简快照代码的来源；
+- yd 日常运行不依赖 NWM 数据库、scheduler、ingest、display API 或前端运行时；
+- 客户侧 producer 的下载、调度和计算形态待客户环境明确后另行设计；当前只保证 producer 与 viewer 通过 `YD_ROOT` 文件边界解耦。
+
+## 2. 已拍板决策
 
 | 分支 | 结论 |
 |---|---|
-| 更新形态 | 滚动更新；时次下拉可选，窗口 = 最新时次往前 **7 天** |
-| 架构 | **无库直读**：无 PG/ingest，直接读 SHUD 原生二进制产物 |
-| 产物来源 | 由本仓 yd 循环预报环产出（node-22，双源 IFS+GFS、7 天时效、12h 节律，见 [compute-loop-design.md](compute-loop-design.md)）；最终随整仓迁客户服务器本地落盘，无跨机传输链路 |
-| 接口契约 | 直读 SHUD 原生输出 + 完成标记（见 §4 产物契约）；cycle 目录含 source 维度 |
-| 27 角色 | 同款实例读 NFS `/home/ghdc/yd`，作为交付验证 oracle |
-| 暴露方式 | 客户侧 IP+端口直访；27 侧暂挂 `test.nwm.ac.cn/yd` |
-| 功能范围 | **仅核心**：河网地图 + 河段点击流量过程线（IFS/GFS 双源两条曲线，按可用性出线）+ 时次下拉；无气象代站图层、无面雨量、无单元变量染色 |
-| 代码组织 | 独立仓库（本仓库），与 NWM 主仓分离；前端组件按需一次性拷贝，不做共享包 |
-| 访问控制 | 查看器不带登录，交给客户网络层 |
-| 系统名称 | **水文预报系统** |
+| 当前验收 | node-22 双源真计算，node-27 真产物展示 |
+| 更新节律 | IFS/GFS 各自独立；UTC 00/12 两轮，严格按时序推进 |
+| 预报长度 | 7 天；水文流量每小时输出，168 行 |
+| viewer 架构 | 单容器 FastAPI + 构建后 React；无数据库、无写路径 |
+| 数据接口 | `YD_ROOT` 下的 GeoJSON、SHUD v2 二进制和 `DONE` |
+| 单源行为 | 任一来源 `DONE` 即发布 cycle；曲线按实际可用源显示一条或两条 |
+| 地图默认帧 | 最新任一源完成 cycle；GFS 优先，否则 IFS；取 lead 0 |
+| 历史窗口 | viewer 列最新成功 cycle 往前 7 天；producer 保留 14 天 |
+| 前端复用 | 从 NWM 当前 m11 页面复制最小纯 UI/纯函数快照，独立维护 |
+| 底图 | node-27 部署时注入天地图配置；矢量/卫星/地形切换；禁止硬编码 key |
+| 访问控制 | viewer 不带登录，由部署网络边界负责 |
+| 客户迁移 | 本期不承诺未知客户调度环境；仅固化可搬迁的文件边界 |
 
-## 3. 关键事实基线（已实测/已查证）
+明确不做：
 
-- **产物是二进制**：yd 的 `yd.cfg.para` 为 `BINARY_OUTPUT=1, ASCII_OUTPUT=0`——
-  NWM 仓的文本版 rivqdown 解析器不适用，须按 rSHUD `readout()` 的二进制格式新写解析。
-- **二进制格式**（rSHUD ground truth）：整文件 little-endian float64 序列。
-  v2：前 128 double（1024 字节）ASCII 文本头，`raw[128]`=起始日期 YYYYMMDD，
-  `raw[129]`=列数 nc，`raw[130:130+nc]`=列编号表；v1：`raw[0]`=nc，`raw[1]`=起始日期。
-  数据每行 nc+1 个 double，第 0 列为相对起始日的分钟数。模型边写边读时尾部可能有残行，须截断到整行。
-- **文件可能很大**：当前 yd 参数 `END=9132`（天）、`DT_QR_DOWN=1440`（日输出），
-  单个 rivqdown.dat 可达 ~290 MB → 读取端必须 **memmap 按列抽取**，禁止整文件进内存。
-- **河网几何**：`input/yd/gis/river.shp` 共 3988 段，dbf `Index`(1..3988) 与 rivqdown
-  列编号一一对应；投影为自定义 Albers（WKT 在 `.prj`），须重投影 EPSG:4326。
-  `domain.shp` 7891 个三角单元，并集外边界作流域边界；yd 流域面积中心约 (103.2°E, 36.5°N)。
-- **流量单位**：rivqdown 为 m³/day，展示转 m³/s（÷86400）。
-- **27 底图现状**：NWM 前端用天地图 WMTS（带 key）。yd-viewer 底图 URL 走配置项，
-  27 部署时配天地图；客户内网未确认能否联网 → **默认按完全离线设计**（见 §7）。
+- PostgreSQL、Redis、ingest、消息队列、MVT 服务；
+- `meta.json`、`status.json`、degraded 状态和运维页面；
+- 气象代站、面雨量、单元变量等扩展图层；
+- viewer 内的 shapefile/GDAL 运行时转换；
+- NWM 登录、RBAC、全局 store、多流域和 `/ops` 代码；
+- SHUD v1 二进制兼容和残行修复。
 
-## 4. 产物目录契约（对计算方，另见 products-contract.md）
+## 3. 系统结构
 
+### 3.1 `YD_ROOT`
+
+同一份 NFS 在两台主机上的路径不同：
+
+- node-22：`/ghdc/data/yd`
+- node-27：`/home/ghdc/yd`
+
+逻辑布局：
+
+```text
+<YD_ROOT>/
+  input/
+    models/
+      yd_gfs/                    # GFS direct-grid SHUD 变体
+      yd_ifs/                    # IFS direct-grid SHUD 变体
+    viewer/
+      rivers.geojson             # EPSG:4326，含 reach_id
+      boundary.geojson           # EPSG:4326 流域边界
+  states/
+    gfs/<cycle>.cfg.ic
+    ifs/<cycle>.cfg.ic
+  output/
+    <YYYYMMDDHH>/
+      gfs/
+        yd.rivqdown.dat
+        DONE
+      ifs/
+        yd.rivqdown.dat
+        DONE
+  logs/
+    gfs/<cycle>.log
+    ifs/<cycle>.log
 ```
-<products_root>/                     # 客户机自定；27 侧为 /home/ghdc/yd（22 视图 /ghdc/data/yd）
-  input/yd/gis/{river,domain,seg}.*  # 流域几何（随模型包，已存在）
-  output/<YYYYMMDDHH>/<source>/      # 每轮 × 每源（ifs|gfs）一个目录，cycle 命名按 UTC
-    yd.rivqdown.dat                  # SHUD 原生二进制河道流量（唯一必需产物）
-    meta.json                        # degraded 标记、血缘摘要
-    DONE                             # 本源本轮写完后最后写入；无此标记不展示
-  status.json                        # 循环健康状态（viewer 据此显示更新时间/停更提示）
+
+viewer 容器只读挂载 `input/viewer` 与 `output`，看不到模型、状态和计算日志。
+
+### 3.2 几何
+
+一次性 `prepare` 从外部提供的 yd 模型包生成：
+
+- `river.shp` 的 3988 条河段转为 `rivers.geojson`；
+- DBF `Index` 作为 `reach_id`，当前为 1..3988，与 rivqdown 列编号对应；
+- `domain.shp` 的 7891 个单元合并为 `boundary.geojson`；
+- 自定义 Albers 投影按 `.prj` 重投影到 EPSG:4326。
+
+几何固定放在 `YD_ROOT/input/viewer`。viewer 启动和请求期间不加载 shapefile，也不携带 GDAL/Fiona。
+
+## 4. SHUD 产物语义
+
+### 4.1 二进制格式
+
+viewer 只支持本项目当前 SHUD 版本写出的 v2：
+
+- 1024 字节文本头；
+- 随后的 little-endian float64：起始日期、列数、列编号表；
+- 数据区每行 `nc + 1` 个 float64，第 0 列为模型相对分钟，其后为河段值；
+- 当前 `nc = 3988`，列编号与 GeoJSON `reach_id` 使用同一套 SHUD 编号。
+
+格式权威仍是 rSHUD `readout()`，但绝对时间不使用其“日期头 + 分钟”的 00Z 假设。
+
+### 4.2 时间
+
+producer 固定覆盖 SHUD 参数：
+
+```text
+START = 0
+END = 7
+DT_QR_DOWN = 60
 ```
 
-时间基准已定：cycle 与 .dat 内部均为 UTC，viewer 展示转北京时间。
-模型包（几何/率定/SHUD 版本）变更条款对 zhaochen 方，见 products-contract.md。
+00Z 与 12Z 都使用 `START=0`。direct-grid forcing 的首行 `Time_Day=0` 即 cycle 时刻。
 
-## 5. 服务架构（无状态，只读）
+绝对时间唯一解释为：
 
-单容器 = FastAPI 后端 + 构建后的前端静态文件。**无数据库、无磁盘缓存、无写路径**，
-产物目录以只读方式挂载；进程内缓存（几何 GeoJSON、.dat 头部/时间轴，按 mtime 失效）。
+```text
+UTC cycle_id + DAT 第 0 列分钟
+```
 
-API（全部相对路径，供根路径与反代子路径两种部署形态共用）：
+因此 12Z 不会因 v2 日期头只有自然日而静默提前 12 小时。
+
+7 天、60 分钟输出得到：
+
+- 168 行；
+- 分钟列 `0, 60, 120, …, 10020`；
+- lead 标签 `0h, 1h, …, 167h`；
+- 每行代表标签之后一小时区间的平均河道流量，例如 lead 0 表示 `[cycle, cycle+1h)`。
+
+这是 SHUD `PrintData` 的累计并按输出间隔平均行为，不是 168 个瞬时状态点。
+
+### 4.3 单位
+
+`yd.rivqdown.dat` 中流量单位为 m³/day。后端统一除以 86400，API 和页面均使用 m³/s。普通页面文案只显示“流量 (m³/s)”；逐小时平均口径由本节和产物契约明确。
+
+## 5. 产物发布与窗口
+
+每个 source/cycle 正式目录只有：
+
+```text
+output/<cycle>/<source>/
+  yd.rivqdown.dat
+  DONE
+```
+
+规则：
+
+1. producer 先完成 DAT 和下一轮状态的提交，最后创建空文件 `DONE`；
+2. viewer 只枚举有 `DONE` 的 source 目录；
+3. cycle 下任一 source 有 `DONE`，该 cycle 即可选择；
+4. IFS/GFS 互不阻塞；后完成的来源自然补成第二条曲线；
+5. viewer 的 7 天窗口以最新成功 cycle 为锚，而不是墙钟；计算停更后仍展示最后一批数据；
+6. producer 保留最新成功 cycle 往前 14 天，清理窗口外 source 目录。
+
+完整条款见 [products-contract.md](products-contract.md)。
+
+## 6. viewer 后端
+
+单容器内的 FastAPI 同时服务业务 API、预转换 GeoJSON 和构建后的前端。容器无数据库、无磁盘缓存、无写路径。
+
+### 6.1 API
+
+所有前端请求使用相对路径；反代 `/yd/` 剥前缀后与根路径部署共用同一构建物。
 
 | 端点 | 说明 |
 |---|---|
-| `GET api/meta` | 标题、底图 URL、边界 bbox、窗口天数 |
-| `GET api/geometry/rivers` | 河网 GeoJSON（含 index/down/length/width） |
-| `GET api/geometry/boundary` | 流域边界 GeoJSON |
-| `GET api/cycles` | 7 天窗口内时次列表（倒序），每时次附可用 source 列表 |
-| `GET api/cycles/{id}/reaches/{rid}/discharge` | 单河段流量序列（m³/s），按可用 source 返回一或两组曲线 |
-| `GET api/status` | 透传 status.json（更新时间、停更提示） |
+| `GET /api/cycles` | 最新成功 cycle 往前 7 天，倒序返回 cycle 及实际可用 source |
+| `GET /api/map/latest` | 选择最新一个任一来源 `DONE` 的 cycle；该 cycle 内 GFS 优先、否则 IFS；取 lead 0，返回 3988 个 m³/s 值 |
+| `GET /api/cycles/{cycle}/reaches/{reach_id}` | 一次返回该河段该 cycle 的所有可用 GFS/IFS 曲线，各 168 点 |
+| `GET /api/health` | 容器健康检查；确认服务运行且只读数据挂载可访问 |
 
-守护性行为：产物列数 ≠ 河网段数时返回 409 并明说"产物与几何来自不同流域构建"；
-时次滑出窗口返回 404；解析失败返回 502，不画错数据。
+几何作为同源静态文件提供，不再包装成 geometry API。
 
-**7 天窗口语义**：以**最新时次**为基准往前 7 天（而非墙钟）——计算中断时页面
-退化为展示最后一批时次，而不是空白。若需严格"自然日过去 7 天"可一行改回。
+`/api/cycles` 示例：
 
-## 6. 前端（全新轻量，不移植 m11）
+```json
+[
+  {"cycle": "2026082700", "sources": ["gfs", "ifs"]},
+  {"cycle": "2026082612", "sources": ["gfs"]}
+]
+```
 
-Vite + React + TypeScript + MapLibre GL + ECharts。m11 组件与流域/代站领域模型
-深度耦合（已勘察确认），移植成本高于新写；仅借鉴其曲线窗交互与配色。
+`/api/map/latest` 示例：
 
-- 布局：顶栏（系统名"水文预报系统" + 时次下拉）+ 全屏地图 + 浮动曲线面板；
-- 地图：底图（配置的栅格瓦片 URL，可为空 → 素底 + 流域边界）+ 河网线图层（宽度按 zoom/河宽），
-  点击河段高亮并拉取该时次流量序列；
-- 曲线：ECharts 时间轴折线，标题"河段 #id"，单位 m³/s，IFS/GFS 双系列图例（缺源时单线）；
-  顶栏含数据更新时间/停更提示（来自 `api/status`）；
-- 构建以相对路径为 base（`./`），fetch 一律相对 URL —— `/yd/` 子路径与根路径同一份产物。
+```json
+{
+  "cycle": "2026082700",
+  "source": "gfs",
+  "valid_time": "2026-08-27T00:00:00Z",
+  "values": [12.3, 9.8, 0.4]
+}
+```
 
-## 7. 部署形态
+河段曲线一次返回可用双源，缺源时省略该 source，不让前端发两次请求再合并。
 
-- **交付包（离线优先）**：`docker build`（多阶段：node 构建前端 → python slim 运行）→
-  `docker save` 镜像 tar + compose 文件 + `.env` 模板 + 一页部署说明 + 产物契约，打成带版本号的 tar 包。
-  客户侧 `docker load` + `docker compose up -d`，产物目录只读挂载。升级 = 换包重启。
-- **27 staging**：同一镜像跑独立端口，`YDV_PRODUCTS_ROOT=/home/ghdc/yd`，
-  nginx 增加一条 `location /yd/ { proxy_pass http://127.0.0.1:<port>/; }`（剥前缀），
-  `nginx -t` 后 reload（不 restart）——这是"零影响 nwm 服务"的执行要点。
-- 配置项：`YDV_PRODUCTS_ROOT`（必填）、`YDV_TILE_URL`、`YDV_WINDOW_DAYS=7`、
-  `YDV_TITLE=水文预报系统`、`YDV_DONE_MARKER=DONE`、`YDV_PORT`。
+## 7. 前端
 
-## 8. 验证计划
+技术栈：Vite + React + TypeScript + MapLibre GL + ECharts，使用 `corepack pnpm`。
 
-| 项 | 手段 |
+交互以 NWM 当前实际挂载的源页面 `OverviewPage` 为准；可复制组件仍沿用源码中的 `M11*` 命名：
+
+- 全屏地图；
+- 河网按 `/api/map/latest` 的流量着色；
+- 右上矢量/卫星/地形底图按钮；
+- 右下 m11 流量 colorbar；
+- 地图缩放和比例尺；
+- 点击河段高亮并打开可拖拽曲线窗；
+- 曲线窗内只有起报时次下拉，GFS/IFS 同轴显示；
+- 曲线窗切换历史 cycle 不改变地图，地图始终保持最新总览；
+- 页面显示最新数据时间，不显示停更原因或内部计算状态。
+
+从 NWM 复制并精简：
+
+- `M11DraggableCurveWindow`；
+- `ForecastChart` 与 ECharts tree-shaking 配置；
+- 底图切换器和 MapLibre 样式生成；
+- 河段 hover/selected 高亮；
+- discharge 色带和图例；
+- 起报下拉的纯 UI 外壳。
+
+不复制 NWM 的 OpenAPI client、Zustand store、登录/RBAC、MVT、代站、多流域、监控和运维链接。复制代码记录来源 commit，之后由本仓独立维护。
+
+NWM 源码中的旧天地图 key 不得复制。node-27 通过运行时配置注入有效的底图 URL 模板；客户侧未来可替换为内网瓦片或空底图，无需重建前端。
+
+## 8. node-27 部署
+
+- 单独镜像、单独 compose project、独立回环端口；不得占用 NWM display API 的 `:8080`；
+- host 只读挂载 `/home/ghdc/yd/input/viewer` 和 `/home/ghdc/yd/output`；
+- Nginx 只增加 `/yd/` location，`nginx -t` 成功后 reload，禁止 restart；
+- 不修改 NWM 的 `/`、`/ops`、PG、ingest、autopipe、display API 或前端；
+- node-27 是当前阶段唯一浏览器 live receipt oracle。
+
+具体登录、发布、权限与验证纪律见 [agent-ops.md](agent-ops.md)。
+
+## 9. 验证
+
+### 9.1 本地
+
+| 项 | 验证 |
 |---|---|
-| .dat 解析（v1/v2/残行/非连续列表） | pytest：按格式规格合成二进制 fixture |
-| 7 天窗口、DONE 门控、时次排序 | pytest：临时产物树 |
-| 几何转换（真实 shapefile → 4326） | pytest：坐标落在 (102–105°E, 34–38°N) |
-| 流量单位换算、404/409/502 分支 | pytest：TestClient |
-| 前端 | tsc + build 门禁；交互走 27 实机浏览器验证 |
-| 端到端 | 27 部署后 live receipt：`/yd/` 加载几何、时次列表、点击出曲线 |
+| v2 DAT 解析 | 合成 168 行、3988 列 fixture；校验分钟列、单位换算和按列读取 |
+| 目录契约 | 临时树覆盖无 DONE、单源、双源、7 天窗口和排序 |
+| 几何 | 真实外部 fixture 预转换后落在 yd 合理经纬度范围，reach_id 与河网一致 |
+| API | FastAPI 测试覆盖 cycles、latest map、单/双源曲线、health |
+| 前端 | TypeScript、构建和组件测试；base 与 fetch 均为相对路径 |
 
-注：27 端到端在循环预报环（compute-loop-design.md）首轮按契约落盘后才能真产物闭环；
-在此之前用合成产物在 27 做同构验证。
+### 9.2 node-22 真产物
 
-## 9. 里程碑
+至少实跑一个 00Z 和一个 12Z：
 
-1. **M1 后端**：解析器 + 几何 + API + pytest 全绿（本地）
-2. **M2 前端**：核心三件套 + 构建门禁（本地）
-3. **M3 打包**：Dockerfile + 离线 bundle 脚本 + 部署文档
-4. **M4 27 staging**：部署 + nginx `/yd/` + live receipt（合成产物）
-5. **M5 契约闭环**：循环预报环首轮真产物落盘 → 27 真产物 receipt → 出客户交付包
+- `START=0`、`DT_QR_DOWN=60`；
+- DAT 恰有 168 行，分钟列 `0..10020`；
+- 3988 个河段；
+- T+12 状态可供下一轮精确接续；
+- IFS/GFS 独立推进；
+- NWM raw 未被 yd 修改；
+- 单源失败不影响另一源完成。
 
-## 10. 开放项
+### 9.3 node-27 live receipt
 
-1. 客户服务器能否联外网（底图/镜像拉取）——待问客户；默认离线设计。
-2. 27 实例数据源由本仓循环预报环（node-22）按契约落盘 `/ghdc/data/yd/output/`，
-   不再依赖 zhaochen 落产物；对 zhaochen 只剩模型包条款（见 products-contract.md）。
-3. 27 上 yd-viewer 的端口号与天地图 key（用新申请、域名绑定的 key，勿用已泄漏旧 key）。
+- `/yd/` 与 `/api/health` 可达；
+- 最新地图着色、colorbar 和单位一致；
+- GFS 优先，无 GFS 时自动显示 IFS；
+- 河段曲线为 168 点，单源/双源均正确；
+- 历史起报只影响曲线窗；
+- 三种底图切换正常；
+- NWM 原有 `/`、`/ops` 与 display API 不受影响。
 
-## 11. 风险
+本地绿不能替代 node-22 或 node-27 receipt。
 
-- SHUD 版本差异导致 v1/v2 头部不同 → 解析器双版本自适应 + 契约要求变更通知。
-- 客户服务器无 docker / 架构非 x86 → 交付前向客户确认运行环境（开放项 1 一并问）。
-- 产物在 NFS 上 memmap 首次按列读取有冷读延迟（27 侧）→ 可接受；客户侧为本地盘无此问题。
+## 10. 里程碑
+
+1. **M1 文档与契约**：本方案、计算环、产物契约、agent ops 四份文档一致。
+2. **M2 producer 基础**：prepare/init/run CLI、DB-free canonical/direct-grid、状态工具和本地测试。
+3. **M3 viewer**：v2 解析、四个 API、m11 最小 UI 快照、前端构建门禁。
+4. **M4 node-22 真计算**：00Z/12Z、IFS/GFS、T+12 接力和真实 DAT receipt。
+5. **M5 node-27 真闭环**：旁路部署、Nginx `/yd/`、真实地图与曲线 receipt。
+
+客户交付包和客户侧 producer 迁移不属于本期 M1–M5。
+
+## 11. 尚待现场确定
+
+这些值不得在代码中猜测：
+
+- node-27 viewer 独立端口；
+- node-27 有效天地图配置；
+- Slurm partition、account、CPU、内存和 walltime；
+- 外部基线模型包在首次 `prepare` 时的现场路径；
+- 客户服务器的计算、下载和调度形态。

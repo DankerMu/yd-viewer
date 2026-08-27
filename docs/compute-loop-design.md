@@ -1,180 +1,416 @@
-# yd 循环预报设计方案（node-22 极简计算环）
+# yd 循环预报设计方案（node-22 独立计算环）
 
-状态：方案（已与需求方对齐结论，未开始实现）
-日期：2026-08-26
+状态：方案已定稿，尚未开始实现
+日期：2026-08-27
 
 ## 1. 目标与边界
 
-在 node-22 上只为 yd 一个流域跑滚动预报，参考 NWM 但大幅简化：
+在 node-22 上为 yd 流域运行独立的 IFS/GFS 双源 SHUD 循环预报，并把正式产物写入 NFS，供 node-27 的 yd-viewer 只读消费。
 
-- **warm start 语义与 NWM 完全一致**（快照 valid_time 精确等于下轮起点、精确匹配 + 血缘、
-  负残差归零），实现方式取 NWM 自身的确定性路径（见 §5），去掉 watcher/轮询等复杂件；
-- 每轮跑完**只保留 SHUD 产物与状态链**，run 目录整体删除；
-- 无 DB、无 orchestrator、无 registry 服务——一个 cron 驱动的单脚本 + Slurm 作业；
-- 产物按 [products-contract.md](products-contract.md) 落 `/ghdc/data/yd/output/`，供 27 的
-  yd-viewer 与最终客户侧同款服务消费。
+本期边界：
+
+- 只复用 NWM 已下载的 raw GRIB，且对 raw 永远只读；
+- yd 自己完成 raw 完整性扫描、canonical、direct-grid forcing、SHUD、状态接力和发布；
+- 无数据库、无 registry 服务、无 NWM scheduler/orchestrator；
+- 一个 Python CLI + cron + `flock` + Slurm；
+- 计算中间物全部位于共享 `/scratch`，NFS 只保存长期数据；
+- IFS/GFS 独立成环，一源故障不阻塞另一源；
+- 客户侧 producer 迁移形态不在本期范围，当前只固化 `YD_ROOT` 文件边界。
+
+正式展示契约见 [products-contract.md](products-contract.md)。节点操作纪律见 [agent-ops.md](agent-ops.md)。
 
 ## 2. 已拍板决策
 
 | 分支 | 结论 |
 |---|---|
-| 驱动源 | **双源 IFS + GFS**，各自独立成环（独立 warm-start 状态链、独立产物） |
-| 预报时效 | **7 天（168h）**，两源同窗 |
-| 节律 | **每 12h**，00/12 UTC cycle，与 NWM raw 数据到达节奏对齐 |
-| 失败兜底 | **绝不冷启动**：降级梯度到底后停更 + 告警（yd 无 spin-up 机制，冷启动即垃圾数据） |
-| 代码归属 | 本仓 `compute/` 目录；node-22 上 checkout 本仓运行 |
+| 来源 | IFS + GFS，各自独立状态链和产物 |
+| cycle | 仅 UTC 00/12，间隔 12 小时 |
+| 预报长度 | 7 天 |
+| 水文输出 | `DT_QR_DOWN=60`，168 个逐小时平均流量段 |
+| warm start | cycle T 只接受 `states/<source>/<T>.cfg.ic`；缺失即停该源 |
+| 下一状态 | 7 天单跑中捕获 T+12；漏采后确定性补跑 12 小时 |
+| 调度 | cron 非阻塞 `flock`；控制器持锁至本次全部作业收尾 |
+| 并发 | 同源串行；IFS/GFS 最多各一个 Slurm 作业并行 |
+| 完成真相 | `output/<T>/<source>/DONE` |
+| 失败 | 本次该源停；另一源继续；下次 cron 从干净 work 重试一次 |
+| 初始建链 | 显式 `init`；`run` 永不自动 bootstrap |
+| forcing 映射 | source-specific direct-grid；固定生成 `yd_gfs`、`yd_ifs` 两个变体 |
+| NWM 依赖 | NFS raw 只读 + `prepare` 一次性 builder；日常代码为本仓独立快照 |
 
-双源对展示端的影响：viewer 每河段过程线展示 IFS/GFS 两条曲线（图例区分），
-产物契约的 cycle 目录增加 source 维度——已同步改入 `design.md` 与 `products-contract.md`。
+不实现：旧状态降级、跨轮重戳、冷启动、degraded、状态 registry、血缘 JSON、失败计数、指数退避、下载兜底、常驻服务、自写 watchdog 或自动 `scancel`。
 
-## 3. 事实基线（已查证，路径见 NWM 仓）
+## 3. 物理拓扑与目录
 
-- **forcing 三段 CLI 全部 DB-free 可独立调用**：`nhms-{ifs,gfs} download` →
-  `nhms-canonical convert` → `nhms-forcing produce`（`workers/data_adapters/cli.py`、
-  `workers/canonical_converter/cli.py`、`workers/forcing_producer/cli.py`）。
-  node-22 生产 `.venv` 已装齐（`.venv/bin/nhms-forcing` 等）。
-- **raw grib 现成**：node-22 生产调度已在下载 IFS/GFS（每日 4 cycle，覆盖 00/12），
-  私有根 `/scratch/frd_muziyao/nhms-prod/object-store/raw/`，NFS 镜像
-  `/ghdc/data/nwm/object-store/raw/`（实测两源均新鲜到当天，GFS 留 ~16 天）。
-  canonical 转换产物同在私有根下，可直接复用。
-- **站点表即契约**：`nhms-forcing produce` 的 file 后端只需一个 `.tsd.forc`
-  （`ID Lon Lat X Y Z Filename` 表）+ 手写最小 file-registry/model manifest 两个 JSON，
-  不需要 Basins 注册；站点任意经纬度，legacy IDW（k=4 最近格点 1/d² 加权）插值，
-  与 yd 的 105 站 0.1° 表直接兼容（`workers/forcing_producer/file_store.py:1027-1068`）。
-- **CSV 口径**：`X<lon>Y<lat>.csv` = `Time_Day Precip Temp RH Wind RN`
-  （mm/day、°C、[0,1]、m/s、W/m²），时间基准 **UTC**、相对起始日的日序——SHUD 直接读，
-  与 rSHUD 逐字节同构（NWM `docs/forcing数据处理流程与rSHUD一致性说明.md`）。
-- **NWM warm start 精确语义**（`workers/shud_runtime/runtime.py`、
-  `packages/common/state_cli.py`、`state_manager.py`、`state_qc.py`）：
-  1. 快照 **valid_time 精确等于下一轮 cycle 起点**（本轮在 lead=cycle 间隔处产出的
-     checkpoint），不是"跑到哪算哪"的末态；
-  2. 下一轮按 `(model, source, valid_time, 反推 producer cycle, lead_hours)` 精确匹配 +
-     血缘（模型包版本/checksum）校验选取，而非"取最新"；
-  3. 候选损坏/时间不符 → 逐级降级到更旧可用状态；同因批量降级 → 系统性熔断硬失败；
-  4. 保存前**负残差归零**：负值一律清零，但 mesh 域均修正量 > 2.0e-4 m 或 river 域均
-     > 2.0e-3 m 则整体拒绝该快照；
-  5. `.cfg.ic` header `<mesh_count> <列数6> <minute-time>`，重启时把 minute-time 重戳到
-     新 run 的时间基准（NWM `_shift_cfg_ic_time` 同义操作）；
-  6. NWM **没有 SPINUPDAY 机制**，靠 12h 接力替代 spin-up——这正是"绝不冷启动"决策的依据。
-- **yd 模型包**：7891 单元 / 3988 河段；`yd.cfg.para` 为 `INIT_MODE=3, BINARY_OUTPUT=1,
-  CRYOSPHERE=1`；交付的 `yd.cfg.ic` 是 25 年率定长跑末态（minute 13150080 =
-  2000-01-01 起 9132 天 ≈ 2025-01-01 有效），作为 bootstrap 底座。
-- **算力**：CPU 分区 24 节点 × 40 核；yd 规模的 7 天预报单跑预计分钟级。
-- **node-22 环境纪律**：维护窗口前禁止裸 `uv run`/`uv sync`；一律用精确解释器
-  `/scratch/frd_muziyao/NWM/.venv/bin/python -m <entry>` 调 nhms CLI（CLAUDE.md 约束）。
+### 3.1 可见性
 
-## 4. 每轮流程（cycle T ∈ {00,12}UTC × source ∈ {ifs,gfs}，相互独立）
+- node-22 登录节点与 Slurm 计算节点共同可见 `/scratch`；
+- Slurm 计算节点看不到 yd NFS；
+- NFS 在 node-22 挂为 `/ghdc/data/yd`，node-27 挂为 `/home/ghdc/yd`；
+- 因此只有 node-22 控制器负责 NFS ↔ scratch 搬运和正式发布。
 
-```
-cron(每小时) → flock 防重入 → 对每个 source：
-  1. 发现：NWM store 里最新的 raw/<source>/<T>/manifest.json 完整、且
-     /ghdc/data/yd/output/<T>/<source>/DONE 不存在 → 该 (T, source) 为待跑目标
-  2. forcing：canonical/<source>/<T> 缺则 nhms-canonical convert；
-     nhms-forcing produce --source-id <source> --cycle-time <T> --model-id yd_<source>
-     → 105 个 X*.csv + yd.tsd.forc（0–168h）
-  3. 选态：states/<source>/ 里 valid_time == T 的快照；缺则降级（§5）
-  4. 组装 run 目录（/scratch/frd_muziyao/yd-loop/runs/<source>/<T>/）：
-     input 模板（几何/参数/calib，随本仓固定版本）+ 新 forcing + 重戳后的 cfg.ic
-  5. sbatch 单作业，作业内顺序两次 SHUD（START/END 单位为天，规则而非常量：
-     设 S = (cycle_time − tsd.forc 起始日 00:00 UTC)/86400——00Z 轮 S=0，12Z 轮
-     S=0.5 或 0，取决于 producer 把 Time_Day 锚在 cycle 时刻还是当日零点，
-     **须实测钉死**，见 §9；IC header 分钟同步重戳为 S×1440）：
-     a. 状态短跑：START=S, END=S+0.5（12h）→ 末态 = valid_time T+12h 的快照
-     b. 预报长跑：START=S, END=S+7.0 → yd.rivqdown.dat（DT_QR_DOWN=180，3h 步长）
-  6. 收尾（作业成功后）：
-     - 短跑末态负残差归零 + 阈值 QC → states/<source>/<T+12h>.cfg.ic + 元数据
-       （producer_cycle、模型包 checksum——供下轮血缘校验）
-     - yd.rivqdown.dat → /ghdc/data/yd/output/<T>/<source>/，最后 touch DONE
-     - 整个 run 目录删除；states/<source>/ 保留最近 30 个快照 + bootstrap；
-       output/ 清理 >14 天的 cycle 目录
-  7. 失败：run 目录删除（保留该轮一份错误日志），不写 DONE、不产状态；
-     下一轮自然走降级梯度
+不得把 NFS 当作 Slurm 作业目录，也不得让计算作业直接发布展示产物。
+
+### 3.2 NFS 长期根
+
+```text
+<YD_ROOT>/                         # node-22: /ghdc/data/yd
+  input/
+    models/
+      yd_gfs/
+      yd_ifs/
+    viewer/
+      rivers.geojson
+      boundary.geojson
+  states/
+    gfs/<cycle>.cfg.ic
+    ifs/<cycle>.cfg.ic
+  output/<cycle>/<source>/
+    yd.rivqdown.dat
+    DONE
+  logs/<source>/<cycle>.log
 ```
 
-两次 SHUD 同源同 IC 同 forcing，仅 END 不同——短跑末态即"lead=12h checkpoint"，
-与 NWM watcher 采样 + 确定性补算（`runtime.py:784-937`）产出的对象**语义等价**，
-但实现是纯确定性的，无轮询、无补算分支。代价是每轮多跑 12h/168h ≈ 7% 计算量，yd 规模下可忽略。
+### 3.3 scratch
 
-## 5. Warm-start 选态与降级（复刻 NWM 三层语义，去掉不需要的层）
+现场 `local.toml` 指定 `scratch_root`，规划示例：
 
-1. **精确命中**：`states/<source>/<T>.cfg.ic` 且元数据血缘（模型包 checksum）一致 → fresh。
-2. **降级梯度**：缺失/损坏（checksum 不符、header 时间与文件名不符）→ 取 `<T` 最新可用
-   快照，header minute 重戳到 T，产物标记 `degraded`（写入该轮 `meta.json`，viewer 可见性
-   后续再议）；候选逐个验、坏的标记跳过。
-3. **停更熔断**：可用快照距 T 超过 **7 天** → 本轮拒跑，写告警状态（§7），绝不 INIT_MODE=1。
-   同 NWM 系统性熔断精神：熔断不消耗候选，修复后自然恢复。
-4. **bootstrap**：首启用 zhaochen 25 年末态（valid ≈ 2025-01-01）重戳为首轮 T ——
-   有效性距今 ~1.5 年，头几周状态偏离需向用户/计算方说明（开放项 3 给出补救选项）。
+```text
+/scratch/frd_muziyao/yd-loop/
+  work/<source>/<cycle>/
+    raw/                         # 本轮从 NWM NFS 只读复制的临时副本
+    raw-manifest.json
+    object-store/
+      canonical/
+      forcing/
+    model/
+    output/
+    state-checkpoints/
+    job.log
+```
 
-血缘：状态元数据记录 `{source, producer_cycle, model_package_sha256, valid_time}`；
-模型包（input 模板 + calib + SHUD 二进制版本号）变更时 checksum 变 → 旧状态整体失配 →
-触发停更告警，人工决定重新 bootstrap。这等价于 NWM 的 packaged-IC fail-closed 门。
+每轮 work 目录是一次性隔离单元。成功发布后删除；失败先回收一份日志，再删除。下次运行从零组装，不复用失败残留。
 
-## 6. Forcing 的最小接线
+## 4. 与 NWM 的关系
 
-- yd 自有 object-store 根 `/scratch/frd_muziyao/yd-loop/object-store/`：
-  `raw/`、`canonical/` 为指向 NWM 生产私有根同名目录的**符号链接**（同属 frd_muziyao，
-  只读复用，零拷贝零污染）；`forcing/` 为实目录，yd 自己的产出落这里。
-- 手写两个 JSON（进本仓 `compute/registry/`）：file-registry manifest
-  （`yd_ifs`/`yd_gfs` 两个 model 条目）+ model manifest（`model_package_uri` 指向
-  本仓 checkout 内的 yd 输入模板目录，`shud_input_name=yd`）。
-- 环境：`NHMS_FORCING_REPOSITORY_BACKEND=file`、`NHMS_SCHEDULER_REGISTRY_MANIFEST=<上述
-  registry 路径>`、`OBJECT_STORE_ROOT=/scratch/frd_muziyao/yd-loop/object-store`。
-- IFS 168h 内步长 3h；GFS 全程 3h——两源产物时间轴一致，viewer 无需特判。
+### 4.1 raw 所有权
 
-## 7. 调度、日志与告警（极简）
+NWM downloader 在 node-27 将 raw 写入共享 NFS。node-22 的当前权威视图是：
 
-- **cron**（frd_muziyao 账户）每小时执行 `compute/run_cycle.sh`（flock 单实例）；
-  脚本只做发现/组装/提交/收尾，重活全部在 Slurm 作业内。
-- 幂等：以 `output/<T>/<source>/DONE` 为唯一完成判据，重复执行天然 no-op；
-  作业中断残留的 run 目录由下次执行清理重建。
-- 日志：单一滚动日志 `/scratch/frd_muziyao/yd-loop/loop.log`（logrotate 或按大小自截），
-  失败轮另存一份该轮错误摘要至 `states/<source>/failures/`（薄记，非产物）。
-- 告警 = 状态外显：每次执行后写 `/ghdc/data/yd/status.json`
-  （各 source 最新成功 cycle、连续失败次数、最后错误摘要、是否处于停更熔断）。
-  yd-viewer 读它在页面上显示"数据更新时间/停更提示"（viewer 侧小增量，已记入其开放项）；
-  不建邮件/IM 通道，保持极简。
+```text
+/ghdc/data/nwm/object-store/raw
+```
 
-## 8. 保留策略（"只留 SHUD 产物"的精确化）
+node-27 对应视图是 `/home/ghdc/nwm/object-store/raw`。`/scratch/frd_muziyao/nhms-prod/object-store` 是 NWM 调度器私有根，不是 raw 来源。
 
-| 对象 | 保留 |
+这是 NWM 资产：
+
+- node-22 yd 控制器只做完整性扫描和读取；
+- Slurm 计算节点看不到 NFS，因此控制器只把本轮 manifest 引用的 raw 文件复制到 yd 自己的 scratch work；
+- 临时副本只供本轮 canonical/forcing 使用，收尾时随 work 删除；
+- 不复制到 `YD_ROOT`，也不长期缓存；
+- 不修改、不移动、不重命名、不删除 NWM 原件；
+- yd 清理代码不得跨入 NWM NFS raw 根；
+- NWM 下载停摆时 yd 同步停更，不实现第二套下载器。
+
+raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路径。部署前必须以 `frd_muziyao` 身份确认可遍历和读取；权限不足时 fail closed，不修改 NWM 目录权限。
+
+### 4.2 独立代码快照
+
+从 NWM 固定 commit 精简复制并由本仓独立维护：
+
+- DB-free canonical converter；
+- file-backend direct-grid forcing producer；
+- object-store/path 基础函数和 direct-grid 契约；
+- IFS/GFS source 与 raw manifest 数据结构；
+- `cfg.ic` 原生分段解析、重戳、负残差处理和结构检查；
+- T+12 checkpoint tracker 与漏采补跑；
+- 上述能力的最小测试。
+
+每个快照模块记录 NWM 来源 commit。不得复制或运行时依赖：
+
+- PostgreSQL repository、迁移和数据库模型；
+- scheduler/orchestrator、候选、reservation、file journal；
+- model registry 生命周期、state index/copyback；
+- NWM downloader、ingest、output parser 入库链；
+- NWM display API、MVT 和前端 store。
+
+日常 `run` 使用 yd 自己由 `uv` 建立的环境，不 import NWM checkout。只有一次性 `prepare` 的 mapping-builder 通过 NWM 当前活动解释器调用，具体纪律见 agent ops。
+
+## 5. 配置
+
+版本化 `config.toml` 保存业务规则：
+
+- cycle 固定 00/12；
+- IFS/GFS 0–168h raw 完整性规则、变量和 bundle 文件模式；
+- 两个模型变体相对路径；
+- `forecast_days=7`；
+- `output_interval_minutes=60`；
+- `checkpoint_hours=[12]`；
+- Slurm 资源配置字段结构。
+
+不入库的 `local.toml` 只保存现场值：
+
+- `yd_root`；
+- `scratch_root`；
+- NWM raw 根和 NWM checkout/解释器（仅 prepare）；
+- SHUD 二进制；
+- Slurm partition、account、CPU、内存和 walltime；
+- cron lock 与日志位置。
+
+项目不维护动态 registry。复制来的 file backend 如要求 NWM 结构的 registry/model manifest，控制器根据 TOML 在本轮 work 内临时生成，用完随 work 删除。
+
+## 6. CLI
+
+一个 Python CLI 提供三个显式入口：
+
+```text
+yd-producer prepare
+  一次性生成 direct-grid 模型变体和 viewer GeoJSON
+
+yd-producer init
+  只在系统历史上第一次建立两条状态链
+
+yd-producer run
+  日常发现、追赶、提交、发布和清理
+```
+
+### 6.1 `prepare`
+
+输入是外部受控、Git ignored 的 yd 基线模型包。流程：
+
+1. 检查 `YD_ROOT/input/models/yd_gfs` 与 `yd_ifs` 均不存在；任一存在即拒绝，不提供覆盖参数；
+2. 在 scratch 中通过薄外壳调用 NWM mapping-builder；
+3. 按 GFS、IFS 各自 canonical grid 生成两份 binding、重写后的 `sp.att` 和 forcing station 索引；
+4. 生成完整运行变体 `yd_gfs`、`yd_ifs`；两者水文参数和率定状态来自同一基线，但网格 binding 不共用；
+5. 从基线 GIS 生成 EPSG:4326 的 `rivers.geojson` 与 `boundary.geojson`；
+6. 将两个变体和两个 GeoJSON 提交到 NFS；
+7. 删除 scratch 中间物。
+
+运行根只保留两个运行变体，不长期保留基线包。基线模型包的现场路径和归档方式由实施方管理，不进入 Git。本项目不额外维护人工填写的模型包总 checksum。
+
+本期 M1–M5 固定同一套基线模型、SHUD 二进制和河网。模型或 SHUD 升级是新的契约变更：禁止原地覆盖现有变体和状态；必须在新的干净 staging 根重新 `prepare`、`init`、真跑和 viewer 验证，再单独设计切换。当前 CLI 不提供在线升级状态机或 `--force`。
+
+### 6.2 `init`
+
+`init` 是唯一 bootstrap 入口：
+
+1. 若 `states` 下已有任一状态，或 `output` 下已有任一 `DONE`，直接拒绝；
+2. 以执行时刻往前 7 天为扫描窗；
+3. 对每个 source 找到窗内最早的完整 00Z/12Z raw cycle；
+4. 从两个变体内的同源率定末态复制首态，重戳到各自首轮 T；
+5. 写为 `states/<source>/<T>.cfg.ic`；
+6. 不运行 SHUD、不写 `DONE`。
+
+两源首轮可因 raw 到达情况不同而不同；从首轮开始各自演进。率定末态约对应 2025-01，直接重戳到首轮意味着初期存在状态收敛偏差；这是已接受的首启代价，不把它伪装成 degraded，也不在 viewer 展示内部状态。
+
+`run` 发现状态目录缺失时只报错，绝不自动执行 init。已有持续产物接管时不调用 init：下一轮由现有状态文件名确定。
+
+## 7. raw 完整性与 forcing
+
+### 7.1 自行扫描
+
+本仓按 NWM adapter 的当前事实固化两份 source 规则：
+
+- 仅接受 00Z、12Z；
+- 预报 lead 覆盖 0–168h；
+- IFS/GFS 各自的变量、bundle 名和 f000 特例；
+- 所有预期文件存在且可读才视为完整。
+
+不靠目录稳定时间、末 lead 文件或动态推断判断完整。
+
+### 7.2 临时 raw manifest
+
+完整后，控制器把 manifest 声明的本轮 raw 文件复制到 `work/raw/`，并在 work 内生成 NWM-compatible `raw-manifest.json`。manifest 包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息，entry 路径只引用 `work/raw/` 临时副本。控制器复制前后均不修改 NWM NFS 原件。
+
+### 7.3 DB-free 日常链
+
+单个 source/cycle 的 Slurm 作业在 scratch 内顺序执行：
+
+```text
+临时 raw manifest
+  → canonical NetCDF + catalog
+  → source-specific direct-grid forcing 包
+  → 组装 SHUD 输入
+  → 7 天 SHUD
+```
+
+canonical、forcing 和临时 manifest 都是本轮工件，不写 NFS，也不跨轮复用。direct-grid forcing 将 canonical 格点直接作为 SHUD forcing 站点，binding 权重为 1；不走旧的 105 站 IDW。
+
+IFS/GFS forcing 原生 3 小时并不限制水文输出为 3 小时：SHUD 求解按自身步长推进，forcing 在相邻时刻间保持当前值，`DT_QR_DOWN=60` 独立输出逐小时平均流量。
+
+## 8. 严格 warm start
+
+状态命名唯一：
+
+```text
+states/<source>/<cycle>.cfg.ic
+```
+
+cycle T 的规则：
+
+- 只读取精确的 `<T>.cfg.ic`；
+- 缺失、不可读或时间不对应 T 时停止该 source；
+- 不取更旧状态，不跨轮重戳，不冷启动；
+- IFS/GFS 永不互借状态；
+- 成功后只保留下一待跑状态及其前一份状态。
+
+`cfg.ic` 是原生分段格式，不得按“单一 6 列表”处理：至少包含 mesh 状态段与 river `Stage` 段，可能还有 lake 段。重戳和检查复用精简后的 NWM `state_qc` 解析语义。
+
+负残差处理沿用 NWM 已验证的纯函数：负残差归零，并保留对应的域均修正阈值检查；不引入状态 registry 或血缘 JSON。
+
+## 9. 单轮 SHUD 与 T+12 状态
+
+### 9.1 固定参数
+
+每个 source/cycle 只先跑一次 7 天 SHUD：
+
+```text
+START = 0
+END = 7
+DT_QR_DOWN = 60
+Update_IC_STEP = 720
+BINARY_OUTPUT = 1
+ASCII_OUTPUT = 0
+```
+
+00Z、12Z 都是 `START=0`，因为 direct-grid forcing 的 `Time_Day=0` 锚在 cycle 时刻。
+
+### 9.2 checkpoint 捕获
+
+SHUD 会反复覆盖同一个 `<project>.cfg.ic.update`：当模型时间为 720、1440、… 分钟时依次更新。因此 T+12 文件不能在 7 天运行结束后再取。
+
+作业内保留 NWM 的最小 job-local tracker：
+
+1. 启动 SHUD；
+2. 轮询 `cfg.ic.update` 的 header 时间；
+3. 命中 relative 720 分钟或等价的 T+12 绝对分钟时，复制到独立 checkpoint 文件；
+4. 确认复制完成并可按原生分段格式读取；
+5. SHUD 继续跑到 7 天。
+
+### 9.3 漏采补跑
+
+如果 7 天运行成功但 tracker 未得到 T+12：
+
+1. 使用同一个 cycle T 初态与同一份 forcing；
+2. 把 `END` 缩短为 0.5 天，`Update_IC_STEP=720`；
+3. 确定性补跑一次 12 小时；
+4. 取末态作为 T+12 checkpoint；
+5. 补跑仍失败则整轮失败，不写状态和 `DONE`。
+
+这保留 NWM 的可靠性，但不复制其外层 watcher 服务、恢复状态机或 registry。
+
+## 10. 控制器、Slurm 与积压
+
+cron 每小时调用 `yd-producer run` 的非阻塞 `flock` 包装：
+
+- 前一实例仍持锁时，本 tick 直接跳过，不排队；
+- 锁覆盖发现、提交、等待、发布和清理的完整生命周期；
+- 手工补跑也必须走同一个锁入口，不能绕过互斥。
+
+一次 run 先为每个 source 确定严格前沿：
+
+1. 若该源没有任何 `DONE`，全新链只允许存在 init 写入的最早状态，该文件名就是待跑 T；
+2. 否则取该源最新 `DONE` cycle D，待跑 T 固定为 D+12h；
+3. 必须存在 `states/<source>/<T>.cfg.ic`，否则停止该源；
+4. 若无 `DONE(T)` 却存在比 T 更晚的状态或 T 目录半成品，它们是上次发布中断的未提交残留：保留 T 状态，删除残留后重跑 T；
+5. 扫描 T 的 raw；未完整则该源暂不提交；
+6. 为每源最多组装一个 work 并提交一个 Slurm 作业；
+7. IFS/GFS 可并行，控制器等待两者；
+8. 成功源发布后以前沿规则立即推进到下一个 cycle，直到追到最新完整 raw；
+9. 某源作业失败后，本次停止该源，另一源继续追赶；
+10. 下次 cron 对失败 cycle 从干净 work 重试一次。
+
+raw 一次补齐多轮时按时序全补；中间永久缺轮时停在缺口，运维人员补齐原始资料后自动继续。不自动跳过 cycle。
+
+Slurm 的 partition/account/资源/walltime 来自 `local.toml`。不为尚未出现的卡死增加 CLI watchdog；人工取消时只能按本次 receipt 记录的 yd job ID 操作，不得模糊匹配或取消 NWM 作业。
+
+## 11. 发布、崩溃恢复与幂等
+
+### 11.1 成功条件
+
+作业退出成功后，控制器确认本轮至少具备：
+
+- v2 `yd.rivqdown.dat`，168 行、3988 个河段；
+- T+12 原生 `cfg.ic`；
+- 本轮合并 stdout/stderr 可供失败时回收。
+
+这是 producer 写 `DONE` 前的自身契约检查；viewer 信任 `DONE`，不实现第二套修复协议。
+
+### 11.2 NFS 提交顺序
+
+运行 T 时，旧的 `states/<source>/<T>.cfg.ic` 保留到最后：
+
+1. 从 scratch 复制 DAT 到 NFS source 目录的临时文件；
+2. 在 NFS 内原子 rename 为 `yd.rivqdown.dat`；
+3. 复制 T+12 状态到 NFS 临时文件；
+4. 原子 rename 为 `states/<source>/<T+12>.cfg.ic`；
+5. 最后原子创建 `output/<T>/<source>/DONE`；
+6. `DONE` 成功后才删除比 T 更旧的状态；最终保留 T 与 T+12；
+7. 删除 scratch work。
+
+多个文件无法同时原子提交，因此用“旧状态保留 + DONE 最后写”恢复：若步骤 1–4 间宕机且无 `DONE`，下次删除该 source/cycle 的半成品，仍用 T 状态整轮重跑。不得先写 `DONE` 再提交状态。
+
+### 11.3 失败
+
+- 不写 `DONE`；
+- 不推进状态链；
+- 把完整 stdout/stderr、命令、开始/结束时间和退出码合成一份 `logs/<source>/<T>.log`；
+- 删除整个 scratch work；
+- 下次 cron 干净重跑。
+
+不维护失败次数、退避或 `status.json`。
+
+## 12. 保留与清理
+
+| 对象 | 规则 |
 |---|---|
-| `output/<T>/<source>/yd.rivqdown.dat` + `DONE` + `meta.json` | 14 天，之后删除 cycle 目录 |
-| `states/<source>/*.cfg.ic`（+元数据） | 最近 30 个 + bootstrap 永久 |
-| run 目录（forcing csv、其余 SHUD 输出、日志） | 跑完即删，失败仅留错误摘要 |
-| yd object-store `forcing/<source>/<cycle>/` | 跟随 output 同窗清理 |
+| `output/<T>/<source>/{yd.rivqdown.dat,DONE}` | 保留最新成功 cycle 往前 14 天 |
+| `states/<source>/*.cfg.ic` | 每源保留下一待跑状态及其前一份 |
+| `logs/<source>/<T>.log` | 仅失败轮；与 output 的 14 天窗口一起清理 |
+| scratch `work/<source>/<T>` | 每轮成功或失败收尾后删除 |
+| NWM NFS raw 原件 | yd 永不清理 |
+| scratch raw 副本/canonical/forcing/raw-manifest | 本轮临时工件，随 work 删除 |
 
-## 9. 验证计划
+清理只允许作用于经 `realpath` 确认位于 yd 自己根目录下的对象；不得跟随路径进入 NWM raw 根。
 
-| 项 | 手段（oracle：node-22 实机） |
+## 13. 验证计划
+
+### 13.1 本地
+
+| 项 | 验证 |
 |---|---|
-| forcing 最小接线 | 对一个历史 cycle 跑三段 CLI，抽 3 站 CSV 与 canonical 格点值对照 IDW 权重手算 |
-| **12Z 轮时间锚定** | 对一个 12Z 历史 cycle 实跑 produce，人工核对 `.tsd.forc` 起始日头与首行 Time_Day，钉死 §4 的 S 取 0.5 还是 0（防整条曲线静默平移半天） |
-| 两段跑 warm-start 接力 | 连续两轮实跑：断言第二轮消费的快照 valid_time == 其 T、血缘匹配；比对第二轮 [0,12h] 流量与第一轮长跑同窗段一致性 |
-| 负残差 QC | 用真实短跑末态验证清零/阈值行为（含构造超阈值拒绝样例） |
-| 降级/熔断 | 删除精确快照 → 断言取旧+degraded 标记；清空 states → 断言拒跑+status.json 告警位 |
-| 幂等 | DONE 存在时重复执行 no-op；作业中断后重入自愈 |
-| 产物契约 | 27 侧 yd-viewer 读实产 output/ 出曲线（与 viewer M4/M5 合并验收） |
+| raw 扫描 | IFS/GFS 完整、缺文件、GFS f000 特例和临时 manifest |
+| DB-free 链 | 合成 raw/canonical fixture 跑到 direct-grid forcing 包 |
+| prepare | 两个 source-specific 变体、拒绝覆盖、两个 GeoJSON |
+| state | 原生 mesh/river/lake 分段解析、T 重戳、负残差处理 |
+| tracker | T+12 正常捕获、快速覆盖漏采、12h 补跑成功/失败 |
+| 控制器 | 同源顺序、双源并行、raw 缺口、单源失败、flock 幂等 |
+| 发布 | 无 DONE 崩溃恢复、DONE 最后写、状态只保留两份 |
 
-## 10. 开放项
+### 13.2 node-22 真运行
 
-1. **SHUD 二进制版本与末态写出机制**：必须与 zhaochen 率定所用版本一致（CRYOSPHERE 等
-   特性开关影响状态语义）——向 zhaochen 确认其编译版本/commit，钉进模型包 checksum。
-   同场确认：该二进制在 END 时刻把末态写到哪个文件、由哪个 para 键控制（交付的
-   `yd.cfg.para` 无 NWM patch 的 `Update_IC_STEP` 键，短跑末态可捕获目前是**假设**，
-   由 §9"两段跑接力"实测兜底）。
-2. **契约确认**：双源目录布局（`output/<T>/<source>/`）与时间基准（forcing/产物均为 UTC，
-   viewer 展示转北京时间）需与 zhaochen / viewer 侧三方对齐——viewer 契约文档已同步改。
-3. **bootstrap 状态过旧（~2025-01）**：可选补救——向 zhaochen 要 2025-01 至今的历史
-   forcing，先跑一次追赶模拟把状态推进到当前再开环；不做则接受头几周 degraded。
-4. **对 NWM 生产的依赖**：raw/canonical 搭便车，NWM 下载停摆则 yd 停更（status.json 可见）。
-   接受此依赖以换极简；如需独立，后备方案是 yd 环内自跑 `nhms-ifs/gfs download`（CLI 现成）。
-5. node-22 `.venv` 3.11 切换维护窗口（NWM #1831）落地后，本环调用的精确解释器路径复核一次。
+至少选择一个 00Z 和一个 12Z，IFS/GFS 均覆盖：
 
-## 11. 风险
+1. raw 扫描只读且未改变 NWM 文件；
+2. direct-grid forcing 的首行 `Time_Day=0` 对应 cycle；
+3. `START=0`，12Z 没有 12 小时偏移；
+4. DAT 为 v2、168 行、分钟列 `0..10020`、3988 河段；
+5. T+12 checkpoint 被捕获或由补跑确定生成；
+6. 下一轮精确消费该状态；
+7. 单源失败时另一源继续；
+8. NFS 只在控制器收尾阶段出现正式文件，`DONE` 最后写；
+9. scratch work 最终清理，失败只留一份日志。
 
-- 两源 raw 到达时间不一：按源独立成环已消化（一源晚到只影响该源该轮）。
-- NWM raw 保留 14 天、canonical 清理窗口更短的可能：本环紧跟最新 cycle（滞后 ≤ 12h），
-  实际风险极低；缺 canonical 时自行 convert 兜底。
-- Slurm 队列拥堵导致 12h 内没跑完：下轮发现上轮无状态 → 降级梯度自然消化；
-  作业请求资源刻意小（单节点 8 核）降低排队概率。
+### 13.3 node-27 闭环
+
+node-27 viewer 必须直接读取上述真实产物完成地图与曲线 receipt；不以 NWM 自身数据库或线上水文产物作为 yd 正确性的 oracle。
+
+## 14. 尚待现场确定
+
+- node-22 本仓 checkout 与 `local.toml` 的实际位置；
+- Slurm partition、account、CPU、内存、walltime；
+- SHUD 可执行文件路径；
+- 首次 prepare 所用外部基线模型包路径；
+- cron 的最终分钟点。
+
+这些值只能在部署时实测填写，不能写死进业务代码。
