@@ -9,3 +9,6 @@ dist/
 fixtures/
 local.toml
 .env
+
+# Local agent tooling
+.claude/
