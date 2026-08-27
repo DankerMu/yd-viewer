@@ -8,6 +8,7 @@
 import copy
 import dataclasses
 import json
+import re
 import typing
 from collections.abc import Mapping
 from pathlib import Path
@@ -271,10 +272,33 @@ def test_load_local_returns_all_site_fields(tmp_path):
 # 包裹的点分路径，因为运维读的是消息。反引号是必要的：pytest 的 tmp_path 目录名由
 # 测试名与参数拼出，裸子串探测会被目录名恒真地满足。
 
+_BACKTICKED = re.compile(r"`([^`]+)`")
+
+# 缺字段消息的"别名域"：任一必需字段的点分路径。消息只许指名出错的那一个。
+ALL_REQUIRED_KEYS = frozenset(CONFIG_REQUIRED_KEYS) | frozenset(LOCAL_REQUIRED_KEYS)
+
 
 def _assert_locates(excinfo, dotted_key: str) -> None:
     assert excinfo.value.path == dotted_key
     assert f"`{dotted_key}`" in str(excinfo.value)
+
+
+def _assert_names_no_other_field(
+    excinfo, dotted_key: str, universe: frozenset[str]
+) -> None:
+    """定位必须是**指名**而非**罗列**：消息 MUST NOT 顺带列出其它必需字段。
+
+    只断言 `` `x` `` 出现在消息里是没有判别力的——把 `_require` 换成"每次都列出全部
+    必需项"的目录式消息后，25 条参数化用例仍然全绿（`path` 机检存活，运维侧定位失
+    效）。因此这里额外要求：消息里反引号包裹的词元中，不得出现除出错字段之外的任何
+    必需字段路径。
+
+    本断言只用于**缺字段**类用例。键集不等（多余键）与 `required_fields` 重复项的消
+    息天然要同时指名多个键，套用本规则会造成假红。
+    """
+    named = set(_BACKTICKED.findall(str(excinfo.value)))
+    others = named & (universe - {dotted_key})
+    assert not others, f"消息除 `{dotted_key}` 外还罗列了其它必需字段：{sorted(others)}"
 
 
 @pytest.mark.parametrize("missing_key", CONFIG_REQUIRED_KEYS)
@@ -285,6 +309,7 @@ def test_config_missing_required_key_fails_closed(tmp_path, missing_key):
         load_config(path)
 
     _assert_locates(excinfo, missing_key)
+    _assert_names_no_other_field(excinfo, missing_key, ALL_REQUIRED_KEYS)
 
 
 @pytest.mark.parametrize("missing_key", LOCAL_REQUIRED_KEYS)
@@ -296,18 +321,38 @@ def test_local_missing_required_key_fails_closed(tmp_path, missing_key):
         load_local(path, config)
 
     _assert_locates(excinfo, missing_key)
+    _assert_names_no_other_field(excinfo, missing_key, ALL_REQUIRED_KEYS)
 
 
-def test_whole_file_failures_carry_no_field_path(tmp_path):
-    """整文件级失败不指向具体字段，`path` MUST 为 None（避免误导定位）。"""
+@pytest.mark.parametrize("loader", ["config", "local"])
+def test_whole_file_failures_carry_no_field_path(tmp_path, loader):
+    """整文件级失败不指向具体字段，`path` MUST 为 None（避免误导定位）。
+
+    两个装载器都要断言：`load_local` 多包了一层现场提示，只测 `load_config` 会漏掉
+    该层给整文件失败补上字段 `path` 的情况。
+    """
+    config = _loaded_config(tmp_path)
+
+    def _load(target: Path) -> None:
+        if loader == "config":
+            load_config(target)
+        else:
+            load_local(target, config)
+
     with pytest.raises(ConfigError) as excinfo:
-        load_config(tmp_path / "config.toml")
+        _load(tmp_path / f"absent-{loader}.toml")
     assert excinfo.value.path is None
 
-    broken = tmp_path / "broken.toml"
+    broken = tmp_path / f"broken-{loader}.toml"
     broken.write_text('forecast_days = "unterminated\n', encoding="utf-8")
     with pytest.raises(ConfigError) as excinfo:
-        load_config(broken)
+        _load(broken)
+    assert excinfo.value.path is None
+
+    directory = tmp_path / f"dir-{loader}.toml"
+    directory.mkdir()
+    with pytest.raises(ConfigError) as excinfo:
+        _load(directory)
     assert excinfo.value.path is None
 
 
@@ -486,6 +531,26 @@ def test_broken_toml_local_raises_config_error(tmp_path):
     assert "TOML" in str(excinfo.value)
 
 
+@pytest.mark.parametrize("loader", ["config", "local"])
+def test_unreadable_path_raises_config_error(tmp_path, loader):
+    """路径指向目录（现场把 `--config` 传成配置目录）-> `ConfigError`，不外泄 OSError。
+
+    `IsADirectoryError` 是 `OSError` 而非 `FileNotFoundError` 的子类，只有 `_read_toml`
+    的 `except OSError` 分支能收敛它；该分支此前零测试。
+    """
+    config = _loaded_config(tmp_path)
+    directory = tmp_path / f"{loader}-as-dir.toml"
+    directory.mkdir()
+
+    with pytest.raises(ConfigError) as excinfo:
+        if loader == "config":
+            load_config(directory)
+        else:
+            load_local(directory, config)
+
+    assert str(directory) in str(excinfo.value)
+
+
 @pytest.mark.parametrize("encoding", ["gbk", "utf-16"])
 @pytest.mark.parametrize("loader", ["config", "local"])
 def test_non_utf8_file_raises_config_error(tmp_path, loader, encoding):
@@ -547,6 +612,9 @@ def test_non_string_required_fields_rejected(tmp_path):
 # --- local.[slurm] 键集：唯一权威是 config.slurm.required_fields -------------
 
 
+SLURM_FIELD_PATHS = frozenset(f"slurm.{name}" for name in SLURM_REQUIRED_FIELDS)
+
+
 @pytest.mark.parametrize("missing_field", SLURM_REQUIRED_FIELDS)
 def test_local_slurm_missing_declared_field_fails_closed(tmp_path, missing_field):
     config = _loaded_config(tmp_path)
@@ -557,6 +625,72 @@ def test_local_slurm_missing_declared_field_fails_closed(tmp_path, missing_field
         load_local(_write_toml(tmp_path / "local.toml", data), config)
 
     _assert_locates(excinfo, f"slurm.{missing_field}")
+    # 只缺一项时消息也只许指名这一项：否则"每次列出全部 required_fields"的目录式
+    # 消息能让这 5 条参数化用例整体退化成 1 条
+    _assert_names_no_other_field(excinfo, f"slurm.{missing_field}", SLURM_FIELD_PATHS)
+
+
+def test_local_slurm_multiple_missing_fields_locate_the_first(tmp_path):
+    """同时缺多项：消息全报，`path` 取排序后的第一项（代码承诺的确定性）。
+
+    只有单项缺失的用例时，`missing[0]`/`missing[-1]`/随机取值都同样绿。
+    """
+    config = _loaded_config(tmp_path)
+    data = copy.deepcopy(VALID_LOCAL)
+    del data["slurm"]["partition"]
+    del data["slurm"]["account"]
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    _assert_locates(excinfo, "slurm.account")
+    assert "`slurm.partition`" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("stale_field", SLURM_REQUIRED_FIELDS)
+def test_local_slurm_stale_key_after_required_field_removal_rejected(
+    tmp_path, stale_field
+):
+    """config 删掉某个 `required_fields` 项、现场 `local.toml` 忘删 -> 必须报错。
+
+    生产五字段（partition/account/cpus/memory/walltime）逐项覆盖：装载器若对这些名字
+    网开一面（把它们从"多余键"里减掉），残留的现场值会被静默忽略，现场以为改生效了。
+    """
+    config_data = copy.deepcopy(VALID_CONFIG)
+    config_data["slurm"]["required_fields"] = [
+        name for name in SLURM_REQUIRED_FIELDS if name != stale_field
+    ]
+    config = _loaded_config(tmp_path, config_data)
+
+    # local.toml 原样保留全部五个键，其中 stale_field 已不在 required_fields 内
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", VALID_LOCAL), config)
+
+    _assert_locates(excinfo, f"slurm.{stale_field}")
+
+
+def test_local_slurm_production_named_values_are_kept_verbatim(tmp_path):
+    """生产名字段的值 MUST 原样透传：不 trim、不改大小写、不改标量类型。
+
+    取值刻意对大小写与首尾空白敏感——Slurm 的 partition/account 名区分大小写，装载器
+    做任何"顺手规整"都会让作业提交到别的分区或记到别的账户。用生产名（而非合成名）
+    是必要的：按名字硬编码的规整只在这些名字上触发。
+    """
+    verbatim = {
+        "partition": "  CPU-Long  ",
+        "account": "YD-Forecast",
+        "cpus": 8,
+        "memory": "32G",
+        "walltime": "04:00:00",
+    }
+    data = copy.deepcopy(VALID_LOCAL)
+    data["slurm"] = copy.deepcopy(verbatim)
+
+    config = _loaded_config(tmp_path)
+    local = load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    assert local.slurm == verbatim
+    assert type(local.slurm["cpus"]) is int
 
 
 def test_local_slurm_extra_key_is_not_silently_ignored(tmp_path):
@@ -635,6 +769,26 @@ def test_local_slurm_keyset_shares_no_name_with_production_fields(tmp_path):
 
 
 # --- 零默认值 ----------------------------------------------------------------
+
+# 零默认值断言的遍历范围必须自证：`_dataclass_tree` 若不递归，嵌套类里的默认值会被
+# 整体跳过而测试照绿。此处以独立字面量清单钉死它必须走到的类。
+EXPECTED_DATACLASSES = {
+    "Config",
+    "CycleConfig",
+    "VariantsConfig",
+    "RawConfig",
+    "RawSourceConfig",
+    "SlurmSchema",
+    "LocalConfig",
+    "NwmLocal",
+    "CronLocal",
+}
+
+
+def test_dataclass_tree_reaches_every_nested_dataclass():
+    walked = _dataclass_tree(Config) + _dataclass_tree(LocalConfig)
+
+    assert {klass.__name__ for klass in walked} == EXPECTED_DATACLASSES
 
 
 def test_no_dataclass_field_carries_a_default():

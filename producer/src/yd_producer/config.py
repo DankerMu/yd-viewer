@@ -267,8 +267,8 @@ def _read_toml(path: str | os.PathLike[str], missing_message: str) -> dict[str, 
     except UnicodeDecodeError as exc:
         # tomllib 先把字节按 UTF-8 解码再解析；非 UTF-8 存盘（GBK 注释、UTF-16）抛
         # UnicodeDecodeError，它是 ValueError 而非 OSError/TOMLDecodeError 的子类，
-        # 必须单独收敛。本子句放在 TOMLDecodeError 之后：后者同为 ValueError 子类，
-        # 顺序颠倒会让语法错误的专有消息被泛化子句遮蔽。
+        # 没有别的子句会捕获它，必须单独收敛。它与 TOMLDecodeError 互不为子类，两个
+        # 子句谁先谁后都不影响捕获结果。
         raise ConfigError(
             f"配置文件编码错误：{location} 不是 UTF-8（{exc.reason}），"
             "请以 UTF-8 重新存盘"
