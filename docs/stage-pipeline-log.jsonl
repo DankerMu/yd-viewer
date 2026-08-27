@@ -1,0 +1,1 @@
+{"date":"2026-08-27","change":"m2-producer-core","grill_gate":"passed:branches=5,open=0","rounds":1,"gate_net_catch":0,"p0":{"in":0,"resolved":0,"residual":0},"p1":{"resolved":12,"carried":0},"regressions":0,"approx_subagent_calls":8,"verdict":"clean","alignment":{"rounds":1,"p1_resolved":2}}
