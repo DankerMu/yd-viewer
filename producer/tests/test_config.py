@@ -662,7 +662,7 @@ def test_config_nested_table_type_error_names_dotted_path(tmp_path):
 
 def test_config_lead_hours_must_be_int_list(tmp_path):
     data = copy.deepcopy(VALID_CONFIG)
-    data["raw"]["gfs"]["lead_hours"] = ["6"]
+    data["raw"]["gfs"]["lead_hours"] = ["6", 12]
 
     with pytest.raises(ConfigError) as excinfo:
         load_config(_write_toml(tmp_path / "config.toml", data))
@@ -698,7 +698,7 @@ def test_config_bool_is_not_accepted_as_int(tmp_path):
 
 def test_config_bool_is_not_accepted_as_int_list_element(tmp_path):
     data = copy.deepcopy(VALID_CONFIG)
-    data["checkpoint_hours"] = [True]
+    data["checkpoint_hours"] = [True, 12]
 
     with pytest.raises(ConfigError) as excinfo:
         load_config(_write_toml(tmp_path / "config.toml", data))
@@ -872,7 +872,7 @@ def test_duplicate_required_fields_rejected(tmp_path):
 
 def test_non_string_required_fields_rejected(tmp_path):
     data = copy.deepcopy(VALID_CONFIG)
-    data["slurm"]["required_fields"] = [*SLURM_REQUIRED_FIELDS, 7]
+    data["slurm"]["required_fields"] = [7, *SLURM_REQUIRED_FIELDS]
 
     with pytest.raises(ConfigError) as excinfo:
         load_config(_write_toml(tmp_path / "config.toml", data))
@@ -988,6 +988,23 @@ def test_local_slurm_pure_extra_key_locates_that_key(tmp_path):
         load_local(_write_toml(tmp_path / "local.toml", data), config)
 
     _assert_locates(excinfo, "slurm.qos")
+
+
+def test_local_slurm_multiple_extra_keys_locate_the_first(tmp_path):
+    """同时多出多项：消息全报，`path` 取排序后的第一项（代码承诺的确定性）。
+
+    只有单项多余的用例时，`extra[0]`/`extra[-1]`/随机取值都同样绿。
+    """
+    config = _loaded_config(tmp_path)
+    data = copy.deepcopy(VALID_LOCAL)
+    data["slurm"]["qos"] = "normal"
+    data["slurm"]["array"] = "0-3"
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    _assert_locates(excinfo, "slurm.array")
+    assert "`slurm.qos`" in str(excinfo.value)
 
 
 def test_local_slurm_keyset_follows_added_required_field(tmp_path):

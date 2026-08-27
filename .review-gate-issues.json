@@ -1,9 +1,17 @@
 {
   "issues": {
     "2": {
-      "ceilingPrs": [],
+      "ceilingPrs": [
+        30
+      ],
       "gateEntries": 2,
-      "closed": []
+      "closed": [
+        {
+          "pr": 30,
+          "outcome": "closed",
+          "rounds": 5
+        }
+      ]
     }
   }
 }
