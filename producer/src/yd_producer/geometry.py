@@ -211,9 +211,20 @@ def read_shapefile(shp_path: str | Path) -> tuple[CRS, list[Feature]]:
             f"该组文件互不匹配: {shp_file} 或 {shx_file} 或 {dbf_file}"
         )
 
+    # 与几何读取失败同规则地点名 `.shp` 与 `.shx` 两者，不点名 `.dbf`。
+    # 这里手上只有一个 `Shape` 对象，判不出它来自哪个文件的损坏：合法的 ESRI NULL
+    # 记录（shapeType 0，`.shp` 负载一侧）与「`.shx` 记录长度被改坏后在完好 `.shp`
+    # 字节上错位读出的 NULL」到达此处完全同形——pyshp 在 shapes() 路径上只按 `.shx`
+    # 的长度字段顺序推进（偏移字段不读），长度改大若干字就会让后续记录落到零字节上，
+    # 而大小/对齐/头部声明长度俱不变，结构先验与数量守卫都判不出来。责任不可判即
+    # 点名全部候选。`.dbf` 不在候选内：它已被独立打开读出记录且数量守卫已放行，
+    # 对几何解码不负任何责任，点名它就是冤枉一个已知完好的文件。
     try:
         geometries = [shapely_shape(shp.__geo_interface__) for shp in shapes]
     except Exception as exc:
-        raise GeometryError(f"shapefile 几何不可解析: {shp_file}") from exc
+        raise GeometryError(
+            f"shapefile 几何不可解析（.shp 负载或 .shx 索引损坏）: "
+            f"{shp_file} 或 {shx_file}"
+        ) from exc
 
     return crs, list(zip(records, geometries, strict=True))

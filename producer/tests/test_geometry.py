@@ -850,14 +850,20 @@ def test_reproject_geometry_converts_transformer_failure() -> None:
     assert type(excinfo.value) is GeometryError
 
 
-def test_read_shapefile_null_geometry_names_only_the_shp(
+def test_read_shapefile_null_geometry_names_the_geometry_pair(
     baseline: SyntheticBaseline, tmp_path
 ) -> None:
-    """NULL 几何（shapeType 0）无法转成 GeoJSON：责任只在 `.shp` 负载。
+    """NULL 几何（shapeType 0）无法转成 GeoJSON：点名 `.shp` 与 `.shx`，不点名 `.dbf`。
 
-    `.shx` 索引与 `.dbf` 记录都与该记录一一对应且字节完好，数量也相等——三条结构
-    校验、两次读取、组完整性守卫全部放行，唯有几何解析能判。消息不得点名这两个
-    完好的旁文件。
+    这里的 `.shx` 确实完好，但「几何不可解析」这个位置**判不出**它完好：代码手上只
+    有一个 `shapeType == 0` 的 `Shape`，而同一个对象既可能来自 `.shp` 里一条合法的
+    ESRI NULL 记录（本用例），也可能来自 `.shx` 记录长度被改坏后在完好 `.shp` 字节
+    上的错位读取（见 `test_read_shapefile_shx_record_length_shift_names_both_files`）。
+    按模块「责任不可判时点名全部候选」的规则，多报一个完好的 `.shx` 是规则预先接受
+    的代价，漏掉真正损坏的 `.shx` 不是。
+
+    `.dbf` 则相反：它已被独立打开、独立读出记录，且数量守卫已通过，不可能对几何
+    解析失败负责——必须**不**被点名。
     """
     layer = write_layer_with_null_shape(
         tmp_path / "nulls" / "nulls.shp", baseline.prj_wkt
@@ -866,6 +872,86 @@ def test_read_shapefile_null_geometry_names_only_the_shp(
         read_shapefile(layer)
     message = str(excinfo.value)
     assert str(layer) in message
-    assert str(sidecar(layer, ".shx")) not in message
+    assert str(sidecar(layer, ".shx")) in message
     assert str(sidecar(layer, ".dbf")) not in message
     assert type(excinfo.value) is GeometryError
+
+
+#: 「几何不可解析」的 `.shx` 记录长度偏移搜索区间（16-bit 字）。取值不写死：
+#: 落点由生成器写出的坐标字节决定，换一版 pyproj/PROJ 就可能平移。
+_SHX_LENGTH_DELTAS = range(-64, 257)
+
+_UNPARSEABLE_PREFIX = "shapefile 几何不可解析"
+
+
+def _shx_record_length_probe(
+    baseline: SyntheticBaseline, record: int, delta: int
+) -> str | None:
+    """把 `.shx` 第 `record` 条记录的长度字段就地加 `delta`，返回报错消息。
+
+    就地改写 4 字节：文件大小、8 字节对齐、头部声明长度全部不变且自洽，因此
+    `_check_shx_structure` 三条结构先验必然放行——这正是本类输入的要害。
+    返回 `None` 表示该 delta 未触发任何 `GeometryError`（读取成功）。
+    """
+    shx = sidecar(baseline.rivers_shp, ".shx")
+    raw = bytearray(shx.read_bytes())
+    pos = 100 + 8 * record + 4
+    current = struct.unpack(">i", bytes(raw[pos : pos + 4]))[0]
+    raw[pos : pos + 4] = struct.pack(">i", current + delta)
+    shx.write_bytes(bytes(raw))
+    try:
+        read_shapefile(baseline.rivers_shp)
+    except GeometryError as exc:
+        return str(exc)
+    return None
+
+
+def test_read_shapefile_shx_record_length_shift_names_both_files(
+    baseline: SyntheticBaseline,
+) -> None:
+    """`.shx` 记录长度被改坏 -> 完好 `.shp` 字节错位读出 NULL：必须同时点名两者。
+
+    pyshp 3.1.6 在 `Reader.shapes()` 这条路径上**只**消费 `.shx` 的长度字段（偏移
+    字段根本不读），按 `pos += 长度 + 8` 顺序推进；把某条记录的长度改大若干字，后续
+    记录就落在零字节上、解码成 shapeType 0，于是：结构先验放行、pyshp 不抛异常、
+    几何数仍等于 `.dbf` 记录数，最终只有「几何不可解析」能判——而唯一损坏的文件
+    正是 `.shx`。消息漏掉 `.shx` 就是冤枉了完好的 `.shp` 独自担责。
+
+    落点用**搜索**而非硬编码常数确定：命中窗口取决于生成器写出的坐标字节，换一版
+    pyproj/PROJ 可能平移。搜索不到就 `pytest.fail` 报出扫描区间——静默 skip 会把本
+    用例退化成永真式，而「非区分性的扫描」正是这条不变量此前失守的原因。
+    """
+    shx = sidecar(baseline.rivers_shp, ".shx")
+    intact_shx = shx.read_bytes()
+    intact_shp = baseline.rivers_shp.read_bytes()
+    intact_dbf = sidecar(baseline.rivers_shp, ".dbf").read_bytes()
+
+    hit: tuple[int, int, str] | None = None
+    for record in range(len(baseline.river_indices)):
+        for delta in _SHX_LENGTH_DELTAS:
+            if delta == 0:
+                continue
+            message = _shx_record_length_probe(baseline, record, delta)
+            shx.write_bytes(intact_shx)
+            if message is not None and message.startswith(_UNPARSEABLE_PREFIX):
+                hit = (record, delta, message)
+                break
+        if hit is not None:
+            break
+    if hit is None:
+        pytest.fail(
+            f"未搜到落在「{_UNPARSEABLE_PREFIX}」的 .shx 长度偏移："
+            f"记录 0..{len(baseline.river_indices) - 1} × delta "
+            f"{_SHX_LENGTH_DELTAS.start}..{_SHX_LENGTH_DELTAS.stop - 1}"
+        )
+    record, delta, message = hit
+
+    # 复现命中输入并核对：改动只在 `.shx`，另两个文件逐字节完好。
+    assert _shx_record_length_probe(baseline, record, delta) == message
+    assert shx.read_bytes() != intact_shx
+    assert baseline.rivers_shp.read_bytes() == intact_shp
+    assert sidecar(baseline.rivers_shp, ".dbf").read_bytes() == intact_dbf
+
+    assert str(shx) in message
+    assert str(baseline.rivers_shp) in message
+    assert str(sidecar(baseline.rivers_shp, ".dbf")) not in message
