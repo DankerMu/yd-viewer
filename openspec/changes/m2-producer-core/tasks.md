@@ -4,8 +4,8 @@
 
 ## 1. cli-config：配置装载与 CLI 骨架
 
-- [ ] 1.1 实现 `config.toml` 类型化装载与 fail-closed 校验（业务规则字段全集含 `reach_count`，spec cli-config）
-- [ ] 1.2 实现 `local.toml` 现场值装载（含 NWM checkout 根），缺失即报错、零内置默认
+- [x] 1.1 实现 `config.toml` 类型化装载与 fail-closed 校验（业务规则字段全集含 `reach_count`，spec cli-config）
+- [x] 1.2 实现 `local.toml` 现场值装载（含 NWM checkout 根），缺失即报错、零内置默认
 - [ ] 1.3 实现 argparse 三入口骨架（prepare/init/run 薄委托，注册 `[project.scripts]` 入口点）、未知子命令拒绝、`DATABASE_URL` 环境守卫、run 入口状态目录缺失/为空即报错停止且不触发 init 逻辑
 - [ ] 1.4 实现 NWM 解释器薄外壳（精确路径调用、cwd/`PYTHONPATH` 取自 checkout 字段、fail-closed），以假解释器脚本测试调用形态
 
@@ -13,6 +13,151 @@
 §13.1 归属：无直接行（基础设施，支撑全部行）
 Suggested fixture level: compact - 内联 TOML 与假解释器小脚本即可覆盖全部场景
 Minimal mergeable slice: 配置装载器（1.1–1.2）——纯函数加测试，可独立合并保绿，CLI 入口为后继
+
+### Issue #2 fixture（任务 1.1–1.2）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：配置对象是后续 26 个 issue 全部消费的共享契约，且改动面命中强制 expanded 触发词 parser/reader/schema/field/format）
+Repair intensity: medium
+Project profile: yd-viewer
+
+Change surface:
+- 新增 `producer/src/yd_producer/config.py`：`load_config(path) -> Config`、`load_local(path, config) -> LocalConfig`、公开异常 `ConfigError` 及其 dataclass 树
+- 新增 `producer/tests/test_config.py`
+- 不触碰 CLI 入口、解释器薄外壳、任何业务模块
+
+Must preserve:
+- `producer/pyproject.toml` 的 `dependencies = []`（仅 stdlib `tomllib`，D5）
+- 现有 `tests/test_smoke.py` 继续通过
+
+Must add/change:
+- 按下方「TOML key schema」装载 `config.toml` 与 `local.toml`，返回类型化 dataclass 树
+- 任何必需字段缺失或类型错误 fail closed，错误信息含该字段的完整点分路径（如 `raw.gfs.variables`）；代码中零内置现场默认值
+- 两个装载器的全部失败路径抛同一个公开异常类型 `yd_producer.config.ConfigError`（本 fixture 钉死类名），不抛裸 `KeyError`/`TypeError`/`tomllib.TOMLDecodeError`
+
+TOML key schema（本 issue 钉死；下游 issue 与生产 `config.toml` 实例必须对齐此 schema）:
+
+`config.toml` — 全部 key 必需，无可选字段：
+
+```toml
+# 顶层 key 名由 spec cli-config 反引号逐字钉死，不得加表前缀
+forecast_days = 7               # START=0 / END=7（products-contract §5.2）
+output_interval_minutes = 60    # DT_QR_DOWN
+checkpoint_hours = [12]         # T+12 捕获点
+reach_count = 3988              # products-contract §5.1；run-controller spec 的 forecast_days*24 行校验同源
+
+[cycle]
+hours = [0, 12]                 # 仅接受 00Z/12Z（compute-loop §7.1）
+lead_hours_start = 0            # 预报 lead 覆盖 0–168h，两源共用
+lead_hours_end = 168
+
+[variants]
+gfs = "input/models/yd_gfs"     # 相对 yd_root（compute-loop §6.1）
+ifs = "input/models/yd_ifs"
+
+[raw.ifs]
+variables = ["<变量名>"]         # 值由 issue #4 勘察与 #6 判定确立，本 issue 只定 schema
+bundles = ["<bundle 文件名模式>"]
+f000_special = false            # IFS 无 f000 特例
+
+[raw.gfs]
+variables = ["<变量名>"]
+bundles = ["<bundle 文件名模式>"]
+f000_special = true             # GFS f000 特例（compute-loop §7.1）
+
+[slurm]
+required_fields = ["partition", "account", "cpus", "memory", "walltime"]
+```
+
+`[slurm].required_fields` 即 compute-loop §5 的"Slurm 资源配置字段结构"：config 侧声明必需字段名，值只在 `local.toml` 提供。**它是 `local.toml` 的 `[slurm]` 表唯一的键集权威**——装载器不对 `local.[slurm]` 另设静态 schema，只按这份运行期列表校验，避免"静态 schema 与列表互相矛盾"的双权威。约束：
+
+- `required_fields` MUST 是非空字符串列表，元素唯一；
+- `local.[slurm]` 的键集 MUST 与 `required_fields` **完全相等**：缺项与多余项都抛 `ConfigError` 并指名该键（多余项必须报错，否则现场把 `partition` 写成 `partiton` 会被静默忽略）;
+- `LocalConfig.slurm` 以映射（`dict[str, str | int]`）暴露，不做成五个固定 dataclass 字段——固定字段等于把键集第二次写死在代码里，正是这条要消除的双权威。
+
+因此交叉校验要求先有 `Config`，`load_local` 的签名为 `load_local(path, config) -> LocalConfig`。
+
+`local.toml` — `[slurm]` 之外全部 key 必需，无可选字段（NWM checkout/解释器仅 `prepare` 消费，但装载期一律必需：做成条件可选就必须引入条件性缺省，正是"零内置默认"禁止的）：
+
+```toml
+yd_root = "<绝对路径>"
+scratch_root = "<绝对路径>"
+shud_binary = "<绝对路径>"
+
+[nwm]
+raw_root = "<绝对路径>"
+checkout_root = "<绝对路径>"
+python = "<解释器绝对路径>"
+
+[slurm]
+# 键集完全由 config.toml 的 slurm.required_fields 决定，此处仅示例其生产取值形态
+partition = "<名称>"
+account = "<名称>"
+cpus = 8
+memory = "<如 32G>"
+walltime = "<如 04:00:00>"
+
+[cron]
+lock_path = "<绝对路径>"
+log_dir = "<绝对路径>"
+```
+
+Seams under test:
+- `load_config(path) -> Config` 与 `load_local(path, config) -> LocalConfig`（file→object 纯函数，design.md「Sketch seams under test」之下的基础层；CLI 入口层不做行为测试）
+
+Risk packs considered (core):
+- Public API / CLI / script entry: selected - 装载器是 `prepare`/`init`/`run` 三入口共用的公共 API，字段名与返回结构即契约
+- Config / project setup: selected - 本 issue 全部内容
+- File IO / path safety / overwrite: not selected - 只读单个 TOML 文件，不写、不删、不遍历目录；`local.toml` 内的路径本 issue 只装载不解引用（路径存在性校验归 1.3/1.4 与各业务模块）
+- Schema / columns / units / field names: selected - config 字段全集即 schema，字段名/类型/单位（minutes、hours、days）错配会传导到全部下游模块
+- Auth / permissions / secrets: not selected - `local.toml` 已 gitignored，字段为路径与 Slurm 资源，无凭据；装载器不打印文件内容
+- Concurrency / shared state / ordering: not selected - 无共享状态、无并发，纯函数
+- Resource limits / large input / discovery: not selected - 输入为人工维护的小 TOML，无发现逻辑
+- Legacy compatibility / examples: not selected - 首个功能模块，仓库此前无业务代码，无既有消费者
+- Error handling / rollback / partial outputs: selected - fail-closed 是本 issue 的核心验收项，需要稳定异常类型与含字段名的错误信息，且不得返回带默认值的半成品配置对象
+- Release / packaging / dependency compatibility: selected - 必须只用 stdlib `tomllib`，不得引入新依赖，`uv sync --frozen` 无 drift
+- Documentation / migration notes: not selected - 无迁移；字段清单由本 fixture 的「TOML key schema」钉死，下游 issue 直接读该 schema，无需另写文档
+
+Domain packs (from active profile):
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: selected - `cycle.hours`、`cycle.lead_hours_*`、`forecast_days`、`output_interval_minutes`、`checkpoint_hours` 的取值与单位在此定型，错配直接污染 forcing 与 tracker
+- 状态链 / warm-start 定戳: not selected - 本 issue 不读写状态
+- NWM 快照溯源 / DB-free 隔离: not selected - 本 issue 无快照代码
+
+Required evidence（每条 input -> expected output）:
+- 齐备 `config.toml`（内联 TOML）-> 返回 `Config`，逐字段值与文件一致（含 `raw.ifs`/`raw.gfs` 嵌套表、`slurm.required_fields`、顶层 `reach_count`）
+- 齐备 `local.toml` -> 返回 `LocalConfig`，暴露全部现场字段供三入口使用
+- **参数化：** 对上方 schema 中 `config.toml` 的每个必需 key 各生成一份"删该 key"的 TOML -> 每份都抛 `ConfigError`，消息含该 key 的完整点分路径；测试以 schema 的必需 key 清单驱动，新增字段不加测试即漏测
+- **参数化：** 对 `local.toml` 的每个必需 key 同上 -> 每份都抛 `ConfigError`，消息含完整点分路径
+- 类型错误 `reach_count = "3988"`（字符串）-> 抛 `ConfigError`，消息含 `reach_count` 与期望类型
+- 类型错误 `cycle.hours = 0`（非列表）-> 抛 `ConfigError`，消息含 `cycle.hours` 与期望类型
+- `local.toml` 路径不存在 -> 抛 `ConfigError`，消息提示需现场创建，且不返回任何对象
+- TOML 语法损坏（如未闭合字符串）-> 抛 `ConfigError`（不外泄 `tomllib.TOMLDecodeError`）
+- **参数化：** 对 `slurm.required_fields` 的每一项，各生成一份"`local.[slurm]` 删该项"的 TOML -> 每份都抛 `ConfigError`，消息含该缺失键名
+- `local.[slurm]` 含 `required_fields` 之外的多余键（如把 `partition` 误写为 `partiton`）-> 抛 `ConfigError`，消息含该多余键名（不得静默忽略）
+- `slurm.required_fields = []`（空列表）-> 抛 `ConfigError`；元素重复 -> 抛 `ConfigError`；元素非字符串 -> 抛 `ConfigError`
+- `required_fields` 增删一项后 `local.[slurm]` 同步增删 -> `load_local` 成功，`LocalConfig.slurm` 映射键集等于 `required_fields`（证明键集权威唯一，代码未第二次写死五个字段）
+- 零默认值行为断言：`Config`/`LocalConfig` 及其全部嵌套 dataclass 的字段均无默认值（以 `dataclasses.fields()` 断言每个 field 的 `default` 与 `default_factory` 均为 `MISSING`），因此任何缺失只能走 fail-closed 路径而非静默填值
+- 全部失败路径断言以 `pytest.raises(ConfigError)` 表达，不接受 `pytest.raises(Exception)`
+- `cd producer && uv sync --frozen` -> 退出码 0（无 lock drift；本 issue 不得新增依赖）
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check .` 与 `uv run ruff format --check .` -> 退出码 0
+
+Non-goals:
+- argparse 三入口骨架、`DATABASE_URL` 守卫、run 状态目录守卫（任务 1.3，issue #3）
+- NWM 解释器薄外壳与假解释器脚本测试（任务 1.4，issue #3）
+- `local.toml` 内路径的存在性/可执行性校验（归各自使用点）
+- **不提交版本化 `producer/config.toml` 生产实例**：`raw.ifs`/`raw.gfs` 的变量名、bundle 文件模式与 GFS f000 具体取值出自 compute-loop §7.1 所称"NWM adapter 的当前事实"，由 issue #4 勘察与 issue #6 完整性判定确立，此刻不可知；本 issue 只钉 schema，测试全部用内联 TOML。生产实例落库已路由为 issue #29（`Depends on #2, #6`），并已挂入 epic #1 依赖图。
+- 不提交 `local.toml.example`：compute-loop §5 明确 `local.toml` 不入库，现场值由实施方创建（agent-ops）
+
+Review focus:
+- 字段名/类型/单位是否与上方 TOML key schema 逐字对应，且 schema 的每个叶子字段可回溯到 compute-loop §5/§7.1 或 products-contract §5
+- 是否存在任何隐式默认值、`.get(k, fallback)` 式兜底，或 dataclass 字段默认值
+- 错误信息是否总能定位到具体字段的完整点分路径（含嵌套表内字段）
+- 是否引入了 stdlib 之外的依赖
+- 失败路径是否全部收敛到单一公开异常 `ConfigError`
+- `local.[slurm]` 的键集是否只有 `config.slurm.required_fields` 一个权威——代码里若再出现 partition/account/cpus/memory/walltime 的固定字段清单即为双权威，属实现缺陷
+- spec cli-config 用反引号钉死的 key 名（`forecast_days`、`output_interval_minutes`、`checkpoint_hours`、`reach_count`）是否逐字保留在顶层，未被加上表前缀
 
 ## 2. forcing-chain（一）：NWM 快照勘察与基础结构
 
