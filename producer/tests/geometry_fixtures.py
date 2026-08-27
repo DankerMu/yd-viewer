@@ -27,6 +27,16 @@ Anchors = tuple[tuple[float, float], ...]
 METRIC_GUARD = 180.0
 
 
+def sidecar(shp_path: Path, suffix: str) -> Path:
+    """把 `shp_path` 的最后一个后缀换成 `suffix`（`yd.riv.shp` -> `yd.riv.prj`）。
+
+    刻意不用 `with_suffix("")` + `with_suffix(suffix)`：带点基名会被多剥一层后缀，
+    指向另一组 shapefile。本函数与 `yd_producer.geometry` 的同名逻辑各自实现，
+    保持生成器对被测模块的独立性。
+    """
+    return shp_path.with_name(shp_path.name[: -len(shp_path.suffix)] + suffix)
+
+
 @dataclass(frozen=True)
 class AlbersParams:
     """合成基线使用的自定义 Albers Equal Area 参数（非 EPSG 编码投影）。"""
@@ -77,11 +87,11 @@ class SyntheticBaseline:
 
     @property
     def rivers_prj(self) -> Path:
-        return self.rivers_shp.with_suffix(".prj")
+        return sidecar(self.rivers_shp, ".prj")
 
     @property
     def domain_prj(self) -> Path:
-        return self.domain_shp.with_suffix(".prj")
+        return sidecar(self.domain_shp, ".prj")
 
 
 def _forward_transformer(albers: AlbersParams) -> Transformer:
@@ -168,7 +178,7 @@ def _assert_metric_guard(parts: list[list[tuple[float, float]]], label: str) -> 
 
 
 def _write_prj(shp_path: Path, wkt: str) -> None:
-    shp_path.with_suffix(".prj").write_text(wkt, encoding="utf-8")
+    sidecar(shp_path, ".prj").write_text(wkt, encoding="utf-8")
 
 
 def _write_layer(
@@ -179,8 +189,13 @@ def _write_layer(
     wkt: str,
 ) -> tuple[int, ...]:
     indices = tuple(range(1, len(features) + 1))
+    # 显式给出三个目标文件而非「基名」：`Writer(基名)` 对 `yd.riv.shp` 会写成
+    # `yd.*`，与 `read_shapefile` 的路径绑定契约相悖，也无法生成带点基名的基线。
     with shapefile.Writer(
-        str(shp_path.with_suffix("")), shapeType=shape_type
+        shp=str(shp_path),
+        shx=str(sidecar(shp_path, ".shx")),
+        dbf=str(sidecar(shp_path, ".dbf")),
+        shapeType=shape_type,
     ) as writer:
         writer.field("Index", "N", 10, 0)
         for index, feature in zip(indices, features, strict=True):
@@ -201,19 +216,24 @@ def write_synthetic_baseline(
     river_count: int = 3,
     unit_count: int = 2,
     albers: AlbersParams | None = None,
+    rivers_stem: str = "rivers",
+    domain_stem: str = "domain",
 ) -> SyntheticBaseline:
     """在 `directory` 下生成 `rivers` / `domain` 两组 shapefile 及其 `.prj`。
 
     坐标 oracle 为 lon/lat 锚点：先用 pyproj 正向投影写入文件，测试再断言
     被测工具能把它们还原回锚点——期望坐标不得手写。
+
+    `rivers_stem`/`domain_stem` 允许生成带点基名（如 `yd.riv`）与同目录同前缀的
+    兄弟组（`yd.riv.*` 与 `yd.*`），供路径绑定回归使用。
     """
     albers = albers or AlbersParams()
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     wkt = albers.to_esri_wkt()
 
-    rivers_shp = directory / "rivers.shp"
-    domain_shp = directory / "domain.shp"
+    rivers_shp = directory / f"{rivers_stem}.shp"
+    domain_shp = directory / f"{domain_stem}.shp"
     river_anchors = _river_anchors(river_count, albers)
     domain_anchors = _domain_anchors(unit_count, albers)
     river_indices = _write_layer(

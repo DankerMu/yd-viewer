@@ -52,7 +52,7 @@ CLI 入口层不做行为测试（薄委托），`prepare`/`init` 的行为经�
 
 - [NWM 快照模块存在隐藏 DB/registry 耦合] → 勘察任务先行定清单；确有耦合时在快照内最小改写为文件后端并在模块头注明偏离，不引入运行时 NWM import。
 - [cfgrib/eccodes 在 CI ubuntu 上安装失败] → 已按「优先二进制 wheel」分支解决：显式加 `eccodeslib` 依赖（PyPI 上 `eccodes` 仅发 win_amd64 wheel，linux/macOS 不自带库），CI producer job 无需 `apt-get libeccodes0`。
-- [pyproj/shapely 在 CI 安装失败] → 同上处理（均有 manylinux wheel，风险低于 eccodes），随 prepare-variants 依赖任务验证 CI 绿。
+- [pyproj/shapely 在 CI 安装失败] → 已随 prepare-variants 依赖任务（10.1）解决并验证：三者均走 cp312 manylinux wheel（pyproj `manylinux_2_28`、shapely `manylinux_2_17`、pyshp 纯 py3），CI producer job 无需额外 apt 包。
 - [无真实 GRIB/canonical 数据可本地验证数值] → 合成 fixture 验证结构与管线正确性；数值正确性显式归 M4 receipt，不在 M2 声明。
 - [flock 语义测试跨平台脆弱（macOS/Linux 差异）] → 锁封装为小模块，单元测试进程内验证非阻塞跳过语义；真实 cron+flock 行为归 M4。
 
