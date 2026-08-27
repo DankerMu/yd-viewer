@@ -1,6 +1,6 @@
 # forcing-chain
 
-来源：compute-loop-design §4.2、§5（registry 临时生成）、§7.3、§9.1；design.md（本 change）D2/D5。
+来源：compute-loop-design §4.2、§5（registry 临时生成）、§7.3、§8（warm-start 初态）、§9.1；design.md（本 change）D2/D5。
 
 ## ADDED Requirements
 

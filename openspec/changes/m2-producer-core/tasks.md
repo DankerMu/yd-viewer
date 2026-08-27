@@ -122,7 +122,7 @@ Minimal mergeable slice: atomic - 单一编排函数，拒绝守卫/扫描窗/�
 - [ ] 12.2 实现未提交残留识别与清理重跑判定（保留 T 状态、删更晚状态与半成品）
 - [ ] 12.3 实现非阻塞 flock 封装（持有即跳过、覆盖全生命周期），进程内测试跳过语义
 
-依赖：组 1
+依赖：组 1、组 4（12.1 时间头校验读分段 header）
 §13.1 归属：控制器（前沿/flock 幂等/raw 缺口）
 Suggested fixture level: compact - tmp 目录树表达 DONE/状态组合即可
 Minimal mergeable slice: 前沿确定纯函数（12.1）——判定逻辑独立合并保绿，残留清理与锁为后继
@@ -140,8 +140,8 @@ Minimal mergeable slice: 发布器（13.1）——发布顺序与契约检查对
 
 ## 14. run-controller（三）：主循环集成
 
-- [ ] 14.1 单源单轮 `run_once` 骨架打通：发现 → 组装 → 提交 fake → 发布 → work 清理；job ID/partition/终态/起止时间进运行报告；`local.toml` 缺 Slurm 字段即停（§13.1：同源顺序）
-- [ ] 14.2 多轮追赶与缺口停等：raw 一次补齐 T/T+12h/T+24h 时序推进、每源在途提交计数 ≤1、缺轮停在缺口（§13.1：raw 缺口）
+- [ ] 14.1 单源单轮 `run_once` 骨架打通：发现 → 组装 → 提交 fake → 发布 → work 清理；job ID/partition/终态/起止时间进运行报告；`local.toml` 缺 Slurm 字段即停
+- [ ] 14.2 多轮追赶与缺口停等：raw 一次补齐 T/T+12h/T+24h 时序推进、每源在途提交计数 ≤1、缺轮停在缺口（§13.1：同源顺序/raw 缺口）
 - [ ] 14.3 双源并行、单源失败隔离与崩溃恢复端到端：IFS 失败 GFS 继续、失败日志与 work 清理、无 DONE 残留下次重跑（§13.1：双源并行/单源失败/无 DONE 崩溃恢复）
 
 依赖：组 5、组 8、组 9、组 12、组 13

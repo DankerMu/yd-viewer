@@ -110,11 +110,11 @@ run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过�
 - **THEN** 该源 `states/` 下只存在最新待跑状态及其前一份
 
 ### Requirement: 失败处理
-作业失败时 MUST 不写 `DONE`、不推进状态链；MUST 把完整 stdout/stderr、命令、起止时间与退出码合成一份 `logs/<source>/<T>.log`；MUST 删除整个 scratch work；下次 run 从干净 work 对该 cycle 重试。MUST NOT 维护失败计数、退避或 `status.json`。
+作业失败时 MUST 不写 `DONE`、不推进状态链；MUST 把完整 stdout/stderr、命令、job ID、起止时间与退出码合成一份 `logs/<source>/<T>.log`；MUST 删除整个 scratch work；下次 run 从干净 work 对该 cycle 重试。MUST NOT 维护失败计数、退避或 `status.json`。
 
 #### Scenario: 失败轮产物
 - **WHEN** fake executor 返回失败
-- **THEN** 该 source/cycle 无 `DONE`、状态链未动、存在唯一合并日志、work 目录不存在
+- **THEN** 该 source/cycle 无 `DONE`、状态链未动、存在唯一含该轮 job ID 的合并日志、work 目录不存在
 
 ### Requirement: 保留窗口与安全清理
 清理 MUST 保留最新成功 cycle 往前 14 天的 `output` source 目录，窗口外目录与对应失败日志删除；每个删除目标（含成功轮 work 删除）MUST 先经 `realpath` 确认位于 yd 自己的根内，否则拒绝删除。
