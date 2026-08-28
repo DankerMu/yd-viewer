@@ -12,6 +12,29 @@ SIGKILL（或 NFS `ESTALE`）的窗口——POSIX 没有跨目录事务，无法
 （products-contract §2/§6 没有为 `input/viewer/` 定义就绪标记，本模块也不发明一个；
 就绪标记与崩溃后的人工恢复程序路由为 follow-up issue #78）。
 
+**清理/回滚不变量（I1）**：任何一步清理或回滚 MUST NOT 取消其余步骤，也 MUST NOT 替换、
+掩盖或降级正在传播的异常，更 MUST NOT 把一次已完成的提交报成失败。故清理不是裸序列：
+每步各自独立执行（`_run_cleanup_steps`），失败被**收集**——失败路径上作为 `add_note`
+附到原始异常上（`BuilderUnavailableError` 因此仍是 `BuilderUnavailableError`，退出码 `3`
+不被降级成 `1`），成功路径上作为 `PrepareReport.cleanup_warnings` 返回（已提交就是已提交，
+清理残留不改变这个事实；`cli` 只打印 `str(exc)`，故这些告警对 CLI 不可见，是本模块公开
+返回值上的证据面）。
+
+**本次条目登记不变量（I2）**：`YD_ROOT` 内每一个本次运行创建的条目，MUST 在它可能落盘
+**之前**就被登记为本次条目（`_ensure_directory` 先 `created.extend` 再建目录——
+`safe_fs.ensure_directory_no_follow` 逐层创建且没有 unwind，登记在后会漏掉半条链）；
+回滚只删本次创建的条目，且**父目录一律非递归**（`_remove_created_directory` 走 `rmdir`
+语义）：单次运行下这些目录在回滚时可证为空，行为不变；而并发写入者落进来的内容会让
+`rmdir` 响亮地失败，而不是被静默递归删掉。
+
+**同一路径拼写不变量（I3）**：拒绝覆盖守卫 `os.path.lexists` 看的路径、`geometry` 写的
+路径、`safe_fs` 操作的路径 MUST 是同一个文件系统对象。`safe_fs._expand_path` 会
+`expanduser()` 而另外两者不会，故 `yd_root = "~/yd"` 会让守卫看 `./~/yd` 而删除落在真实
+`$HOME/yd`。闸门在 `run_prepare` 入口（步骤 1 之前）：`local.yd_root` 与
+`local.scratch_root` MUST 是绝对路径（这一条同时拒掉 `~` 与任何相对拼写）且 MUST 是**已
+存在**的目录（`safe_fs.verify_directory_no_follow` 顺带拒掉 symlink 组件）。装载器那边
+不加校验：`specs/cli-config/spec.md` 把它钉死为只做存在性与类型检查。
+
 **为什么不是「scratch 目录直接 rename 到 `YD_ROOT`」**：生产上 `yd_root` 在 NFS
 （`/ghdc/data/yd`，agent-ops §4.1）而 `scratch_root` 在本地盘（`/scratch/.../yd-loop/`，
 agent-ops §4.2）——两棵真不同文件系统的树，而 `safe_fs.rename_entry_no_follow` 明写
@@ -27,9 +50,14 @@ agent-ops §10），再由 staging 同盘 rename 到终名。与控制器发布�
 （`store/safe_fs.py:11`），`except OSError` 兜不住它。注入 builder 抛出的任何异常同样
 包装（`BuilderUnavailableError` 除外——它必须原样上浮，`cli` 靠它区分退出码 `3`）。
 
-**文件系统原语**：一律复用 `store.safe_fs`，本模块不另写一套。**唯一豁免**是
-`_copy_tree_publish`——`safe_fs` 的公共面确无 copy 原语，而扩它属 #24/#25 发布面的归属，
-故树复制只落在本模块内，且仍由 `safe_fs` 的 no-follow 原语逐条构成。
+**文件系统原语**：一律复用 `store.safe_fs`，本模块不另写一套。**恰有两处豁免**，两处的
+理由同源——`safe_fs` 的公共面确无对应原语，而扩它属 #24/#25 发布面的归属：
+
+1. `_copy_tree_publish`（无 copy 原语）——树复制只落在本模块内，且仍由 `safe_fs` 的
+   no-follow 原语逐条构成；
+2. `_remove_created_directory`（无非递归删目录原语）——父目录的撤回 MUST 是 `rmdir`
+   语义而非 `rmtree`（见下 I2），目录本身仍经 `safe_fs.open_directory_no_follow` 逐层
+   no-follow 打开，`os.rmdir` 只在那个 fd 上按条目名执行。
 
 **合成约定**：基线包内部布局（`BASELINE_*`）与变体内文件名（`VARIANT_*`）是本 issue 的
 fixture 定义的合成约定，以模块常量暴露给 11.1 消费；真实外部基线模型包的现场布局与读取
@@ -41,8 +69,9 @@ from __future__ import annotations
 import os
 import stat
 import uuid
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 from yd_producer.config import Config, LocalConfig
@@ -98,6 +127,15 @@ VIEWER_GEOJSON_NAMES = {
 }
 _VIEWER_RELATIVE_DIR = Path("input") / "viewer"
 
+#: 变体终名 MUST NOT 落入的 `YD_ROOT` 相对子树（词法闸门，见 `variant_targets`）：
+#: `input/viewer/` 是 products-contract §2 钉死的「恰两个文件」目录，`output/` 是同一类
+#: 的 viewer 读取面（§2/§7）。变体终名落进去只是普通配置笔误，但既有的两两互异 /
+#: 互为祖先闸门都拦不住它——变体目录是两个 GeoJSON 的**兄弟**。
+_VARIANT_FORBIDDEN_RELATIVE_DIRS = (
+    _VIEWER_RELATIVE_DIR,
+    Path("output"),
+)
+
 #: 本次运行专属 staging 在 `YD_ROOT` 下的目录名前缀（**不**落在 `input/viewer/` 之内：
 #: products-contract §2 只允许该目录存在两个文件，把 staging 建在里面等于让 viewer 看见
 #: 中间态）。
@@ -138,11 +176,18 @@ class VariantBuildRequest:
 
 @dataclass(frozen=True, kw_only=True)
 class PrepareReport:
-    """一次成功编排的产出终名。全部路径都已提交到 `YD_ROOT`。"""
+    """一次成功编排的产出终名。全部路径都已提交到 `YD_ROOT`。
+
+    `cleanup_warnings` 是**成功之后**的清理失败（scratch 工作目录或 `YD_ROOT` 内 staging
+    没删掉）。它 MUST NOT 被升格成异常：四个终名都已提交，把它抛出去会让运维看到退出码
+    `1`，而重跑又被拒绝覆盖守卫挡住（`prepare` 无 `--force`），一次成功的运行就此变成
+    死局。故这里是返回值上的证据面，不是失败信号；空元组表示清理干净。
+    """
 
     variants: Mapping[str, Path]
     rivers_geojson: Path
     boundary_geojson: Path
+    cleanup_warnings: tuple[str, ...] = field(default=())
 
 
 Builder = Callable[[VariantBuildRequest], None]
@@ -185,6 +230,12 @@ def _resolve_variant_relative(field: str, value: str, yd_root: Path) -> Path:
     绝对路径会把产物写到运行根之外，`..` 逃逸会让"拒绝覆盖"守卫保护的树和实际写入的树
     不是同一棵。规范化只做**词法**折叠（`os.path.normpath`），不 `resolve()`——后者会
     跟随 symlink 触碰文件系统，而这是一个在任何写入之前运行的纯函数闸门。
+
+    `..` 的判据是**任一 `os.pardir` 组件**，而非"规范化后是否逃出 `yd_root`"：
+    `specs/prepare-variants/spec.md`「拒绝覆盖已有产物」写的是「绝对路径或含 `..` 的路径
+    MUST 拒绝执行」，而只查规范化结果会放行 `input/../input/models/yd_gfs` 这类词法上
+    含 `..`、折叠后又落回根内的值。`variants.*` 没有任何需要 `..` 的正当理由，收紧到
+    组件级判据让规范文本与实现同时为真，且仍是纯词法、仍在任何写入之前。
     """
     if not value:
         raise PrepareError(f"配置项 `{field}` 不得为空")
@@ -193,14 +244,15 @@ def _resolve_variant_relative(field: str, value: str, yd_root: Path) -> Path:
         raise PrepareError(
             f"配置项 `{field}` 必须是相对 `yd_root` 的路径，不得为绝对路径：{value}"
         )
+    if os.pardir in candidate.parts:
+        raise PrepareError(
+            f"配置项 `{field}` 不得含 `..` 组件（规范化后是否仍落在 `yd_root` 内都一样"
+            f"拒绝）：{value}"
+        )
     normalized = os.path.normpath(value)
     parts = Path(normalized).parts
     if normalized == os.curdir or not parts:
         raise PrepareError(f"配置项 `{field}` 不得指向 `yd_root` 自身：{value}")
-    if parts[0] == os.pardir:
-        raise PrepareError(
-            f"配置项 `{field}` 规范化后逃出 `yd_root`：{value} -> {normalized}"
-        )
     return yd_root / normalized
 
 
@@ -219,7 +271,12 @@ def variant_targets(local: LocalConfig, config: Config) -> dict[str, Path]:
     之前**成立：
 
     1. **相对性**（见 `_resolve_variant_relative`）；
-    2. **四个终名两两互异、且任一 MUST NOT 是另一终名的祖先**。把 `variants.gfs` 与
+    2. **变体终名 MUST NOT 落在 `input/viewer/` 或 `output/` 之内**（含等于该目录本身）。
+       这两棵子树是 viewer 的读取面（products-contract §2/§7），而 §2 明写
+       `input/viewer/` 恰只有两个文件。`variants.gfs = "input/viewer/yd_gfs"` 是两个
+       GeoJSON 终名的**兄弟**：两两互异过、互为祖先过、两个 `lexists` 也过，于是变体的
+       `yd.cfg.ic`/`yd.para`/`yd.binding` 直接落到 viewer 的读取面上；
+    3. **四个终名两两互异、且任一 MUST NOT 是另一终名的祖先**。把 `variants.gfs` 与
        `variants.ifs` 抄成同一值是普通的配置笔误，而装载器只校验存在性与类型、不拦；
        两个 `lexists` 守卫也全过（两者都不存在），于是 `gfs` 提交成功、第二次 rename 撞
        `ENOTEMPTY`，`YD_ROOT` 停在"只有一个变体"的半提交态——直接违反总不变量。互为祖先
@@ -233,6 +290,15 @@ def variant_targets(local: LocalConfig, config: Config) -> dict[str, Path]:
         )
         for source in SOURCE_IDS
     }
+
+    for source, path in targets.items():
+        for relative in _VARIANT_FORBIDDEN_RELATIVE_DIRS:
+            forbidden = yd_root / relative
+            if path == forbidden or _is_ancestor(forbidden, path):
+                raise PrepareError(
+                    f"配置项 `variants.{source}` 不得落在 `{relative.as_posix()}` 之内"
+                    f"（那是 viewer 的读取面，products-contract §2/§7）：{path}"
+                )
 
     labelled = [(f"variants.{source}", path) for source, path in targets.items()]
     labelled += [
@@ -291,25 +357,41 @@ def default_builder(request: VariantBuildRequest) -> None:
 # --- 文件系统助手（全部由 safe_fs 原语构成）---------------------------------
 
 
-def _ensure_directory(path: Path, created: list[Path]) -> Path:
+def _ensure_directory(
+    path: Path, created: list[Path], *, lower_bound: Path | None = None
+) -> Path:
     """创建目录并把**本次新建**的每一层登记进 `created`（供提交失败时回滚）。
 
     先按存在性逐层向上探一遍再交给 `safe_fs.ensure_directory_no_follow`：后者一次建齐
     全部缺失层但不告诉调用方建了哪几层，而总不变量要求提交失败时 `YD_ROOT` 回到执行前的
     条目集合——「为提交而新建的父目录」属本次条目，必须能被指名删除。
+
+    **登记先于创建**（I2）：`ensure_directory_no_follow` 逐层 `os.mkdir` 且没有 unwind，
+    链中途失败（`EDQUOT`/`EACCES`/`ENOSPC`）会留下已建好的前几层。登记在创建之后，那几层
+    就永远不在 `created` 里，回滚够不着它们——`YD_ROOT` 回不到执行前的条目集合。故先
+    `created.extend` 再建：多登记一个"其实没建成"的条目是无害的（回滚对不存在的条目是
+    无操作），少登记一个已建成的条目则直接破坏总不变量。
+
+    `lower_bound` 给向上探测**封底**：没有下界时，`yd_root` 打错一个字（或 NFS 瞬时未
+    挂载）会让循环一路探到 `/`，把整条不存在的祖先链当成"本次新建"，随后
+    `ensure_directory_no_follow` 真把整个影子根造出来并**返回成功**，产物提交进一棵
+    viewer 永远读不到的树（agent-ops §4.1）。下界不存在即硬失败，不代造。
     """
     missing: list[Path] = []
     probe = path
     while not os.path.lexists(probe):
         missing.append(probe)
+        if lower_bound is not None and probe == lower_bound:
+            raise PrepareError(
+                f"运行根在本次运行途中消失，拒绝重建：{lower_bound}（目标 {path}）"
+            )
         if probe.parent == probe:
             break
         probe = probe.parent
-    target = _wrap_fs(
+    created.extend(reversed(missing))
+    return _wrap_fs(
         lambda: safe_fs.ensure_directory_no_follow(path), f"创建目录失败：{path}"
     )
-    created.extend(reversed(missing))
-    return target
 
 
 def _wrap_fs(action, message: str):
@@ -329,11 +411,15 @@ def _wrap_fs(action, message: str):
 
 
 def _remove_tree(path: Path) -> None:
-    """删除本次运行自己创建的目录/文件；缺失即无操作。
+    """递归删除本次运行创建的 `YD_ROOT` 侧条目（staging、已提交的本次终名）；缺失即无操作。
 
-    只用于**本次新建**的条目（scratch 工作目录、`YD_ROOT` 内 staging、已提交的本次终名、
-    为提交而新建的父目录）——它们在执行前都不存在（四个终名由 `lexists` 守卫证实），
-    故树内不可能有既有内容被误删。清理失败不掩盖原始失败：抛 `PrepareError`。
+    只用于**本次新建**的条目——它们在执行前都不存在（四个终名由 `lexists` 守卫证实），
+    故树内不可能有既有内容被误删。这里刻意保留 `rmtree_no_follow` 的**拒绝 symlink**
+    策略：`YD_ROOT` 内的这些树由本模块逐条新建，出现 symlink 是**篡改证据**，不该被
+    默默清掉。builder 产出的 scratch 树是相反的情形，见 `_remove_scratch_tree`。
+
+    失败抛 `PrepareError`，由 `_run_cleanup_steps` 收集——MUST NOT 直接从清理位置逃逸
+    （那会取消其余清理步骤、并替换掉正在传播的原始异常，见模块头 I1）。
     """
     _wrap_fs(
         lambda: safe_fs.rmtree_no_follow(path, missing_ok=True),
@@ -341,7 +427,79 @@ def _remove_tree(path: Path) -> None:
     )
 
 
-def _copy_tree_publish(source: Path, destination: Path, created: list[Path]) -> None:
+def _remove_scratch_tree(path: Path) -> None:
+    """递归删除 scratch 工作目录；缺失即无操作。**允许** symlink 条目。
+
+    走 `safe_fs.remove_tree_allow_symlinks` 而非 `rmtree_no_follow`：该目录的内容由
+    **builder** 写入，按构造是不可信的（`run_prepare` 的主 seam 就是一个可编排 builder），
+    builder 在 `variant_root` 里留一条 symlink 会让 `rmtree_no_follow` 拒绝整棵树
+    （`safe_fs.py` 的 `Refusing to remove symlink tree entry`），于是 scratch 树被永久搁浅，
+    而"变体含未预期条目"这条真因还被清理错误盖住。该原语的 docstring 把自己的适用范围
+    钉死为正是这一类"内容按构造不可信的残留树"，且从不跟随 symlink（unlink 链接本身）。
+    """
+    _wrap_fs(
+        lambda: safe_fs.remove_tree_allow_symlinks(
+            path.parent, path.name, missing_ok=True
+        ),
+        f"清理失败：{path}",
+    )
+
+
+def _remove_created_directory(path: Path) -> None:
+    """**非递归**撤回本次为提交而新建的一层目录；缺失或父目录已消失即无操作。
+
+    刻意不是 `rmtree`（I2）：`created` 里的父目录（`input/`、`input/models/`）是与别的
+    写入者共享的命名空间。递归删除会连带删掉另一个写入者在本次运行期间落进来的内容——
+    `prepare` 全程不持锁，四个 `lexists` 守卫到提交循环之间的窗口有整个 builder 运行时长。
+    单次运行下这些目录在回滚时可证为空（本次产物已先被撤回），故 `rmdir` 语义与递归删除
+    行为完全一致；一旦不空，`ENOTEMPTY` 是一次**响亮的失败**（收进清理失败附到原始异常
+    上），而不是一次静默的数据删除。
+
+    `os.rmdir` 走父目录 fd，父目录本身用 `safe_fs.open_directory_no_follow` 打开——路径
+    逐层 no-follow，与本模块其余文件系统操作同纪律。
+    """
+    try:
+        parent_fd = safe_fs.open_directory_no_follow(path.parent)
+    except FileNotFoundError:
+        return
+    except (safe_fs.SafeFilesystemError, OSError) as exc:
+        raise PrepareError(f"清理失败：{path}（{exc}）") from exc
+    try:
+        os.rmdir(path.name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise PrepareError(
+            f"清理失败：{path} 不是本次运行独占的空目录，拒绝递归删除（{exc}）"
+        ) from exc
+    finally:
+        os.close(parent_fd)
+
+
+def _run_cleanup_steps(steps: Iterable[Callable[[], None]]) -> list[str]:
+    """逐步执行清理，**每一步彼此独立**，返回失败描述列表（I1）。
+
+    裸序列的清理有两个致命形态：第一步抛出会取消后面所有步骤（已提交的终名回滚不掉、
+    本次新建的父目录被搁浅），而抛出的清理异常还会替换掉正在传播的原始异常
+    （`BuilderUnavailableError` 被降级成 `PrepareError`，`cli` 的退出码 `3` 变成 `1`）。
+
+    收 `Exception` 而非只收 `PrepareError`：清理原语内部任何未被翻译的 `OSError`
+    （`os.close`/`os.rmdir`）同样会取消后续步骤，那正是本函数要消除的形态。
+    `BaseException`（`KeyboardInterrupt`/`SystemExit`）不收——那是进程要停，属模块头
+    已声明的"被杀窗口"，不该被清理循环吞掉。
+    """
+    failures: list[str] = []
+    for step in steps:
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001 - 见 docstring：每步互不取消
+            failures.append(str(exc))
+    return failures
+
+
+def _copy_tree_publish(
+    source: Path, destination: Path, created: list[Path], *, lower_bound: Path
+) -> None:
     """把 `source` 树按**发布权限新建条目**的方式复制到 `destination`。
 
     刻意不是 `shutil.copytree(copy2)`/`cp -a`：那会把计算节点的 uid/gid/mode 原样带进
@@ -354,7 +512,7 @@ def _copy_tree_publish(source: Path, destination: Path, created: list[Path]) -> 
     非普通文件（symlink/FIFO/设备）一律拒绝：`safe_fs.stat_no_follow` 对 symlink 直接
     抛，其余类型在此点名。
     """
-    _ensure_directory(destination, created)
+    _ensure_directory(destination, created, lower_bound=lower_bound)
     names = _wrap_fs(
         lambda: safe_fs.list_directory_no_follow(source), f"读取目录失败：{source}"
     )
@@ -364,7 +522,9 @@ def _copy_tree_publish(source: Path, destination: Path, created: list[Path]) -> 
             lambda child=child: safe_fs.stat_no_follow(child), f"读取条目失败：{child}"
         )
         if stat.S_ISDIR(info.st_mode):
-            _copy_tree_publish(child, destination / name, created)
+            _copy_tree_publish(
+                child, destination / name, created, lower_bound=lower_bound
+            )
         elif stat.S_ISREG(info.st_mode):
             payload = _wrap_fs(
                 lambda child=child: safe_fs.read_bytes_no_follow(child),
@@ -439,6 +599,54 @@ def _validate_variant(source: str, variant_root: Path, config: Config) -> None:
 # --- 编排 --------------------------------------------------------------------
 
 
+def _verify_root(field_name: str, value: Path | str) -> Path:
+    """运行根的入口闸门（I3）：MUST 为绝对路径、MUST 为已存在的目录。
+
+    绝对性这一条同时关掉两个洞：`~/yd` 这类拼写会让守卫的 `os.path.lexists` 与
+    `geometry` 看字面量 `~`，而 `safe_fs` 的每个原语都先 `expanduser()`——同一个配置值
+    在三个消费者眼里是两个不同的文件系统对象，回滚会去删真实 `$HOME/yd` 里的既有内容；
+    普通相对路径同理（`safe_fs` 拿 `Path.cwd()` 锚定，另外两者不锚）。
+
+    "已存在"这一条关掉影子根：`yd_root` 打错一个字（或 NFS 未挂载）时，若默许创建，
+    整棵运行根会被凭空造出来、运行**返回成功**、产物躺在 viewer 永远读不到的地方
+    （agent-ops §4.1/§4.2）。`safe_fs.verify_directory_no_follow` 逐层 no-follow 打开，
+    顺带拒掉任何 symlink 组件，并返回它自己解析后的路径——本模块之后一律用这个返回值，
+    保证三个消费者拿的是同一个拼写。
+
+    校验落在这里而不是装载器：`specs/cli-config/spec.md` 把 `local.toml` 的装载钉死为
+    只做存在性与类型检查，往 `config.py` 里加文件系统探测会越过那条规范。
+    """
+    path = Path(value)
+    if not path.is_absolute():
+        raise PrepareError(
+            f"配置项 `{field_name}` 必须是绝对路径（`~` 与相对路径一律拒绝——"
+            f"守卫、`geometry` 与 `safe_fs` 对它们的展开方式不同）：{value}"
+        )
+    return _wrap_fs(
+        lambda: safe_fs.verify_directory_no_follow(path),
+        f"配置项 `{field_name}` 必须是已存在的目录，prepare 不代建运行根：{path}",
+    )
+
+
+def _refuse_existing_targets(
+    labelled_targets: Sequence[tuple[str, Path]], *, phase: str
+) -> None:
+    """四个终名的拒绝覆盖探测；任一 `lexists` 即 `PrepareError`。
+
+    探两次（步骤 1 与提交循环之前）是刻意的 TOCTOU **窄化**（不是消解）：步骤 1 的探测
+    与提交之间隔着两次 builder 调用的全部时长，而 `safe_fs.rename_entry_no_follow` 发的
+    是裸 `renameat`（没有 `RENAME_NOREPLACE`），期间落到终名上的既有文件会被**静默替换**
+    且运行报成功。第二次探测把窗口从"整个构建时长"压到"探测到 rename 之间的微秒级"。
+    POSIX 没有可移植的 `RENAME_NOREPLACE`，剩下的窗口不可消解，本模块也不假装消解。
+    """
+    for label, target in labelled_targets:
+        if os.path.lexists(target):
+            raise PrepareError(
+                f"终名已存在（{phase}），拒绝执行：{target}（{label}）；"
+                "prepare 不覆盖既有产物，也不提供 --force（compute-loop §6.1）"
+            )
+
+
 def run_prepare(
     *,
     local: LocalConfig,
@@ -448,6 +656,8 @@ def run_prepare(
 ) -> PrepareReport:
     """执行一次 `prepare` 编排，严格按 fixture 钉死的八步顺序。
 
+    0. **运行根预检**：`local.yd_root` 与 `local.scratch_root` MUST 是绝对路径且是已存在
+       的目录（见 `_verify_root`；I3）；
     1. **拒绝覆盖**：四个终名任一 `lexists` 即 `PrepareError`；此时 MUST NOT 创建
        scratch、MUST NOT 调 builder（`prepare` 不幂等、无 `--force`，compute-loop §6.1）；
     2. 在 `local.scratch_root` 下建本次运行专属工作目录（名字含 pid + 随机 token，
@@ -457,23 +667,31 @@ def run_prepare(
        `config.reach_count`）；
     5. 把校验通过的两棵变体树按发布权限复制进 `YD_ROOT` 内本次专属 staging；
     6. `geometry.write_viewer_geojson` 直接写进该 staging（**不经 scratch**，唯一落点）；
-    7. 四个终名逐个同盘 rename 提交，顺序「两变体 → rivers → boundary」；
-    8. 无论成败删除 scratch 工作目录与 staging；提交阶段失败时**同时**回滚本次已提交的
-       终名与本次为提交新建的父目录，使 `YD_ROOT` 回到执行前的条目集合。
+    7. 四个终名**再探一次**拒绝覆盖（TOCTOU 窄化，见 `_refuse_existing_targets`），随后
+       逐个同盘 rename 提交，顺序「两变体 → rivers → boundary」；
+    8. 无论成败删除 `YD_ROOT` 内 staging 与 scratch 工作目录；提交阶段失败时**同时**回滚
+       本次已提交的终名与本次为提交新建的父目录，使 `YD_ROOT` 回到执行前的条目集合。
+
+    步骤 8 不用 `finally`（I1）。`finally` 里抛出的清理失败会在**成功路径**上抢在
+    `return PrepareReport(...)` 之前逃逸，把一次四个终名全部提交完成的运行报成失败，而
+    重跑又被拒绝覆盖守卫挡住；在**失败路径**上它则替换掉正在传播的原始异常，
+    `BuilderUnavailableError` 被降级成 `PrepareError`，`cli` 的退出码 `3` 变成 `1`。故
+    分成 `except` / `else` 两条显式路径：清理步骤各自独立执行、失败被收集，失败路径上
+    以 `add_note` 附到原始异常（`raise` 裸重抛，异常对象与 traceback 都不动），成功路径上
+    进 `PrepareReport.cleanup_warnings`。清理顺序也钉死为「先 `YD_ROOT` 内 staging、后
+    本地 scratch」：前者承载不变量（留在 `YD_ROOT` 里就是 viewer 能看见的中间态），后者
+    只是一次性本地垃圾，不该反过来卡住前者。
     """
-    yd_root = Path(local.yd_root)
-    scratch_root = Path(local.scratch_root)
+    # 步骤 0：运行根预检（在任何路径拼接、任何写入、任何 builder 调用之前）。
+    yd_root = _verify_root("yd_root", local.yd_root)
+    scratch_root = _verify_root("scratch_root", local.scratch_root)
     baseline = Path(baseline_root)
 
     # 步骤 1：相对性/互异性闸门（在任何写入之前）与拒绝覆盖检查。
     variants = variant_targets(local, config)
     viewer = viewer_targets(local)
-    for label, target in list(variants.items()) + list(viewer.items()):
-        if os.path.lexists(target):
-            raise PrepareError(
-                f"终名已存在，拒绝执行：{target}（{label}）；"
-                "prepare 不覆盖既有产物，也不提供 --force（compute-loop §6.1）"
-            )
+    labelled_targets = list(variants.items()) + list(viewer.items())
+    _refuse_existing_targets(labelled_targets, phase="执行前")
 
     token = f"{os.getpid()}-{uuid.uuid4().hex}"
     work_dir = scratch_root / f"{_SCRATCH_PREFIX}-{token}"
@@ -483,13 +701,13 @@ def run_prepare(
 
     try:
         # 步骤 2–3：scratch 工作目录 + 逐 source 调 builder。
-        _ensure_directory(work_dir, [])
+        _ensure_directory(work_dir, [], lower_bound=scratch_root)
         requests: dict[str, VariantBuildRequest] = {}
         for source in SOURCE_IDS:
             variant_root = work_dir / source
             if os.path.lexists(variant_root):  # pragma: no cover - token 保证不可达
                 raise PrepareError(f"scratch 变体目录已存在：{variant_root}")
-            _ensure_directory(variant_root, [])
+            _ensure_directory(variant_root, [], lower_bound=scratch_root)
             request = VariantBuildRequest(
                 source_id=normalize_source_id(source),
                 grid_id=getattr(config.nwm_canonical_grid_id, source),
@@ -512,18 +730,21 @@ def run_prepare(
             _validate_variant(source, requests[source].variant_root, config)
 
         # 步骤 5：scratch -> `YD_ROOT` 内 staging（按发布权限新建条目）。
-        _ensure_directory(staging_root, created)
+        _ensure_directory(staging_root, created, lower_bound=yd_root)
         models_staging = staging_root / "models"
         viewer_staging = staging_root / "viewer"
         for source in SOURCE_IDS:
             # staging 内按 source 命名而非按终名叶名：两个终名允许同叶名不同父目录
             # （`a/yd` 与 `b/yd`），照终名命名会在 staging 里撞成一个。
             _copy_tree_publish(
-                requests[source].variant_root, models_staging / source, created
+                requests[source].variant_root,
+                models_staging / source,
+                created,
+                lower_bound=yd_root,
             )
 
         # 步骤 6：GeoJSON 直接落 staging（唯一落点，不经 scratch）。
-        _ensure_directory(viewer_staging, created)
+        _ensure_directory(viewer_staging, created, lower_bound=yd_root)
         try:
             write_viewer_geojson(
                 rivers_shp=baseline_rivers_shp(baseline),
@@ -533,7 +754,9 @@ def run_prepare(
         except GeometryError as exc:
             raise PrepareError(f"viewer GeoJSON 生成失败：{exc}") from exc
 
-        # 步骤 7：四个终名逐个同盘 rename 提交，顺序「两变体 → rivers → boundary」。
+        # 步骤 7：提交前把四个终名再探一次（TOCTOU 窄化），随后逐个同盘 rename 提交，
+        # 顺序「两变体 → rivers → boundary」。
+        _refuse_existing_targets(labelled_targets, phase="提交前复探")
         plan: list[tuple[Path, str, Path]] = [
             (models_staging, source, variants[source]) for source in SOURCE_IDS
         ]
@@ -542,7 +765,7 @@ def run_prepare(
             for key in ("rivers", "boundary")
         ]
         for source_parent, source_name, target in plan:
-            _ensure_directory(target.parent, created)
+            _ensure_directory(target.parent, created, lower_bound=yd_root)
             _wrap_fs(
                 lambda source_parent=source_parent, source_name=source_name, target=target: (
                     safe_fs.rename_entry_no_follow(
@@ -552,23 +775,40 @@ def run_prepare(
                 f"提交失败：{source_parent / source_name} -> {target}",
             )
             committed.append(target)
-    except BaseException:
+    except BaseException as exc:
         # 步骤 8（失败侧）：把本次新建的条目全部撤回，使 `YD_ROOT` 的条目集合与执行前
-        # 相同。顺序自内向外：已提交终名 -> staging -> 本次新建的父目录（逆序）。
-        # 已提交终名在执行前由 `lexists` 守卫证实不存在，故删除的只可能是本次产物。
-        for target in reversed(committed):
-            _remove_tree(target)
-        _remove_tree(staging_root)
-        for directory in reversed(created):
-            _remove_tree(directory)
+        # 相同。顺序自内向外：已提交终名 -> staging -> 本次新建的父目录（逆序）->
+        # scratch 工作目录。已提交终名在执行前由 `lexists` 守卫证实不存在，故删除的只
+        # 可能是本次产物；父目录一律非递归（见 `_remove_created_directory`）。
+        #
+        # 每一步互不取消，失败**收集**而非抛出：抛出会取消其余撤回步骤，并把原始异常
+        # （可能是 `BuilderUnavailableError`）替换成一条清理错误。失败以 `add_note` 附
+        # 在原始异常上——`raise` 是裸重抛，异常类型、`__cause__` 与 traceback 都不动。
+        failures = _run_cleanup_steps(
+            [partial(_remove_tree, target) for target in reversed(committed)]
+            + [partial(_remove_tree, staging_root)]
+            + [
+                partial(_remove_created_directory, directory)
+                for directory in reversed(created)
+            ]
+            + [partial(_remove_scratch_tree, work_dir)]
+        )
+        for failure in failures:
+            exc.add_note(f"回滚/清理未完成：{failure}")
         raise
-    finally:
-        # 步骤 8（无条件）：scratch 工作目录与 staging 一并删除，成败都清。
-        _remove_tree(work_dir)
-        _remove_tree(staging_root)
+    else:
+        # 步骤 8（成功侧）：只清 staging 与 scratch。失败不升格为异常——四个终名都已
+        # 提交，报成失败会让重跑撞上拒绝覆盖守卫（无 `--force`），把一次成功变成死局。
+        warnings = _run_cleanup_steps(
+            [
+                partial(_remove_tree, staging_root),
+                partial(_remove_scratch_tree, work_dir),
+            ]
+        )
 
     return PrepareReport(
         variants=dict(variants),
         rivers_geojson=viewer["rivers"],
         boundary_geojson=viewer["boundary"],
+        cleanup_warnings=tuple(warnings),
     )

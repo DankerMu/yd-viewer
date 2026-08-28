@@ -43,6 +43,16 @@ BASELINE_HYDRO_PARAM_BYTES = b"# synthetic hydrologic parameters\nKsatH 1.0e-4\n
 SYNTHETIC_MESH_COUNT = 2
 
 
+def binding_bytes(*, grid_id: str, source_id: str) -> bytes:
+    """假 builder 写进 `yd.binding` 的字节：把 `grid_id`/`source_id` **写进内容**。
+
+    这是"变体内容 ↔ 终名"绑定的唯一 oracle，故 fixture 与断言共用本函数而不是各写一遍
+    格式：断言那边只要写出「`yd_gfs` 里该有 `source_id=gfs`」，把两次 staging 复制源对调
+    的实现就必红。只断言"两个 binding 互不相等"在对调下恒真——它是一条永真式。
+    """
+    return f"grid_id={grid_id}\nsource_id={source_id}\n".encode()
+
+
 @dataclass(frozen=True)
 class SyntheticBaselinePackage:
     """一份合成基线模型包及其 oracle。"""
@@ -94,6 +104,9 @@ class VariantScript:
     include_river_section: bool = True
     #: 额外留在 `variant_root` 内的条目（如 `"yd.binding.tmp"`）
     extra_entries: tuple[str, ...] = ()
+    #: 额外留在 `variant_root` 内的 **symlink** 条目（名 -> 目标字符串）。builder 的产出
+    #: 按构造不可信，symlink 是编排清理面必须能吃下的形态之一
+    symlink_entries: tuple[tuple[str, str], ...] = ()
     #: 不写出的条目（用于"变体缺必需文件"）
     omit_entries: tuple[str, ...] = ()
     #: `True` 表示 builder 返回但**根本没建**（这里是：删掉编排预建的）`variant_root`
@@ -161,10 +174,11 @@ class RecordingBuilder:
         payload = {
             # 水文参数从**同一份基线**原样复制：两变体字节必然一致（同源）。
             VARIANT_HYDRO_PARAM_NAME: self._package.hydro_param.read_bytes(),
-            # binding 逐 source 由 `grid_id` 决定：两变体字节必然不同（不共用）。
-            VARIANT_BINDING_NAME: (
-                f"grid_id={request.grid_id}\nsource_id={request.source_id}\n"
-            ).encode(),
+            # binding 逐 source 由 `grid_id`/`source_id` 决定：两变体字节必然不同（不
+            # 共用），且内容可反查出它属于哪个 source（见 `binding_bytes`）。
+            VARIANT_BINDING_NAME: binding_bytes(
+                grid_id=request.grid_id, source_id=request.source_id
+            ),
             VARIANT_CALIBRATED_STATE_NAME: (
                 b"\xff\xfe truncated-not-utf8"
                 if script.corrupt_state
@@ -177,6 +191,8 @@ class RecordingBuilder:
             (root / name).write_bytes(content)
         for name in script.extra_entries:
             (root / name).write_bytes(b"residue\n")
+        for name, link_target in script.symlink_entries:
+            (root / name).symlink_to(link_target)
 
 
 def tree_snapshot(root: Path) -> dict[str, object]:

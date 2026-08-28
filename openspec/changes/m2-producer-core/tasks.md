@@ -1362,7 +1362,7 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 
 - [x] 10.1 引入几何依赖（pyshp/pyproj/shapely）并 `uv lock`，构造带自定义 Albers `.prj` 的合成 shapefile 基线 fixture，实现 `.prj` 解析与重投影工具，CI 绿
 - [x] 10.2 实现 `rivers.geojson`（`reach_id`=DBF Index、数量一致）与 `boundary.geojson`（单元合并边界）生成，落点 `input/viewer/`
-- [ ] 10.3 实现 prepare 编排：拒绝覆盖检查 → 薄外壳按源两次调用 builder（记录型假 builder 断言两次入参 source/grid 不同、输出分别落 `yd_gfs`/`yd_ifs`）→ 变体 reach 数等于 `reach_count` 校验 → 提交到 `input/models/` 与 `input/viewer/` → scratch 清理
+- [x] 10.3 实现 prepare 编排：拒绝覆盖检查 → 薄外壳按源两次调用 builder（记录型假 builder 断言两次入参 source/grid 不同、输出分别落 `yd_gfs`/`yd_ifs`）→ 变体 reach 数等于 `reach_count` 校验 → 提交到 `input/models/` 与 `input/viewer/` → scratch 清理
 
 依赖：组 1（薄外壳、`reach_count`）
 §13.1 归属：prepare
@@ -1666,7 +1666,7 @@ Seams under test:
 
 Required evidence（每条 input -> expected output）:
 - 干净 `YD_ROOT` + 合法合成基线 -> 退出成功；`YD_ROOT` **全树条目集合**等于「执行前 ∪ 恰好四个终名及其必要父目录」——即**无 staging 残留、无多余目录**（单点探测 `input/models/`、`input/viewer/` 各有几个条目对"staging 留在 `YD_ROOT` 顶层"恒真，故此处必须走全树）；`input/viewer/` 下**恰有** `rivers.geojson` 与 `boundary.geojson` 两个条目；`scratch_root` 下无任何残留条目
-- 同一次成功运行 -> 假 builder 恰被调用 2 次；两次 `source_id` 分别为 `"gfs"`/`"ifs"`、两次 `grid_id` 取自 config 且互不相等；两次 `variant_root` 互不相同、调用前均不存在、均在 `scratch_root` 之下；两次 `baseline_root` 相同
+- 同一次成功运行 -> 假 builder 恰被调用 2 次；两次 `source_id` 分别为 `"gfs"`/`"ifs"`、两次 `grid_id` 取自 config 且互不相等；两次 `variant_root` 互不相同、**调用当时为空且由本次运行新建**（编排在调用 builder 前建目录，故「调用前不存在」只能指「不是上一次运行的遗留」——该性质由「两次运行取不同 scratch/staging 名」的用例行使）、均在 `scratch_root` 之下；两次 `baseline_root` 相同
 - 成功运行 -> 两变体的水文参数文件（假 builder 从同一基线复制）字节一致（同源）；两变体的 binding 文件字节不同（不共用）
 - `YD_ROOT/input/models/yd_gfs` 预先存在 -> `PrepareError`；全树快照与执行前完全一致；`scratch_root` 无新条目；builder 调用次数 **0**
 - `YD_ROOT/input/viewer/rivers.geojson` 预先存在且内容已知 -> `PrepareError`；该文件字节与执行前**逐字节相等**；`input/models/` 无新目录；builder 调用次数 **0**（PR #50 路由过来的 CONFIRMED 发现在此结清）

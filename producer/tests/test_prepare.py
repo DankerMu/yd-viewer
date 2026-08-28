@@ -35,6 +35,7 @@ from prepare_fixtures import (
     RenameProbe,
     SyntheticBaselinePackage,
     VariantScript,
+    binding_bytes,
     tree_snapshot,
     write_baseline_package,
 )
@@ -655,20 +656,27 @@ def test_first_commit_failure_leaves_no_new_entries(env, monkeypatch):
     assert_untouched(env, before)
 
 
-def test_late_commit_failure_rolls_back_already_committed_targets(env, monkeypatch):
-    """第三次 rename（rivers）失败 -> 两个已提交的变体目录必须被撤回。
+@pytest.mark.parametrize("fail_at", [2, 3, 4])
+def test_late_commit_failure_rolls_back_already_committed_targets(
+    env, monkeypatch, fail_at
+):
+    """第 N 次 rename 失败 -> 此前已提交的每一个终名都必须被撤回。
 
-    总不变量是**全有或全无**：只回滚 staging 与父目录、把已提交的两个变体留在
-    `YD_ROOT` 里，会留下一个"有变体、无 GeoJSON"的半提交态，而 `prepare` 无 `--force`
-    且四名任一存在即拒绝——半提交态目前没有文档化出路（已接受残留只到 SIGKILL 窗口）。
+    总不变量是**全有或全无**：只回滚 staging 与父目录、把已提交的变体留在 `YD_ROOT`
+    里，会留下一个半提交态，而 `prepare` 无 `--force` 且四名任一存在即拒绝——半提交态
+    目前没有文档化出路（已接受残留只到 SIGKILL 窗口）。
+
+    `fail_at` 三个取值覆盖三种撤回形态：只回滚一个变体**目录**（2）、回滚两个变体目录
+    （3）、以及回滚里含一个已提交的普通**文件**（4，`rivers.geojson` 已落终名）——第三
+    种此前从未被行使，而 `rmtree_no_follow` 对目录与非目录走的是两条不同分支。
     """
-    probe = _probe_rename(monkeypatch, fail_at=3)
+    probe = _probe_rename(monkeypatch, fail_at=fail_at)
     before = tree_snapshot(env.yd_root)
 
     with pytest.raises(PrepareError):
         run(env, make_builder(env))
 
-    assert probe.count == 3
+    assert probe.count == fail_at
     assert_untouched(env, before)
 
 
@@ -723,3 +731,517 @@ def test_viewer_targets_are_the_contract_literals(env):
         "rivers": env.yd_root / "input" / "viewer" / "rivers.geojson",
         "boundary": env.yd_root / "input" / "viewer" / "boundary.geojson",
     }
+
+
+# --- I1 清理/回滚容错 --------------------------------------------------------
+
+
+def _staging_entries(yd_root: Path) -> list[str]:
+    """`YD_ROOT` 顶层残留的本次 staging 目录名（成功后必须为空）。"""
+    return sorted(
+        p.name
+        for p in yd_root.iterdir()
+        if p.name.startswith(prepare_module._STAGING_PREFIX)
+    )
+
+
+def _fail_rmtree_when(monkeypatch, predicate):
+    """令 `safe_fs.rmtree_no_follow` 只对满足 `predicate` 的路径失败。
+
+    模拟 NFS 上的瞬时 `EIO`/`ESTALE`——`safe_fs` 自己就把这一类归为 `kind="io"`。
+    """
+    real = safe_fs.rmtree_no_follow
+
+    def flaky(path, **kwargs):
+        if predicate(Path(path)):
+            raise safe_fs.SafeFilesystemError(
+                f"injected cleanup failure: {path}", kind="io"
+            )
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(prepare_module.safe_fs, "rmtree_no_follow", flaky)
+
+
+def test_one_failing_rollback_step_does_not_cancel_the_others(env, monkeypatch):
+    """回滚里第一步删除失败 -> 其余每一步照跑，且原始异常原样上浮（I1 / cand-01）。
+
+    裸序列的回滚在这条上必红：第一个 `_remove_tree` 抛出会取消后面所有撤回，`YD_ROOT`
+    停在「两个变体已提交、无 GeoJSON 对、本次新建的父目录全部搁浅」的半提交态，而逃逸
+    出去的还是一条清理错误——原始的提交失败被顶掉了。
+    """
+    _probe_rename(monkeypatch, fail_at=4)
+    rivers = env.yd_root / "input" / "viewer" / "rivers.geojson"
+    _fail_rmtree_when(monkeypatch, lambda path: path == rivers)
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(env, make_builder(env))
+
+    # 上浮的是**原始**失败（第 4 次 rename），不是清理失败。
+    assert "提交失败" in str(excinfo.value)
+    assert "boundary.geojson" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, safe_fs.SafeFilesystemError)
+    # 清理失败没有被丢掉，也没有替换原始异常：作为 note 附在它身上。
+    notes = getattr(excinfo.value, "__notes__", [])
+    assert any("injected cleanup failure" in note for note in notes)
+    assert any(str(rivers) in note for note in notes)
+
+    # 失败那一步之后的每一步都真的跑了。
+    assert not os.path.lexists(env.yd_root / "input" / "models" / "yd_gfs")
+    assert not os.path.lexists(env.yd_root / "input" / "models" / "yd_ifs")
+    assert not os.path.lexists(env.yd_root / "input" / "models")
+    assert _staging_entries(env.yd_root) == []
+    assert tree_snapshot(env.scratch_root) == {}
+    # 只有那一步自己的残留还在（连同盛着它的、非递归因此删不掉的父目录）。
+    assert rivers.is_file()
+
+
+def test_builder_unavailable_survives_a_cleanup_failure(env, monkeypatch):
+    """清理失败 MUST NOT 把 `BuilderUnavailableError` 降级成基类（I1 / cand-02）。
+
+    这是今天唯一生产可达的那一支：`cli` 传的就是生产 `default_builder`。降级即退出码
+    从 `3` 掉到 `1`，运维会去改一份没有问题的配置。
+    """
+
+    def refuse(parent, name, **kwargs):
+        raise safe_fs.SafeFilesystemError(
+            f"injected cleanup failure: {Path(parent) / name}", kind="io"
+        )
+
+    monkeypatch.setattr(prepare_module.safe_fs, "remove_tree_allow_symlinks", refuse)
+    before = tree_snapshot(env.yd_root)
+
+    with pytest.raises(BuilderUnavailableError) as excinfo:
+        run_prepare(local=env.local, config=env.config, baseline_root=env.package.root)
+
+    assert type(excinfo.value) is BuilderUnavailableError
+    assert "归属 M4" in str(excinfo.value)
+    notes = getattr(excinfo.value, "__notes__", [])
+    assert any("injected cleanup failure" in note for note in notes)
+    assert tree_snapshot(env.yd_root) == before
+
+
+def test_success_survives_a_staging_cleanup_failure(env, monkeypatch):
+    """成功提交后 staging 删不掉 -> 仍然返回成功报告（I1 / cand-03）。
+
+    把它报成失败会让四个终名已经全部提交的运行拿到退出码 `1`，而重跑立刻撞上拒绝覆盖
+    守卫（无 `--force`）——一次成功的运行变成死局。
+    """
+    before = tree_snapshot(env.yd_root)
+    _fail_rmtree_when(
+        monkeypatch,
+        lambda path: path.name.startswith(prepare_module._STAGING_PREFIX),
+    )
+
+    report = run(env, make_builder(env))
+
+    after = tree_snapshot(env.yd_root)
+    assert report.rivers_geojson.is_file()
+    assert report.boundary_geojson.is_file()
+    assert report.variants["gfs"].is_dir()
+    assert report.variants["ifs"].is_dir()
+    # 清理失败没有被吞掉：它在返回值上。
+    assert report.cleanup_warnings
+    assert any("injected cleanup failure" in w for w in report.cleanup_warnings)
+    # 残留确实还在（告警说的是实话），且 scratch 侧照样清了（两步互不取消）。
+    assert _staging_entries(env.yd_root) != []
+    assert tree_snapshot(env.scratch_root) == {}
+    assert set(after) >= set(before) | EXPECTED_NEW_ENTRIES
+
+
+def test_scratch_cleanup_failure_does_not_gate_the_staging_cleanup(env, monkeypatch):
+    """本地 scratch（可弃）删不掉 MUST NOT 卡住 `YD_ROOT` 内 staging（承载不变量）的清理。"""
+
+    def refuse(parent, name, **kwargs):
+        raise safe_fs.SafeFilesystemError(
+            f"injected scratch failure: {Path(parent) / name}", kind="io"
+        )
+
+    monkeypatch.setattr(prepare_module.safe_fs, "remove_tree_allow_symlinks", refuse)
+
+    report = run(env, make_builder(env))
+
+    assert _staging_entries(env.yd_root) == []
+    assert any("injected scratch failure" in w for w in report.cleanup_warnings)
+    assert tree_snapshot(env.scratch_root) != {}
+
+
+def test_success_reports_no_cleanup_warnings_when_cleanup_is_clean(env):
+    """判别性反面：正常成功路径上 `cleanup_warnings` 必须是空的。"""
+    report = run(env, make_builder(env))
+
+    assert report.cleanup_warnings == ()
+
+
+def test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed(env):
+    """builder 在 `variant_root` 里留 symlink -> 拒绝提交并点名它，scratch 全清（cand-04）。
+
+    `rmtree_no_follow` 对 symlink 条目**拒绝删除**（在 `YD_ROOT` 侧那是正确策略：symlink
+    是篡改证据）。但 scratch 的内容由 builder 写、按构造不可信，用同一个原语会让 scratch
+    树永久搁浅，而"变体含未预期条目"这条真因还被一条清理错误顶掉。
+    """
+    before = tree_snapshot(env.yd_root)
+    builder = make_builder(
+        env, {"gfs": VariantScript(symlink_entries=(("yd.link", "/etc/passwd"),))}
+    )
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(env, builder)
+
+    assert "yd.link" in str(excinfo.value)
+    assert "未预期条目" in str(excinfo.value)
+    assert getattr(excinfo.value, "__notes__", []) == []
+    assert_untouched(env, before)
+
+
+# --- I2 本次条目登记与删除范围 ----------------------------------------------
+
+
+def test_mid_chain_directory_creation_failure_leaves_no_new_entries(env, monkeypatch):
+    """`ensure_directory_no_follow` 建到一半失败 -> `YD_ROOT` 条目集合回到执行前（cand-05）。
+
+    该原语逐层 `os.mkdir` 且**没有 unwind**；登记在创建之后，中途失败时已建好的那几层
+    永远不进 `created`，回滚够不着它们。
+    """
+    before = tree_snapshot(env.yd_root)
+    real = safe_fs.ensure_directory_no_follow
+    victim = env.yd_root / "input" / "models"
+
+    def partial_then_fail(path, **kwargs):
+        if Path(path) == victim:
+            # 忠实模拟 EDQUOT/EACCES 打断循环：前一层已经落盘了。
+            real(env.yd_root / "input")
+            raise safe_fs.SafeFilesystemError(
+                f"injected mid-chain failure: {path}", kind="io"
+            )
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(
+        prepare_module.safe_fs, "ensure_directory_no_follow", partial_then_fail
+    )
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(env, make_builder(env))
+
+    assert "injected mid-chain failure" in str(excinfo.value)
+    assert set(tree_snapshot(env.yd_root)) == set(before)
+    assert tree_snapshot(env.scratch_root) == {}
+
+
+def test_rollback_never_recursively_deletes_a_shared_parent(env, monkeypatch):
+    """本次新建的父目录里出现别的写入者的内容 -> 回滚 MUST NOT 递归删掉它（cand-06）。
+
+    `prepare` 全程不持锁，四个 `lexists` 守卫到提交循环之间隔着整个 builder 运行时长，
+    两个并发/重复派发的运行都能通过守卫。父目录用递归删除时，回滚会连带删掉另一个运行
+    已经提交的产物——直接违反「任何既有条目 MUST NOT 被覆盖或删除」。
+    """
+    real = safe_fs.rename_entry_no_follow
+    foreign = env.yd_root / "input" / "models" / "foreign_from_run_a"
+
+    def plant_then_fail(parent, name, dest_parent, dest_name, **kwargs):
+        foreign.write_bytes(b"another writer's committed product\n")
+        raise safe_fs.SafeFilesystemError(
+            f"injected rename failure: {Path(dest_parent) / dest_name}", kind="io"
+        )
+
+    monkeypatch.setattr(
+        prepare_module.safe_fs, "rename_entry_no_follow", plant_then_fail
+    )
+    assert real is not plant_then_fail
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(env, make_builder(env))
+
+    # 别人的产物逐字节还在。
+    assert foreign.read_bytes() == b"another writer's committed product\n"
+    # 而且是**响亮**地留下的：删不掉的父目录进了 note，不是静默递归删除。
+    notes = getattr(excinfo.value, "__notes__", [])
+    assert any(str(env.yd_root / "input" / "models") in note for note in notes)
+    assert any("拒绝递归删除" in note for note in notes)
+    assert _staging_entries(env.yd_root) == []
+    assert tree_snapshot(env.scratch_root) == {}
+
+
+def test_probe_loop_refuses_to_rebuild_a_vanished_run_root(env):
+    """`yd_root` 在运行途中消失 -> 硬失败，MUST NOT 沿着不存在的祖先链把它重造出来。"""
+    import shutil
+
+    recording = make_builder(env)
+
+    def builder(request):
+        recording(request)
+        if request.source_id == "ifs":
+            shutil.rmtree(env.yd_root)
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(env, builder)
+
+    assert str(env.yd_root) in str(excinfo.value)
+    assert "拒绝重建" in str(excinfo.value)
+    assert not os.path.lexists(env.yd_root)
+    assert tree_snapshot(env.scratch_root) == {}
+
+
+# --- I3 同一路径拼写（运行根预检）------------------------------------------
+
+
+def _replace_local(env: Env, **overrides) -> Env:
+    """替换已装载 `LocalConfig` 的运行根字段。
+
+    装载器对 `yd_root`/`scratch_root` 只做存在性与类型检查（`specs/cli-config/spec.md`
+    钉死），故它原样透传字符串——`replace` 忠实复现装载器会给出的对象。
+    """
+    from dataclasses import replace
+
+    return Env(
+        config=env.config,
+        local=replace(env.local, **overrides),
+        yd_root=env.yd_root,
+        scratch_root=env.scratch_root,
+        package=env.package,
+    )
+
+
+@pytest.mark.parametrize("field_name", ["yd_root", "scratch_root"])
+@pytest.mark.parametrize("spelling", ["~/yd", "relative/yd", "./yd"])
+def test_non_absolute_run_roots_are_refused_before_any_builder_call(
+    env, field_name, spelling
+):
+    """非绝对的运行根一律拒绝（I3 / cand-12）。
+
+    `safe_fs` 的每个原语都先 `expanduser()` 并用 `Path.cwd()` 锚定相对路径，而拒绝覆盖
+    守卫的 `os.path.lexists` 与 `geometry.write_viewer_geojson` 都不展开。同一个配置值
+    在三个消费者眼里成了两个文件系统对象，回滚就会去删真实 `$HOME` 里的既有内容。
+    """
+    before = tree_snapshot(env.yd_root)
+    scoped = _replace_local(env, **{field_name: spelling})
+    builder = make_builder(env)
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(scoped, builder)
+
+    message = str(excinfo.value)
+    assert field_name in message
+    assert "绝对路径" in message
+    assert_untouched(env, before, builder)
+
+
+def test_tilde_run_root_never_touches_the_real_home(env, tmp_path, monkeypatch):
+    """`yd_root = "~/yd"` 的判别性证据：真实 `$HOME` 下的既有产物逐字节存活。"""
+    home = tmp_path / "home"
+    victim_dir = home / "yd" / "input" / "viewer"
+    victim_dir.mkdir(parents=True)
+    victim = victim_dir / "rivers.geojson"
+    victim.write_bytes(b"OPERATOR BYTES\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    home_before = tree_snapshot(home)
+    builder = make_builder(env)
+
+    with pytest.raises(PrepareError):
+        run(_replace_local(env, yd_root="~/yd"), builder)
+
+    assert victim.read_bytes() == b"OPERATOR BYTES\n"
+    assert tree_snapshot(home) == home_before
+    # 也没有在 CWD 下留一棵字面量 `~` 的孤儿树。
+    assert not os.path.lexists(tmp_path / "~")
+    assert builder.count == 0
+
+
+@pytest.mark.parametrize("field_name", ["yd_root", "scratch_root"])
+def test_missing_run_roots_are_refused_before_any_builder_call(env, field_name):
+    """运行根不存在 -> 拒绝执行，MUST NOT 凭空造出影子根并报成功（I3 / cand-07）。
+
+    生产上 `yd_root` 是 NFS 发布根 `/ghdc/data/yd`（agent-ops §4.1）。打错一个字或一次
+    瞬时未挂载，如果默许创建，整棵根会被造出来、运行返回 **0**、产物躺在 viewer 永远
+    读不到的地方。
+    """
+    absent = Path(env.local.yd_root).parent / "typo-root" / "deep"
+    builder = make_builder(env)
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(_replace_local(env, **{field_name: str(absent)}), builder)
+
+    assert field_name in str(excinfo.value)
+    assert str(absent) in str(excinfo.value)
+    assert not os.path.lexists(absent)
+    assert not os.path.lexists(absent.parent)
+    assert builder.count == 0
+
+
+def test_symlinked_run_root_is_refused(env, tmp_path):
+    """运行根含 symlink 组件 -> 拒绝（`verify_directory_no_follow` 逐层 no-follow）。"""
+    link = tmp_path / "yd-link"
+    link.symlink_to(env.yd_root)
+    builder = make_builder(env)
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(_replace_local(env, yd_root=str(link)), builder)
+
+    assert "yd_root" in str(excinfo.value)
+    assert builder.count == 0
+
+
+# --- G3 词法闸门的扩展 -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["input/viewer/yd_gfs", "input/viewer", "input/viewer/nested/yd_gfs", "output"],
+)
+def test_variant_target_on_the_viewer_read_surface_is_refused(tmp_path, value):
+    """变体终名落在 `input/viewer/` 或 `output/` 之内 -> 任何写入之前拒绝（cand-08）。
+
+    变体目录是两个 GeoJSON 终名的**兄弟**：两两互异过、互为祖先过、两个 `lexists` 也过，
+    于是变体的三个文件直接落到 viewer 的读取面上，破坏 products-contract §2 的「恰两个
+    文件」。
+    """
+    env = make_env(tmp_path, variants={"gfs": value, "ifs": "input/models/yd_ifs"})
+    before = tree_snapshot(env.yd_root)
+    builder = make_builder(env)
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(env, builder)
+
+    assert "variants.gfs" in str(excinfo.value)
+    assert_untouched(env, before, builder)
+
+
+def test_output_subtree_variant_target_is_refused(tmp_path):
+    """`output/` 子树同类：viewer 的另一半读取面（products-contract §2/§7）。"""
+    env = make_env(
+        tmp_path, variants={"gfs": "output/yd_gfs", "ifs": "input/models/yd_ifs"}
+    )
+    before = tree_snapshot(env.yd_root)
+    builder = make_builder(env)
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(env, builder)
+
+    assert "variants.gfs" in str(excinfo.value)
+    assert "output" in str(excinfo.value)
+    assert_untouched(env, before, builder)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "input/../input/models/yd_gfs",
+        "input/models/../models/yd_gfs",
+        "../outside/yd_gfs",
+    ],
+)
+def test_any_pardir_component_in_a_variant_path_is_refused(tmp_path, value):
+    """`variants.*` 含**任一** `..` 组件即拒绝（cand-09）。
+
+    `specs/prepare-variants/spec.md` 写的是「绝对路径或含 `..` 的路径 MUST 拒绝执行」，
+    而只查"规范化后是否逃出 `yd_root`"会放行 `input/../input/models/yd_gfs`。
+    """
+    env = make_env(tmp_path, variants={"gfs": value, "ifs": "input/models/yd_ifs"})
+    before = tree_snapshot(env.yd_root)
+    builder = make_builder(env)
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(env, builder)
+
+    message = str(excinfo.value)
+    assert "variants.gfs" in message
+    assert value in message
+    assert ".." in message
+    assert_untouched(env, before, builder)
+
+
+# --- G4 提交前复探（TOCTOU 窄化）--------------------------------------------
+
+
+def test_target_appearing_after_the_first_guard_is_refused_before_commit(
+    env, monkeypatch
+):
+    """守卫之后、提交之前落到终名上的既有文件 MUST NOT 被静默替换（cand-10）。
+
+    `rename_entry_no_follow` 发的是裸 `renameat`（没有 `RENAME_NOREPLACE`），第一次探测
+    与提交之间隔着两次 builder 调用的全部时长。复探把窗口压到微秒级；POSIX 没有可移植
+    的原子 rename-noreplace，剩下的窗口**不可消解**，本用例也不假装它被关掉了。
+    """
+    real_write = prepare_module.write_viewer_geojson
+    victim = env.yd_root / "input" / "viewer" / "rivers.geojson"
+
+    def write_then_plant(**kwargs):
+        result = real_write(**kwargs)
+        victim.parent.mkdir(parents=True, exist_ok=True)
+        victim.write_bytes(b"PRE-EXISTING OPERATOR BYTES\n")
+        return result
+
+    monkeypatch.setattr(prepare_module, "write_viewer_geojson", write_then_plant)
+    probe = _probe_rename(monkeypatch)
+
+    with pytest.raises(PrepareError) as excinfo:
+        run(env, make_builder(env))
+
+    assert "提交前复探" in str(excinfo.value)
+    assert str(victim) in str(excinfo.value)
+    # 既有字节逐字节存活，且一次 rename 都没发生。
+    assert victim.read_bytes() == b"PRE-EXISTING OPERATOR BYTES\n"
+    assert probe.count == 0
+    assert not os.path.lexists(env.yd_root / "input" / "models")
+    assert _staging_entries(env.yd_root) == []
+    assert tree_snapshot(env.scratch_root) == {}
+
+
+# --- G5 变体内容与终名的绑定、归属字面量、每次运行专属命名 -------------------
+
+
+def test_each_final_name_receives_its_own_source_content(env):
+    """`yd_gfs` 里必须是 gfs 的 binding，`yd_ifs` 里必须是 ifs 的（cand-13）。
+
+    判别性：把两次 staging 复制的源对调，全套 919+ 用例原本全绿——两个变体的水文参数
+    本来就同源一致，而"两个 binding 互不相等"在对调下恒真。内容必须按**终名**回读。
+    """
+    report = run(env, make_builder(env))
+
+    for source in ("gfs", "ifs"):
+        expected = binding_bytes(
+            grid_id=getattr(env.config.nwm_canonical_grid_id, source),
+            source_id=source,
+        )
+        assert (report.variants[source] / VARIANT_BINDING_NAME).read_bytes() == expected
+    # 反向：另一个 source 的字节 MUST NOT 出现在这个终名下。
+    gfs_bytes = (report.variants["gfs"] / VARIANT_BINDING_NAME).read_bytes()
+    ifs_bytes = (report.variants["ifs"] / VARIANT_BINDING_NAME).read_bytes()
+    assert b"source_id=gfs" in gfs_bytes
+    assert b"source_id=ifs" in ifs_bytes
+
+
+def test_production_binding_names_its_owner_with_a_literal(env):
+    """归属断言取**字面量**，不取模块常量（cand-14）。
+
+    `assert prepare_module.BUILDER_OWNER in str(exc)` 是自指的：把 `BUILDER_OWNER` 置空
+    并删掉消息里的归属子句，该断言照样绿。
+    """
+    with pytest.raises(BuilderUnavailableError) as excinfo:
+        run_prepare(local=env.local, config=env.config, baseline_root=env.package.root)
+
+    assert "归属 M4" in str(excinfo.value)
+
+
+def test_two_runs_get_distinct_scratch_and_staging_names(env):
+    """同一对 `scratch_root`/`yd_root` 上跑两次 -> 工作目录名必须不同（cand-15）。
+
+    把 per-run token 换成常量，全套用例原本全绿（每个用例都用全新的 `tmp_path`，固定名
+    在套件内永不相撞）。而在现场，两次运行共用一个 `work_dir` 与一个 staging，无条件的
+    清理会让其中一次删掉另一次在途的 staging。
+    """
+    work_dirs = []
+
+    def builder(request):
+        work_dirs.append(request.variant_root.parent)
+        raise RuntimeError("stop before any commit")
+
+    for _ in range(2):
+        with pytest.raises(PrepareError):
+            run(env, builder)
+
+    assert len(work_dirs) == 2
+    assert work_dirs[0] != work_dirs[1]
+    assert work_dirs[0].parent == env.scratch_root
+    assert work_dirs[1].parent == env.scratch_root
+    assert tree_snapshot(env.scratch_root) == {}

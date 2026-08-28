@@ -13,12 +13,14 @@
 """
 
 import argparse
+from pathlib import Path
 
 import pytest
 from cli_fixtures import write_config, write_fake_interpreter, write_local
 
 from yd_producer import cli, nwm
 from yd_producer import prepare as prepare_module
+from yd_producer.config import load_config, load_local
 
 # --- 记录型 fake -------------------------------------------------------------
 
@@ -70,9 +72,18 @@ def _exit_code(argv, env):
 
 
 def _argv(command, tmp_path, *, baseline=None, **local_kwargs):
-    """齐备 argv。`prepare` 额外带必需的 `--baseline`（`init`/`run` 不带）。"""
+    """齐备 argv。`prepare` 额外带必需的 `--baseline`（`init`/`run` 不带）。
+
+    `yd_root`/`scratch_root` 一并建出来：`prepare.run_prepare` 的步骤 0 预检要求两个运行
+    根都是**已存在**的目录（打错一个字就凭空造出影子根、还返回成功，是 issue #20 复核里
+    确认的失效）。这是 arrange 侧的新前置条件，本文件的断言一条未动——`init`/`run` 不经
+    该预检，对它们是惰性的。
+    """
     config_path = write_config(tmp_path)
     local_path = write_local(tmp_path, **local_kwargs)
+    local = load_local(local_path, load_config(config_path))
+    Path(local.yd_root).mkdir(parents=True, exist_ok=True)
+    Path(local.scratch_root).mkdir(parents=True, exist_ok=True)
     argv = [command, "--config", str(config_path), "--local", str(local_path)]
     if command == "prepare":
         argv += [
@@ -427,8 +438,38 @@ def test_prepare_with_executable_interpreter_reaches_production_builder_binding(
 
     err = capsys.readouterr().err
     assert prepare_module.BUILDER_OWNER in err  # 指名归属
+    # 归属断言取字面量：只断言模块常量出现在消息里是自指的（把常量置空并删掉归属子句
+    # 仍然全绿），测不出"消息里到底有没有指名归属"。
+    assert "归属 M4" in err
     assert "Traceback" not in err
     assert runner.count == 0
+
+
+def test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code(
+    monkeypatch, capsys, tmp_path
+):
+    """清理失败 MUST NOT 把退出码 `3` 降级成 `1`（issue #20 复核 cand-02）。
+
+    这是今天唯一生产可达的那一支：`cli` 传的就是生产 `default_builder`，绑定抛
+    `BuilderUnavailableError` 之后清理 scratch；清理失败若替换掉正在传播的异常，`main`
+    的 `except BuilderUnavailableError` 就不再匹配，运维拿到 `1` 会去改一份没问题的配置。
+    """
+    monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
+
+    def refuse(*args, **kwargs):
+        raise prepare_module.safe_fs.SafeFilesystemError(
+            "injected cleanup failure", kind="io"
+        )
+
+    # 两个删除原语一起注入：编排改用哪一个来清 scratch 都不影响本用例要钉的性质。
+    monkeypatch.setattr(prepare_module.safe_fs, "remove_tree_allow_symlinks", refuse)
+    monkeypatch.setattr(prepare_module.safe_fs, "rmtree_no_follow", refuse)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
+
+    err = capsys.readouterr().err
+    assert "归属 M4" in err
+    assert "Traceback" not in err
 
 
 def test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes(
