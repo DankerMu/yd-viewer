@@ -101,6 +101,16 @@ class CheckpointTracker:
     （`config.toml`），本模块 MUST NOT 写死 `12` / `720`，也不从 manifest 或预报时长反推
     （design.md D4：现场值不得在代码中猜测）。构造**不触碰文件系统**——SHUD 尚未启动、
     `run_dir` 尚不存在时构造出来的 tracker 同样是安全的。
+
+    **调用方前置条件（本模块无法自检）**：`run_dir` MUST 是规范路径，其**任一祖先分量都不得
+    是符号链接**。`safe_fs` 的每个原语都以「目录 + 不跟随符号链接」的方式逐段打开路径，且它
+    在锚定 containment root 时会把 `run_dir` 自己也从根重新走一遍，所以
+    `containment_root=run_dir` **并不豁免 `run_dir` 的祖先**；`/scratch → /mnt/...` 这类 HPC
+    常规布局会让每一次观测都抛 `SafeFilesystemError`，被观测步骤归进「本次观测无结果」，
+    于是整整一轮零捕获、`observed_header_minutes` 保持为空——与「SHUD 从没启动」逐字节相同。
+    本模块**不得**自行 `resolve()`：构造期 resolve 就碰了文件系统（违上一条），惰性 resolve
+    等于把符号链接根接受下来，正好废掉 `safe_fs` 要守的东西。故这是调用方契约，由作业脚本
+    接线侧保证。
     """
 
     def __init__(
@@ -130,6 +140,16 @@ class CheckpointTracker:
             )
         if project_name in {".", ".."}:
             raise TrackerError(f"project_name 是路径遍历分量：{project_name!r}")
+        # NUL 的两条是**纯字符串检查**（不碰文件系统，本节上一条不破）：`os.stat` / `os.open`
+        # 对路径里的 NUL 抛的是 `ValueError` 而不是 `OSError`，`safe_fs` 也不转译它，于是它
+        # 绕过 `_FS_FAILURES` 从 `capture_available()` 直接外泄（违偏离 8）。而它**可从配置
+        # 到达**——TOML 的基本字符串接受 `\u0000`。MUST NOT 靠把 `ValueError` 并进
+        # `_FS_FAILURES` 来堵：那会连 `state.parse` 的 `ValueError` 一起吞掉，而
+        # `_copy_is_intact` 正靠它做判别。
+        if "\0" in project_name:
+            raise TrackerError(f"project_name 含 NUL 字节：{project_name!r}")
+        if "\0" in str(run_dir):
+            raise TrackerError(f"run_dir 含 NUL 字节：{str(run_dir)!r}")
 
         self._run_dir = Path(run_dir)
         self._project_name = project_name

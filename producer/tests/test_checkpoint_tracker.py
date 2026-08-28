@@ -15,7 +15,9 @@ oracle 纪律：合成 `cfg.ic` 一律由 `cfg_ic_fixtures.build_cfg_ic` 生成�
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
+import inspect
 import pathlib
 
 import pytest
@@ -28,6 +30,10 @@ from yd_producer.tracker import checkpoint_tracker as tracker_module
 
 PROJECT = "yd_gfs"
 HOURS = (12,)
+
+#: 生成一份 > `MAX_STATE_IC_BYTES`（64 MiB）的**结构合法**源文件所需的 mesh 规模。
+#: 实测 ~73 MB / 0.7 秒 / RSS 峰值约 580 MB，与 fixture 记录的成本一致。
+OVERSIZE_MESH_COUNT = 1_400_000
 
 
 def _payload(minute: str, *, mesh_count: int = 3) -> bytes:
@@ -93,6 +99,37 @@ def test_construction_rejects_unusable_project_name(
 ) -> None:
     with pytest.raises(TrackerError):
         _tracker(tmp_path, project_name=project_name)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"project_name": "yd\x00gfs"}, "project_name"),
+        ({"run_dir_suffix": "sub\x00dir"}, "run_dir"),
+    ],
+    ids=["project-name-nul", "run-dir-nul"],
+)
+def test_construction_rejects_nul_bytes_in_paths(
+    tmp_path: pathlib.Path, kwargs: dict[str, str], reason: str
+) -> None:
+    """NUL 走的是 `ValueError` 而不是 `OSError`，`safe_fs` 也不转译它。
+
+    不在构造期拦下，它就会在**观测期**从 `capture_available()` 外泄（`stat`/`open` 各一条
+    路径），违偏离 8「唯一对外异常」；而 TOML 的基本字符串接受 `\u0000`，它可从配置到达。
+    用例形态是刻意的：拒绝**必须发生在构造期**（`except` 分支只接构造那一句），而守卫缺席
+    时构造会通过，于是控制流走到观测那一行——`ValueError` 在那里外泄，本条以**异常外泄**
+    而不是「DID NOT RAISE」的断言失败变红，正是契约要钉的形态。
+    """
+    run_dir = tmp_path
+    if "run_dir_suffix" in kwargs:
+        run_dir = tmp_path / kwargs["run_dir_suffix"]
+    try:
+        tracker = _tracker(run_dir, project_name=kwargs.get("project_name", PROJECT))
+    except TrackerError as error:
+        assert reason in str(error)
+        return
+    tracker.capture_available()
+    pytest.fail(f"构造期未拒绝含 NUL 的 {reason}")
 
 
 def test_construction_does_not_touch_the_filesystem(tmp_path: pathlib.Path) -> None:
@@ -367,6 +404,85 @@ def test_checkpoint_filename_zero_pads_the_lead_hour(tmp_path: pathlib.Path) -> 
     assert tracker.captured[5].path.is_file()
 
 
+# --- G8 捕获阶段的实现级 MUST ---
+
+
+def test_source_advancing_between_the_two_reads_is_not_captured(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """钉死副本 header 复检（`_copy_is_intact` 的 header 合取）。
+
+    观测已按 header `720` 命中，但在 `_capture` 重读源文件之前 SHUD 又覆写了一版**完全
+    合法**的 `1440`。删掉 header 合取后，`f012` 会逐字节持有 1440 的 body 且
+    `missing_hours()` 报空——正是 spec 禁止的「以更晚时刻的版本冒充 T+12」。既有的回读
+    用例代替不了它：那条落盘的是**截断**内容，`state.parse` 先抛错，header 合取从来不是
+    判别项。
+    """
+    tracker = _tracker(tmp_path)
+    _write(tracker.source_path, _payload("720.000000"))
+    payload_1440 = _payload("1440.000000")
+    # 前置断言：这一版是完全合法的，失败不能由结构校验代劳。
+    state.parse(payload_1440)
+    real_ensure = safe_fs.ensure_directory_no_follow
+
+    def advancing_ensure(path, **kwargs):  # type: ignore[no-untyped-def]
+        # `_capture` 的第一步；在它重读源文件之前插入下一次就地覆写。
+        _write(tracker.source_path, payload_1440)
+        return real_ensure(path, **kwargs)
+
+    monkeypatch.setattr(safe_fs, "ensure_directory_no_follow", advancing_ensure)
+    tracker.capture_available()
+
+    assert tracker.missing_hours() == (12,)
+    assert dict(tracker.captured) == {}
+    assert not (tracker.checkpoint_dir / f"{PROJECT}.f012.cfg.ic.update").exists()
+
+
+def test_filesystem_failure_after_the_match_never_leaks(tmp_path: pathlib.Path) -> None:
+    """捕获段的异常收敛：header 已命中之后的 FS 失败同样不得外泄。
+
+    G5 的三条敌意形态全在 `_read_header_minute` 里就返回了，没有一条进入 `_capture`；这里
+    用「`run_dir` 下有个名为 `state_checkpoints` 的**普通文件**占位」把失败推到命中之后。
+    把 `_capture` 的 `except _FS_FAILURES` 收窄后，本条以外泄的 `SafeFilesystemError` 变红。
+    """
+    tracker = _tracker(tmp_path)
+    _write(tracker.source_path, _payload("720.000000"))
+    placeholder = _write(tracker.checkpoint_dir, b"not a directory\n")
+
+    tracker.capture_available()
+
+    assert tracker.missing_hours() == (12,)
+    assert dict(tracker.captured) == {}
+    assert tracker.checkpoint_dir.is_file()
+    assert tracker.checkpoint_dir.read_bytes() == placeholder
+
+
+def test_oversize_source_is_not_captured(tmp_path: pathlib.Path) -> None:
+    """超限源文件走「校验失败」支：删副本、保持未捕获（§D 超限处置）。
+
+    有界读在超限时返回 `max_bytes + 1` 字节，`state.parse` 对超限有**显式**判定并抛
+    `ValueError`——不是靠截断后的内容碰巧解析失败。源读、回读、`state.parse` 三处上限
+    各自放开都是语义等价（只有资源放大），故只有三处同时放开才会让本条变红。
+    """
+    tracker = _tracker(tmp_path)
+    payload = build_cfg_ic(
+        mesh_count=OVERSIZE_MESH_COUNT, river_count=2, minute="720.000000"
+    ).payload
+    assert len(payload) > state.MAX_STATE_IC_BYTES
+    # 结构合法性由**同一生成器的同形小样本**作证：对 64 MiB 那份直接 parse 只是重复同一条
+    # 判定，代价却是再翻一倍的内存峰值。
+    state.parse(_payload("720.000000"))
+    _write(tracker.source_path, payload)
+
+    tracker.capture_available()
+
+    # header 本身读到了（有界读的首行完好），拒绝发生在捕获校验而不是观测步骤。
+    assert tracker.observed_header_minutes == (720.0,)
+    assert tracker.missing_hours() == (12,)
+    assert dict(tracker.captured) == {}
+    assert not (tracker.checkpoint_dir / f"{PROJECT}.f012.cfg.ic.update").exists()
+
+
 # --- G7 结构、只读性与模块自述 ---
 
 
@@ -374,6 +490,30 @@ def test_captured_view_is_not_writable(tmp_path: pathlib.Path) -> None:
     tracker = _tracker(tmp_path)
     with pytest.raises(TypeError):
         tracker.captured[12] = None  # type: ignore[index]
+
+
+def test_constructor_takes_only_keyword_arguments() -> None:
+    """§B「三者均 keyword-only」：去掉 `__init__` 的 `*` 后变红。"""
+    params = inspect.signature(CheckpointTracker.__init__).parameters
+    for name in ("run_dir", "project_name", "checkpoint_hours"):
+        assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, name
+
+
+def test_captured_record_is_frozen(tmp_path: pathlib.Path) -> None:
+    """`MappingProxyType` 只挡 `__setitem__`，挡不住成员改写——那一半由 `frozen=True` 守。"""
+    tracker = _tracker(tmp_path)
+    _write(tracker.source_path, _payload("720.000000"))
+    tracker.capture_available()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        tracker.captured[12].lead_hours = 24  # type: ignore[misc]
+
+
+def test_captured_record_rejects_positional_construction(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`kw_only=True`：五个字段里有三个是字符串/路径，位置构造错序不会有任何提示。"""
+    with pytest.raises(TypeError):
+        CapturedCheckpoint(12, 720.0, tmp_path / "x", "s", "c")  # type: ignore[misc]
 
 
 def test_missing_hours_is_ascending_regardless_of_argument_order(
