@@ -186,6 +186,48 @@ def _absolute(value: str | os.PathLike[str], label: str) -> Path:
         ) from exc
 
 
+def _normalized(path: Path, label: str) -> Path:
+    """containment 判定专用的物理归一：折叠 symlink 与 `..`。
+
+    **只用于该判定**，MUST NOT 用它替换下游路径：`verdict.expected_files` 由 `judge`
+    以 `Path.cwd()` 提升而**不**归一，把归一结果拿去重构源路径会让一个合法的相对
+    `raw_root` 调用在 `_reconstruct_sources` 上被误判 `verdict-mismatch`。
+
+    `Path.resolve()` 而不是 `os.path.abspath`：后者是纯词法折叠 `..`，跨 symlink 时
+    会折出一条不同的物理路径（`tasks.md` 已按此禁用）。
+    """
+    try:
+        return path.resolve()
+    except (OSError, ValueError) as exc:
+        # NUL 字节路径在这里抛裸 `ValueError`（`lstat: embedded null character`）。
+        # 归 `ConfigError`：它是「调用写错了」，且与 `_absolute` 的形参守卫同面。
+        raise ConfigError(f"无法规范化 {label} {path}：{exc}") from exc
+
+
+def _is_same_dir(left: Path, right: Path) -> bool:
+    try:
+        return os.path.samestat(os.stat(left), os.stat(right))
+    except (OSError, ValueError):
+        # 不存在/不可 stat 的段不可能与另一侧是同一个 inode。
+        return False
+
+
+def _contains_by_identity(outer: Path, inner: Path) -> bool:
+    """`inner` 自身或其任一**已存在**的祖先段与 `outer` 是同一个 inode。
+
+    纯路径比较不够：`resolve()` 折叠 symlink 与 `..`，但 CPython 的 posix 实现
+    **保留调用方给的非链组件大小写**，于是在大小写不敏感的卷（darwin 默认、部分
+    NFS 导出）上 `<b>/NWM-RAW/work` 与 `<b>/nwm-raw` 归一后仍是两条不相交的字符串，
+    而它们物理上是同一棵树。inode 身份是唯一对**任何**别名机制（大小写折叠、硬链接
+    目录、将来的卷特性）都成立的判据。
+
+    走查放在**调用方一侧**（work/raw 两个根互查），MUST NOT 改用 `_reject_symlinks`
+    式的目标侧逐段检查：那是 issue #71 的工具，且按设计跳过根本身（生产上 NFS 挂载
+    点整体可能就是 symlink），正好漏掉这里要抓的那一段。
+    """
+    return any(_is_same_dir(candidate, outer) for candidate in (inner, *inner.parents))
+
+
 def _validate_params(source: str, cycle: datetime, config: Config) -> RawSourceConfig:
     """形参守卫：只挡住会让下游原语抛裸异常的入参形态。
 
@@ -394,9 +436,27 @@ def _source_forecast_hours(manifest: DownloadManifest, cycle_root: Path) -> set[
 
 
 def _index_source_entries(
-    manifest: DownloadManifest,
+    manifest: DownloadManifest, cycle_root: Path
 ) -> dict[tuple[int, str], ManifestEntry]:
-    return {(entry.forecast_hour, entry.variable): entry for entry in manifest.entries}
+    """按 (forecast_hour, variable) 索引源 entry。
+
+    `variable` 必须先判形态再当字典键：`ManifestEntry.from_dict` 对该字段**不做**
+    任何强制（`forecast_hour` 有 `int(...)`、`metadata` 有 `dict(...)`，`variable`
+    原样透传），故一份外部 JSON 里的 `"variable": ["tmp2m"]` 会在建索引时让
+    `dict` 求哈希抛裸 `TypeError`；此处在 `stage_raw` 的 try 块**之前**，三层
+    handler 一条也接不到。见 `_check_accumulation` 的同类说明。
+    """
+    index: dict[tuple[int, str], ManifestEntry] = {}
+    for entry in manifest.entries:
+        variable = entry.variable
+        if not isinstance(variable, str):
+            raise RawStagingError(
+                f"源 manifest {cycle_root / SOURCE_MANIFEST_FILENAME} 的 entry 的 "
+                f"`variable` 不是字符串，实际 {type(variable).__name__}",
+                "source-manifest",
+            )
+        index[(entry.forecast_hour, variable)] = entry
+    return index
 
 
 def _carried_metadata(
@@ -460,6 +520,19 @@ def _check_accumulation(metadata: Mapping[str, Any], lead: int, variable: str) -
             + "/".join(f"`{key}`" for key in ACCUMULATION_TYPE_KEYS),
             "accumulation-metadata",
         )
+    if not isinstance(accumulation_type, str):
+        # 形态先于取值域：源 manifest 是外部 JSON，`"accumulation_type": ["x"]` 是
+        # 合法 JSON、反序列化成 `list`，而下一行的 `x not in frozenset(...)` 要对它
+        # 求哈希，于是抛裸 `TypeError`。本闸门在 `stage_raw` 的 try 块**之前**执行
+        # （`_build_entries` 整段都是），三层 handler 一条也接不到，裸异常直接逃出
+        # 九项闭合词表。同类出口另有 `_index_source_entries` 的 `variable`。
+        # §3.1 对该字段无任何类型约束——「pin 不会写 list」是对生成器的观察，不是
+        # 对 yd 所读的那份落盘 JSON 的保证。
+        raise RawStagingError(
+            f"(lead={lead}, variable={variable!r}) 的累积类型必须是字符串，"
+            f"实际 {type(accumulation_type).__name__}",
+            "accumulation-metadata",
+        )
     if accumulation_type not in ACCUMULATION_TYPES:
         raise RawStagingError(
             f"(lead={lead}, variable={variable!r}) 的累积类型 {accumulation_type!r} "
@@ -482,13 +555,16 @@ def _check_accumulation(metadata: Mapping[str, Any], lead: int, variable: str) -
 def _local_key(source: str, cycle: datetime, filename: str) -> str:
     """object-store key 形态，**不是**文件系统路径。
 
-    消费端经 object store 的 `resolve_path(local_key)` 解析——勘察清单 §3.1 记有
-    `packages/common/object_store.py` 的 `resolve_path`(L273-285) 与
-    `normalize_object_key`(L44-75)，本仓侧的对应实现是 `store/object_store.py`。
-    （本处原引 `converter.py:1460`；§3.1 无该行，而 §3.1 是本仓唯一可核的 pin 桥，
-    故改锚到它实有的事实——issue #7 round 1 verifier CONFIRMED/FIX_NOW。）本 issue 让
-    object-store 根落在 `work_dir`，于是解析结果为
+    「它经 `resolve_path` 被解析成路径」这条命题走**本仓侧论证**，不作任何 pin 断言：
+    本仓 `store/object_store.py` 的 `LocalObjectStore` 每一条访问都走
+    `self.resolve_path(key)`（:156/186/204/215/233/246/261/306，定义 :314），而本
+    issue 让 object-store 根取 `work_dir`，于是解析结果恒为
     `<work_dir>/raw/<存储身份>/<YYYYMMDDHH>/<bundle>`，位于 `work/raw/` 之下。
+    （§3.1 只记载 `packages/common/object_store.py` 有 `resolve_path`(L273-285) 与
+    `normalize_object_key`(L44-75) 且二者**不做大小写归一**——由此得「存储身份必须
+    逐源非对称」；§3.1 **没有**任何一行记载消费端把 `local_key` 交给 `resolve_path`，
+    故原先那半句是无支撑的 pin 断言，与 `manifest_uri` 同一路线改掉——issue #7
+    round 2 verifier CONFIRMED/FIX_NOW。）
     形态逐字沿用 pin 的 `f"raw/{source_id}/{compact_cycle}/{bundle_filename}"`
     （gfs_adapter.py:615）；存储身份逐源非对称，复用 `rawscan.SOURCE_DIR_NAMES`。
     """
@@ -552,6 +628,15 @@ def _identity(path: Path) -> tuple[int, int, int, int]:
     return (status.st_size, status.st_mtime_ns, status.st_ino, status.st_mode)
 
 
+def _rollback_note(failures: tuple[str, ...]) -> str:
+    """回滚失败的对外文案。清理失守时**必须**有信号：不变量是无条件的「不留任何
+    部分产物」，代码不能单方面把它降级成沉默的尽力而为。
+    """
+    return f"清理本轮 work 侧写入时有 {len(failures)} 项失败，残留仍在：" + "；".join(
+        failures
+    )
+
+
 class _Written:
     """本轮 work 侧写入的账本，供失败清理用（不留半套 raw）。"""
 
@@ -559,20 +644,41 @@ class _Written:
         self.files: list[Path] = []
         self.dirs: list[Path] = []
 
-    def rollback(self) -> None:
+    @staticmethod
+    def _remove(remove: Any, path: Path, failures: list[str]) -> None:
+        try:
+            remove(path)
+        except FileNotFoundError:
+            # 账本按「走查时不存在的祖先段」反向多记（见 `_ensure_dir`），这些路径
+            # 本轮可能根本没被建出来。它们不是残留，记成失败会让消息反向说谎。
+            pass
+        except Exception as exc:  # noqa: BLE001 —— 见 `rollback` 的不抛保证
+            failures.append(f"{path}（{exc!r}）")
+
+    def rollback(self) -> tuple[str, ...]:
+        """清理本轮 work 侧写入；**保证不抛**，把失败逐条返回给调用方外抛。
+
+        为什么是「保证不抛」而不是「多吞几种异常」：`rollback` 在三个 handler 里都
+        运行在**已有异常正在外抛**的上下文中，它自己抛出的任何异常会**替换**那个
+        异常——round-2 verifier 实测过一条纯入参路径（NUL 字节的 `work_dir` 让
+        `os.rmdir` 抛裸 `ValueError`），裸异常因此顶掉正在构造的 `RawStagingError`
+        并逃出九项闭合词表；三层 handler 一条也拦不住 `rollback` 自己。收口点因此
+        只能在 `rollback` 内部，而不是在某一层 handler 上加一条 `except`。
+
+        与之配对的是**不静默**：吞掉失败但不报告，等于把无条件的「不留任何部分
+        产物」私自降级成尽力而为，且让 tier-2 的「已清理本轮 work 侧写入」变成假
+        消息。故失败以清单返回，三个 handler 各自把它带进外抛的异常。
+
+        `BaseException` 不吞：清理途中的 Ctrl-C MUST 照常传播。
+        """
+        failures: list[str] = []
         for path in reversed(self.files):
-            try:
-                os.unlink(path)
-            except OSError:
-                # 清理是尽力而为：真正要外抛的是触发清理的那个 staging 失败。
-                pass
+            self._remove(os.unlink, path, failures)
         for path in sorted(
             set(self.dirs), key=lambda item: len(item.parts), reverse=True
         ):
-            try:
-                os.rmdir(path)
-            except OSError:
-                pass
+            self._remove(os.rmdir, path, failures)
+        return tuple(failures)
 
 
 def _ensure_dir(directory: Path, written: _Written) -> None:
@@ -581,11 +687,22 @@ def _ensure_dir(directory: Path, written: _Written) -> None:
     while not probe.exists():
         missing.append(probe)
         if probe.parent == probe:
+            # 文件系统根：`probe.parent == probe` 时再上溯就是死循环。该支要求根
+            # 本身 `exists()` 为假，实际不可达（`while` 先退出），但它一旦成立就会
+            # 把根登记进账本——`rollback` 的 `rmdir("/")` 只会以 EBUSY/EACCES 落进
+            # 失败清单，不会删掉任何东西。与下方账本语义同源，一并记在此处。
             break
         probe = probe.parent
     # 账本**先于**效果登记：`mkdir(parents=True)` 是多步的，中途失败（ENOSPC/EDQUOT/
     # 并发 rmdir）会留下已建的祖先段，而失败路径不回到这里，账本就永远收不到它们。
-    # 反向多记是安全的：`rollback` 对没建成的路径 `rmdir` 只会吞掉 OSError。
+    # 代价与其边界（round-2 verifier 证伪了原先的落地理由，这里换成正确的那条）：
+    # 账本记的是「走查时不存在的段」而不是「本轮创建的段」，两者在走查与 `mkdir`
+    # 之间的窗口里可能发散——窗口内被**别人**创建的同名目录会被 `rollback` 删掉。
+    # 原注释写的「反向多记是安全的：`rmdir` 只会吞掉 OSError」论证的是「不会抛」，
+    # 而风险是「会删不是本轮建的」，两个命题不同，故不成立。真正的边界是 fixture
+    # 把 `work_dir` 定义为一次性隔离单元：窗口内的外来写入者在模型之外。收紧成
+    # 「本轮创建的」需要 `mkdir` 逐级自建（放弃 `parents=True`），归组 12 的
+    # work-dir 生命周期一并处理。
     written.dirs.extend(missing)
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -750,7 +867,9 @@ def stage_raw(
 
     失败一律抛 `RawStagingError`（`kind` 取自 `ERROR_KINDS`），形参写错抛 `ConfigError`；
     复制/落盘期的**任何**异常（含裸的非 `RawStagingError`）都会先清掉本轮已写入的
-    work 侧路径。`raw_root` 之下**零写入**是本函数的硬约束
+    work 侧路径；清理**本身**失败时不静默——`rollback` 保证不抛（否则它会替换正在
+    外抛的失败），失败清单进入外抛异常（tier-2 进消息、tier-1/3 进 `add_note`）。
+    `raw_root` 之下**零写入**是本函数的硬约束
     （`docs/compute-loop-design.md` §4.1）。
     """
     if verdict.complete is not True:
@@ -776,15 +895,27 @@ def stage_raw(
 
     raw_path = _absolute(raw_root, "raw_root")
     work_path = _absolute(work_dir, "work_dir")
-    if work_path.is_relative_to(raw_path) or raw_path.is_relative_to(work_path):
-        # 两个入参互相包含时，「只读 raw_root、只写 work_dir」这条硬约束在本函数内部
-        # 不再可能同时成立：副本、目录与失败回滚的 unlink/rmdir 全都会落进 NWM raw 树
-        # （`docs/compute-loop-design.md` §4.1）。这是「调用写错了」，归 `ConfigError`
-        # 而不是第十项 kind——九项词表由 tasks.md 任务 3.2 fixture 钉死。
-        # `is_relative_to` 是纯词法判定，两向各判一次，相等的情形两向都为真。
+    # 两个入参互相包含时，「只读 raw_root、只写 work_dir」这条硬约束在本函数内部
+    # 不再可能同时成立：副本、目录与失败回滚的 unlink/rmdir 全都会落进 NWM raw 树
+    # （`docs/compute-loop-design.md` §4.1）。这是「调用写错了」，归 `ConfigError`
+    # 而不是第十项 kind——九项词表由 tasks.md 任务 3.2 fixture 钉死。
+    #
+    # 判据是**物理**包含，不是词法包含：`is_relative_to` 只比字符串前缀，round-2
+    # verifier 实测三种别名（大小写别名、`work_dir` 自身是链、`..` 段）都能让副本
+    # 落进 raw 树而闸门放行。`resolve()` 关掉后两种、inode 身份关掉第一种，两者
+    # 缺一不可；两个根互为「外/内」各判一次，相等的情形两向都为真。
+    raw_real = _normalized(raw_path, "raw_root")
+    work_real = _normalized(work_path, "work_dir")
+    if (
+        work_real.is_relative_to(raw_real)
+        or raw_real.is_relative_to(work_real)
+        or _contains_by_identity(raw_real, work_real)
+        or _contains_by_identity(work_real, raw_real)
+    ):
         raise ConfigError(
-            f"work_dir {work_path} 与 raw_root {raw_path} 互相包含；"
-            "work 必须是 raw 树之外的独立目录，否则「raw_root 之下零写入」不可能成立"
+            f"work_dir {work_path} 与 raw_root {raw_path} 互相包含"
+            f"（物理路径 {work_real} 与 {raw_real}）；work 必须是 raw 树之外的独立"
+            "目录，否则「raw_root 之下零写入」不可能成立"
         )
     rebuilt = _reconstruct_sources(
         raw_root=raw_path,
@@ -813,7 +944,7 @@ def stage_raw(
         rebuilt=rebuilt,
         source=source,
         cycle=cycle,
-        source_index=_index_source_entries(source_manifest),
+        source_index=_index_source_entries(source_manifest, cycle_root),
     )
 
     manifest_payload = _render_manifest(
@@ -845,24 +976,33 @@ def stage_raw(
             payload=manifest_payload,
             written=written,
         )
-    except RawStagingError:
-        written.rollback()
+    except RawStagingError as exc:
+        failures = written.rollback()
+        if failures:
+            # 用 `add_note` 而不是重建异常：kind、`__cause__` 与调用方的 `is` 身份
+            # 都必须原样保留，要加的只是「清理没做干净」这条信号。
+            exc.add_note(_rollback_note(failures))
         raise
     except Exception as exc:
         # 清理触发器 MUST NOT 窄于它要维护的不变量：只接 `RawStagingError` 时，写入块
         # 里任何别的异常（NUL 字节路径让 `mkdir` 抛裸 `ValueError`、序列化面的
         # `UnicodeEncodeError`、被 monkeypatch 的原语抛出的任意异常）都会绕过回滚**并**
         # 逃出九项闭合词表。此支同时收口两侧：先回滚，再把它收敛成 `copy-failed`。
-        written.rollback()
+        failures = written.rollback()
+        # 「已清理」这句话只有在真清理干净时才准说：清理失败时它是假消息，而残留
+        # 会让下一次重试被 `lexists` 预检以 `target-exists` 硬拒、楔死整个 cycle。
+        cleanup = "已清理本轮 work 侧写入" if not failures else _rollback_note(failures)
         raise RawStagingError(
-            f"复制/落盘期出现未预期的异常 {exc!r}；已清理本轮 work 侧写入",
+            f"复制/落盘期出现未预期的异常 {exc!r}；{cleanup}",
             "copy-failed",
         ) from exc
-    except BaseException:
+    except BaseException as exc:
         # `KeyboardInterrupt`/`SystemExit` MUST NOT 被改写成 `RawStagingError`——那会
         # 让 Ctrl-C 看起来像一次 staging 失败。但清理照做：不留半套副本这条不变量与
         # 异常类型无关。这是本函数唯一一条外抛非 `{ConfigError, RawStagingError}` 的
         # 出口，且是有意为之。
-        written.rollback()
+        failures = written.rollback()
+        if failures:
+            exc.add_note(_rollback_note(failures))
         raise
     return StagedRaw(manifest_path=manifest_path, copied_files=targets, entries=entries)

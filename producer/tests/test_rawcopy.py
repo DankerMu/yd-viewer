@@ -139,6 +139,34 @@ def local_key(source: str, lead: int) -> str:
 # `nwm-bucket/raw/...`（`resolve_path` 后指向不存在的路径），自己算的实现不受影响。
 SOURCE_LOCAL_KEY_PREFIX = "nwm-bucket/"
 
+# 同一手法的其余四处**故意发散**。源 manifest 是不受信的外部 JSON，下列取值与 yd
+# 自算值之间没有任何强制相等关系；写成相等就等于用「期望输出」去喂输入，
+# 「承接」与「自算」两种实现在断言下不可区分（round-2 verifier 实测 P1/P2/P3/N1/
+# N2/N3 六条变异体在 747 条全套件下全部存活，根因就是这种重合）。逐条：
+#
+# - `SOURCE_ID_PREFIX`：manifest 级 `source_id` MUST 由 yd 自算（存储身份逐源非
+#   对称），故源侧带镜像前缀；照抄源的实现会产出 `mirror-gfs`。
+# - `SOURCE_MANIFEST_CYCLE_ISO`：manifest 级 `cycle_time` MUST 自算（= 形参
+#   `cycle`）。实现不交叉核对源 manifest 的 cycle，故这里放另一个 cycle 的值。
+# - `SOURCE_TIME_SUFFIX`：**entry 级** `cycle_time`/`valid_time` 反过来 MUST 逐字
+#   承接。`Z` 与 `+00:00` 是同一时刻的两种合法 ISO-8601 写法，pin 侧写哪种不受本仓
+#   约束；自算的实现走 `datetime.isoformat()` 恒产出 `+00:00`，于是可判别。
+# - `SOURCE_EXTRA_HOURS`：manifest 级四键 MUST 自算 = 本轮 lead 全集；源侧下载器
+#   按它自己的 requested 集合落盘，yd 只要求「源覆盖本轮 lead」。
+# - `SOURCE_REMOTE_HOST`：`remote_url` 取源 entry 的**同名字段**，MUST NOT 取承接
+#   metadata 里的 `logical_remote_url`；pin 上两者是不同的 URL（镜像 vs 逻辑源）。
+SOURCE_ID_PREFIX = "mirror-"
+SOURCE_MANIFEST_CYCLE_ISO = "2026-03-03T12:00:00+00:00"
+SOURCE_TIME_SUFFIX = "Z"
+SOURCE_EXTRA_HOURS = (9, 12)
+SOURCE_REMOTE_HOST = "https://mirror.invalid/"
+LOGICAL_REMOTE_HOST = "https://example.invalid/"
+
+
+def source_iso(moment: datetime) -> str:
+    """源 manifest 侧的 ISO 写法：`Z` 结尾，与 `datetime.isoformat()` 逐字不同。"""
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S") + SOURCE_TIME_SUFFIX
+
 
 def selector_for(variable: str, lead: int) -> dict[str, Any]:
     """合成的 `IdxSelection.as_metadata()` 四键（NWM@8ae9b8f2 :248-258）。"""
@@ -152,7 +180,9 @@ def selector_for(variable: str, lead: int) -> dict[str, Any]:
 
 def entry_payload(source: str, lead: int, variable: str) -> dict[str, Any]:
     short_name = SHORT_NAMES[variable]
-    remote = f"https://example.invalid/{DIR_SEGMENTS[source]}/{CYCLE_DIR}/"
+    segment = f"{DIR_SEGMENTS[source]}/{CYCLE_DIR}/"
+    remote = SOURCE_REMOTE_HOST + segment
+    logical = LOGICAL_REMOTE_HOST + segment
     return {
         "remote_url": remote + bundle_name(source, lead),
         "local_key": SOURCE_LOCAL_KEY_PREFIX + local_key(source, lead),
@@ -161,8 +191,8 @@ def entry_payload(source: str, lead: int, variable: str) -> dict[str, Any]:
         "expected_checksum": None,
         "expected_size_bytes": None,
         "metadata": {
-            "cycle_time": CYCLE_ISO,
-            "valid_time": (CYCLE + timedelta(hours=lead)).isoformat(),
+            "cycle_time": source_iso(CYCLE),
+            "valid_time": source_iso(CYCLE + timedelta(hours=lead)),
             "bundle": {
                 "layout": "per_forecast_hour",
                 "variables": list(GFS_VARIABLES if source == "gfs" else IFS_VARIABLES),
@@ -170,7 +200,7 @@ def entry_payload(source: str, lead: int, variable: str) -> dict[str, Any]:
             },
             "grib_short_name": short_name,
             "cfgrib_filter_by_keys": {"shortName": short_name},
-            "logical_remote_url": remote + bundle_name(source, lead),
+            "logical_remote_url": logical + bundle_name(source, lead),
         },
     }
 
@@ -188,6 +218,12 @@ def source_manifest_payload(
 
     `with_idx` 默认按源形态取：GFS 带 `idx_selectors`（云镜像下载路径注入），IFS 不带
     （pin 侧 IFS 全文无 idx 键）。
+
+    单数 `idx_selector` **只在 `len(variables) == 1` 时**才另写：§3.1
+    （`nwm-snapshot-inventory.md:113`）逐字记「L1071-1072 只有在 `len(variables) == 1`
+    时才另写单数键」。原先在 4 变量 bundle 上每条 entry 都写单数键，既与本文件自己
+    转录的 pin 事实相悖，又让「单数键由 yd 按变量从复数键取」与「照抄源侧单数键」
+    两种实现不可区分（round-2 verifier 的 P1 变异体因此存活）。
     """
     variables = variables or (GFS_VARIABLES if source == "gfs" else IFS_VARIABLES)
     if with_idx is None:
@@ -199,18 +235,20 @@ def source_manifest_payload(
             payload = entry_payload(source, lead, variable)
             if with_idx:
                 payload["metadata"]["idx_selectors"] = selectors
-                payload["metadata"]["idx_selector"] = selectors[variable]
+                if len(variables) == 1:
+                    payload["metadata"]["idx_selector"] = selectors[variable]
             entries.append(payload)
+    span = list(declared_hours) if declared_hours else [*leads, *SOURCE_EXTRA_HOURS]
     metadata: dict[str, Any] = {
-        "first_forecast_hour": min(leads),
-        "last_forecast_hour": max(leads),
-        "forecast_hours": list(declared_hours if declared_hours else leads),
+        "first_forecast_hour": min(span),
+        "last_forecast_hour": max(span),
+        "forecast_hours": list(span),
     }
     if with_requested:
-        metadata["requested_forecast_hours"] = list(leads)
+        metadata["requested_forecast_hours"] = list(span)
     return {
-        "source_id": DIR_SEGMENTS[source],
-        "cycle_time": CYCLE_ISO,
+        "source_id": SOURCE_ID_PREFIX + DIR_SEGMENTS[source],
+        "cycle_time": SOURCE_MANIFEST_CYCLE_ISO,
         "manifest_uri": f"s3://nwm/raw/{DIR_SEGMENTS[source]}/{CYCLE_DIR}/manifest.json",
         "metadata": metadata,
         "entries": entries,
@@ -464,7 +502,6 @@ def _manifest_without_selector_key(key: str, *, variable: str = "apcp"):
     payload = source_manifest_payload("gfs")
     for entry in payload["entries"]:
         if entry["variable"] == variable:
-            entry["metadata"]["idx_selector"].pop(key, None)
             entry["metadata"]["idx_selectors"][variable].pop(key, None)
     return payload
 
@@ -483,7 +520,7 @@ def test_out_of_domain_accumulation_type_fails_closed(tmp_path: Path) -> None:
     payload = source_manifest_payload("gfs")
     for entry in payload["entries"]:
         if entry["variable"] == "apcp":
-            entry["metadata"]["idx_selector"]["accumulation_type"] = "unknown"
+            entry["metadata"]["idx_selectors"]["apcp"]["accumulation_type"] = "unknown"
     raw_root, work_dir = build_tree(tmp_path, manifest=payload)
     before = snapshot(work_dir)
     with pytest.raises(RawStagingError) as excinfo:
@@ -505,7 +542,7 @@ def test_accumulation_aliases_are_accepted(tmp_path: Path) -> None:
     """别名 `accumulation_policy`/`stepRange` 同样可满足 R4B2（域检查覆盖别名）。"""
     payload = source_manifest_payload("gfs")
     for entry in payload["entries"]:
-        selector = entry["metadata"]["idx_selector"]
+        selector = entry["metadata"]["idx_selectors"][entry["variable"]]
         selector["accumulation_policy"] = selector.pop("accumulation_type")
         selector["stepRange"] = selector.pop("step_range")
     raw_root, work_dir = build_tree(tmp_path, manifest=payload)
@@ -517,7 +554,7 @@ def test_cumulative_since_cycle_without_step_range_is_accepted(tmp_path: Path) -
     """只有 `interval_bucket` 才要求区间范围。"""
     payload = source_manifest_payload("gfs")
     for entry in payload["entries"]:
-        selector = entry["metadata"]["idx_selector"]
+        selector = entry["metadata"]["idx_selectors"][entry["variable"]]
         selector["accumulation_type"] = "cumulative_since_cycle"
         selector.pop("step_range")
     raw_root, work_dir = build_tree(tmp_path, manifest=payload)
@@ -902,8 +939,7 @@ def test_apcp_without_any_selector_mapping_fails_closed(tmp_path: Path) -> None:
     payload = source_manifest_payload("gfs")
     for entry in payload["entries"]:
         if entry["variable"] == "apcp":
-            entry["metadata"].pop("idx_selector")
-            entry["metadata"]["idx_selectors"].pop("apcp")
+            entry["metadata"]["idx_selectors"].pop("apcp", None)
     raw_root, work_dir = build_tree(tmp_path, manifest=payload)
     with pytest.raises(RawStagingError) as excinfo:
         staged(raw_root, work_dir)
@@ -920,8 +956,6 @@ def test_variable_absent_from_idx_selectors_omits_the_singular_key(
         entry["metadata"]["idx_selectors"] = {
             k: v for k, v in entry["metadata"]["idx_selectors"].items() if k != "rh2m"
         }
-        if entry["variable"] == "rh2m":
-            entry["metadata"].pop("idx_selector")
     raw_root, work_dir = build_tree(tmp_path, manifest=payload)
     result = staged(raw_root, work_dir)
     written = json.loads(result.manifest_path.read_text(encoding="utf-8"))
@@ -1375,3 +1409,358 @@ def test_structurally_broken_source_manifest_never_leaks_a_bare_exception(
     expect_kind(excinfo, "source-manifest")
     assert not isinstance(excinfo.value, leaked)
     assert snapshot(work_dir) == {}
+
+
+# --- Row：回滚自身失败（`rollback` 保证不抛 + 失败带进外抛异常）---------------
+
+
+def _copy_failure_with_broken_rollback(
+    monkeypatch: pytest.MonkeyPatch, work_dir: Path, failure: BaseException
+):
+    """让第三份副本的创建失败，并让**回滚原语**抛一个非 `OSError`。
+
+    两个注入合在一起才是本类的判别器：只让复制失败，回滚会成功、什么也测不到；
+    只让回滚失败，没有触发回滚的失败路径。
+    """
+    doomed = work_dir / "raw" / "gfs" / CYCLE_DIR / bundle_name("gfs", 6)
+    real_open = os.open
+
+    def hooked_open(path, flags, *args, **kwargs):
+        if str(path) == str(doomed):
+            raise failure
+        return real_open(path, flags, *args, **kwargs)
+
+    def hooked_unlink(path, *args, **kwargs):
+        # 刻意不是 OSError：`rollback` 原先只吞 `OSError`，这条会**替换**正在外抛的
+        # `RawStagingError` 并逃出九项闭合词表（round-2 verifier 在 NUL 路径上实测过
+        # 同一机制，`os.rmdir` 抛裸 `ValueError`）。
+        raise ValueError(f"注入的非 OSError 清理故障：{path}")
+
+    monkeypatch.setattr(os, "open", hooked_open)
+    monkeypatch.setattr(os, "unlink", hooked_unlink)
+
+
+def test_rollback_failure_is_reported_and_never_replaces_the_staging_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回滚原语抛非 `OSError` 时：外抛的仍是 `RawStagingError`，且残留有信号。
+
+    `rollback` 在三个 handler 里都跑在「已有异常正在外抛」的上下文里，它自己抛出的
+    异常会**替换**那个异常——于是一个纯入参就能让裸 `ValueError` 逃出 `stage_raw`。
+    收口点只能在 `rollback` 内部（handler 加 `except` 拦不住它自己）。配套的另一半
+    是**不静默**：清理失败必须进入外抛的异常，否则「不留任何部分产物」这条无条件
+    不变量失守时无任何信号，而残留会让下一次重试被 `target-exists` 楔死。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    _copy_failure_with_broken_rollback(
+        monkeypatch,
+        work_dir,
+        OSError(errno.ENOSPC, "No space left on device"),
+    )
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    monkeypatch.undo()
+    expect_kind(excinfo, "copy-failed")
+    assert not isinstance(excinfo.value, ValueError)
+    notes = "".join(getattr(excinfo.value, "__notes__", []))
+    assert "清理" in notes and "残留" in notes
+    # 信号必须与事实一致：这两份副本确实还在。
+    survivors = sorted(p.name for p in (work_dir / "raw" / "gfs" / CYCLE_DIR).iterdir())
+    assert survivors == [bundle_name("gfs", lead) for lead in (0, 3)]
+    for name in survivors:
+        assert name in notes
+
+
+def test_tier2_message_stops_claiming_cleanup_when_rollback_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非 `RawStagingError` 腿的消息 MUST NOT 在清理失败时仍宣称「已清理」。
+
+    这是本轮唯一被实测出会说假话的路径（tier-1 的消息不含清理声明）：残留 2 份副本
+    的同时，异常消息逐字写着「已清理本轮 work 侧写入」。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    _copy_failure_with_broken_rollback(
+        monkeypatch, work_dir, RuntimeError("注入的非 OSError 故障")
+    )
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    monkeypatch.undo()
+    expect_kind(excinfo, "copy-failed")
+    message = str(excinfo.value)
+    assert "已清理本轮 work 侧写入" not in message
+    assert "残留" in message
+    assert snapshot(work_dir) != {}
+
+
+def test_successful_rollback_still_reports_a_clean_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """反向判别器：回滚成功时消息仍宣称「已清理」，且不挂任何残留 note。
+
+    没有这条，「一律不说已清理」的实现也能让上面那条变绿。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    doomed = work_dir / "raw" / "gfs" / CYCLE_DIR / bundle_name("gfs", 6)
+    real_open = os.open
+
+    def hooked_open(path, flags, *args, **kwargs):
+        if str(path) == str(doomed):
+            raise RuntimeError("注入的非 OSError 故障")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", hooked_open)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    monkeypatch.undo()
+    assert "已清理本轮 work 侧写入" in str(excinfo.value)
+    assert getattr(excinfo.value, "__notes__", []) == []
+    assert snapshot(work_dir) == {}
+
+
+def test_null_byte_work_dir_is_refused_without_leaking_a_bare_value_error(
+    tmp_path: Path,
+) -> None:
+    """NUL 字节的 `work_dir`：纯入参、无注入，原先让裸 `ValueError` 逃出 `stage_raw`。
+
+    链条是 `Path.exists()`/`os.path.lexists` 都自吞 `ValueError` 返 `False`，于是整条
+    NUL 祖先链被登记进账本，`mkdir` 抛裸 `ValueError` -> tier-2 -> `rollback` 的
+    `os.rmdir` 再抛裸 `ValueError` 把它顶掉。现在在归一闸门上以 `ConfigError`（形参
+    写错）短路，零写入。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    before = snapshot(work_dir)
+    config = make_config()
+    verdict = judge(raw_root, "gfs", CYCLE, config)
+    with pytest.raises(ConfigError) as excinfo:
+        stage_raw(verdict, raw_root, f"{work_dir}/w\x00x", "gfs", CYCLE, config)
+    assert not isinstance(excinfo.value, ValueError)
+    assert snapshot(work_dir) == before
+
+
+# --- Row：外部 JSON 的值形态（不可哈希值 MUST NOT 漏裸 TypeError）------------
+
+
+@pytest.mark.parametrize("bad_value", [["interval_bucket"], {"a": 1}])
+def test_unhashable_accumulation_type_fails_closed(
+    tmp_path: Path, bad_value: Any
+) -> None:
+    """`"accumulation_type": ["interval_bucket"]` 是合法 JSON，反序列化成不可哈希值。
+
+    闸门写成 `x not in frozenset(...)` 时求哈希抛裸 `TypeError`，而 `_build_entries`
+    整段在 `stage_raw` 的 try 块**之前**，三层 handler 一条也接不到。§3.1 对该字段
+    无任何类型约束，「pin 不会写 list」是对生成器的观察、不是对落盘 JSON 的保证。
+    """
+    payload = source_manifest_payload("gfs")
+    for entry in payload["entries"]:
+        entry["metadata"]["idx_selectors"]["apcp"]["accumulation_type"] = bad_value
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    # 前提取证：这份取值确实不可哈希（求哈希即裸 TypeError）。
+    with pytest.raises(TypeError):
+        hash(bad_value)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "accumulation-metadata")
+    assert not isinstance(excinfo.value, TypeError)
+    assert snapshot(work_dir) == {}
+
+
+def test_unhashable_entry_variable_fails_closed(tmp_path: Path) -> None:
+    """同类的另一个出口：`ManifestEntry.from_dict` 不强制 `variable` 的类型，
+
+    一个 `"variable": ["apcp"]` 会在按 (lead, variable) 建索引时让 `dict` 求哈希抛裸
+    `TypeError`——同样在 try 块之前。
+    """
+    payload = source_manifest_payload("gfs")
+    payload["entries"][0]["variable"] = ["apcp"]
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    # 前提取证：坏值确实穿过了 `from_dict`（它只强制 forecast_hour/metadata）。
+    assert DownloadManifest.from_dict(dict(payload)).entries[0].variable == ["apcp"]
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert not isinstance(excinfo.value, TypeError)
+    assert snapshot(work_dir) == {}
+
+
+# --- Row：containment 的三种别名与一条合法路径 -------------------------------
+
+
+def _case_insensitive(tmp_path: Path) -> bool:
+    probe = tmp_path / "case-probe"
+    probe.mkdir()
+    return (tmp_path / "CASE-PROBE").is_dir()
+
+
+def test_case_aliased_work_dir_inside_raw_root_is_refused(tmp_path: Path) -> None:
+    """大小写别名：`<b>/NWM-RAW/work` 与 `<b>/nwm-raw` 词法不相交、物理同一棵树。
+
+    `resolve()` 关不掉这条腿——CPython 的 posix 实现折叠 symlink 与 `..`，但**保留
+    调用方给的非链组件大小写**。判据必须落到 inode 身份上。
+    """
+    raw_root, _work_dir = build_tree(tmp_path)
+    if not _case_insensitive(tmp_path):
+        pytest.skip("大小写敏感的卷上不存在该别名")
+    alias_work = tmp_path / "NWM-RAW" / "work"
+    # 前提取证：别名确实指向 raw_root 那个 inode，且两条路径词法不相交。
+    assert os.path.samestat(os.stat(tmp_path / "NWM-RAW"), os.stat(raw_root))
+    assert not alias_work.resolve().is_relative_to(raw_root.resolve())
+    before = snapshot(raw_root)
+    config = make_config()
+    verdict = judge(raw_root, "gfs", CYCLE, config)
+    with pytest.raises(ConfigError):
+        stage_raw(verdict, raw_root, alias_work, "gfs", CYCLE, config)
+    assert snapshot(raw_root) == before
+
+
+def test_symlinked_work_dir_pointing_into_raw_root_is_refused(tmp_path: Path) -> None:
+    """`work_dir` **自身**是一条指进 raw 树的链（#71 的目标侧逐段检查按设计跳过根，
+    故那条工具在这里无效）。
+    """
+    raw_root, _work_dir = build_tree(tmp_path)
+    real = raw_root / "work-real"
+    real.mkdir()
+    link = tmp_path / "worklink"
+    link.symlink_to(real, target_is_directory=True)
+    before = snapshot(raw_root)
+    config = make_config()
+    verdict = judge(raw_root, "gfs", CYCLE, config)
+    with pytest.raises(ConfigError):
+        stage_raw(verdict, raw_root, link, "gfs", CYCLE, config)
+    assert snapshot(raw_root) == before
+
+
+def test_dotdot_aliased_work_dir_inside_raw_root_is_refused(tmp_path: Path) -> None:
+    """`..` 段：`<b>/side/../nwm-raw/work` 词法上不以 `<b>/nwm-raw` 为前缀。"""
+    raw_root, _work_dir = build_tree(tmp_path)
+    (tmp_path / "side").mkdir()
+    alias_work = tmp_path / "side" / ".." / "nwm-raw" / "work"
+    before = snapshot(raw_root)
+    config = make_config()
+    verdict = judge(raw_root, "gfs", CYCLE, config)
+    with pytest.raises(ConfigError):
+        stage_raw(verdict, raw_root, alias_work, "gfs", CYCLE, config)
+    assert snapshot(raw_root) == before
+
+
+def test_work_dir_reached_through_dotdot_outside_raw_root_stages_normally(
+    tmp_path: Path,
+) -> None:
+    """合法路径 MUST NOT 被误拒：`<raw_root>/../work` 解析后是 raw 树的**兄弟**。
+
+    这是该闸门唯一的无误拒判别器——既有三条用例（`raw_root/yd-work`、`tmp_path`、
+    同前缀兄弟 `nwm-raw-work`）全部词法可判，在纯词法闸门下也照样绿。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    through_dotdot = raw_root / ".." / "work"
+    # 前提取证：这条路径词法上以 raw_root 为前缀，解析后却在 raw 树之外。
+    assert Path(through_dotdot).is_relative_to(raw_root)
+    assert not through_dotdot.resolve().is_relative_to(raw_root.resolve())
+    result = staged(raw_root, through_dotdot)
+    assert len(result.copied_files) == len(LEADS)
+    assert (work_dir / MANIFEST_NAME).is_file()
+
+
+# --- Row：lead_hours 的排序 / verdict 变量集的 list 分量 ----------------------
+
+
+def test_unsorted_lead_hours_stage_normally(tmp_path: Path) -> None:
+    """`lead_hours=(6, 0, 3)` 是合法配置（装载器不排序也不要求有序）。
+
+    `_reconstruct_sources` 的 `sorted(lead_hours)` 是活闸门而不是展示用排序：去掉它
+    时该合法调用会被 `verdict-mismatch` 误拒（`judge` 侧的 `_expected_leads` 排序）。
+    """
+    config = make_config(gfs=make_source(lead_hours=(6, 0, 3)))
+    raw_root, work_dir = build_tree(tmp_path)
+    result = staged(raw_root, work_dir, "gfs", config)
+    assert result.copied_files == tuple(
+        work_dir / "raw" / "gfs" / CYCLE_DIR / bundle_name("gfs", lead)
+        for lead in LEADS
+    )
+    written = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert written["metadata"]["forecast_hours"] == [0, 3, 6]
+
+
+def test_verdict_lead_variable_set_as_a_list_stages_normally(tmp_path: Path) -> None:
+    """值形态闸门的 `list` 分量：`isinstance(variables, tuple | list)` 的右半。
+
+    该分量声明「`list` 值集是合法输入」，但既有三个坏输入（`None`/`5`/`"tmp2m"`）对
+    两个分量咬合相同，把闸门收窄成只认 `tuple` 的变异体照样全绿。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    verdict = _handmade_verdict(raw_root, "gfs", LEADS, GFS_VARIABLES)
+    as_list = type(verdict)(
+        complete=True,
+        expected_files=verdict.expected_files,
+        missing_files=(),
+        unreadable_files=(),
+        expected_variables={lead: list(GFS_VARIABLES) for lead in LEADS},
+    )
+    result = stage_raw(as_list, raw_root, work_dir, "gfs", CYCLE, make_config())
+    assert {(e.forecast_hour, e.variable) for e in result.entries} == {
+        (lead, var) for lead in LEADS for var in GFS_VARIABLES
+    }
+
+
+# --- Row：symlink 拒绝**先于**读源 manifest（顺序的判别器）-------------------
+
+
+def test_symlinked_cycle_directory_is_refused_before_the_manifest_is_read(
+    tmp_path: Path,
+) -> None:
+    """链目标里放一份畸形 `manifest.json`：两种顺序按 `kind` 分开。
+
+    先读 manifest 的实现会以 `source-manifest` 失败（并且已经穿过那条 spec 说
+    「不跟随」的链）；正确顺序以 `source-symlink` 失败。既有的链 cycle 目录用例背后
+    是一份**合法** manifest，两种顺序同样报 `source-symlink`，判别不了顺序。
+    """
+    raw_root = tmp_path / "nwm-raw"
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(parents=True)
+    real_cycle = raw_root / "gfs" / "real-2026030400"
+    real_cycle.mkdir(parents=True)
+    for lead in LEADS:
+        (real_cycle / bundle_name("gfs", lead)).write_bytes(bundle_bytes(lead))
+    (real_cycle / SOURCE_MANIFEST_NAME).write_text("{not json", encoding="utf-8")
+    (raw_root / "gfs" / CYCLE_DIR).symlink_to(real_cycle, target_is_directory=True)
+    # 前提取证：链后面那份 manifest 确实不可解析（先读就必然是 source-manifest）。
+    with pytest.raises(json.JSONDecodeError):
+        json.loads((real_cycle / SOURCE_MANIFEST_NAME).read_text(encoding="utf-8"))
+    config = make_config()
+    verdict = judge(raw_root, "gfs", CYCLE, config)
+    assert verdict.complete is True
+    with pytest.raises(RawStagingError) as excinfo:
+        stage_raw(verdict, raw_root, work_dir, "gfs", CYCLE, config)
+    expect_kind(excinfo, "source-symlink")
+    assert snapshot(work_dir) == {}
+
+
+# --- Row：manifest 级四键由 yd 自算（first/last 两端都发散）------------------
+
+
+def test_manifest_level_hour_keys_are_self_computed_not_copied(tmp_path: Path) -> None:
+    """源侧小时表在**两端**都比本轮 lead 宽：first 与 last 各自可判。
+
+    默认 fixture 只让 last 发散（源侧 `[0,3,6,9,12]` vs 本轮 `[0,3,6]`），照抄源侧
+    `first_forecast_hour` 的实现在那份输入上取值恰好重合。这里把本轮 lead 收成
+    `(3, 6)`、源侧仍从 0 起，四键全部发散。
+    """
+    leads = (3, 6)
+    config = make_config(gfs=make_source(lead_hours=leads))
+    payload = source_manifest_payload("gfs", leads=leads, declared_hours=(0, 3, 6, 9))
+    raw_root, work_dir = build_tree(tmp_path, leads=leads, manifest=payload)
+    result = staged(raw_root, work_dir, "gfs", config)
+    written = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert written["metadata"] == {
+        "first_forecast_hour": 3,
+        "last_forecast_hour": 6,
+        "requested_forecast_hours": [3, 6],
+        "forecast_hours": [3, 6],
+    }
+    # 前提取证：源侧四键与上面每一项都不同（否则本用例判别不了「照抄」）。
+    assert payload["metadata"] == {
+        "first_forecast_hour": 0,
+        "last_forecast_hour": 9,
+        "forecast_hours": [0, 3, 6, 9],
+        "requested_forecast_hours": [0, 3, 6, 9],
+    }

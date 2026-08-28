@@ -8,11 +8,18 @@
 `status = os.lstat(path)`、`SOURCE_DIR_NAMES[source]`、`metadata.get(...)` 这类闸门在
 关键字扫描下不可见（project-profile「Orchestration hazards」实测漏约 10 个）。
 
-原始枚举：函数体内命中 **157** 个节点，按「行 + 语义」归并为下表 **58** 条闸门；每条
+原始枚举：函数体内命中 **157** 个节点，按「行 + 语义」归并为下表 **108** 条闸门（原记
+58 条，是 round-1 逐分量重修**之前**的计数，未随文末重修同步——round-2 verifier CONFIRMED）；每条
 落在「表内（有杀手变异体）」或「死腿登记（附不可达/无判别力的理由）」两桶之一，无第三桶。
 
 **round-1 修复后重修（PR #65）**：复合闸门按**分量**重新展开（见文末「复合闸门逐分量
 重修」），表内由 38 条细化为 71 条，死腿登记 20 条不变。
+
+**round-2 修复后重修（PR #65）**：表内 71 -> **88** 条（新增承接/自算七条、containment
+的归一与 inode 身份三条、`rollback` 三条、外部值形态两条、symlink 顺序一条、`sorted(lead_hours)`
+与 `tuple | list` 的 `list` 分量各一条）；死腿登记仍 **20** 条（`_Written.rollback` 的两条 `except OSError`
+出表——它已不是「尽力而为」而是「保证不抛 + 失败带进外抛异常」，有 R1a/R1b/R1c/R1d 四个杀手变异体；
+新入表的死腿是 `O_NOFOLLOW`）。
 
 变异实验环境：私有 scratch 副本 `/private/tmp/claude-501/mutate-issue7-rawcopy`（含
 `issue7` 标识、非共用路径），`rsync --exclude='.venv' --exclude='__pycache__'
@@ -29,7 +36,28 @@ round-1 修复轮在私有副本 `scratchpad/pr65-fix1` 内重跑全套 producer
 `tests/test_snapshot_provenance.py` 在收集期就 `FileNotFoundError`，整轮变异实验会
 以「1 error」收场而不是给出红/绿。
 
-## 表内闸门（38 条，各有杀手变异体，全部实测变红）
+**round-2 修复轮的变异实验**：私有副本
+`/private/tmp/claude-501/mutate-r2fix-issue7-rawcopy-12303`（同一套 profile 措施：三个
+rsync exclude + 仓根 `openspec/`/`docs/`、副本内 `env -u VIRTUAL_ENV uv sync --frozen`、
+每轮 pytest 均带 `env -u VIRTUAL_ENV` 与 `PYTHONDONTWRITEBYTECODE=1`、逐变异体清
+`__pycache__`、每个变异体先跑 `hygiene.py` 断言 `yd_producer.__file__` 与
+`rawcopy.__file__` 都落在副本内并对**已 import** 的模块做 `inspect.getsource` 变异 token
+断言，每轮跑**全 producer 套件** `pytest tests/`）。基线 **762 passed / 16 skipped**；
+控制变异 **M00**（`_local_key` 前缀 `raw/` -> `rawX00MUT/`）= **17 failed / 745 passed /
+16 skipped**（RED，校准通过；较 round-1 的 13 failed 多 4 条，是本轮新增的四条依赖复制
+路径的用例）。本轮 19 个候选变异体（P1/P2/P3/N1/N2/N3/N4/N5/N6/N8、R1a/R1b/R1c/R1d、
+A2a/A2b、C3a/C3b/C3d）**全部变红**，逐条见上表「杀手变异体」列；控制变异 M00 在**十九个
+变异体之后**再跑一次，仍是 17 failed / 745 passed / 16 skipped（首尾两次校准一致）。
+
+**沿用结论的边界（本轮被改写的函数不沿用）**：round-1 的 71 条表内结论跑在 round-1 源上。
+本轮改写了三处闸门所在的代码块（containment 闸门、tier-1 回滚腿、tier-3 回滚腿），故其
+原变异体 MF3/M23/MF6 在**最终源**上重跑，逐条仍 RED：MF3-r2（整条 containment 闸门失效）
+= 5 failed、M23-r2（tier-1 不回滚）= 7 failed、MF6-r2（tier-3 不回滚）= 1 failed。其余
+legacy 行所指的闸门语句在本轮 diff 中**逐字节未变**（`_carried_metadata` 的 selector 取法、
+`_check_accumulation` 的取值域三闸门、`_reconstruct_sources` 的两处比对、`_render_manifest`
+的字段赋值），结论沿用。
+
+## 表内闸门（88 条，各有杀手变异体，全部实测变红）
 
 | 闸门（行/语义） | 所在函数 | 杀手变异体 | 结果 |
 |---|---|---|---|
@@ -41,7 +69,8 @@ round-1 修复轮在私有副本 `scratchpad/pr65-fix1` 内重跑全套 producer
 | `SOURCE_DIR_NAMES[source]`（重构目录段） | `_reconstruct_sources` | M27 改用小写入参 | RED |
 | lead 集合**相等**（缺一个 lead 的方向） | `_reconstruct_sources` | `test_verdict_missing_a_lead_variable_set_is_rejected` + M03 | RED |
 | lead 集合**相等**（多一个 lead 的方向） | `_reconstruct_sources` | MF4（相等退化成包含）+ `test_verdict_with_an_extra_lead_is_rejected` | RED |
-| `expected_variables[lead] is None`（键相等仍需判值） | `_reconstruct_sources` | MF5（去掉该判值）+ `test_verdict_lead_with_a_null_variable_set_is_rejected` | RED |
+| `not isinstance(variables, tuple \| list)`（键相等仍需判值形态） | `_reconstruct_sources` | MF5（去掉该判值）+ `test_verdict_lead_with_a_malformed_variable_set_is_rejected`（`None`/`5`/`"tmp2m"`） | RED |
+| 同一闸门的 `list` 分量（`list` 值集是**合法**输入） | `_reconstruct_sources` | N4（收窄成 `isinstance(variables, tuple)`）+ `test_verdict_lead_variable_set_as_a_list_stages_normally` | RED（反向：误拒即红） |
 | `for segment in segments`（祖先段逐段查） | `_reject_symlinks` | M06 只查叶子 | RED |
 | `os.lstat(current)` + `S_ISLNK(mode)` | `_reject_symlinks` | M05 放行 | RED |
 | `open(<cycle>/manifest.json)`（OSError 腿） | `_load_source_manifest` | `test_absent_source_manifest_fails_closed`（缺文件即红） | RED（M07 同族） |
@@ -83,15 +112,31 @@ round-1 修复轮在私有副本 `scratchpad/pr65-fix1` 内重跑全套 producer
 | `written.rollback()`（`RawStagingError` 腿） | `stage_raw` | M23 不回滚 | RED |
 | `written.rollback()`（**非** `RawStagingError` 腿，并收敛成 `copy-failed`） | `stage_raw` | MF1a 收窄回 `except RawStagingError` + `test_bare_exception_inside_the_write_block_still_rolls_back` | RED |
 | `written.rollback()`（`BaseException` 腿，且**不**改写异常类型） | `stage_raw` | MF6 该腿不回滚 + `test_keyboard_interrupt_mid_copy_still_rolls_back` | RED |
+| `rollback` 的 `except Exception`（**保证不抛**：它抛出的异常会替换正在外抛的失败） | `_Written._remove` | R1a（收窄回 `except OSError`）+ `test_rollback_failure_is_reported_and_never_replaces_the_staging_error` | RED |
+| 回滚失败进入外抛异常（tier-1 的 `add_note`） | `stage_raw` | R1d（不挂 note）+ 同上用例 | RED |
+| tier-2 的清理声明**条件化**（清理失败时不得宣称「已清理」） | `stage_raw` | R1b（无条件宣称已清理）+ `test_tier2_message_stops_claiming_cleanup_when_rollback_failed` / R1c（无条件宣称残留）+ `test_successful_rollback_still_reports_a_clean_cleanup` | RED |
 | `_render_manifest` 的 `.encode("utf-8")`（序列化前置到准入期） | `_render_manifest` | MF1b 改成 `errors="surrogatepass"` + `test_non_utf8_encodable_carried_value_is_refused_before_any_write` | RED |
 | `for variable in verdict.expected_variables[lead]`（逐变量扇出，集合相等两方向） | `_build_entries` | M24 漏一条 / M25 多一条 | RED / RED |
 | `local_key=local_key`（entry 的 key 由 yd **自己算**，不照抄源 manifest） | `_build_entries` | MX1（`local_key=source_entry.local_key`）+ `test_full_cycle_copies_files_and_manifest_triples_match` / `test_manifest_json_matches_the_producer_consumer_contract`（源 fixture 带 `nwm-bucket/` 发散前缀） | RED |
 | `work_dir` 在 `raw_root` 之下（析取左半） | `stage_raw` | MF3 去掉该闸门 + `test_work_dir_under_raw_root_is_a_config_error` | RED |
 | `raw_root` 在 `work_dir` 之下（析取右半） | `stage_raw` | MF3 + `test_raw_root_under_work_dir_is_a_config_error` | RED |
-| `source_id=SOURCE_DIR_NAMES[source]`（存储身份逐源非对称） | `_write_manifest` | M26 用小写入参 | RED |
+| `_normalized` 的 `resolve()`（折叠 symlink 与 `..` 后再判包含） | `stage_raw` | C3b（回到未归一的纯词法闸门）+ `test_symlinked_work_dir_pointing_into_raw_root_is_refused` / `test_dotdot_aliased_work_dir_inside_raw_root_is_refused` / `test_work_dir_reached_through_dotdot_outside_raw_root_stages_normally`（无误拒判别器） | RED |
+| `_contains_by_identity`（inode 身份，抓 `resolve()` 关不掉的大小写别名） | `stage_raw` | C3a（只留 `resolve()` 比较）+ `test_case_aliased_work_dir_inside_raw_root_is_refused` | RED |
+| `_normalized` 的 `ValueError` 腿（NUL 字节路径） | `_normalized` | C3d（只接 `OSError`）+ `test_null_byte_work_dir_is_refused_without_leaking_a_bare_value_error` | RED |
+| `source_id=SOURCE_DIR_NAMES[source]`（存储身份逐源非对称；**自算**不照抄源） | `_render_manifest` | M26 用小写入参 / N2（照抄源 `source_id`，源侧已带 `mirror-` 前缀） | RED |
 | `expected_checksum`/`expected_size_bytes` 留 None | `_build_entries` | M28 写 0 | RED |
-| `manifest_uri=None` | `_write_manifest` | M29 写 `file://` | RED |
+| `manifest_uri=None` | `_render_manifest` | M29 写 `file://` | RED |
 | manifest 级四键 | `_manifest_metadata` | M30 少写 `requested_forecast_hours` | RED |
+| `FIRST_/LAST_FORECAST_HOUR_KEY` 由本轮 lead **自算**（不照抄源 manifest） | `_manifest_metadata` | N3 + `test_manifest_level_hour_keys_are_self_computed_not_copied`（源侧小时表两端都比本轮宽） | RED |
+| `cycle_time=cycle.astimezone(UTC)`（manifest 级**自算**） | `_render_manifest` | N1（照抄源 manifest 的 `cycle_time`，源侧已偏移到另一个 cycle） | RED |
+| `remote_url=source_entry.remote_url`（取源 entry 的**同名字段**，不取承接来的 `logical_remote_url`） | `_build_entries` | N6（源侧两个 URL 已发散到不同 host） | RED |
+| entry 级 `cycle_time` **逐字承接**（不自算） | `_carried_metadata` | P2（改为 `cycle.astimezone(UTC).isoformat()`；源侧写 `Z`、自算出 `+00:00`） | RED |
+| entry 级 `valid_time` **逐字承接**（不自算） | `_carried_metadata` | P3（改为 `cycle + timedelta(hours=lead)`） | RED |
+| `selectors.get(variable)`（单数键由**复数键按变量**取，不照抄源侧单数键） | `_carried_metadata` | P1（改读 `metadata.get(IDX_SELECTOR_KEY)`；4 变量 bundle 上源侧按 §3.1 根本不写单数键） | RED |
+| `tuple(sorted(source_config.lead_hours))`（无序 `lead_hours` 是合法配置） | `_reconstruct_sources` | N5（去 `sorted`）+ `test_unsorted_lead_hours_stage_normally`（`(6, 0, 3)` 被误判 `verdict-mismatch` 即红） | RED（反向：误拒即红） |
+| `isinstance(accumulation_type, str)`（求哈希前先判形态） | `_check_accumulation` | A2a + `test_unhashable_accumulation_type_fails_closed`（`list`/`dict`） | RED |
+| `isinstance(entry.variable, str)`（当字典键前先判形态） | `_index_source_entries` | A2b + `test_unhashable_entry_variable_fails_closed` | RED |
+| symlink 拒绝**先于**读源 manifest 的顺序 | `stage_raw` | N8（把读 manifest 提到走查之前）+ `test_symlinked_cycle_directory_is_refused_before_the_manifest_is_read`（链目标里放畸形 manifest，两种顺序按 kind 分开） | RED |
 | `source not in SOURCE_DIR_NAMES`（形参守卫） | `_validate_params` | M34 放行 | RED |
 | `isinstance(cycle, datetime)` | `_validate_params` | M34 同族 | RED |
 | `utcoffset() != timedelta(0)` 的 naive 腿（`utcoffset()` 为 `None`） | `_validate_params` | 参数化行 naive `datetime` | RED |
@@ -121,14 +166,14 @@ round-1 修复轮在私有副本 `scratchpad/pr65-fix1` 内重跑全套 producer
 | `except OSError`（读写循环中途，如写到一半 ENOSPC） | `_copy_one` | 需真实填满文件系统；注入点选在 `os.open`（M36b/用例已覆盖同一 kind） |
 | `except OSError`（复制后 `_identity`） | `_copy_one` | 需在复制后瞬间让源不可 lstat，测试内不可靠 |
 | `except OSError`（manifest 写入中途） | `_write_manifest` | 同上（创建腿已由 M36b 同族覆盖） |
-| `except OSError` ×2 | `_Written.rollback` | 尽力而为清理：吞掉异常是有意的，红/绿都不改变外抛的 staging 失败 |
-| `if probe.parent == probe` | `_ensure_dir` | 不可达：文件系统根恒存在，`while` 先退出 |
+| `if probe.parent == probe` | `_ensure_dir` | 不可达：文件系统根恒存在，`while` 先退出。该支一旦成立会把根登记进账本，`rollback` 的 `rmdir("/")` 只会以 EBUSY/EACCES 落进失败清单、不删任何东西（round-2 verifier 批次外记录，理由已写进源码注释） |
 | `zip(..., strict=True)` | `stage_raw` | 不可达：`targets` 由 `rebuilt` 同一推导式构造，长度恒等 |
 | `rebuilt[0][1].parent if rebuilt else raw_path` 的 else 支 | `stage_raw` | 不可达：空 `lead_hours` 已在 `_validate_params` 以 `ConfigError` 拒 |
 | `if not source_config.lead_hours` | `_validate_params` | 上游 `judge` 先以 `ConfigError` 拒同一输入；此处是本模块自己的兜底 |
 | `if kind not in ERROR_KINDS` | `RawStagingError.__init__` | 自检式断言：本模块内所有 raise 点都用字面量 kind，越域取值只可能来自将来的改动 |
 | `hours[0]` / `hours[-1]` | `_manifest_metadata` | 与上面空 `lead_hours` 同一前置，非空后恒有定义 |
-| `sorted(...)` ×3（消息拼装、回滚排序、`uncovered`） | 多处 | 前两处是展示/顺序，无判定语义；第三处的判定由 `if uncovered` 承担（表内） |
+| `sorted(...)`（消息拼装、回滚排序、`uncovered`；**不含** `_reconstruct_sources` 的 `sorted(lead_hours)`，那条已在表内） | 多处 | 前两处是展示/顺序，无判定语义；`uncovered` 的判定由 `if uncovered` 承担（表内） |
+| `O_NOFOLLOW`（常量定义与 `os.open(source_path, O_RDONLY \| O_NOFOLLOW)`） | 模块常量 / `_copy_one` | 纵深防御的**第二道闩**（`rawcopy.py:126-128` 自述）：叶子与祖先段的链已由 `_reject_symlinks` 在任何 open 之前逐段 `lstat` 拒绝，单摘该标志不变红（N7 变异体存活于全套件——**round-2 verifier C 实测**，非本轮自跑）。本仓既有范式：`producer/tests/test_safe_fs_refusals.py:19-27` |
 
 
 ## 复合闸门逐分量重修（PR #65 round 1）
