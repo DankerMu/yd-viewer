@@ -355,6 +355,11 @@ class SlurmJobExecutor:
         except ExecutorError:
             raise
         except Exception as exc:
-            raise ExecutorError(
-                f"执行 `{argv[0]}` 失败：{exc.__class__.__name__}: {exc}", job_id
-            ) from exc
+            message = f"执行 `{argv[0]}` 失败：{exc.__class__.__name__}: {exc}"
+            # `CalledProcessError` 的 `str()` 只有退出码，诊断原文在 `stderr` 上；而
+            # `OSError` 一类根本没有该属性，故用 `getattr` 取。stdout 不并入：失败时
+            # 它要么为空要么是半截输出，只会稀释诊断。
+            stderr = getattr(exc, "stderr", None)
+            if stderr:
+                message = f"{message}\nstderr: {str(stderr).strip()}"
+            raise ExecutorError(message, job_id) from exc

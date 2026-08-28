@@ -364,6 +364,10 @@ def test_parse_sacct_record_absent_times_become_none(absent):
         ),
         pytest.param("12345|COMPLETED|2026-08-28T00:00:00", id="three-columns"),
         pytest.param(
+            "12345|COMPLETED|2026-08-28T00:00:00|2026-08-28T01:00:00|extra",
+            id="five-columns",
+        ),
+        pytest.param(
             "99999|COMPLETED|2026-08-28T00:00:00|2026-08-28T01:00:00",
             id="job-id-mismatch",
         ),
@@ -476,33 +480,52 @@ def test_poll_env_overlays_sacct_env_onto_process_env(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "diagnostic"),
     [
-        OSError("sbatch: command not found"),
-        subprocess.CalledProcessError(1, ["sbatch"], stderr="invalid partition"),
+        pytest.param(
+            OSError("sbatch: command not found"),
+            "sbatch: command not found",
+            id="oserror",
+        ),
+        pytest.param(
+            subprocess.CalledProcessError(1, ["sbatch"], stderr="invalid partition"),
+            "invalid partition",
+            # `str(CalledProcessError)` 只有"退出码非零"，诊断原文只在 `stderr` 里
+            id="called-process-error",
+        ),
     ],
 )
-def test_submit_translates_runner_exception(error):
-    """原生异常 MUST NOT 外泄，且转译消息须带原文（诊断信息只在原文里）。"""
+def test_submit_translates_runner_exception(error, diagnostic):
+    """原生异常 MUST NOT 外泄，且转译消息须带诊断原文（否则只剩无信息消息）。"""
     executor, _ = make_executor([error])
     with pytest.raises(ExecutorError) as excinfo:
         executor.submit(make_spec())
     assert str(error) in str(excinfo.value)
+    assert diagnostic in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "diagnostic"),
     [
-        OSError("sacct: connection refused"),
-        subprocess.CalledProcessError(1, ["sacct"], stderr="db down"),
+        pytest.param(
+            OSError("sacct: connection refused"),
+            "sacct: connection refused",
+            id="oserror",
+        ),
+        pytest.param(
+            subprocess.CalledProcessError(1, ["sacct"], stderr="db down"),
+            "db down",
+            id="called-process-error",
+        ),
     ],
 )
-def test_poll_translates_runner_exception(error):
+def test_poll_translates_runner_exception(error, diagnostic):
     executor, _ = make_executor(["12345\n", error])
     executor.submit(make_spec())
     with pytest.raises(ExecutorError) as excinfo:
         executor.poll("12345")
     assert str(error) in str(excinfo.value)
+    assert diagnostic in str(excinfo.value)
 
 
 def test_poll_lets_job_record_invariant_reject_backwards_start():
