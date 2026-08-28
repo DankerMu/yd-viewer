@@ -655,9 +655,26 @@ def stage_raw(
 - `copied_files: tuple[Path, ...]` —— 副本绝对路径，与 `verdict.expected_files` **同序同长**
 - `entries: tuple[ManifestEntry, ...]` —— 写进 manifest 的 entry，按 (lead 升序, `variables` 声明序)
 
+失败一律抛 `RawStagingError`（本 issue 新增，`Exception` 子类），带**闭合词表**的 `kind` 字段，供调用方与测试机检；MUST NOT 外泄裸 `OSError`/`KeyError`/`json.JSONDecodeError`。词表恰好八项：
+
+| `kind` | 触发 |
+|---|---|
+| `incomplete-verdict` | `verdict.complete is False` |
+| `unsupported-layout` | `len(bundles) != 1`（见下方单 bundle 约束） |
+| `source-symlink` | 源侧 bundle 路径或其祖先段是 symlink |
+| `source-manifest` | 源 manifest 缺失/不可解析/覆盖不全/缺 `forecast_hours`，或形参与 verdict 的路径不一致 |
+| `accumulation-metadata` | R4B2 的三条 APCP fail-closed 中任一条不成立 |
+| `source-mutated` | 复制前后源 `lstat` 元组不一致 |
+| `target-exists` | 目标副本路径已存在 |
+| `copy-failed` | 复制期的其它 IO 失败（权限、ENOSPC 等） |
+
+`ConfigError` 仍由 `rawscan` 的取值域校验承担，本 issue 不重复校验、也不把上表任一项归进 `ConfigError`——两个异常类型的分工是「配置写错了」对「本轮环境不满足前置」。每个 `kind` MUST 各有一个具名用例并各有一个杀手变异体（把该分支删掉/改成放行即变红）。
+
 **`(lead, variable, file)` 三元组契约（#6 round 1 cand-05 路由到本 issue 的 seam）**：本 issue 在此确立该键关系，形态为
 `(entry.forecast_hour, entry.variable, entry.local_key)`。同一 (lead, bundle) 的**全部变量 entry 共享同一个 `local_key`**（pin 的逐变量扇出，`NWM@8ae9b8f2 gfs_adapter.py:611-636`：外层 hour 算一次 `local_key`，内层逐变量产 entry）。三元组的完整性由下式定义并 MUST 被断言：
 `{(lead, var) for lead, vars in verdict.expected_variables.items() for var in vars}` 与 `{(e.forecast_hour, e.variable) for e in entries}` **相等**（不是包含）。
+
+**单 bundle 约束（fail closed）**：上式只在「一个 lead 恰好对应一个物理文件」时有定义。`RawSourceConfig.bundles` 是元组、允许多模式（#6 的 fixture 就行使了两个模式），此时 `entries` 是 lead × variables 而 `copied_files` 是 lead × bundles，**变量落在哪个 bundle 无处可查**——`config` 不携带 variable→bundle 映射，`ScanVerdict` 也不提供。故 `stage_raw` MUST 在任何写入之前检查 `len(config.raw.<source>.bundles) == 1`，否则以 `kind="unsupported-layout"` 拒绝。这不是把 3.1 的能力砍掉：3.1 的判定对多 bundle 完全有效（它只需要文件在不在），是 manifest 侧的语义在多 bundle 下不存在。pin 侧同源事实：bundle 文件名逐 hour 只产一个（`gfs_adapter.py:1878-1880`、`ifs_adapter.py:1688-1690`），多 bundle 是 yd 的 config 允许而 pin 上不存在的形态。放开该约束需要先在 `config` 里长出 variable→bundle 映射——归 **#29 / #32**，本 issue 不发明。
 
 消费 `ScanVerdict` 的两条 #6 交接约定：`ScanVerdict` 是持有可变 `dict` 的 frozen dataclass，`hash()` 抛 `TypeError`——MUST NOT 放进 set 或用作 dict key；`ScanVerdict` 不提供三元组，故上式是本 issue 自己从 `expected_files` 与 `expected_variables` 交叉构造的。
 
@@ -668,7 +685,8 @@ def stage_raw(
 - `local_key = f"raw/{存储身份}/{YYYYMMDDHH}/{bundle 文件名}"`（`gfs_adapter.py:615`）
 - object-store 根 = `work_dir`；于是 `resolve_path` 结果为 `<work_dir>/raw/<存储身份>/<YYYYMMDDHH>/<bundle>`，**位于 `work/raw/` 之下**，满足 spec 的「entry 路径 MUST 只引用 `work/raw/` 临时副本」
 - 存储身份逐源非对称，复用 `rawscan.SOURCE_DIR_NAMES`（`ifs -> "IFS"`、`gfs -> "gfs"`），MUST NOT 另抄一份字面量
-- `remote_url` 沿用源 manifest 的对应值；源 manifest 不可用时（见下）落 `""` 不是可接受形态——见 fail-closed 段
+- `remote_url` 沿用源 manifest 对应 entry 的值；源 manifest 不可用时整轮 fail closed，MUST NOT 以 `""` 占位（见 fail-closed 段）
+- `expected_checksum`、`expected_size_bytes`、`manifest_uri` 三者 MUST 落 `None`，逐条理由 MUST 写进实现注释：前两者在 pin 的**构建期**同样是 `None`（下载期才可能有值），yd 复制的是已落盘的字节、无独立 oracle，写进去等于制造一个无人校验的声明；`manifest_uri` 在 pin 上是 object-store URI（`ifs_adapter.py:667` 一带），而 yd 的 manifest 落在 `<work_dir>/raw-manifest.json`、不是 object-store 对象，写 `file://` 路径属发明语义
 
 #### 源 manifest 承接（不发明语义）
 
@@ -683,7 +701,10 @@ pin 在 raw cycle 目录内落盘 `manifest.json`（GFS `_persist_manifest_metad
 
 1. 凡 `variable == "apcp"` 的 entry，其 `idx_selector.accumulation_type`（或别名 `accumulation_policy`）MUST 存在且取值 ∈ `{"cumulative_since_cycle", "interval_bucket"}`；取 `"interval_bucket"` 时 `step_range`（或别名 `stepRange`）MUST 一并存在。缺失或越域即报错停止。
 2. MUST NOT 继承 pin converter L1726 的 `or "cumulative_since_cycle"` 静默默认；MUST NOT 依赖 converter L678「`idx_selector` 不是 Mapping 就回退到 entry metadata 顶层」这条兜底——yd 的落盘位置固定为**单数 `idx_selector` 子 Mapping**，平铺到顶层不作为 yd 的落盘约定。
-3. manifest 级 metadata MUST 显式写 `forecast_hours`、`first_forecast_hour`、`last_forecast_hour`、`requested_forecast_hours` 四键；缺失即报错。理由：converter `_configured_forecast_hours`(L1611-1622) 缺 `forecast_hours` 时会回落到 L1622 的 `sorted({entry["forecast_hour"]})`——用「实际有的」当「应该有的」，完整性检查恒为真。
+3. manifest 级 forecast hours 键分两侧，MUST NOT 混为一谈：
+   - **源侧（读）**：源 manifest MUST 带 `forecast_hours` 且其值 MUST 是 list，缺失或非 list 即 `kind="source-manifest"` 报错。只此一键强制——它是 converter `_configured_forecast_hours`(L1611-1622) 唯一读的键，缺了会回落到 L1622 的 `sorted({entry["forecast_hour"]})`，用「实际有的」当「应该有的」，完整性检查恒为真。**`requested_forecast_hours` MUST NOT 对源侧强制**：IFS 在 pin 上从不写该键（见勘察清单 §3.1「R4B2 的作用域与可用性」段），对它强制会让每个 IFS cycle 无条件失败。
+   - **yd 侧（写）**：yd 自产的 `raw-manifest.json` 的 manifest 级 metadata **四键全写**，取值由 yd 自己确定而不从源 manifest 抄：`forecast_hours == requested_forecast_hours == sorted(verdict.expected_variables)`（即本轮 `lead_hours` 全集；yd 不做 pin 那种 requested/effective 的裁剪，两者相等是本 issue 的形态），`first_/last_forecast_hour` 取其 min/max。
+   - **两侧的一致性检查**：`set(源 manifest 的 forecast_hours) ⊇ set(yd 的 forecast_hours)` MUST 成立，否则 `kind="source-manifest"` 报错——源 manifest 没声明的小时，yd 不能凭副本存在就声明它齐全。反向不要求（源可以比 yd 要的多）。
 4. 本 fixture 实测的 pin 事实（限定 R4B2 的作用域，MUST 写进实现注释）：`IFS_VARIABLES = ("2t","2d","10u","10v","tp","sp","ssr","str")`（`ifs_adapter.py:47`）**不含 `apcp`**，且 IFS 侧全文无 `idx_selector`——故第 1 条只对 GFS 产生约束。IFS 的降水变量是 `tp`、且同为累积量，但 pin 未给 IFS 任何累积元数据，本 issue **不为 IFS 发明**该语义（见 Non-goals 与 Known limits）。
 5. 已知运行期后果（MUST 记入 PR 已知限制）：pin 只在**云镜像**下载路径注入 `idx_selectors`（`_download_cloud_mirror` L1068-1072）；NOMADS 直连路径（`_download_with_retries`）不注入。故一个经 NOMADS 下载的 GFS cycle 会在本 issue 的第 1 条上 fail closed、整轮拒绝。这是 R4B2 要求的方向（宁停勿错），不是缺陷；运行期若命中需以运维决策而非放宽本闸门处理。
 
@@ -691,7 +712,9 @@ pin 在 raw cycle 目录内落盘 `manifest.json`（GFS `_persist_manifest_metad
 
 - 复制集 **恰好** `verdict.expected_files`，一个不多一个不少；`verdict.complete is False` -> 拒绝，且**不得写任何文件**（含不得建目录、不得写半个 manifest）
 - 复制**前后**对每个源文件取 `os.lstat`，比对 `(st_size, st_mtime_ns, st_ino, st_mode)`；任何一项变化即报错。这同时是「源不可变」的证据与扫描→复制窗口 TOCTOU 的收敛点（残余 TOCTOU 归组 12 控制器，见 Non-goals）
-- 复制 MUST NOT 跟随 symlink 进入 NWM 根之外，MUST NOT 写、删、改、重命名 NWM 原件的任何路径（compute-loop §4.1 硬约束）
+- **源侧 symlink 一律拒绝**（`kind="source-symlink"`）：对每个源 bundle 路径，MUST 逐段 `lstat` 检查——路径自身或 `<raw_root>` 之下的任一祖先段是 symlink 即拒绝，MUST NOT 跟随。这里刻意**比 3.1 更严**：`rawscan._check` 走 `is_file()` 语义、跟随 symlink（`rawscan.py:255-274`），故 `judge` 可能对一个 symlinked bundle 返回 `complete=True`；而本 issue 钉死的源不可变取证是 `os.lstat`（看链本身、不看目标），两者叠加会在「MUST NOT 跟随 symlink」这句话正下方留一个洞：链的元组不变而目标被换掉，取证照样通过。收口方式是拒绝而不是改用 `os.stat`——`stat` 版本要再补目标的 containment 检查与第二个 TOCTOU 窗口，复杂度换不来收益（NWM 经 object store 的 `write_bytes_atomic` 落盘，raw 树内出现 symlink 属异常形态）。该不对称是**有意的**，MUST 写进实现注释：3.1 判「NWM 说它在」，3.2 判「yd 愿意复制它并为其身份背书」
+- 复制 MUST NOT 写、删、改、重命名 NWM 原件的任何路径（compute-loop §4.1 硬约束）
+- 源路径 containment：每个源 bundle 路径 MUST 由 `raw_root`/`SOURCE_DIR_NAMES[source]`/cycle 紧凑戳/bundle 文件名**重新构造**，并与 `verdict.expected_files` 的对应项逐字相等；MUST NOT 直接信任 `expected_files` 里的路径——形参与 verdict 由不同调用点提供，不一致即 `kind="source-manifest"` 报错（调用序错误）
 - 目标目录不存在则创建；目标已存在同名文件 -> 报错停止，MUST NOT 覆盖（work 是一次性隔离单元，同名存在意味着调用序错误）
 - 部分失败（第 k 个文件复制失败）-> 报错，并把本轮已写入的 work 侧路径清理干净（不留半套 raw），MUST NOT 让 `raw-manifest.json` 与实际副本不一致
 - 副本与 manifest MUST 全部落在 `work_dir` 之下；`YD_ROOT` 模拟根内 MUST 不出现任何 raw 副本
@@ -719,7 +742,14 @@ Regression rows:
 - `stage_raw` + `accumulation_type == "interval_bucket"` 但缺 `step_range` -> 抛错
 - `stage_raw` + 源 manifest 缺 manifest 级 `forecast_hours` -> 抛错
 - `stage_raw` + 第 k 个源文件在复制中途被替换（lstat 前后不一致）-> 抛错，work 侧不留半套副本
-- `stage_raw` + 目标路径已存在同名文件 -> 抛错，MUST NOT 覆盖
+- `stage_raw` + 目标路径已存在同名文件 -> `kind="target-exists"`，MUST NOT 覆盖
+- `stage_raw` + `len(bundles) == 2` 的合法配置 -> `kind="unsupported-layout"`，零写入（多 bundle 下 variable→bundle 无定义）
+- `stage_raw` + 源 bundle 路径本身是 symlink（指向同根内的真实文件）-> `kind="source-symlink"`，零写入；**同一 fixture 下 `judge` 返回 `complete=True`**（钉死 3.1/3.2 的有意不对称）
+- `stage_raw` + cycle 目录段是 symlink -> `kind="source-symlink"`，零写入（祖先段检查，不只查叶子）
+- `stage_raw` + 第 k 个文件复制时目标不可写（权限/ENOSPC）-> `kind="copy-failed"`，work 侧不留半套副本（与 `source-mutated` 分属两条清理路径，各自具名）
+- `stage_raw` + 源 manifest 的 `forecast_hours` 不覆盖本轮某个 lead -> `kind="source-manifest"`，零写入
+- `stage_raw` + 源 manifest 缺 `requested_forecast_hours`（IFS 的 pin 形态）-> **正常产出**，yd 自己写该键 = `lead_hours` 全集（钉死「不对源侧强制」）
+- 产出的 `raw-manifest.json`（正向 schema 断言）-> `DownloadManifest.from_dict(json.load(...))` roundtrip 成功；`source_id == SOURCE_DIR_NAMES[source]`（逐源大小写非对称，本仓已记录的 CONFIRMED/FIX_NOW 陷阱）；每条 entry 的 `metadata` 含且仅含承接的 6 键加 `idx_selector`/`idx_selectors`；`idx_selector` 是该变量的 Mapping 而非被整个 `idx_selectors` 塞进去；manifest 级四键齐全且 `forecast_hours == requested_forecast_hours == sorted(expected_variables)`；`expected_checksum`/`expected_size_bytes`/`manifest_uri` 三者均为 `None`
 - `stage_raw` + IFS 源（无 apcp、无 idx_selectors）-> 正常产出，R4B2 第 1 条不触发（作用域证据）
 - `stage_raw` + GFS `f000_special` 生效 -> lead 0 的 entry 变量集等于 `verdict.expected_variables[0]`，且 lead 0 的**文件**仍在副本集内（f000 只削变量集不削文件集）
 - 源文件树（不变的兄弟面）-> 全部 `lstat` 元组在调用前后逐字相等；NWM 根下零新增/删除/改名
@@ -746,6 +776,7 @@ Regression rows:
 - 变异实验按 profile 的 "Mutation-testing hazards" 与 "Orchestration hazards" 两节执行：唯一命名的私有 scratch 副本、`rsync --exclude='.venv'`、`env -u VIRTUAL_ENV uv sync --frozen`、`PYTHONDONTWRITEBYTECODE=1` 且逐变异体清 `__pycache__`、断言 `yd_producer.__file__` 落在副本内、先跑一个必然变红的控制变异校准
 - 闸门枚举 MUST 用 **AST 遍历全部可执行语句**（不用 grep——grep 看不见 `status = path.stat()` 这类值传播闸门），逐条落进「表内」或「死腿登记」两桶，审计表作为交付物落盘到 `.workplans/pr-<N>/review/`
 - 禁区 grep：`grep -rnE 'psycopg|DATABASE_URL|scheduler|registry|reservation' producer/src/yd_producer/rawcopy.py` -> 零命中
+- `cd producer && uv sync --frozen` -> 无 lock drift（`dependencies = []` 是 Must-preserve 项，本条是它的判别器）
 - `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
 - `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
 
@@ -764,6 +795,8 @@ Regression rows:
 - NOMADS 下载路径的 GFS cycle 会在 R4B2 上整轮 fail closed（上方 fail-closed 第 5 条）
 - IFS 累积语义缺口（上方 Non-goals 第 4 条）
 - `work_dir` 的创建/清理生命周期归组 12，本 issue 只保证自己不留半套
+- 多 bundle 配置（`len(bundles) != 1`）在 staging 侧不受支持，需 config 长出 variable→bundle 映射后才能放开（上方单 bundle 约束）
+- 源侧 symlink 一律拒绝，与 3.1 的 `is_file()` 跟随语义有意不对称（上方复制语义）
 
 #### Review focus
 
@@ -775,6 +808,10 @@ Regression rows:
 - 是否出现按 `source == "gfs"` 的硬分支（应由 `variable == "apcp"` 与配置驱动）
 - 存储身份是否复用 `rawscan.SOURCE_DIR_NAMES` 而非另抄字面量
 - 源不可变断言是否含 mtime_ns 与 ino（只比内容不算）
+- 单 bundle 约束是否在**任何写入之前**短路，且是否真的以 `len(bundles)` 判而非以「渲染出几个文件名」间接判
+- symlink 检查是否覆盖**祖先段**而不只是叶子；拒绝是否发生在复制之前
+- 源侧是否只对 `forecast_hours` 强制、`requested_forecast_hours` 确实**不**强制（IFS 用例是这条的判别器）
+- 八个 `kind` 是否各有具名用例与杀手变异体；是否有裸 `OSError`/`KeyError`/`JSONDecodeError` 从 `stage_raw` 穿出
 - 是否引入 stdlib 之外的依赖，或运行时 import NWM
 
 ## 4. state-tools：cfg.ic 工具链

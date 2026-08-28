@@ -50,19 +50,27 @@
 - **WHEN** 目标副本路径上已存在同名文件
 - **THEN** 报错停止，不覆盖该文件
 
+#### Scenario: 源侧 symlink 拒绝
+- **WHEN** 待复制的源文件路径自身、或其在 raw 根之下的任一祖先目录段是 symlink
+- **THEN** 拒绝并报错，不跟随该链、不复制，work 根内不出现任何新增路径
+
 ### Requirement: 本轮临时 raw manifest
-扫描器 MUST 在 work 内生成 NWM-compatible `raw-manifest.json`，包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息；entry 路径 MUST 只引用 `work/raw/` 临时副本。entry MUST 逐变量扇出，同一 bundle 的各变量 entry 共享同一路径键；manifest 声明的 `(lead, variable)` 集合 MUST 与判定结果的预期变量集**相等**。
+扫描器 MUST 在 work 内生成 NWM-compatible `raw-manifest.json`，包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息；entry 路径 MUST 只引用 `work/raw/` 临时副本。entry MUST 逐变量扇出，同一 `(lead, bundle)` 的各变量 entry 共享同一路径键；manifest 声明的 `(lead, variable)` 集合 MUST 与判定结果的预期变量集**相等**。变量与 bundle 的归属关系无处可查时（一个 lead 对应多于一个 bundle 文件模式）MUST 拒绝生成 manifest，MUST NOT 任选一个 bundle 承担全部变量。
 
 #### Scenario: manifest 结构与路径
 - **WHEN** 对完整 cycle 生成 manifest
 - **THEN** JSON 含 source/cycle/forecast hours/变量/filter 字段，且所有 entry 路径位于 `work/raw/` 之下
 
 #### Scenario: 逐变量扇出与预期集相等
-- **WHEN** 对完整 cycle 生成 manifest
-- **THEN** entry 的 `(lead, variable)` 集合与判定结果的预期变量集相等，且同一 lead 的各变量 entry 共享同一路径键
+- **WHEN** 对单一 bundle 模式的完整 cycle 生成 manifest
+- **THEN** entry 的 `(lead, variable)` 集合与判定结果的预期变量集相等，且同一 `(lead, bundle)` 的各变量 entry 共享同一路径键
+
+#### Scenario: 多 bundle 模式拒绝生成
+- **WHEN** 该 source 声明了多于一个 bundle 文件模式
+- **THEN** 拒绝并报错，work 根内不出现任何新增路径
 
 ### Requirement: manifest 语义键承接与 fail-closed
-manifest 的 entry 级语义键（GRIB filter、累积语义）MUST 逐条承接自 NWM 源 manifest，MUST NOT 在本仓发明或以默认值补齐。降水累积语义缺失或越域时 MUST 报错停止；manifest 级 forecast hours 键 MUST 显式写出，MUST NOT 依赖消费端由实际 entry 反推。
+manifest 的 entry 级语义键（GRIB filter、累积语义）MUST 逐条承接自 NWM 源 manifest，MUST NOT 在本仓发明或以默认值补齐。降水累积语义缺失或越域时 MUST 报错停止。源 manifest MUST 声明其 forecast hours 全集，且该全集 MUST 覆盖本轮预期的全部 lead；本仓产出的 manifest MUST 自行显式写出 forecast hours 相关键，MUST NOT 从源 manifest 转抄、也 MUST NOT 依赖消费端由实际 entry 反推。
 
 #### Scenario: 源 manifest 不可用
 - **WHEN** 源 manifest 缺失、不可解析，或其 entry 无法覆盖本轮预期的 `(lead, variable)` 全集
@@ -80,6 +88,18 @@ manifest 的 entry 级语义键（GRIB filter、累积语义）MUST 逐条承接
 - **WHEN** 累积类型为区间桶但区间范围键缺失
 - **THEN** 报错停止
 
-#### Scenario: manifest 级 forecast hours 缺失
-- **WHEN** 源 manifest 缺少 manifest 级 forecast hours 键
+#### Scenario: 源 manifest 缺少 forecast hours 全集
+- **WHEN** 源 manifest 缺少 manifest 级 forecast hours 全集键，或其值不是列表
 - **THEN** 报错停止，不落到消费端「由实际 entry 反推应有小时表」的自证式回退
+
+#### Scenario: 源 manifest 的 forecast hours 覆盖不全
+- **WHEN** 源 manifest 声明的 forecast hours 全集不包含本轮预期的某个 lead
+- **THEN** 报错停止，不以副本存在为由声明该轮齐全
+
+#### Scenario: 源侧未声明「请求小时表」不构成失败
+- **WHEN** 源 manifest 只声明 forecast hours 全集而未声明「请求小时表」键
+- **THEN** 正常产出，本仓产出的 manifest 自行写出该键，取值为本轮预期 lead 全集
+
+#### Scenario: 产出 manifest 的结构可回读
+- **WHEN** 对完整 cycle 生成 manifest
+- **THEN** 该 JSON 可被 NWM 快照的 manifest 结构原样回读，source 身份段取该源的存储身份拼法，且未经校验的校验和/大小/清单 URI 三个字段留空而非填入本仓臆造的值
