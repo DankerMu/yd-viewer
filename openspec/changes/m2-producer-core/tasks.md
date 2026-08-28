@@ -324,6 +324,109 @@ Minimal mergeable slice: 完整性判定纯函数（3.1）——不含复制与 
 Suggested fixture level: compact - 合成分段状态文件（小规模 mesh/river/lake）覆盖全场景
 Minimal mergeable slice: 分段解析与 roundtrip（4.1）——格式层独立合并保绿，重戳/残差为后继
 
+### Issue #8 fixture（任务 4.1）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：改动面正面命中强制 expanded 触发词 `parser` / `writer` / `format` / `column` / `field`，并命中 profile 的 domain 触发词 `cfg.ic` 与「状态链」——与 issue #2/#3 同一条覆写理由）
+Repair intensity: high（本模块是整条状态链的共享格式根：`init` 首态、每轮 T+12 checkpoint 定戳、发布到 `states/<source>/<T>.cfg.ic` 全部经此解析/回写；profile 把「断链即整链失效」列为首位风险轴，故适用 `Invariant Matrix`）
+Project profile: yd-viewer
+
+**核心设计裁决（本 fixture 钉死，实现不得自行改写）**：spec state-tools 要求「解析后 MUST 能无损回写」且验收标准是**字节等价**，但 NWM pin 上的 `packages/common/state_qc.py` **没有 writer**——`_parse_ic_file`（`:424-493`）只返回 `tuple[list[list[float]], list[list[float]], list[list[float]]]`，且解析过程三重有损：`line.strip()` 丢首尾空白、空行被丢弃、token 经 `float()` 丢失原始记法（`0.100000` / `1e-3` / `-0.0` 回写后不可复原）。因此**字节等价不可能由「快照 + 补一个 writer」得到**，格式保真层是本 issue 的新代码，任务标题里的「适配」承担实质工作。数据模型 MUST 逐行保真（保留原始行文本与行序，含行尾形态），而非只保留 float。这一点同时被下游钉死：#9 的重戳要求「数据区 MUST 保持不变」，而 `cfg.ic` 的产出方是 SHUD 求解器与率定末态（格式不由本项目控制），只有逐字保留模型能在不控制格式的前提下满足它。
+
+Change surface:
+- 新增 `producer/src/yd_producer/state/__init__.py` 与 `producer/src/yd_producer/state/cfg_ic.py`：格式保真的解析/回写层
+- 从 NWM pin 移植的分段识别辅助（逐函数带 `NWM@8ae9b8f2 packages/common/state_qc.py` 溯源注释）：`_looks_like_column_header`（`:741`）、`_section_from_column_header`（`:751`）、`_native_lake_section_preamble`（`:762`）、`_header_counts`（`:574`）、`_numeric_row`（`:730`，仅作内部分类器）、`_read_bytes_limited`（含其说明「为何刻意不走 no-follow 安全读」的 docstring，原样保留）与 `MAX_STATE_IC_BYTES`
+- 新增 `producer/tests/test_cfg_ic.py` 与合成 fixture 构造器
+- 快照清单 `nwm-snapshot-inventory.md:44` 的目标路径 `state/state_qc.py` 由 **#9** 补齐：本 issue 只落格式层子集到 `state/cfg_ic.py`，不建空的 `state_qc.py` 占位（避免死代码），该行的落地状态在本 PR 内标注为「部分（格式层）」
+
+Must preserve:
+- 移植函数的判定语义与 NWM pin 逐字一致（分段识别、lake preamble 处理、declared-vs-actual lake 行数校验）；偏离 MUST 在模块头注明
+- 本模块 MUST 保持 stdlib-only、零运行时 NWM import、零数据库/scheduler 依赖（agent-ops §2.2 / §7.2）；不依赖 #5 在途的 object-store 工作
+- 不新增依赖、`producer/uv.lock` 不变
+
+Must add/change:
+- `parse(path_or_bytes) -> CfgIcDocument`：文档模型 MUST 同时携带 (a) 原始行序列的逐字副本、(b) header 行位置、(c) 每段（mesh / river / lake，lake 可缺）的行区间与行数、(d) 段内数值视图（供 #9 消费的只读派生，非回写来源）
+- `render(doc) -> bytes`：回写 MUST 由逐字行还原，MUST NOT 由数值重新格式化。对任何本解析器接受的输入，`render(parse(b)) == b` 逐字节成立
+- **行归属必须是全覆盖划分**：文档模型 MUST 把每一行恰好归入一个区域（header / 段列头 / 某段的数据行 / lake preamble），MUST NOT 存在"未归属"的行。两条由 pin 语义反推的钉死裁决（roundtrip 无法分辨这两种猜法，必须在此定死，否则 #9 的结构检查会继承一个错误划分）：(a) **header 行 = 首个非空行**（pin 在取 `lines[0]` 前先丢空行）；(b) mesh 段内**超出 header 声明 `mesh_count` 的多余数据行 MUST 抛 `ValueError`**——这是对 pin 的**刻意偏离**并 MUST 在模块头注明：pin 的 `_parse_sectioned_rows`（`state_qc.py:528-531`）静默丢弃多余 mesh 行，而格式保真根不得静默丢状态行
+- 解析级 fail-closed（本 issue 拥有，语义取自 NWM 场景）：文件不存在、路径为目录或不可读、非 UTF-8、超过字节上界、空文件、header 不可解析、分段体被截断、**输入中不存在任何分段列头（即非原生的计数式兼容布局）**——MUST 抛 `ValueError`，MUST NOT 外泄 `UnicodeDecodeError`，MUST NOT 无界读入，MUST NOT 回退到计数式布局。其中把文件不存在/不可读的 `OSError` 统一封装为 `ValueError` 是对 pin 的**刻意偏离**（pin 的 `_read_bytes_limited` `:563-571` 直接抛 `OSError`，由调用方 `except (OSError, ValueError)` 兜住），本 issue 收敛为单一异常以便调用方无需知道两种类型；MUST 在模块头注明该偏离。仓库级错误封装仍归 #9 的边界
+- **字节上界 MUST 可注入**：`parse(..., max_bytes=MAX_STATE_IC_BYTES)`，模块默认值等于 pin 的 `64 * 1024 * 1024`。理由：上界的两条边界用例（恰好、超一字节）是杀死"`>` 改 `>=`"变异体的唯一手段，而在真实上界上构造 64 MiB 合法文件并逐行保真读入会让每次 `uv run pytest` 多耗数百 MB 内存与可观时间；边界用例 MUST 在**小的注入上界**上跑，另用一条廉价断言钉死模块默认值等于 pin 常量
+- lake preamble（末条 river 行与 lake 列头之间的 `<lake-count> <lake-state-columns>` 行）MUST NOT 被计为 river 行，且回写后仍在原位
+
+Seams under test:
+- `state.cfg_ic.parse(...) -> CfgIcDocument` 与 `state.cfg_ic.render(doc) -> bytes`（design.md「Sketch seams under test」seam 3 的文件级纯函数边界）——file→file，无 IO 副作用之外的状态
+
+Selected risk packs（项目特有检查）:
+- Schema / columns / units / field names: 分段列头与段归属判定即契约
+- File IO / path safety / overwrite: 只读解析 + 有界读；本 issue **不写任何文件**（`render` 返回 bytes，落盘归调用方），故闭包清单只有「有界读」「非普通文件/不可读被拒」适用
+- Error handling / rollback / partial outputs: 全部解析失败为 fail-closed，且「失败时不返回部分文档」是可断言的负面证据
+- Resource limits / large input / discovery: `MAX_STATE_IC_BYTES` 上界，含**恰好等于上界**与**超出一字节**两条边界用例
+- Legacy compatibility / examples: NWM 解析器同时支持兼容的计数式布局；本 issue 的取舍见 Non-goals
+
+Risk packs considered (core):
+- Public API / CLI / script entry: not selected - 不接入 CLI，纯模块级函数，无入口注册
+- Config / project setup: not selected - 不读 `config.toml`/`local.toml`，无新配置字段
+- File IO / path safety / overwrite: selected - 见上
+- Schema / columns / units / field names: selected - 见上
+- Auth / permissions / secrets: not selected - 无凭据面
+- Concurrency / shared state / ordering: not selected - 纯函数，无共享状态；发布顺序归 #24
+- Resource limits / large input / discovery: selected - 见上
+- Legacy compatibility / examples: selected - 见 Non-goals 的兼容布局取舍
+- Error handling / rollback / partial outputs: selected - 见上
+- Documentation / migration notes: not selected - 无迁移；溯源由模块头注释承载
+
+Domain packs (from active profile):
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: not selected - 本 issue **不解释** header 的时间语义，只保留其行文本；`cfg_ic_header_minute_index/_time/_shape` 归 #9 任务 4.3
+- 状态链 / warm-start 定戳: **selected** - 本模块是状态链的格式根，逐字保真是 #9 重戳「数据区不变」的前提
+- NWM 快照溯源 / DB-free 隔离: **selected** - 移植函数须带 `NWM@8ae9b8f2 <原路径>` 头；断言模块内零 NWM import、零 DB 符号
+
+Invariant Matrix:
+- Governing invariant: 状态文件穿过 producer 时逐字节不变，除非某次操作显式改写指定字段
+- Source-of-truth identity/contract: `cfg.ic` 原生分段布局——header 行 + mesh 段 + river `Stage` 段 +（可选）lake preamble 与 lake 段
+- Producers: 外部（SHUD 求解器输出、率定末态基线包，均不由本项目控制格式）
+- Validators/preflight: 本模块的解析级 fail-closed；结构检查 `state_ic_structure_complete` 归 #9
+- Storage/cache/query: `states/<source>/<T>.cfg.ic`（写入面归 #21/#24）
+- Public routes/entrypoints: none - 本 issue 不接入 CLI，入口经 #11/#23 的 init/run
+- Frontend/downstream consumers: #9（结构检查/重戳/负残差）、#16（checkpoint tracker）、#24（发布）
+- Failure paths/rollback/stale state: 解析失败即 fail-closed 抛错，不返回部分文档；无写入面故无回滚
+- Evidence/audit/readiness: 字节级 roundtrip 用例 + 结构索引 oracle + 溯源头检查（任务 2.3 的通用检查未落地前，本模块自带断言）
+- Regression rows:
+  - 干净合成 mesh+river 文件 -> `render(parse(b)) == b`，且段索引与手算期望一致
+  - **脏**合成文件（CRLF、行尾空格、空行、`0.100000`/`1e-3`/`-0.0` 混合记法、无末尾换行）-> 同样逐字节等价（这条是判别力的承重条：canonical 化的 writer 在干净输入上恒绿，只在脏输入上变红）
+  - 超上界文件 / 非 UTF-8 字节 / 截断的分段体 -> 抛 `ValueError`，不返回文档、不无界读
+
+Required evidence（每条 input -> expected output）:
+- mesh+river 干净合成文件 -> `render(parse(b)) == b` 逐字节；`doc.header_index == 0`，mesh/river 段行区间等于手算期望
+- mesh+river+lake 干净合成文件（含 `<lake-count> <lake-state-columns>` preamble）-> 逐字节等价；lake preamble 行**不**落在 river 段区间内，且 river/mesh/lake 三段行区间均等于按合成构造手算的期望值。**注意 native header 不声明 river/lake 行数**：其第二个数值 token 是 mesh 状态列数而非 river 元素数（`state_qc.py:496-506` 的 docstring 与 `_header_counts` `:601-606` 逐字为证），lake 行数由 preamble 声明。故 MUST NOT 写"river 行数 == header 声明值"这类断言；river/lake 计数与权威模型元数据的比对归 #9
+- **两种不同 mesh 规模**（如 3 与 7）各跑一遍上述索引断言 -> 期望值随规模变化（防止把段索引写成常量而恒真）
+- 脏合成文件矩阵（CRLF 行尾 / 行尾多余空格 / 段间空行 / 数值记法混合 `0.100000`+`1e-3`+`-0.0` / 文件无末尾换行）-> 每条均 `render(parse(b)) == b` 逐字节
+- **脏输入不得降级为"只保字节、不分段"**：脏矩阵中至少一条（CRLF + 行尾空格 + 段间空行三者叠加）除逐字节等价外，MUST 同时跑**完整的段索引 oracle**。理由：pin 在分段前先 strip 并丢空行，逐字保真模型若在 detection 路径上绕过该归一化，就会在脏输入上退化为"全部行未归属、段区间为空"——这种实现对只断言字节等价的脏用例**全绿**
+- preamble 声明 lake 数与实际 lake 行数不符（lake 体被截断）-> 抛 `ValueError`（对应 pin `state_qc.py:552-557`）。**不写"header 声明 lake 但无 lake 段"用例**：native header 的 lake 槽恒为 0，该场景在原生布局下不可达；若 lake 段整体缺失，preamble 行会被当作普通 river 行消费而不报错，这是 pin 的既有语义
+- 合法的**计数式兼容布局**文件（无任何分段列头）-> 抛 `ValueError`，消息指明需要原生分段布局（钉死 Non-goals 的 native-only 裁决，防止实现顺手移植 pin 的回退分支）
+- 路径不存在 / 路径是目录 / 路径不可读 -> 均抛 `ValueError`（而非 `OSError`）
+- 恰好等于**注入上界**字节的合法文件 -> 解析成功；上界 + 1 字节 -> 抛 `ValueError` 且消息含上界语义；另断言模块默认 `max_bytes == 64 * 1024 * 1024`
+- 空文件 / 非 UTF-8 字节串（`b"\xff\xfe\x00\x01..."`）/ 非数值行 / 截断 body -> 均抛 `ValueError`，MUST NOT 外泄 `UnicodeDecodeError`
+- 模块头溯源断言：`state/cfg_ic.py` 含 `NWM@8ae9b8f2 packages/common/state_qc.py`；模块源码内无 `import` NWM 包、无数据库符号
+- **预登记必须被杀死的变异体**：(a) `render` 改为按 float 重新格式化 -> 脏输入用例必须变红；(b) 段归属判定偏移一行 -> 结构索引 oracle 必须变红；(c) lake preamble 计入 river 行 -> 三段用例必须变红；(d) 上界比较由 `>` 改 `>=` -> 恰好上界用例必须变红。**变异证明 MUST 按 `openspec/project-profile.md:50-55` 的"Mutation-testing hazards"执行**（本仓已实测绊倒多个独立 agent，四种假绿都长得像好消息）：`rsync --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache'` 且副本内 `rm -rf .venv && uv sync`、先断言 `yd_producer.__file__` 落在 scratch 副本内、每个变异体之间 `PYTHONDONTWRITEBYTECODE=1` 并清 `__pycache__`（(a)/(c) 易出等长字面量改动，会复用上一个变异体的 `.pyc`）、scratch 目录名含 `issue-8` 唯一标识，并另跑一个必然变红的控制变异做校准
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check .` 与 `uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
+
+Non-goals:
+- 结构检查 `state_ic_structure_complete` / `run_state_variable_qc`（任务 4.2，issue #9）、重戳与 `cfg_ic_header_minute_index/_time/_shape`（任务 4.3，issue #9）、负残差与域均修正（任务 4.4，issue #9）
+- **不移植 NWM 的 `tests/test_state_qc.py` 测试代码**：该文件的解析失败用例（`test_empty_file_is_parse_failure`、`test_oversized_ic_fails_without_crash`、`test_binary_non_utf8_ic_fails_without_crash` 等）全部经 `run_state_variable_qc` 行使，而该函数归 #9。本 issue 在新 seam 上**新写**测试，以 NWM 的**场景**为独立真值来源，测试代码本身随 #9 到位。清单 `nwm-snapshot-inventory.md` 中该测试文件的落地归 #9
+- **不落 `producer/tests/test_cfg_ic_header.py`**：`nwm-snapshot-inventory.md:56` 记录了配对约束——该测试引用的三个符号全部出自 `runtime.py` 抽取集（capability 6），缺任一即不可导入；归 #9 与 capability 6 之后
+- **不支持兼容的计数式布局**（NWM `_parse_ic_file` 在原生分段解析失败时的回退分支）：issue #8 的 In Scope 逐字写作「原生分段」。取舍依据与**未决点**：唯一可能是非原生格式的输入是率定末态基线包，而 compute-loop §6 明写「基线模型包的现场路径和归档方式由实施方管理，不进入 Git」，其实际格式在本阶段**不可核**。故本 issue 按原生分段 fail-closed（非原生输入抛 `ValueError` 而非静默走回退），并记录该假设；「率定末态是否为原生分段格式」的核实与兼容布局的归属裁决路由至 **#32**，触发点是 #11（init 首态）真正读入基线包时。MUST NOT 静默支持两种布局
+- **本模块是共享格式根，#9 MUST 复用而非重新移植**：`_looks_like_column_header` / `_section_from_column_header` / `_native_lake_section_preamble` / `_header_counts` 落在 `state/cfg_ic.py` 后，#9 的 `state/state_qc.py` MUST 从 `cfg_ic` 导入这四个符号；再移植一份即为 pin 分段逻辑的双权威副本，本 fixture 显式禁止
+- 不接入 CLI、不写入任何文件、不做发布顺序相关工作
+
+Review focus:
+- `render` 是否真由逐字行还原——任何经 `float`/格式化字符串重建行文本的路径都是缺陷（会在脏输入上丢字节，而干净输入恒绿，看不出来）
+- roundtrip 断言是否具判别力：脏输入矩阵是否真覆盖 CRLF / 尾空格 / 空行 / 记法混合 / 无末尾换行五类，结构索引 oracle 是否用了两种 mesh 规模而非常量期望
+- 移植函数是否与 NWM pin 逐字一致、是否逐函数带溯源注释；有无引入运行时 NWM import 或数据库符号
+- `MAX_STATE_IC_BYTES` 是否在**读取前**生效（有界读），而非先读满再判断
+- 是否越界落地了 #9 的结构检查/重戳/负残差符号（含"顺手先放着"的死代码）
+
 ## 5. 执行器抽象：JobExecutor 协议与 fake
 
 - [x] 5.1 定义 `JobExecutor` 协议（submit/poll、job ID/partition/终态/起止时间语义）与进程内 fake（成功/失败/超时可编排），接口契约测试
