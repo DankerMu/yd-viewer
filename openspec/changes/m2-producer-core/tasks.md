@@ -628,7 +628,8 @@ Risk packs（逐条 selected / not selected）:
 Change surface:
 - 新增 `producer/src/yd_producer/rawcopy.py`（复制 + manifest 生成）
 - 新增 `producer/tests/test_rawcopy.py`
-- 不触碰 `rawscan.py`、`config.py`、CLI 入口、`store/`、`raw/manifest.py`——本 issue 只**消费** `ScanVerdict` 与 `DownloadManifest`/`ManifestEntry` 数据结构，不改其定义
+- `rawscan.py` **仅**允许把 bundle 文件名渲染面提升为可复用（薄公开包装 + `__all__` 登记，不改任何既有公开行为），理由见下方复制语义的 containment 段；这是本 issue 触碰该文件的唯一例外，且 MUST 作为偏离上报
+- 不触碰 `config.py`、CLI 入口、`store/`、`raw/manifest.py`——本 issue 只**消费** `ScanVerdict` 与 `DownloadManifest`/`ManifestEntry` 数据结构，不改其定义
 
 Must preserve:
 - `producer/pyproject.toml` 的 `dependencies = []`（本 issue 只用 stdlib）
@@ -716,7 +717,7 @@ pin 在 raw cycle 目录内落盘 `manifest.json`（GFS `_persist_manifest_metad
 - **源侧 symlink 一律拒绝**（`kind="source-symlink"`）：对每个源 bundle 路径，MUST 逐段 `lstat` 检查——路径自身或 `<raw_root>` 之下的任一祖先段是 symlink 即拒绝，MUST NOT 跟随。这里刻意**比 3.1 更严**：`rawscan._check` 走 `is_file()` 语义、跟随 symlink（`rawscan.py:255-274`），故 `judge` 可能对一个 symlinked bundle 返回 `complete=True`；而本 issue 钉死的源不可变取证是 `os.lstat`（看链本身、不看目标），两者叠加会在「MUST NOT 跟随 symlink」这句话正下方留一个洞：链的元组不变而目标被换掉，取证照样通过。收口方式是拒绝而不是改用 `os.stat`——`stat` 版本要再补目标的 containment 检查与第二个 TOCTOU 窗口，复杂度换不来收益（NWM 经 object store 的 `write_bytes_atomic` 落盘，raw 树内出现 symlink 属异常形态）。该不对称是**有意的**，MUST 写进实现注释：3.1 判「NWM 说它在」，3.2 判「yd 愿意复制它并为其身份背书」
 - 复制 MUST NOT 写、删、改、重命名 NWM 原件的任何路径（compute-loop §4.1 硬约束）
 - 源路径 containment：每个源 bundle 路径 MUST 由 `raw_root`/`SOURCE_DIR_NAMES[source]`/cycle 紧凑戳/bundle 文件名**重新构造**，并与 `verdict.expected_files` 的对应项逐字相等；MUST NOT 直接信任 `expected_files` 里的路径——形参与 verdict 由不同调用点提供，不一致即 `kind="verdict-mismatch"` 报错（调用序错误）。三条落地约束，缺一即该检查要么误报要么无判别力：
-  - **绝对化必须与 `judge` 同法**：`judge` 接受相对 `raw_root` 并以 `Path.cwd()` 提升（`rawscan.py:370-386`，#6 为此钉了一条 Regression row），故 `expected_files` 恒为绝对路径。重新构造 MUST 走同一次提升（相对 `raw_root` 先 `Path.cwd() / root`），否则一个**合法**调用会被本检查误拒。等价的收口方式是 `stage_raw` 要求 `raw_root` 绝对、相对即以 `kind="verdict-mismatch"` 拒绝——二者择一并写进实现注释，MUST NOT 两不沾（既不提升也不拒绝）。
+  - **绝对化必须与 `judge` 同法**：`judge` 接受相对 `raw_root` 并以 `Path.cwd()` 提升（`rawscan.py:370-386`，#6 为此钉了一条 Regression row），故 `expected_files` 恒为绝对路径。重新构造 MUST 走同一次提升（相对 `raw_root` 先 `Path.cwd() / root`），否则一个**合法**调用会被本检查误拒。收口方式只有这一种：**必须与 `judge` 同法提升**。曾考虑的等价方案「要求 `raw_root` 绝对、相对即拒绝」已排除——下方 Regression rows 钉了一条「合法的相对 `raw_root` 调用 -> 正常产出」，那正是本检查没有误拒的唯一判别器，拒绝相对路径会让该行不可满足。提升逻辑 MUST 写进实现注释。
   - **bundle 文件名 MUST 复用 `rawscan` 的渲染路径**，MUST NOT 在本模块重抄一份模式校验/渲染规则。理由与 `SOURCE_DIR_NAMES` 同：第二份字面量会让两处对同一模式给出不同结果，而本检查恰恰以「两处相等」为判据——自己抄一份等于让检查比对自己，判别力归零。`rawscan` 的 `_render`/`_validate_pattern` 目前是私有的；实现者 MUST 在**不改变 `rawscan` 既有公开行为**的前提下把渲染面提升为可复用（最小改动：加一个薄公开包装并在 `__all__` 登记），这是本 issue 允许触碰 `rawscan.py` 的**唯一**例外，且 MUST 作为偏离逐条上报。
   - 该检查 MUST 有自己的 `kind` 与自己的具名用例，MUST NOT 折进 `source-manifest`——后者已有四个触发条件，把它折进去就意味着删掉 containment 检查也不会有任何用例变红（本仓记录在案的「声明必须配判别器」失效模式）。
 - 目标目录不存在则创建；目标已存在同名文件 -> 报错停止，MUST NOT 覆盖（work 是一次性隔离单元，同名存在意味着调用序错误）
