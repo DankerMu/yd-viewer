@@ -45,11 +45,13 @@ forcing 生产 MUST 将 canonical 格点直接作为 SHUD forcing 站点（bindi
 
 #### Scenario: 溯源头部检查
 - **WHEN** 对 `yd_producer` 内标记为快照的模块运行溯源检查测试
-- **THEN** 每个快照文件头部含 `NWM@8ae9b8f2` 与原路径注释
+- **THEN** 每个快照文件的头部（前若干行）内存在一条 **`#` 注释行**含 `NWM@8ae9b8f2` 与该文件的原路径；写在 docstring 或字符串里不算数
 
 #### Scenario: 未登记快照文件的反向守卫
-- **WHEN** `producer/` 内出现头部含 `NWM@` 但不在快照勘察清单路径表内的文件
+- **WHEN** `producer/` 内出现**任意位置**带 `NWM@` 溯源注释、但不在快照勘察清单路径表内的文件
 - **THEN** 溯源检查测试失败，指出该文件路径
+
+正反两向 MUST 共用同一条「什么算溯源注释」的谓词（注释形式）；行预算只作用于正向，反向不设行预算。
 
 #### Scenario: 快照 DB-free 隔离
 - **WHEN** 对已落地的快照模块目录运行禁区检查

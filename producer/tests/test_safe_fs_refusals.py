@@ -9,6 +9,9 @@
 - 非常规文件：`open_file_no_follow` 先 `os.stat(..., follow_symlinks=False)` 判
   `S_ISREG`（前置），`os.open` 之后再 `os.fstat` 判一次 `S_ISREG`（后置，堵 TOCTOU
   窗口）；两处都抛 `SafeFilesystemError("Target file must be a regular file: ...")`。
+  两腿的消息**逐字节相同**（是两个各自独立的字面量），所以断言消息只能证明「拒了」，
+  不能区分是哪条腿拒的；前置腿由 `os.open` recorder 用例单独钉死（拒绝发生在打开之前），
+  后置腿由前置 stat 谎报用例钉死。
 - 写入面符号链接：`atomic_write_bytes_no_follow` 对叶走 `_reject_existing_symlink`，
   对祖先走 `_open_parent_dir` → `_open_child_dir` 的 `O_NOFOLLOW` 分量走。
 - `rename_entry_no_follow` 的叶语义**不是**拒绝：其 docstring 明写符号链接
@@ -67,6 +70,37 @@ def test_open_file_no_follow_refuses_a_fifo_target(root: Path) -> None:
     finally:
         os.close(writer)
         os.close(reader)
+
+
+def test_open_file_no_follow_refuses_a_fifo_before_calling_os_open(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """前置 `S_ISREG` 腿：拒绝必须发生在 `os.open` **之前**，设备节点一次都不许被打开。
+
+    只断异常类型/消息无法钉死这条腿：`_READ_FLAGS` 带 `O_NONBLOCK`，删掉前置校验后
+    控制流会落到 `os.open` 成功、再由后置 `fstat` 腿抛出**逐字节相同**的消息——拒绝的
+    「值」不变，变的是「拒绝发生在打开之前」这条可观测性质。快照文件不可改，故唯一
+    可构造的判别器是把 `os.open` 包成 recorder，断言目标名从未出现在调用记录里。
+    """
+
+    fifo = root / "payload.fifo"
+    os.mkfifo(fifo)
+
+    opened: list[str] = []
+    real_open = os.open
+
+    def recording_open(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        opened.append(os.fsdecode(os.fspath(path)))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", recording_open)
+
+    with pytest.raises(SafeFilesystemError, match="must be a regular file"):
+        open_file_no_follow(fifo, containment_root=root)
+
+    # recorder 确实接上了：父目录组件行走必然至少开过一次目录 fd。
+    assert opened, "recorder 未被调用，判别器失准"
+    assert fifo.name not in opened, f"FIFO 在拒绝前被 os.open 打开了：{opened}"
 
 
 def test_open_file_no_follow_refuses_a_non_regular_fd_after_the_open(

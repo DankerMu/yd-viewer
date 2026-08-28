@@ -223,8 +223,8 @@ Surfaces:
 - Failure paths/rollback/stale state: `store/safe_fs.py` 的 no-follow / 非常规文件 / 超限拒绝分型；`normalize_source_id` 未知源抛错；`cycle_hours`/`region` 缺参 fail closed
 - Evidence/audit/readiness: 模块头溯源注释本身；`nwm-snapshot-inventory.md` §1 表
 Regression rows:
-- 每个新增快照文件（源与测试） -> 头部第一段注释含 `NWM@8ae9b8f2 <该文件在清单里的原路径>`
-- `yd_producer`/`producer/tests` 内任一含 `NWM@` 的文件不在清单路径表内 -> 检查测试失败（反向守卫，保证后续组落地必须登记）
+- 每个新增快照文件（源与测试） -> 前 5 行内存在一条 `#` 注释行，其内容含 `NWM@8ae9b8f2 <该文件在清单里的原路径>`。**正反向必须共用同一个「什么算溯源头部」的谓词**：注释形式（规格「原路径注释」的字面要求）+ 行预算只作用于正向。守卫自身不得出现第二份口径——round 1（位置维度）与 round 2（形式维度）两次失守都源于正反向各有一套定义
+- `yd_producer`/`producer/tests` 内任一文件带上述谓词命中的溯源注释、却不在清单路径表内 -> 检查测试失败（反向守卫，无行预算，保证后续组落地必须登记）。反向侧刻意锚在注释行而非裸串：裸串会命中守卫文件自身拼出的 `PROVENANCE_MARKER` 常量，逼出第二份手工豁免名单
 - `store/`、`raw/` 全目录 grep `psycopg|DATABASE_URL|scheduler|registry|os.getenv|os.environ` -> 零命中
 - **pin 等价性（`剥离点` 为 `无` 或仅注释改写的四行）**：`producer/src/yd_producer/store/object_path.py`、`store/safe_fs.py`、`producer/tests/test_data_adapter_resolution.py`、`store/object_store.py`，各自 `diff` `git -C <NWM 本地 checkout> show 8ae9b8f29c8b72c574e8cbd95f2994160bd42832:<清单该行原路径>`，忽略新增的溯源头部与 import 路径改写（`packages.common.*`/`workers.data_adapters.*` → `yd_producer.*`）、以及 object_store 行 `剥离点` 点名改写的那条注释 -> 无其他差异。抽取/改写式的七行（`:40` source_identity、`:41` manifest、`:42` cycle_hours、`:43` region、`:50` test_safe_fs、`:51` test_object_path、`:52` test_source_identity）不适用本行，其等价证据是实现者的逐文件剥离点符合性说明
 - `normalize_source_id("IFS"/"ifs"/"Ifs")` -> `"ifs"`；`normalize_source_id("ERA5")` -> 抛错（ERA5 条目已删）
@@ -234,14 +234,14 @@ Regression rows:
 - `GeoBBox` 无 bbox 入参 -> fail closed（清单 §4 风险 14：四个 `DEFAULT_BBOX_*` 已删，禁止发明缺省）
 - `env_cycle_hours_utc` 显式入参传 `None` -> 仍走 `normalize_cycle_hours_utc(default, field_name=...)`，零 `os.getenv`
 - `parse_cycle_hours_utc` 收到畸形输入（`"0,25"`、`""`、`"0,abc"`）-> 稳定抛错
-- **键校验的闸门归属（勿读成 `validate_object_path` 单独兜底）**：`normalize_object_key` 拒 `..` 穿越与空键；绝对路径它按 pin 语义 `strip("/")` 后交由 `validate_object_path` 的前缀白名单拒；`validate_object_path` **单独调用时对 `..` 返回 `valid=True`**（pin 语义，该行 `剥离点` 为 `无`，禁止在本 PR 改它）。闭合 containment 的是复合入口 `LocalObjectStore.resolve_path` = `normalize_object_key` → `validate_object_path` → `relative_to(root)`。-> 复合入口对三类输入稳定拒绝；且 `validate_object_path` 的单独permissive行为必须有具名用例钉死，以免组 3/7/13 把它当作穿越闸门
-- `LocalObjectStore` 对已存在对象再写 -> 断言 pin 上的覆盖/no-clobber 语义（以 pin 源码为准，不得在此改语义）
+- **键校验的闸门归属（三个函数各管一段，勿把任一段读成总闸门）**：以下每条均已跑探针核实。`normalize_object_key`（在 `store/object_store.py`，不在 `object_path.py`）拒 `..`（出现在任何位置即 `ValueError`）与空键；**绝对路径它不拒**——按 pin 语义 `strip("/")` 后继续，故 `'/raw/gfs/2026050700/a.grib2'` 被**接受**并根相对化为 `'raw/gfs/2026050700/a.grib2'`，而 `'/etc/passwd'` 被拒是因为 `etc/` 不在前缀白名单里，与「绝对」无关。`validate_object_path` 只做前缀白名单匹配、变量段原样捕获：`..` 出现在**已识别前缀之后**时返回 `valid=True`（`'raw/gfs/../../../etc/passwd'` -> `valid=True, cycle_time='..'`），而**开头**的 `..`（`'../etc/passwd'`）返回 `valid=False`——但拒因仍是前缀不匹配，不是穿越检测；两种结果都不构成穿越闸门。闭合 containment 的是复合入口 `LocalObjectStore.resolve_path` = `normalize_object_key` → `validate_object_path` → `relative_to(root)`。-> 复合入口对三类输入稳定拒绝；`validate_object_path` 的单独 permissive 行为由具名用例 `test_object_store.py::test_validate_object_path_alone_accepts_parent_traversal` 钉死（该用例用「前缀之后的 `..`」这一精确输入），以免组 3/7/13 把它当作穿越闸门
+- `LocalObjectStore` 对已存在对象再写 -> **覆盖允许（last-write-wins）**，非 no-clobber：探针实测 `write_bytes_atomic` 同键写第二次成功且内容被替换，`.part` 临时文件不残留。此为 pin 语义，本 PR 不得改动；组 12/13 若依赖「已存在即拒」需自行加闸门
 - `sha256_bytes(<已知字节串>)` -> 已知摘要字面量（独立 oracle：`printf ... | shasum -a 256`）
 - safe_fs 拒绝分型 -> 稳定拒绝，逐条注明覆盖来源（原措辞「快照测试原有覆盖保留」对**非常规文件**一项前提为假：pin 的 `tests/test_safe_fs.py` 14 个用例里无一触及 `S_ISREG`，round 1 verifier 已在 pin 上核实）：
   - 符号链接叶 / 符号链接祖先（`directory_identity_no_follow` 面）-> 快照用例 `test_directory_identity_refuses_symlink_components`（parametrized final/ancestor）已覆盖
   - 超限读 -> `test_object_store.py` 经 `LocalObjectStore.read_bytes_limited` 覆盖 `read_bytes_limited_no_follow` 的字节上限
   - **非常规文件（FIFO/设备，`safe_fs.py` 的 `S_ISREG` 前后置校验）-> 本 PR 新写具名用例**
-  - **符号链接叶 / 符号链接祖先在写入面（`atomic_write_bytes_no_follow`、`rename_entry_no_follow`）-> 本 PR 新写具名用例**
+  - **写入面符号链接，两个函数语义不同，勿合并成一句拒绝声明**：`atomic_write_bytes_no_follow` 的符号链接叶与符号链接祖先 -> 拒绝，本 PR 新写具名用例；`rename_entry_no_follow` 的符号链接**祖先（父目录，源与目的两侧）** -> 拒绝（两侧父目录均 `O_DIRECTORY|O_NOFOLLOW` 打开并自 containment root 逐段走），本 PR 新写具名用例；`rename_entry_no_follow` 的符号链接**叶** -> **不拒绝，按搬移语义整体移动该链接本身**（pin docstring 原文：a symlink at `name` is MOVED as a link and never followed or inspected），本 PR 新写具名用例钉死这一搬移语义，不得写成拒绝断言
   - 新用例禁止写进 `producer/tests/test_safe_fs.py`（该文件是逐字节快照，改它即破坏 pin 等价性行）
 - 既有 `producer/tests/{test_config,test_geometry,test_smoke}.py` -> 保持全绿（未改动兄弟面）
 
@@ -278,7 +278,7 @@ Required evidence（每条 input -> expected output）:
 - `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
 - 禁区 grep：`grep -rnE 'psycopg|DATABASE_URL|scheduler|registry|journal|reservation|os\.getenv|os\.environ' producer/src/yd_producer/store producer/src/yd_producer/raw` -> 零命中（该断言同时以测试形式固化，不只是人工命令）
 - 溯源头部检查（2.3）：对清单 §1 路径表内每个已存在的目标路径 -> 该文件前 5 行内含字面量 `NWM@8ae9b8f2 <对应原路径>`；表内路径尚未落地的行跳过（后续组落地即自动纳入）
-- 溯源反向守卫（2.3）：`producer/` 内 grep `NWM@` 命中的文件集合 -> 必须是路径表的子集，否则失败并打印越界文件路径
+- 溯源反向守卫（2.3）：扫描根即 `producer/`（与规格字面相等），按「相对路径分量以 `.` 开头即跳过」的规则排除 `.venv`/`.pytest_cache` 等（规则而非具名名单，不引入第二份名单）；其下带溯源注释谓词命中的文件集合 -> 必须是清单 §1 路径表的子集，多一个即失败。实测 2786 个 `.py` → 跳点开头目录后 26 个 → 带标记 11 个
 - 上方 Regression rows 的每一行 -> 对应一个具名 pytest 用例（用例名与断言的期望值须来自 pin 源码或独立 oracle，不得从实现回读）
 
 Non-goals:
@@ -288,6 +288,8 @@ Non-goals:
 - `config.toml` 的 bbox / forcing 上限字段落地——清单 §4 风险 14 已显式交接任务 1.1；本 PR 只保证缺参 fail closed
 - 不为 `manifest.py` 保留的排程函数族新写测试——`test_data_adapter_resolution.py` 整文件快照（10 个用例）已覆盖，重写等于二次实现
 - 不改动 pin 上被保留符号的语义以"顺手改好"——语义等价是本 PR 的验收项；改进意见记为 follow-up issue
+- **不把反向扫描面扩到 `producer/` 之外**（如仓库根、`viewer/`）——本 PR 的守卫只对快照落地面负责，跨面扫描属组 13 的仓库级检查；此边界经 round 1/2 三名 reviewer 复核接受，记录在此以免后续轮次重开庭（PR #40 偏离记录 F2）
+- **不认 docstring / 字符串形式的溯源标记**：正反两向共用注释谓词后，`"""NWM@8ae9b8f2 ..."""` 这类写法**不算**溯源头部，因而一个未登记、仅带 docstring 标记的散落文件不承担登记义务、也不被守卫接触。这是「单一谓词 + 反向必须保持注释锚」的必然推论——反向若放宽成裸串，守卫会命中自身拼出的 `PROVENANCE_MARKER` 常量，逼出一份手工豁免名单。该语义由具名用例 `test_forward_guard_rejects_docstring_form_markers` 钉死，非疏漏
 
 Review focus:
 - 逐行核对清单 §1 的 11 个 in-scope 行的 `剥离点` 列是否被逐条执行，尤其 `:40` 的 `_STORAGE_SOURCE_IDS` 字面量改写与 `:52` 的 10 处下游断言同步、`:43` 的四个 `DEFAULT_BBOX_*` 与 `_env_float` 删除、`:42` 的 `os.getenv` 删除

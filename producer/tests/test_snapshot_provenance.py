@@ -6,14 +6,19 @@
 名单。正向断言对表内每个已落地的目标路径生效，反向守卫强制后续组落地的快照文件必须先
 登记进清单表。
 
-守卫的「执行集」必须等于它「声明的集合」，因此三条口径都从清单派生、不写死：
+守卫的「执行集」必须等于它「声明的集合」，因此下列口径都从清单/文件系统派生、不写死：
 
 1. DB-free 扫描集 = 已落地的清单目标（含快照**测试**文件）∪ 这些目标所在的
    `producer/src/yd_producer/<pkg>/` 包目录整目录（未登记的散落文件也逃不掉）。
    后续任务组落地新目标时扫描集自动扩张，无需改本文件。
-2. 反向守卫按 grep 语义扫**整文件**（清单前言只对正向断言规定「前 5 行内」预算），
-   命中口径锚在注释行上。
-3. §1 表体的每一行都必须解析成功：畸形行是硬失败，不再静默跳过。
+2. 「什么算溯源头部」在本文件里只有**一个**定义：`_MARKER_COMMENT`（注释锚）。正反向
+   共用它，只在**行预算**上分叉——反向按 grep 语义扫整文件（无预算），正向再叠加
+   「行号 ≤ `HEADER_LINE_BUDGET`」与「载有 `NWM@<pin> <原路径>`」。两侧曾各有一份定义
+   （正向是裸前 5 行子串），于是 docstring 形式的标记被正向奖励、又对反向隐形；
+   `test_forward_guard_rejects_docstring_form_markers` 钉死这个形式维度。
+3. 反向扫描根 = 规格声明的 `producer/` 整棵树，只跳过点开头的目录（`.venv` 等）：
+   扫描根写成两个子目录时，执行集与声明集只是「眼下恰好相等」。
+4. §1 表体的每一行都必须解析成功：畸形行是硬失败，不再静默跳过。
 """
 
 from __future__ import annotations
@@ -40,11 +45,9 @@ PROVENANCE_MARKER = f"NWM@{PIN_SHORT}"
 #: 只约束正向断言；反向守卫按 grep 语义扫整文件。
 HEADER_LINE_BUDGET = 5
 
-#: 反向守卫的扫描根：任何带溯源标记的文件都必须先登记进清单表。
-SCANNED_ROOTS = (
-    Path("producer") / "src" / "yd_producer",
-    Path("producer") / "tests",
-)
+#: 反向守卫的扫描根：规格写的是「`producer/` 内」，这里就写 `producer/`，让执行集
+#: 与声明集自证相等，而不是靠「眼下恰好没有第三个子目录」。
+SCANNED_ROOTS = (Path("producer"),)
 
 #: 快照源模块的包根；清单目标落在其下 `<pkg>/` 的，整个 `<pkg>/` 进 DB-free 扫描集。
 SNAPSHOT_PACKAGE_ROOT = Path("producer") / "src" / "yd_producer"
@@ -62,9 +65,13 @@ FORBIDDEN_SURFACES = (
 
 _BACKTICKED = re.compile(r"`([^`]+)`")
 
-#: 溯源标记的命中口径。锚在注释行上，而不是整文件裸串匹配：裸串会命中本文件里
-#: 用 f-string 拼出的 PROVENANCE_MARKER 常量与断言消息本身，从而逼出一份手工豁免
-#: 名单——那正是本守卫要消灭的第二份名单。
+#: 溯源标记的命中口径，**全文件唯一定义**，正反向共用。锚在注释行上，而不是整文件
+#: 裸串匹配：裸串会命中本文件里用 f-string 拼出的 PROVENANCE_MARKER 常量与断言消息
+#: 本身，从而逼出一份手工豁免名单——那正是本守卫要消灭的第二份名单。
+#:
+#: 方向差异只在**行预算**上：反向无预算（整文件 grep），正向叠加 HEADER_LINE_BUDGET。
+#: 命中口径本身不得分叉——正向曾用裸前 5 行子串，于是 docstring 里的标记被正向判为
+#: 合格头部，却对反向隐形。
 _MARKER_COMMENT = re.compile(r"^[ \t]*#.*NWM@")
 
 
@@ -176,7 +183,7 @@ def _forbidden_hits(repo_root: Path, files: Iterable[Path]) -> list[str]:
     return hits
 
 
-# --- 溯源标记命中（反向守卫共用） --------------------------------------------
+# --- 溯源标记命中（正反向共用的唯一谓词） ------------------------------------
 
 
 def _marker_comment_lines(path: Path) -> list[tuple[int, str]]:
@@ -195,23 +202,49 @@ def _marker_comment_lines(path: Path) -> list[tuple[int, str]]:
     ]
 
 
+def _header_marker_lines(path: Path) -> list[tuple[int, str]]:
+    """正向方向：同一谓词命中 ∧ 行号 ≤ 头部行预算。"""
+
+    return [
+        (number, line)
+        for number, line in _marker_comment_lines(path)
+        if number <= HEADER_LINE_BUDGET
+    ]
+
+
+def _provenance_header_lines(path: Path, source: str) -> list[tuple[int, str]]:
+    """正向断言的完整谓词：头部注释行 ∧ 载有 `NWM@<pin> <NWM 原路径>` 原文。
+
+    「前 5 行裸子串」不够：`\"\"\"NWM@8ae9b8f2 ...\"\"\"` 这样的 docstring 形式能通过
+    子串检查，却不是反向守卫认得的头部形式——同一不变量在两个方向上口径分叉。
+    """
+
+    needle = f"{PROVENANCE_MARKER} {source}"
+    return [
+        (number, line) for number, line in _header_marker_lines(path) if needle in line
+    ]
+
+
+def _scannable_python_files(root: Path) -> list[Path]:
+    """扫描根下的 `.py` 文件，跳过点开头目录（`.venv` / `.pytest_cache` / `.git` ...）。
+
+    用「点开头」这条规则而不是一份具名黑名单，同样是为了不养第二份名单。
+    """
+
+    return sorted(
+        path
+        for path in root.rglob("*.py")
+        if not any(part.startswith(".") for part in path.relative_to(root).parts[:-1])
+    )
+
+
 def _files_with_marker(repo_root: Path, roots: Iterable[Path]) -> list[Path]:
     found: list[Path] = []
     for root in roots:
-        for path in sorted((repo_root / root).rglob("*.py")):
+        for path in _scannable_python_files(repo_root / root):
             if _marker_comment_lines(path):
                 found.append(path)
     return found
-
-
-def _header(path: Path) -> str:
-    with path.open(encoding="utf-8") as handle:
-        lines = []
-        for index, line in enumerate(handle):
-            if index >= HEADER_LINE_BUDGET:
-                break
-            lines.append(line)
-    return "".join(lines)
 
 
 # --- 表本身没被解析空、也没被静默丢行 -----------------------------------------
@@ -262,14 +295,36 @@ def test_landed_snapshot_files_carry_their_provenance_header(
     if not path.exists():
         pytest.skip(f"{target} 尚未落地（归后续任务组）")
 
-    assert f"{PROVENANCE_MARKER} {source}" in _header(path), (
-        f"{target} 的前 {HEADER_LINE_BUDGET} 行缺少溯源头 `{PROVENANCE_MARKER} {source}`"
+    assert _provenance_header_lines(path, source), (
+        f"{target} 的前 {HEADER_LINE_BUDGET} 行缺少溯源头**注释**行 "
+        f"`# ... {PROVENANCE_MARKER} {source}`；"
+        f"命中的头部注释行为 {_header_marker_lines(path)}"
     )
 
 
-def test_at_least_the_issue_5_snapshot_files_have_landed() -> None:
-    landed = _landed_targets(REPO_ROOT, INVENTORY_TARGETS)
-    assert len(landed) >= 11, f"已落地的快照文件只有 {landed}"
+def test_landed_targets_are_exactly_the_files_that_carry_a_provenance_header() -> None:
+    """已落地的登记目标集 == 带溯源头的文件集。
+
+    取代原先两处写死的 `>= 11` 计数地板：地板随后续 16 行落地即失去咬合力，而且它是
+    计数、不是逐文件守卫。这条等式两侧都从数据派生（清单 × 文件系统），不随任务组
+    推进而失效，且比地板强——它同时钉死「登记且已落地 ⇒ 有头部」与「有头部 ⇒ 已登记」。
+
+    代价（明写）：整批快照文件被误删时两侧同步收缩，等式仍成立，不再有地板兜底；
+    因此保留一条具名锚点目标，其角色与 `test_inventory_table_parses_every_body_row`
+    里的同名锚点一致——防的是「检查本身失效」而不是「数量退步」。
+    """
+
+    landed = {path.resolve() for path in _landed_targets(REPO_ROOT, INVENTORY_TARGETS)}
+    with_header = {
+        path.resolve() for path in _files_with_marker(REPO_ROOT, SCANNED_ROOTS)
+    }
+
+    anchor = (REPO_ROOT / "producer/src/yd_producer/store/safe_fs.py").resolve()
+    assert anchor in landed, "锚点快照文件未落地，检查本身失效"
+    assert landed == with_header, (
+        f"只在清单里：{sorted(str(p) for p in landed - with_header)}；"
+        f"只在磁盘上：{sorted(str(p) for p in with_header - landed)}"
+    )
 
 
 # --- 反向：带溯源标记的文件必须登记在清单表里 --------------------------------
@@ -277,7 +332,15 @@ def test_at_least_the_issue_5_snapshot_files_have_landed() -> None:
 
 def test_every_file_with_a_provenance_header_is_registered_in_the_inventory() -> None:
     found = _files_with_marker(REPO_ROOT, SCANNED_ROOTS)
-    assert len(found) >= 11, f"反向扫描只命中 {len(found)} 个文件，检查本身失效"
+
+    # 非空性/存活性不用写死的计数地板，改从数据派生：已落地的登记目标必须全在扫描结果里。
+    # 正则或扫描根一旦失灵，这条先红，`unregistered` 才不会真空为空。
+    missed = {
+        path.resolve() for path in _landed_targets(REPO_ROOT, INVENTORY_TARGETS)
+    } - {path.resolve() for path in found}
+    assert not missed, (
+        f"反向扫描漏掉已落地的登记目标，检查本身失效：{sorted(map(str, missed))}"
+    )
 
     unregistered = [
         path.relative_to(REPO_ROOT).as_posix()
@@ -320,7 +383,45 @@ def test_reverse_guard_sees_markers_below_the_header_line_budget(
     assert found == [stray]
     marker_line = _marker_comment_lines(stray)[0][0]
     assert marker_line == 7 > HEADER_LINE_BUDGET
-    assert PROVENANCE_MARKER not in _header(stray)
+    assert not _header_marker_lines(stray)
+
+
+def test_forward_guard_rejects_docstring_form_markers(tmp_path: Path) -> None:
+    """形式维度回归：溯源标记搬进 docstring，正向断言必须不认。
+
+    位置维度（上一条）关上后仍开着的另一半：正向侧曾是「前 5 行裸子串」，把已登记
+    快照的溯源行搬进模块 docstring，正向依旧 PASS，而反向守卫（注释锚）根本看不见
+    这种形式——同一不变量的两个方向对「什么算溯源头部」口径分叉。
+    """
+
+    source = "workers/data_adapters/region.py"
+    disguised = tmp_path / "region_docstring.py"
+    disguised.write_text(
+        f'"""{PROVENANCE_MARKER} {source}\n\n伪装成模块 docstring 的溯源行。"""\n',
+        encoding="utf-8",
+    )
+    proper = tmp_path / "region_comment.py"
+    proper.write_text(
+        f'# {PROVENANCE_MARKER} {source}\n"""真正的模块 docstring。"""\n',
+        encoding="utf-8",
+    )
+
+    # 旧口径（前 5 行裸子串）会把 docstring 形式判为合格头部——这正是被修掉的洞。
+    first_lines = disguised.read_text(encoding="utf-8").splitlines()[
+        :HEADER_LINE_BUDGET
+    ]
+    assert f"{PROVENANCE_MARKER} {source}" in "\n".join(first_lines)
+
+    assert not _provenance_header_lines(disguised, source), (
+        "docstring 形式不得算溯源头部"
+    )
+    assert not _marker_comment_lines(disguised), "反向侧同样看不见 docstring 形式"
+
+    # 正对照：注释形式命中，且正反向共用同一谓词。
+    assert _provenance_header_lines(proper, source) == [
+        (1, f"# {PROVENANCE_MARKER} {source}")
+    ]
+    assert _files_with_marker(tmp_path, (Path("."),)) == [proper]
 
 
 def test_reverse_guard_does_not_self_trigger_on_the_marker_constant() -> None:
@@ -337,7 +438,7 @@ def test_snapshot_scan_set_covers_every_landed_target_and_snapshot_package() -> 
     scanned = _scan_files(REPO_ROOT, INVENTORY_TARGETS)
     landed = _landed_targets(REPO_ROOT, INVENTORY_TARGETS)
 
-    assert len(landed) >= 11
+    assert landed, "已落地目标为空，检查本身失效"
     assert set(landed) <= set(scanned), "扫描集没覆盖全部已落地目标，检查本身失效"
 
     relatives = {path.relative_to(REPO_ROOT).as_posix() for path in scanned}
