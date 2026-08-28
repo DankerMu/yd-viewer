@@ -18,6 +18,7 @@ import pytest
 from cli_fixtures import write_config, write_fake_interpreter, write_local
 
 from yd_producer import cli, nwm
+from yd_producer import prepare as prepare_module
 
 # --- 记录型 fake -------------------------------------------------------------
 
@@ -49,6 +50,9 @@ def _fake_everything(monkeypatch) -> dict[str, Recorder]:
         "run": Recorder(result=0),
         "load_config": Recorder(result=object()),
         "load_local": Recorder(result=object()),
+        # `prepare` 的委托目标（issue #20）。它与 `prepare` 同时被换成 fake 是刻意的：
+        # 两层各自承担一条负面证据——守卫拒绝时**两层**都必须零调用。
+        "run_prepare": Recorder(result=None),
     }
     for name, fake in fakes.items():
         monkeypatch.setattr(cli, name, fake)
@@ -65,10 +69,17 @@ def _exit_code(argv, env):
         return exc.code
 
 
-def _argv(command, tmp_path, **local_kwargs):
+def _argv(command, tmp_path, *, baseline=None, **local_kwargs):
+    """齐备 argv。`prepare` 额外带必需的 `--baseline`（`init`/`run` 不带）。"""
     config_path = write_config(tmp_path)
     local_path = write_local(tmp_path, **local_kwargs)
-    return [command, "--config", str(config_path), "--local", str(local_path)]
+    argv = [command, "--config", str(config_path), "--local", str(local_path)]
+    if command == "prepare":
+        argv += [
+            "--baseline",
+            str(tmp_path / "baseline" if baseline is None else baseline),
+        ]
+    return argv
 
 
 # --- 三入口枚举 --------------------------------------------------------------
@@ -88,6 +99,36 @@ def test_parser_registers_exactly_three_subcommands():
 
     assert len(actions) == 1
     assert set(actions[0].choices) == {"prepare", "init", "run"}
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("prepare", {"--config", "--local", "--baseline"}),
+        ("init", {"--config", "--local"}),
+        ("run", {"--config", "--local"}),
+    ],
+)
+def test_required_option_sets_per_subcommand(command, expected):
+    """`--baseline` 只属 `prepare`（compute-loop §6.1）。
+
+    断言取 argparse 注册表的**必需**选项集合而非 help 文本：`init`/`run` 那两条是判别性
+    的负面证据——把 `--baseline` 加到公共循环里时，只测 `prepare` 的实现照样绿。
+    """
+    actions = [
+        action
+        for action in cli.build_parser()._actions
+        if isinstance(action, argparse._SubParsersAction)
+    ]
+    parser = actions[0].choices[command]
+    required = {
+        option
+        for action in parser._actions
+        if action.required
+        for option in action.option_strings
+    }
+
+    assert required == expected
 
 
 def test_help_exits_zero(capsys):
@@ -131,6 +172,34 @@ def test_missing_required_option_exits_two(monkeypatch, capsys, tmp_path, missin
     assert missing in err
     assert fakes["load_config"].count == 0
     assert fakes["run"].count == 0
+
+
+def test_prepare_without_baseline_exits_two(monkeypatch, capsys, tmp_path):
+    """spec cli-config「prepare 的基线包路径必需」：不装载配置、不执行任何业务逻辑。"""
+    fakes = _fake_everything(monkeypatch)
+    argv = _argv("prepare", tmp_path)
+    index = argv.index("--baseline")
+    del argv[index : index + 2]
+
+    assert _exit_code(argv, env={}) == 2
+
+    assert "--baseline" in capsys.readouterr().err
+    assert fakes["load_config"].count == 0
+    assert fakes["prepare"].count == 0
+    assert fakes["run_prepare"].count == 0
+
+
+@pytest.mark.parametrize("command", ["init", "run"])
+def test_baseline_is_rejected_on_other_subcommands(
+    monkeypatch, capsys, tmp_path, command
+):
+    fakes = _fake_everything(monkeypatch)
+    argv = _argv(command, tmp_path) + ["--baseline", str(tmp_path / "baseline")]
+
+    assert _exit_code(argv, env={}) == 2
+
+    capsys.readouterr()
+    assert all(fake.count == 0 for fake in fakes.values())
 
 
 # --- DATABASE_URL 守卫（agent-ops §2.2）--------------------------------------
@@ -333,24 +402,78 @@ def test_prepare_stops_when_interpreter_not_executable(monkeypatch, capsys, tmp_
     assert runner.count == 0
 
 
-def test_prepare_with_executable_interpreter_reaches_staged_unimplemented(
-    monkeypatch, capsys, tmp_path
-):
-    """正控制：可执行解释器下越过预检进入未实现分支——排除"预检恒失败"的实现。
+# --- prepare 的委托与两级退出码（issue #20）---------------------------------
 
-    预检不代替调用：本 issue 的 `prepare` 不实际调用 mapping-builder，故薄外壳零调用。
-    """
-    runner = Recorder(result=None)
-    monkeypatch.setattr(nwm, "invoke_mapping_builder", runner)
+
+def _prepare_argv(tmp_path, **kwargs):
+    """带可执行假解释器的 `prepare` argv：越过预检后进入真正的编排委托。"""
     script = write_fake_interpreter(
         tmp_path.resolve() / "fake-python", tmp_path.resolve() / "record.json"
     )
-    argv = _argv("prepare", tmp_path, python=script)
+    return _argv("prepare", tmp_path, python=script, **kwargs)
 
-    assert _exit_code(argv, env={}) == 3
 
-    assert "10.3" in capsys.readouterr().err
+def test_prepare_with_executable_interpreter_reaches_production_builder_binding(
+    monkeypatch, capsys, tmp_path
+):
+    """正控制：可执行解释器下越过预检，进入生产 builder 绑定并以退出码 `3` 停。
+
+    预检不代替调用：绑定在**发起任何子进程之前**失败，故薄外壳零调用。
+    """
+    runner = Recorder(result=None)
+    monkeypatch.setattr(nwm, "invoke_mapping_builder", runner)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
+
+    err = capsys.readouterr().err
+    assert prepare_module.BUILDER_OWNER in err  # 指名归属
+    assert "Traceback" not in err
     assert runner.count == 0
+
+
+def test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes(
+    monkeypatch, capsys, tmp_path
+):
+    """同一组参数：干净根 -> `3`（这条路还没通）；终名已存在 -> `1`（拒绝执行）。
+
+    两码可区分是硬要求——合并成一个码，运维无从判断该改配置还是该等 M4。
+    """
+    monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
+    argv = _prepare_argv(tmp_path)
+    yd_root = tmp_path.resolve() / "yd"
+    (yd_root / "input" / "models" / "yd_gfs").mkdir(parents=True)
+
+    assert _exit_code(argv, env={}) == 1
+
+    err = capsys.readouterr().err
+    assert str(yd_root / "input" / "models" / "yd_gfs") in err
+    assert "Traceback" not in err
+
+
+def test_prepare_delegates_resolved_baseline_path(monkeypatch, tmp_path):
+    """`--baseline` 与 `--config`/`--local` 同纪律：`Path.resolve()` 后再传下游。"""
+    fake = Recorder(result=None)
+    monkeypatch.setattr(cli, "run_prepare", fake)
+    monkeypatch.chdir(tmp_path)
+    argv = _prepare_argv(tmp_path, baseline="baseline")
+
+    assert _exit_code(argv, env={}) == 0
+
+    assert fake.count == 1
+    assert fake.calls[0][1]["baseline_root"] == (tmp_path / "baseline").resolve()
+
+
+def test_prepare_error_becomes_exit_one(monkeypatch, capsys, tmp_path):
+    def raising(**kwargs):
+        raise prepare_module.PrepareError("变体 reach 数与 reach_count 不符")
+
+    monkeypatch.setattr(cli, "run_prepare", raising)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 1
+
+    err = capsys.readouterr().err
+    assert "变体 reach 数与 reach_count 不符" in err
+    assert "Traceback" not in err
 
 
 def test_init_reaches_staged_unimplemented(capsys, tmp_path):

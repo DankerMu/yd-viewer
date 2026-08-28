@@ -48,6 +48,12 @@ reach_count = 3988              # products-contract §5.1；run-controller spec 
 # NWM@8ae9b8f2 workers/mapping_builder/cli.py —— 版本化快照事实，非现场值（归属裁决见 #32）
 nwm_mapping_builder_module = "workers.mapping_builder.cli"
 
+# NWM@8ae9b8f2 workers/mapping_builder/cli.py:602 的 `grid_id` —— 同属版本化快照事实
+# （字段随任务 10.3 / #20 加入；生产取值归 #29 的生产实例复核）
+[nwm_canonical_grid_id]
+gfs = "<GFS canonical grid id>"
+ifs = "<IFS canonical grid id>"
+
 [cycle]
 hours = [0, 12]                 # 仅接受 00Z/12Z（compute-loop §7.1）
 

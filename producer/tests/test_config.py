@@ -32,6 +32,9 @@ VALID_CONFIG: dict[str, Any] = {
     "checkpoint_hours": [12],
     "reach_count": 3988,
     "nwm_mapping_builder_module": "workers.mapping_builder.cli",
+    # 逐 source 的 NWM canonical grid 标识（issue #20）。两个值刻意不同：`prepare` 的
+    # "两次 grid_id 不同"这条断言在两者相同时退化成永真式。
+    "nwm_canonical_grid_id": {"gfs": "fixture-grid-gfs", "ifs": "fixture-grid-ifs"},
     "cycle": {"hours": [0, 12]},
     "variants": {"gfs": "input/models/yd_gfs", "ifs": "input/models/yd_ifs"},
     "raw": {
@@ -116,6 +119,12 @@ PINNED_CONFIG_KEYS = (
     "reach_count",
     # issue #3 fixture 的 TOML key schema 在 `reach_count` 之后加入本键（#32 三步之第 1 步）
     "nwm_mapping_builder_module",
+    # issue #20 fixture「Must add/change」在其后加入本表（`nwm_canonical_grid_id` 表 ->
+    # `CanonicalGridConfig(gfs, ifs)`）；spec cli-config 以 `nwm_canonical_grid_id.gfs`
+    # /`.ifs` 逐字钉死其点分名，故表本身与两个叶子都是必需 key。
+    "nwm_canonical_grid_id",
+    "nwm_canonical_grid_id.gfs",
+    "nwm_canonical_grid_id.ifs",
     # tasks.md:49-50 [cycle]
     "cycle",
     "cycle.hours",
@@ -443,6 +452,8 @@ def test_load_config_returns_all_fields(tmp_path):
     assert config.checkpoint_hours == (12,)
     assert config.reach_count == 3988
     assert config.nwm_mapping_builder_module == "workers.mapping_builder.cli"
+    assert config.nwm_canonical_grid_id.gfs == "fixture-grid-gfs"
+    assert config.nwm_canonical_grid_id.ifs == "fixture-grid-ifs"
     assert config.cycle.hours == (0, 12)
     assert config.variants.gfs == "input/models/yd_gfs"
     assert config.variants.ifs == "input/models/yd_ifs"
@@ -473,6 +484,26 @@ def test_mapping_builder_module_follows_fixture_value(tmp_path):
 
     assert VALID_CONFIG["nwm_mapping_builder_module"] != "other.builder.entry"
     assert config.nwm_mapping_builder_module == "other.builder.entry"
+
+
+def test_canonical_grid_ids_follow_fixture_values(tmp_path):
+    """两个 `grid_id` 都取自 `config.toml`，而非装载器里的常量或彼此的副本。
+
+    与 `test_mapping_builder_module_follows_fixture_value` 同判据：判别力只能来自第二组
+    值。这里逐 source 各换一个新值，一个"两个 source 共用同一个 grid_id"或"把 grid_id
+    存回字面量"的实现都会红。
+    """
+    data = _with(VALID_CONFIG, "nwm_canonical_grid_id.gfs", "alt-grid-gfs")
+    data = _with(data, "nwm_canonical_grid_id.ifs", "alt-grid-ifs")
+
+    config = _loaded_config(tmp_path, data)
+
+    assert VALID_CONFIG["nwm_canonical_grid_id"] == {
+        "gfs": "fixture-grid-gfs",
+        "ifs": "fixture-grid-ifs",
+    }
+    assert config.nwm_canonical_grid_id.gfs == "alt-grid-gfs"
+    assert config.nwm_canonical_grid_id.ifs == "alt-grid-ifs"
 
 
 def test_raw_sources_carry_independent_lead_hours(tmp_path):
@@ -683,6 +714,22 @@ def test_config_nested_table_type_error_names_dotted_path(tmp_path):
     # 列表元素错：`path` 取字段本身（不带下标），下标只出现在人读消息里
     _assert_locates(excinfo, "raw.ifs.variables")
     assert "下标 1" in str(excinfo.value)
+
+
+def test_config_canonical_grid_must_be_a_table(tmp_path):
+    """`nwm_canonical_grid_id` 写成标量 -> 报错指名该 key 与期望类型 table。
+
+    单独立一条而不靠推导轴：两条推导轴分别只走"必需 key 缺失"与"标量类型错"，
+    "该 key 存在但不是表"落在两者之间——`_require_table` 的那条分支没有别的用例把守。
+    """
+    data = _with(VALID_CONFIG, "nwm_canonical_grid_id", "not-a-table")
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(_write_toml(tmp_path / "config.toml", data))
+
+    _assert_locates(excinfo, "nwm_canonical_grid_id")
+    assert "table" in str(excinfo.value)
+    assert "str" in str(excinfo.value)
 
 
 def test_config_lead_hours_must_be_int_list(tmp_path):
@@ -1087,6 +1134,7 @@ def test_local_slurm_keyset_shares_no_name_with_production_fields(tmp_path):
 # 整体跳过而测试照绿。此处以独立字面量清单钉死它必须走到的类。
 EXPECTED_DATACLASSES = {
     "Config",
+    "CanonicalGridConfig",
     "CycleConfig",
     "VariantsConfig",
     "RawConfig",

@@ -8,15 +8,18 @@ seam 6：入口层不做业务行为测试，但入口层自身的契约必须�
 
 - `2`：argparse 用法错误（未知子命令、缺子命令、缺必需参数），由 argparse 自身产生；
 - `1`：守卫或配置失败（`DATABASE_URL`、`ConfigError`、`states/` 缺失或为空、NWM 解释器
-  fail-closed）；
-- `3`：分阶段未实现的业务体，stderr 指名归属任务号。
+  fail-closed、`prepare` 编排的 `PrepareError`）；
+- `3`：分阶段未实现的业务体，stderr 指名归属任务号；`prepare` 的
+  `BuilderUnavailableError`（生产 mapping-builder 绑定尚未可用）同属此码——它必须与
+  `1` 可区分，否则运维分不清该改配置还是该等 M4。
 
 **守卫位置**：`DATABASE_URL` 检查是 `main()` 的第一件事，先于 `parse_args` 与任何配置
 装载（agent-ops §2.2 把"不连 NWM 数据库"列为硬约束，环境本身有缺陷时最 fail-closed 的
 形态是在解释任何参数之前拒绝，且代码路径只有一条）。**被接受的后果**：`DATABASE_URL`
 存在时 `yd-producer --help` 同样以 `1` 退出而不打印帮助——环境错了就先修环境。
 
-**路径形态**：`--config` / `--local` 在此边界一律 `Path.resolve()` 后再交给装载器
+**路径形态**：`--config` / `--local` / `prepare` 的 `--baseline` 在此边界一律
+`Path.resolve()` 后再交给装载器/编排层
 （agent-ops §8.2：cron 以 cwd=`$HOME` 调 `run`、人工补跑在 checkout 目录走同一入口，同
 一条相对路径在两处指向不同文件，而装载器的失败消息忠实回显入参）。用 `Path.resolve()`
 而非 `os.path.abspath`：后者对已是绝对路径的入参做词法 `..` 折叠，跨 symlink 会指向不
@@ -34,6 +37,7 @@ from pathlib import Path
 
 from yd_producer import nwm
 from yd_producer.config import Config, ConfigError, LocalConfig, load_config, load_local
+from yd_producer.prepare import BuilderUnavailableError, PrepareError, run_prepare
 
 __all__ = ["build_parser", "main"]
 
@@ -76,6 +80,16 @@ def build_parser() -> argparse.ArgumentParser:
             type=Path,
             help="现场 local.toml 路径（gitignored，代码不内置任何默认）",
         )
+        if name == "prepare":
+            # 只加在 `prepare`：基线包路径只被它消费一次，做成三入口共有参数等于要求
+            # `init`/`run` 也填一个它们从不读的值（compute-loop §6.1）。必需且无默认
+            # ——spec cli-config「代码 MUST NOT 内置默认路径」。
+            sub.add_argument(
+                "--baseline",
+                required=True,
+                type=Path,
+                help="外部基线模型包路径（一次性传入，不入 config.toml/local.toml）",
+            )
     return parser
 
 
@@ -88,15 +102,20 @@ def build_parser() -> argparse.ArgumentParser:
 # 参数解析、退出码与薄外壳，全部为真实实现；走到这里说明全部守卫都已通过。
 
 
-def prepare(local: LocalConfig, config: Config) -> int:
-    """`prepare`：守卫 + NWM 解释器 fail-closed 预检；业务体归任务 10.3。
+def prepare(local: LocalConfig, config: Config, baseline_root: Path) -> int:
+    """`prepare`：守卫 + NWM 解释器 fail-closed 预检，随后薄委托 `prepare.run_prepare`。
 
     预检在此（而非只在薄外壳）是 spec Scenario「解释器缺失即停」的入口层落点——该
     Scenario 的主语是 `prepare`。预检失败抛 `ConfigError`，由 `main` 转成退出码 `1`，
     且不发起任何 builder 调用。
+
+    `run_prepare` 以**模块级名字**解析（不在导入时冻结），与三个委托目标同纪律，使入口
+    层测试能注入 fake 断言"未被调用"这类负面证据。编排的两级失败由 `main` 分码：
+    `BuilderUnavailableError` -> `3`，其余 `PrepareError` -> `1`。
     """
     nwm.check_interpreter(local)
-    return _unimplemented("prepare", "10.3（prepare 编排：变体与几何产出）")
+    run_prepare(local=local, config=config, baseline_root=baseline_root)
+    return 0
 
 
 def init(local: LocalConfig, config: Config) -> int:
@@ -179,10 +198,17 @@ def main(
 
     try:
         if args.command == "prepare":
-            return prepare(local, config)
+            return prepare(local, config, args.baseline.resolve())
         if args.command == "init":
             return init(local, config)
         return run(local, config)
+    except BuilderUnavailableError as exc:
+        # 必须先于 `PrepareError` 捕获：它是后者的子类，反序会把"这条路还没通"报成
+        # 退出码 1，运维会去改一份没有问题的配置。
+        print(f"错误：{exc}", file=sys.stderr)
+        return EXIT_UNIMPLEMENTED
+    except PrepareError as exc:
+        return _fail(str(exc))
     except ConfigError as exc:
         return _fail(str(exc))
 
