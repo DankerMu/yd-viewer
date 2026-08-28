@@ -472,6 +472,59 @@ def test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code(
     assert "Traceback" not in err
 
 
+def test_cleanup_failure_text_reaches_stderr_on_the_failure_path(
+    monkeypatch, capsys, tmp_path
+):
+    """清理失败的**文本**必须到达运维，不只是退出码（cand-r2-A1）。
+
+    上一条用例只断言退出码没被降级，对"证据是否可见"恒绿：`str(exc)` 不含
+    `__notes__`，而 `prepare` 的回滚失败只以 `add_note` 附在原始异常上。渲染缺失时
+    `YD_ROOT`/scratch 里的残留在 agent-ops §8.1 的 receipt 上没有任何痕迹。
+    """
+    monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
+
+    def refuse(*args, **kwargs):
+        raise prepare_module.safe_fs.SafeFilesystemError(
+            "injected cleanup failure", kind="io"
+        )
+
+    monkeypatch.setattr(prepare_module.safe_fs, "remove_tree_allow_symlinks", refuse)
+    monkeypatch.setattr(prepare_module.safe_fs, "rmtree_no_follow", refuse)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
+
+    err = capsys.readouterr().err
+    assert "归属 M4" in err  # 原始异常还在，没被清理失败顶掉
+    assert "injected cleanup failure" in err  # 清理失败也在
+    assert "Traceback" not in err
+
+
+def test_success_path_cleanup_warnings_reach_stderr_without_changing_the_exit_code(
+    monkeypatch, capsys, tmp_path
+):
+    """成功路径的 `cleanup_warnings` 必须打出来，且退出码仍为 `0`（cand-r2-A2）。
+
+    告警说的是"四个终名都提交了，但 staging/scratch 还有残留"。升格成失败会让重跑撞上
+    拒绝覆盖守卫；丢掉则运维不知道有中间态留在 `YD_ROOT` 里。
+    """
+    warnings = ("残留 staging：/x/.prepare-staging-1", "残留 scratch：/y/prepare-1")
+    fake = Recorder(
+        result=prepare_module.PrepareReport(
+            variants={},
+            rivers_geojson=tmp_path / "rivers.geojson",
+            boundary_geojson=tmp_path / "boundary.geojson",
+            cleanup_warnings=warnings,
+        )
+    )
+    monkeypatch.setattr(cli, "run_prepare", fake)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 0
+
+    err = capsys.readouterr().err
+    for warning in warnings:
+        assert warning in err
+
+
 def test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes(
     monkeypatch, capsys, tmp_path
 ):
@@ -492,8 +545,19 @@ def test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes(
 
 
 def test_prepare_delegates_resolved_baseline_path(monkeypatch, tmp_path):
-    """`--baseline` 与 `--config`/`--local` 同纪律：`Path.resolve()` 后再传下游。"""
-    fake = Recorder(result=None)
+    """`--baseline` 与 `--config`/`--local` 同纪律：`Path.resolve()` 后再传下游。
+
+    fake 返回一份**真** `PrepareReport`（而不是 `None`）：入口层要读它的
+    `cleanup_warnings`，而 `cli.prepare` 刻意不做 `None` 兜底——兜底会把坏掉的委托伪装
+    成成功。这里的报告清理干净，故本用例对 stderr 保持沉默。
+    """
+    fake = Recorder(
+        result=prepare_module.PrepareReport(
+            variants={},
+            rivers_geojson=tmp_path / "rivers.geojson",
+            boundary_geojson=tmp_path / "boundary.geojson",
+        )
+    )
     monkeypatch.setattr(cli, "run_prepare", fake)
     monkeypatch.chdir(tmp_path)
     argv = _prepare_argv(tmp_path, baseline="baseline")

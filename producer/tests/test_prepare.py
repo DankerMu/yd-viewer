@@ -872,6 +872,99 @@ def test_success_reports_no_cleanup_warnings_when_cleanup_is_clean(env):
     assert report.cleanup_warnings == ()
 
 
+# --- I1 异常类边界（清理循环只收 Exception；回滚边界收 BaseException）--------
+#
+# 上面几条用例的注入面清一色是 `SafeFilesystemError`，它在 `_wrap_fs` 里就被翻译成
+# `PrepareError`，根本到不了清理循环的 `except`，于是 `except Exception` /
+# `except PrepareError` / `except BaseException` 三种写法在它们眼里完全同形。下面三条
+# 各自换一种到达形态，把三个边界分开钉住。
+
+
+def test_keyboard_interrupt_in_a_cleanup_step_is_not_swallowed(env, monkeypatch):
+    """清理循环 MUST 只收 `Exception`：`KeyboardInterrupt` 原样上抛。
+
+    注入落在**最后**一步（scratch 删除）：更早的步骤被 KI 打断时，后续步骤在 HEAD 上
+    同样不会执行，"其余步骤照跑"在那里本来就不成立，断言会失真。
+    收窄成 `except BaseException` 的实现在这条上必红——运维按下的 Ctrl-C 被吞成一条
+    告警，上浮的会是 `BuilderUnavailableError`。
+    """
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt("operator Ctrl-C during cleanup")
+
+    monkeypatch.setattr(prepare_module.safe_fs, "remove_tree_allow_symlinks", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_prepare(local=env.local, config=env.config, baseline_root=env.package.root)
+
+
+def test_untranslated_oserror_in_a_cleanup_step_does_not_cancel_the_rest(
+    env, monkeypatch
+):
+    """清理循环 MUST 收下未经翻译的裸 `OSError`（不放行、不顶替原始异常）。
+
+    `_remove_created_directory` 的 `finally: os.close(parent_fd)` 不经 `_wrap_fs`，裸
+    `OSError` 直达清理循环——这是 `SafeFilesystemError` 注入面够不到的那一格。注入点必须
+    是 `prepare.os.close`：经 `rmtree_no_follow` 抛的 `OSError` 会被 `_wrap_fs` 翻译成
+    `PrepareError`，`except PrepareError` 的变异体照样绿。
+    """
+    _probe_rename(monkeypatch, fail_at=4)
+
+    real_open = safe_fs.open_directory_no_follow
+    target_parent = env.yd_root / "input"
+    state: dict[str, object] = {"fd": -1, "fired": False}
+
+    def recording_open(path, *args, **kwargs):
+        fd = real_open(path, *args, **kwargs)
+        if Path(path) == target_parent:
+            state["fd"] = fd
+        return fd
+
+    real_close = os.close
+
+    def flaky_close(fd):
+        real_close(fd)
+        if fd == state["fd"] and not state["fired"]:
+            state["fired"] = True
+            raise OSError(5, "injected EIO on close")
+
+    monkeypatch.setattr(
+        prepare_module.safe_fs, "open_directory_no_follow", recording_open
+    )
+    monkeypatch.setattr(prepare_module.os, "close", flaky_close)
+
+    before = tree_snapshot(env.yd_root)
+    with pytest.raises(PrepareError) as excinfo:
+        run(env, make_builder(env))
+
+    assert state["fired"] is True
+    # 上浮的仍是原始的第 4 次 rename 失败，不是这条 OSError。
+    assert "提交失败" in str(excinfo.value)
+    notes = getattr(excinfo.value, "__notes__", [])
+    assert any("injected EIO on close" in note for note in notes)
+    # 其余撤回步骤照跑：`YD_ROOT` 回到执行前，scratch 全清。
+    assert_untouched(env, before)
+
+
+def test_keyboard_interrupt_from_the_builder_still_rolls_back(env, monkeypatch):
+    """回滚边界 MUST 收 `BaseException`：builder 途中的 Ctrl-C 也要先回滚再上抛。
+
+    KI 越过步骤 3 的 `except Exception`（那里只翻译普通 builder 故障）落到回滚边界。
+    边界收窄成 `except Exception` 的实现在这条上必红：回滚被整体跳过，scratch 里留着
+    半棵变体树，下一次 `prepare` 撞上 scratch 残留守卫。
+    """
+    before = tree_snapshot(env.yd_root)
+    builder = make_builder(
+        env, scripts={"gfs": VariantScript(raises=KeyboardInterrupt("Ctrl-C"))}
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        run(env, builder)
+
+    assert tree_snapshot(env.yd_root) == before
+    assert tree_snapshot(env.scratch_root) == {}
+
+
 def test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed(env):
     """builder 在 `variant_root` 里留 symlink -> 拒绝提交并点名它，scratch 全清（cand-04）。
 

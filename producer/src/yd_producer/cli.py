@@ -112,9 +112,19 @@ def prepare(local: LocalConfig, config: Config, baseline_root: Path) -> int:
     `run_prepare` 以**模块级名字**解析（不在导入时冻结），与三个委托目标同纪律，使入口
     层测试能注入 fake 断言"未被调用"这类负面证据。编排的两级失败由 `main` 分码：
     `BuilderUnavailableError` -> `3`，其余 `PrepareError` -> `1`。
+
+    成功路径上报告里的 `cleanup_warnings` MUST 打到 stderr（spec cli-config「prepare 的
+    清理告警与残留证据 MUST 到达运维」）：它记的是 scratch 或 `YD_ROOT` 内 staging 的
+    残留，是 agent-ops §8.1 那份 receipt 唯一能拿到的证据；丢掉它等于让运维在一次
+    "成功"之后对着一棵有中间态的树。它 MUST NOT 改变退出码——四个终名都已提交。
+
+    报告不做 `None` 兜底：委托目标按契约必返回 `PrepareReport`，兜底只会把坏掉的委托
+    伪装成成功。
     """
     nwm.check_interpreter(local)
-    run_prepare(local=local, config=config, baseline_root=baseline_root)
+    report = run_prepare(local=local, config=config, baseline_root=baseline_root)
+    for warning in report.cleanup_warnings:
+        print(f"警告：{warning}", file=sys.stderr)
     return 0
 
 
@@ -155,6 +165,22 @@ def _check_states_dir(states: Path) -> str | None:
                 "run 永不自动 bootstrap，请先经授权执行 `yd-producer init`"
             )
     return None
+
+
+def _print_notes(exc: BaseException) -> None:
+    """把在途异常的 `__notes__` 打到 stderr（spec cli-config）。
+
+    `str(exc)` **不含** notes——notes 只在 `traceback.format_exception` 里出现，而本入口
+    刻意不打 traceback。`prepare` 的回滚/清理失败恰恰只以 `add_note` 附在原始异常上
+    （`prepare.run_prepare` 步骤 8：抛出会替换原始异常并降级退出码），故不在这里渲染
+    就等于把"`YD_ROOT` 里还有残留"这条证据丢掉。
+
+    三个分派 handler 各调一次，而不是塞进 `_fail`：`BuilderUnavailableError` 那支退出码
+    是 `3`、根本不经 `_fail`，只改 `_fail` 覆不全。`run_prepare` 的 `except BaseException`
+    会给**任何**在途异常挂 note，逃逸出去的 `ConfigError` 同样带证据。
+    """
+    for note in getattr(exc, "__notes__", ()):
+        print(note, file=sys.stderr)
 
 
 def _fail(message: str) -> int:
@@ -206,11 +232,16 @@ def main(
         # 必须先于 `PrepareError` 捕获：它是后者的子类，反序会把"这条路还没通"报成
         # 退出码 1，运维会去改一份没有问题的配置。
         print(f"错误：{exc}", file=sys.stderr)
+        _print_notes(exc)
         return EXIT_UNIMPLEMENTED
     except PrepareError as exc:
-        return _fail(str(exc))
+        code = _fail(str(exc))
+        _print_notes(exc)
+        return code
     except ConfigError as exc:
-        return _fail(str(exc))
+        code = _fail(str(exc))
+        _print_notes(exc)
+        return code
 
 
 if __name__ == "__main__":  # pragma: no cover - 入口点走 [project.scripts]
