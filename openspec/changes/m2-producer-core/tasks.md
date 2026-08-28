@@ -604,9 +604,9 @@ Review focus:
 ## 4. state-tools：cfg.ic 工具链
 
 - [x] 4.1 快照并适配 `cfg.ic` 原生分段解析与回写（mesh/river/lake），字节级 roundtrip 测试
-- [ ] 4.2 实现结构检查（缺段、行数与 header 不符、数值区损坏）
-- [ ] 4.3 实现重戳到目标 cycle 绝对时间（只改 header、数据不变；服务 init 首态与发布前 T+12 定戳两条路径）
-- [ ] 4.4 快照负残差归零与域均修正阈值检查纯函数
+- [x] 4.2 实现结构检查（缺段、行数与 header 不符、数值区损坏）
+- [x] 4.3 实现重戳到目标 cycle 绝对时间（只改 header、数据不变；服务 init 首态与发布前 T+12 定戳两条路径）
+- [x] 4.4 快照负残差归零与域均修正阈值检查纯函数
 
 依赖：组 2（勘察清单定原路径）
 §13.1 归属：state
@@ -719,6 +719,312 @@ Review focus:
 - 移植函数是否与 NWM pin 逐字一致、是否逐函数带溯源注释；有无引入运行时 NWM import 或数据库符号
 - `MAX_STATE_IC_BYTES` 是否在**读取前**生效（有界读），而非先读满再判断
 - 是否越界落地了 #9 的结构检查/重戳/负残差符号（含"顺手先放着"的死代码）
+
+### Issue #9 fixture（任务 4.2–4.4）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：改动面正面命中强制 expanded 触发词 `parser` / `format` / `schema` / `field`（header token 布局判定、段列头契约、状态列位置语义），并命中 profile 的 domain 触发词 `cfg.ic`、「状态链」、`重戳/restamp`、`T+12`、`checkpoint`——与 issue #8 同一条覆写理由链；此外本 issue 是格式根上的**第一个写面**（header 覆写）与 `Section.rows`/`span` 的**第一个消费方**）
+Repair intensity: high（本 issue 决定「状态时间头是否对应 cycle 绝对时间」与「状态数值是否可信」两条判定，profile 把「断链即整链失效」列为首位风险轴；重戳写错即整条 warm start 链静默错位，故适用 `Invariant Matrix`）
+Project profile: yd-viewer
+Width exception: merged-tasks（issue 正文声明）——4.2/4.3/4.4 三个纯函数同属 state 工具族、共用同一批合成 fixture 与 pytest 路径
+Minimal mergeable slice: 组 4 余量（issue 正文声明）；首刀（4.1 格式层）已由 #8 剥离并合并
+
+**上游硬依赖：issue #54 是 `Blocks #9`**。#54 的六条验收标准逐条并入本 fixture（见下方「#54 并入映射」），不得只做 4.2/4.3/4.4 的字面三项而把 #54 留给下一个 PR——#54 的定位就是「归 #9 的 QC/结构检查层」，其五条发现全部是本 issue 构建其上的格式根的既有 fail-open。
+
+#### 核心设计裁决（本 fixture 钉死，实现不得自行改写）
+
+**裁决 1 —— 序列化法则：4.3 与 4.4 一律重建在 `CfgIcDocument` 之上，MUST NOT 沿用 pin 的整文件重拼。**
+pin 的 `normalize_state_negative_residuals`（`state_qc.py:154`）与 `_normalized_checkpoint_ic_file`（`state_cli.py:256`）都以 `content.splitlines()` 拆开、改完后 `"\n".join(lines)` 重拼整个文件，改行内部再 `"\t".join(tokens)`。这在 yd 侧**不可用**：spec state-tools 要求重戳「数据区 MUST 保持不变」，而整文件重拼会把每一条**未被改动**的行的 CRLF 归一为 LF、把行尾空格与 Tab/空格混排全部重写。#8 已经为此把格式层做成逐行保真模型。故本 issue 的法则是：
+
+- 只有**被刻意改动的那几行**重新序列化；其余每一行 MUST 逐字节保持原样（含各自的行尾符）。
+- 重戳改动集 = **仅 header 行**；负残差改动集 = **仅真正含负值的数据行**。
+- 判别力承重条：该法则**只在脏 fixture 上可证伪**——canonical 化的写法在干净输入上恒绿。故所有「未改动行逐字节不变」断言 MUST 在 CRLF / 行尾空格 / Tab 分隔 / 空行 / 混合数值记法的脏矩阵上跑（见下方 Required evidence）。
+
+**裁决 2 —— 改行的内部形态：改动行 MUST 只替换目标 token 的字节，保留该行其余空白布局与行尾符。**
+pin 的 `header[minute_index] = ...` + `"\t".join(header)` 会把 header 行里**未被改动的 token 之间**的原始分隔（空格/多空格/Tab 混排）一律重写成单 Tab。这是对 spec「只改写状态时间头」的超出：mesh 计数 token 与列数 token 的字节不该动。故 yd 侧 MUST 就地替换 token 切片，保留前后空白。这是对 pin 的**刻意偏离**，MUST 在模块头注明，并由一条「header 行用多空格 + 行尾空格 + CRLF 构造」的用例钉死（只有 minute token 的字节变化，行内其余字节与行尾符不变）。同一条适用于负残差的改行。
+
+**裁决 3 —— 文档改写只经显式 API，禁止裸 `dataclasses.replace`（#54 第 5 条）。**
+`cfg_ic.CfgIcDocument` 新增 `__post_init__` 构造期不变量校验（至少：`len(roles) == len(lines)`；`0 <= header_index < len(lines)`；每个 `Section.column_header_index` 与 `data_line_indices` 全部落在 `[0, len(lines))`；`lake_preamble_index` 为 None 或在界内），以及**行替换 API** `with_replaced_lines(replacements: Mapping[int, str]) -> CfgIcDocument`：按行号替换行文本、**行数恒定**（故 `roles` / `header_index` / 各段行号全部继续有效），替换值不含行尾符、由 API 重新贴回**原行的**行尾符（原行无行尾符则替换后也无）。越界行号或试图改变行数 MUST 抛 `ValueError`。4.3 与 4.4 一律经此 API 产出新文档。
+
+**裁决 4 —— 非有限值 MUST 在负残差投影之前被拒（#54 第 1 条的完整闭合）。**
+#54 第 1 条只说「移植 `_check_block_range` 时连 isfinite 门一起移植」。本 fixture 复核 pin 的**残差函数**后发现该条只闭合了一半——pin 的 `normalize_state_negative_residuals` 自身**没有** finiteness 门，实测（`uv run --no-project python`，本 fixture 亲自跑）：
+
+```text
+nan >= 0.0 -> False          # 进入归零分支，NaN 被静默写成 0
+correction=-nan -> nan       # nan > 1e-2 -> False，不计入 over_tolerance_clamp
+sum -> nan                   # 域均 = nan
+mean>cap -> False            # nan > cap 为 False → 两条阈值门全部放行 → accepted
+inf >= 0.0 -> True           # +inf 不进归零分支，原样存活到输出
+-inf >= 0.0 -> False         # 仅 -inf 因 correction=inf 触发域均超限而 fail-closed
+```
+
+**作用域更正（fixture 复核补，比上面的实测更严）**：`-inf` 也**不是**普遍被拦——两条域均和只由 **unsat 列**与 **river stage 列**累加（pin `state_qc.py:248-255`），故 `-inf` 落在 canopy / snow / surface / gw 或 lake 列时只计入 `max_correction_m` 与 `over_tolerance_clamp_count`，**照样 accepted**。即 pin 的残差层对 **NaN 静默归零并接受**、对 **+inf 原样放行**、对**非域均列的 -inf 归零并接受**，只有落在 unsat / river-stage 列的 `-inf` 才因域均 inf 被拦。故：
+
+- 结构检查（4.2）MUST 移植 pin `_check_block_range` 的 isfinite 门，且 MUST 保持 pin 的判定次序——**finiteness（`state_qc.py:827`）先于负值（`:832`）**（#54 明文要求写进实现说明，「NaN 从 `value < 0` 底下溜过去」是错误描述，不得照抄）；
+- 负残差处理（4.4）MUST 在任何投影之前拒绝非有限值，抛 `ValueError`。这是对 pin 的**刻意偏离**（pin 无此门），MUST 在模块头注明，理由即上方实测。
+
+**裁决 5 —— 负残差超阈值的错误契约：抛 `ValueError`，证据不丢。**
+spec state-tools 明写「超阈值 MUST 报错」「处理报错，不产出修正后状态」，而 pin 返回 `accepted=False` 的 dataclass。yd 侧 MUST 抛 `ValueError`（承 #8 已确立的「本模块族的结构性/语义性拒绝一律 `ValueError`」约定），且异常实例 MUST 携带 `.evidence: dict[str, Any]`——内容即 pin `StateResidualNormalization.evidence()` 的完整载荷（`accepted=False` 与 `reason` 在内），使 receipt 侧证据零丢失，同时「不产出修正后状态」由「不返回文档」结构性保证。这是对 pin 的**刻意偏离**，MUST 在模块头注明。成功路径仍返回 pin 形状的 `StateResidualNormalization`（含新文档），`accepted` 字段保留以对齐 pin 的证据形状。
+
+**裁决 6 —— 本 issue 不写任何文件（承 #8 先例）。**
+pin 的重戳经 `atomic_write_bytes_no_follow` 落 `.{name}.normalized` 点前缀兄弟文件；该 helper 属 `safe_fs`，是 **issue #5 在途**、本仓尚未落地的面（`producer/src/yd_producer/store/` 不存在）。故 4.3/4.4 的公共 seam 一律 **doc→doc / doc→bytes**，落盘归调用方（#21 init 首态、#24 发布器）。design.md seam 3 的「file→file」按 #8 已确立的读法执行：**读**可由 `cfg_ic.parse` 收路径（有界读），**写**返回 bytes。本条是记录在案的解释，不是新裁决。
+
+**裁决 7 —— 4.3 只落重戳面，rekey 面路由到 #16/#24。**
+快照清单 `nwm-snapshot-inventory.md` §1 中 `packages/common/state_cli.py` 行的抽取集含两族符号：(a) **重戳面**——把 header minute token 覆写为目标绝对时间；(b) **rekey 面**——`_checkpoint_with_header_time` / `_valid_time_from_header_minute` / `_lead_hours_from_run_valid_time` / `StateCheckpoint` / `StateRunContext`，即「读 header 反推 checkpoint 的 valid_time 并改写 lead_hours」。issue #9 正文的 In Scope 对 4.3 的定义是逐字的「重戳到目标 cycle 绝对时间（只改 header、数据不变；服务 init 首态与发布前 T+12 定戳两条路径）」，不含反推。rekey 面的消费者是 tracker（#16）与发布器（#24），在本 issue 内无调用方，落地即死代码。故本 issue 只落 (a)，(b) 记为 non-goal 并路由；`nwm-snapshot-inventory.md` §1 中 `packages/common/state_cli.py` 行的落地状态同步改注为「部分（重戳面）」，同清单 §1 中 `tests/test_state_manager.py` 行（L2187-2471 抽取段）同理只落其中行使重戳面的用例，rekey 用例随 (b) 走。
+
+#### Change surface
+
+- 新增 `producer/src/yd_producer/state/state_qc.py`：任务 4.2 结构检查 + 任务 4.4 负残差；header 判定基座**不在本模块**，从 issue #22 的 `state/header_time.py` 导入并转出（见下方 4.3 段）
+- 新增 `producer/src/yd_producer/state/restamp.py`：任务 4.3 重戳面
+- 改 `producer/src/yd_producer/state/cfg_ic.py`：#54 第 3/4/5 条（分段唯一性守卫、BOM 感知诊断、`__post_init__` 不变量与 `with_replaced_lines`）。**连带强制项**：第 3/4 条各往 `parse` 里新增一条**无 pin 对应物**的 `raise ValueError`，故模块头的「对 pin 的刻意偏离」清单 MUST 由六条扩到**八条**（段重入守卫、BOM 拒绝），且 `__post_init__`/`with_replaced_lines` 若引入新的拒绝路径一并入册。漏更清单是 #8 已复发两轮的同一失败类（`false-exhaustiveness-claim`），本 issue MUST 由上面改造后的 `ast` 计数测试机械闭合
+- 改 `producer/src/yd_producer/state/__init__.py`：导出新符号，并更新模块 docstring 里「4.2–4.4 另行落地」的措辞
+- 新增 `producer/tests/test_state_tools_qc.py`、`producer/tests/test_state_tools_restamp.py`（**刻意避开** `producer/tests/test_state_qc.py` / `producer/tests/test_state_restamp.py` 这两个清单 §1 为 pin 用例**移植**保留的目标路径：本 issue 的用例是按 NWM 场景新写的，占用那两个路径就要贴上 `# NWM@8ae9b8f2 tests/...` 溯源头，等于在清单里申报一次没发生过的移植）；扩充 `producer/tests/cfg_ic_fixtures.py` 的合成构造器（非有限值、BOM、段重入、U+0085 内嵌、负残差矩阵）
+- 改 `producer/tests/test_cfg_ic.py`：#54 第 3/4/5 条在格式层的负例；**并按 #54 评论 2 的方向改造 `:718-733` 的偏离穷尽性测试**（现行写法自指——只断 docstring 写着「六条」、从代码零导出，故对「偏离清单漏登记」恒绿）：改为用 `ast` 数 `parse` 体内的 `ast.Raise` 节点并与模块头登记的偏离条数闭合。**计数域 MUST 覆盖所有承载登记偏离的函数**：`__post_init__` / `with_replaced_lines` 的拒绝路径若入册，其 `ast.Raise` 一并计入，否则漏登记不被该测试覆盖——那正是本测试要终结的那类恒绿
+- 改 `openspec/changes/m2-producer-core/specs/state-tools/spec.md`：结构检查 Requirement 补两条 Scenario（非有限值、river 行数与权威计数），负残差 Requirement 补一条 Scenario（非有限值在归零前被拒）并把「沿用 NWM 语义」收窄为「除模块头登记的偏离外沿用」——裁决 4 的 spec 授权
+- 改 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md`：`:44` 落地状态由「部分（格式层）」改为完成状态并点名本 issue 落的符号；`:45` 标注「部分（重戳面）」并写明 rekey 面路由 #16/#24、`_read_limited_*_no_follow` 的闭包切点；`:55` 标注只落重戳用例
+- 不改 `config.py` / `cli.py` / `geometry.py` / `nwm.py` / `executor.py` / `pyproject.toml` / `uv.lock`
+
+#### Must preserve
+
+- `render(parse(b)) == b` 对本解析器接受域内的**全部**输入继续逐字节成立；#8 的 `test_cfg_ic.py` 既有用例除本 issue 明确收窄接受域的三条（段重入、BOM、非有限值——若实现选择在解析层拒绝）外全部继续通过
+- 从 `cfg_ic` **导入**分段识别与读取基座，MUST NOT 再移植一份：`_looks_like_column_header`、`_section_from_column_header`、`_native_lake_section_preamble`、`_header_counts`、`_as_float`、`_numeric_row`、`_read_bytes_limited`、`MAX_STATE_IC_BYTES`（`nwm-snapshot-inventory.md` §1 中 `packages/common/state_qc.py` 行的双权威副本禁令）
+- 移植函数的判定语义与 NWM pin 逐字一致，逐函数带 `NWM@8ae9b8f2 <原路径>` 溯源注释；每一条偏离 MUST 在模块头注明（本 fixture 的裁决 1/2/4/5 即偏离全集的下界，实现若再生偏离一并入册）
+- **模块头偏离台账的两条口径**（round-2 verifier 裁定，与 #8 已落地的 `cfg_ic.py` 惯例对齐）：(a) **错误契约替换**（pin 的 `StateManagerError` → 本仓 `ValueError`）算一条偏离，MUST 记进模块头，不得只记在 `nwm-snapshot-inventory.md` 的 `剥离点` 列——`cfg_ic.py` 把 `OSError`→`ValueError` 记作其偏离 3、`state_qc.py` 也已把同类改动记为自己的一条，`restamp.py` 却漏记，属家族内不对称；(b) 台账里**对 pin 行为的定量描述 MUST 是谓词本身而非近似**：pin 的 `header_changed = round(observed_minute) != round(expected_minute)`（`state_cli.py:294`，两边单位都是**分钟**）意味着静默保留窗口是「round() 落同一分钟」，差可达近 60 s（`9.51` 与 `10.49` 同为 10，相距 58.8 s 被静默保留；而 `10.4` 与 `10.6` 分属 10/11，相距仅 12 s 却会被重写），且 banker's rounding 只会**放宽**该窗口（`round(9.5)==round(10.5)==10`，整 60 s 亦被静默保留）。写成 `< 30 s` 既不充分也不必要
+- pin 的数值常量逐字保留：`MAX_UNSAT_MEAN_CORRECTION_M = 2.0e-4`、`MAX_RIVER_MEAN_CORRECTION_M = 2.0e-3`、`_NEGATIVE_ZERO_TOLERANCE = 1.0e-2`、`_MAX_STATE_VALUE_M = 1.0e6`、`_MESH_STATE_COLUMNS` / `_RIVER_STATE_COLUMNS` / `_LAKE_STATE_COLUMNS`
+- pin 的域均分母语义逐字保留：unsat 域均除以 **mesh 行数**，river 域均除以 **river 行数**；`_NEGATIVE_ZERO_TOLERANCE` **不**闸投影，只切分证据（`over_tolerance_clamp_count`）
+- stdlib-only、零运行时 NWM import、零数据库/scheduler 依赖；不新增依赖、`producer/uv.lock` 不变
+- 不依赖 #5 在途的 `safe_fs` / object-store 工作
+
+#### Must add/change
+
+**A. 任务 4.2 结构检查（`state/state_qc.py`）**
+
+- `run_state_variable_qc(source, *, expected_mesh_count=None, expected_river_count=None, expected_lake_count=None) -> StateQCResult`：pin `state_qc.py:324` 的移植。解析失败**本身即 QC 失败而非崩溃**（pin 明文语义）——捕获 `cfg_ic.parse` 的 `ValueError`，返回 `passed=False` 且 `reason` 以 `IC parse failed: ` 起头。`StateQCResult(passed, checks, reason)` 与 `to_dict()` 形状逐字保留。
+- `state_ic_structure_complete(source, *, expected_mesh_count=None, expected_river_count=None, expected_lake_count=None) -> bool`：pin `:391` 的移植，窄谓词，供 #16 tracker 在轮询非原子重写的 `cfg.ic.update` 时使用；解析失败返回 `False`（不抛）。
+- `_check_row_counts`（pin `:791`）与 `_check_block_range`（pin `:802`）逐字移植，**含 isfinite 门且次序不变**（isfinite 先于负值先于上界）。
+- **缺段的具体报错（spec Scenario「缺 river 段被拒 → 指明缺失段」）**：pin 返回三个 list，没有「段缺席」概念。报错**措辞**（点名 `missing river section` 而非 `river row count 0 != expected N`）是对 pin 的扩展；但**无条件性**是一条刻意偏离，MUST 按偏离入册而非按扩展记：round-2 verifier 把 pin 模块拷出直接执行，在同一份字节负载（mesh 段完整、**river 列头整段缺席**——连列头都没有、`expected_*` 全为 `None`）上得到 pin `passed=True` / `structure_complete=True`，yd 得到 `passed=False` / `False`——**同一输入上的判定反转**，机制是 pin 的 `_check_row_counts`（`state_qc.py:791-798`）对 `expected is None` 逐类跳过、`_check_block_range("river", [], …)` 对空 list 返回 `None`。**反转的触发条件是列头缺席，不是行数为零**：river 列头在场而其下零行，对 yd 而言该段「存在」，走 `_check_row_counts` 的行数消息，而该门对 `expected is None` 跳过——两侧同为 `passed=True`，**不构成反转**，MUST NOT 拿这种负载做本条偏离的用例。故 `state_qc.py` 模块头的刻意偏离计为**五条**，且 `run_state_variable_qc` / `state_ic_structure_complete` 的逐函数溯源注释 MUST NOT 单挂 `（逐字移植）`——二者的判定路径已含这道非 pin 闸门，注释须点名它。段存在但行数不符仍走 `_check_row_counts` 的行数消息（该门对 `expected is None` 仍跳过，不受本条影响）。
+- `expected_*` 计数由**调用方**传入（pin 的 `expected_*_count` 约定）。把权威 `reach_count`（`Config.reach_count`，本仓值 3988）接进来是**调用方**领域（#21 init / #24 发布器），本 issue 只落「传了就比对、不符即失败」的判定与用例，不在 state 层读 `config.toml`。
+- **不移植 `_check_water_balance`（pin `:843`）与 `water_balance` 形参**：pin 自己标注为 Lane 2 TODO、恒 `skipped`；数值正确性在本项目显式归 M4（profile 风险轴）。落地即死参数，记为 non-goal。
+
+**B. 任务 4.3 重戳（`state/restamp.py`）**
+
+- `cfg_ic_header_minute_index(header_tokens) -> int | None`（pin `state_qc.py:609`）、`cfg_ic_header_minute_time(header_tokens) -> float | None`（`:629`）、`CfgIcHeaderShape` 与 `cfg_ic_header_shape(header_tokens, *, expected_mesh_count=None)`（`:664`）、`_VALID_CFG_IC_HEADER_TOKEN_COUNTS = (3, 4)`（`:646`）逐字移植。**落点是 `state/header_time.py`，不是 `state_qc.py`**：issue #22（任务 12.1）因严格前沿闸门需要同一判定基座而先行落地了这五个符号，快照清单 §1 中 `packages/common/state_qc.py` 行明文「#9 MUST 从 `header_time` 导入这五个符号，MUST NOT 再移植一份」。故 `state_qc.py` / `restamp.py` 一律 **import**，两模块的模块级定义名字集 MUST NOT 含这五个名字——否则即造出 pin header 判定的双权威副本。（本条原写「落点为 `state_qc.py`（pin 同文件）」，是 #22 落地前的写法；#22 合并后按文档优先原则更正。）
+- `restamp_to_absolute_time(doc: CfgIcDocument, target: datetime) -> CfgIcDocument`：**唯一**重戳函数，两条调用路径（init 首态定 T、发布前 checkpoint 定 T+12）只差 `target` 实参，MUST NOT 分裂成两个函数或加 `mode` 开关。语义：
+  - `minute = _ensure_utc(target).timestamp() / 60.0`，写成 `f"{minute:.6f}"`（pin `state_cli.py:299` 的字面格式）；
+  - 覆写**之前** MUST 先过 `cfg_ic_header_shape(header_tokens)`；不合法则抛 `ValueError`，消息以 `STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID` 起头（pin #1430 的中毒 IC 闸门：两 token 形状下被定位的「minute」其实是 mesh 状态列数，覆写它会造出让 SHUD 申请约 183 GB 的文件）；
+  - **闸门次序是对 pin 的刻意偏离，MUST 在模块头注明**：pin 的 `_normalized_checkpoint_ic_file` 先取 `cfg_ic_header_minute_index`（`state_cli.py:271`）、`None` 即早退，再查 shape（`:283`）；yd 侧把 **shape 提到 minute-index 之前**，因为 shape 合法（3 或 4 个数值 token）蕴含 minute-index 必不为 None，反序才有「先按不合法布局定位再拒绝」的中间态。连带后果：`cfg_ic_header_minute_index` 返回 `None` 这条分支在本 seam 上**不可达**（见下方证据表的对应说明）；
+  - `cfg_ic_header_minute_index` 返回 `None` 在本 seam 上**恒不可达**，故 MUST 写成带 `# pragma: no cover` 的内部不变量自检（承 #8 在 `parse` 末尾全覆盖划分自检上确立的同一手法），**MUST NOT** 为它写用例。可达性论证：shape 合法 ⟺ 恰 3 或 4 个数值 token（`cfg_ic_header_shape`，pin `state_qc.py:700`），而 minute-index 为 `None` ⟺ 数值 token < 2（pin `:620-623`），两集合交空；shape 闸门在前（见上一条次序偏离），故任何到达取 minute-index 那一步的 header 都必有 minute token。经 `cfg_ic.parse` 的输入更早一层就被拦：数值 token < 2 时 `_header_counts` 返回 `None`，`parse` 抛 `unreadable IC header`（`cfg_ic.py:187-189`）。**任何为它写的用例都会红在 `STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID` 上或只断 `ValueError` 而恒绿**，两种都是假证据；
+  - 改动集仅 header 行，且行内仅 minute token 的字节变化（裁决 2）；经 `with_replaced_lines` 产出新文档（裁决 3）。
+- `_ensure_utc`（pin `state_cli.py:1186`）随之移植：naive datetime MUST 按 UTC 解释还是拒绝，按 pin 语义逐字执行并在模块头写明。
+- 常量 `STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID`（pin `state_cli.py:86`）移植。`STATE_CHECKPOINT_IC_HEADER_SHAPE_REKEY_SKIPPED`（`:87`）与 `LOGGER`（`:46`）随 rekey 面走，本 issue **不**落。
+
+**C. 任务 4.4 负残差（`state/state_qc.py`）**
+
+- `StateResidualNormalization` dataclass 与 `evidence()` 的字段/键名逐字移植（pin `:109-151`），`policy` 值保持 `"unbounded_physical_zero_projection_v4"`。**唯一登记的字段改名**：pin 的 `content: str`（`state_qc.py:111`）改为 `document: CfgIcDocument`，是裁决 1/6 的连带后果（本层不再持有整文件字符串）；`evidence()` 的键集**不受影响**（pin `:126-151` 本就不含 `content`）。除此之外不得增删改任何字段名。
+- `normalize_negative_residuals(doc: CfgIcDocument) -> StateResidualNormalization`：
+  - **先**拒绝非有限值（裁决 4）；
+  - 无条件把所有状态列（列索引 >= 1）的负值投影为零，**无逐格修正上限**（pin 模块头逐字记录的 owner directive 与 4327 个生产文件的分布数据是该裁决的依据，MUST 在模块头保留该说明的实质）；
+  - 拒绝判据**只有**两条域均门：unsat 域均 > `2.0e-4`、river 域均 > `2.0e-3`，超限抛 `ValueError` 并带 `.evidence`（裁决 5）；
+  - 段/列归属经 `CfgIcDocument` 的段模型判定（mesh 段的 `unsat` 列、river 段的 `stage`/`river_stage` 列），**MUST NOT** 重走 pin 的「按 `current_columns` 边扫边猜」路径——那是 pin 因为没有文档模型才需要的；列索引由段列头文本定位（`current_columns.index("unsat")` 的等价物），MUST NOT 写死索引 4。**列名来源钉死**：`cfg_ic.Section` 无列名字段，4.4 MUST 就地重切 `doc.lines[section.column_header_index]` 取列名（`.split()` 后 `strip().lower()`，与 pin `:197` 一致），**MUST NOT** 为此给 `Section` 加字段——那会越出本 issue 声明的 `cfg_ic.py` 变更面（仅 #54 第 3/4/5 条）。
+  - 改动集仅真正含负值的数据行，经 `with_replaced_lines` 产出新文档（裁决 1/2/3）。
+
+**D. #54 并入映射（六条验收标准逐条落地或记为 non-goal）**
+
+| #54 条目 | 本 issue 动作 | 落点 |
+|---|---|---|
+| 1 非有限值 fail-open | isfinite 门随 `_check_block_range` 移植且次序不变；**并**在 4.4 投影前加门（裁决 4，本 fixture 新增的另一半） | `state_qc.py` |
+| 2 river 行数无门 | `expected_river_count` 比对落地 + 一条「物理行内嵌 U+0085」负例 | `state_qc.py` / 测试 |
+| 3 分段列头重入 | 采纳 #54 推荐 (a)：同名段列头第二次出现即 `ValueError` | `cfg_ic.py` |
+| 4 BOM 误诊 | `parse` 检出首行以 U+FEFF 起头即直说「文件带 UTF-8 BOM」，不再报 `truncated` | `cfg_ic.py` |
+| 5 文档无构造期不变量 | `__post_init__` 校验 + `with_replaced_lines`（裁决 3） | `cfg_ic.py` |
+| 6 未做项须记 non-goal | 第 1/3/4/5 条全做；第 2 条的**判定与用例**落地、**权威 `reach_count`(3988) 接线**记为 non-goal 路由 #21/#24（`expected_river_count=None` 时该门不生效，是本 issue 明确保留的收窄） | PR 描述 |
+| 7（#54 评论 1）`cfg_ic.py:281-284` 的 mesh 列头守卫无用例（#54 评论按 commit 7a14c77 之前的行号写作 `:270-273`）（`if False:` 变异下全套 339 条全绿），明文路由「自然随 #9 落地」 | 补该守卫的用例，复现输入 `b'0 6 27000000.000000\nIndex Stage\n1 0.100000\n'` | `test_cfg_ic.py` |
+| 8（#54 评论 2）`test_cfg_ic.py:718-733` 偏离穷尽性测试自指 | 改为 `ast` 计数闭合（见 Change surface） | `test_cfg_ic.py` |
+
+`_as_float` 接受 Python 下划线数字字面量（`1_0` → `10.0`）宽于 C/Fortran 读者：#54 明写「记在第 1 条内作为已知面，不单独立项」，本 issue **不收窄**（收窄即偏离 pin 的词法且无 pin 对应物），在模块头记为已知面。
+
+`_ensure_utc` 的 pin 语义（`state_cli.py:1186-1189`）是逐字的「naive 视为 UTC，aware 转 UTC」：
+
+```python
+if value.tzinfo is None:
+    return value.replace(tzinfo=UTC)
+return value.astimezone(UTC)
+```
+
+移植时**不得**改成拒绝 naive——那是无 pin 对应物的收窄；但 MUST 有一条用例把「naive 与等值 aware 产出同一 minute」钉死，另有一条把「非 UTC tz 的等值时刻产出同一 minute」钉死（防止实现漏掉 `astimezone`）。
+
+#### Seams under test
+
+- `state_qc.run_state_variable_qc(source, expected_*) -> StateQCResult`、`state_qc.state_ic_structure_complete(...) -> bool`、`state_qc.normalize_negative_residuals(doc) -> StateResidualNormalization`、`restamp.restamp_to_absolute_time(doc, target) -> CfgIcDocument`——design.md「Sketch seams under test」seam 3 的文件级纯函数边界（parse/restamp/negative-residual/check），无 IO 副作用之外的状态
+- `cfg_ic.CfgIcDocument.with_replaced_lines(...)` 与 `__post_init__`——本 issue 新增的文档改写边界，是裁决 1/2/3 的唯一执行点
+
+#### Selected risk packs（项目特有检查）
+
+- **Schema / columns / units / field names**: 状态列语义（mesh 的 `unsat` 列、river 的 `stage`/`river_stage` 列）与 header token 布局（3/4 token）即契约。**两层定位方式不同，不得互相污染**：4.2 的 `_check_block_range` 逐字移植 pin 的**按位置**语义（pin 模块 docstring `state_qc.py:24-25` 明写 "Column semantics are applied by position"，用 `_MESH_STATE_COLUMNS` / `_RIVER_STATE_COLUMNS` 按位置命名）；4.4 的**投影列定位** MUST 由段列头文本查找（pin `:210-222` 的 `current_columns.index("unsat")` 语义），MUST NOT 写死索引 4
+- **Error handling / rollback / partial outputs**: 全部拒绝为 fail-closed；「超阈值不产出修正后状态」是可断言的负面证据；解析失败在 QC 层降级为 `passed=False` 而非崩溃（pin 明文语义），两种收敛方式并存且各有用例
+- **Legacy compatibility / examples**: pin 的判定语义与常量逐字保留；本 issue 的四条偏离（裁决 1/2/4/5）逐条注明并各有用例
+- **Resource limits / large input / discovery**: 有界读经 `cfg_ic.parse` 的 `MAX_STATE_IC_BYTES` 承担；本 issue 不新增读取面，只断言未绕过（QC 入口传 `max_bytes` 到 `parse` 且默认值不变）
+
+Risk packs considered (core):
+- Public API / CLI / script entry: not selected - 不接入 CLI；入口经 #21/#24
+- Config / project setup: not selected - 不读 `config.toml`/`local.toml`；`expected_*` 由调用方传入
+- File IO / path safety / overwrite: not selected - 本 issue **不写任何文件**（裁决 6），读面完全复用 #8 已闭包的 `cfg_ic.parse`
+- Schema / columns / units / field names: selected - 见上
+- Auth / permissions / secrets: not selected - 无凭据面
+- Concurrency / shared state / ordering: not selected - 纯函数，无共享状态；轮询竞态归 #16，发布顺序归 #24
+- Resource limits / large input / discovery: selected - 见上
+- Legacy compatibility / examples: selected - 见上
+- Error handling / rollback / partial outputs: selected - 见上
+- Documentation / migration notes: not selected - 无迁移；溯源由模块头注释与快照清单承载
+
+Domain packs (from active profile):
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: **selected** - 本 issue 首次解释 header 的时间语义（epoch 分钟 ↔ cycle 绝对时间），T+12 与 init 首态两条定戳路径同源
+- 状态链 / warm-start 定戳: **selected** - 重戳正确性即 §8「时间不对应 T 即停」的判定基座
+- NWM 快照溯源 / DB-free 隔离: **selected** - 移植函数须带 `NWM@8ae9b8f2 <原路径>` 头；断言零 NWM import、零 DB 符号
+
+#### Invariant Matrix
+
+- Governing invariant: 状态文件穿过 producer 时逐字节不变，**除非**某次操作显式改写指定字段——重戳只改 header 行的 minute token，负残差只改真正含负值的数据行的负值 token；任何其他字节的变化都是缺陷
+- Source-of-truth identity/contract: (a) header 的**最后一个数值 token** 是 epoch 分钟（3 token native / 4 token 兼容两种布局，`cfg_ic_header_shape` 是唯一判定权威）；(b) **4.4 的投影列**由段列头文本定位，不由位置常量定位（4.2 的范围检查另按 pin 的位置语义移植，见 Selected risk packs 的 Schema 行——两者不得互相改写）
+- Producers: 外部（SHUD 求解器输出 `cfg.ic.update`、率定末态基线包），格式不由本项目控制
+- Validators/preflight: `state_qc.run_state_variable_qc` / `state_ic_structure_complete`（本 issue 新增）；`cfg_ic.parse` 的解析级 fail-closed（#8 已落，本 issue 补 #54 第 3/4 条）
+- Storage/cache/query: `states/<source>/<T>.cfg.ic`（写入面归 #21/#24，本 issue 无写面）
+- Public routes/entrypoints: none - 不接入 CLI
+- Frontend/downstream consumers: #16（tracker 轮询用 `state_ic_structure_complete`）、#21（init 首态重戳）、#24（发布前 T+12 定戳与发布顺序）
+- Failure paths/rollback/stale state: 重戳/残差的拒绝一律抛 `ValueError` 且不返回文档；QC 层把解析失败降级为 `passed=False`；无写入面故无回滚
+- Evidence/audit/readiness: `StateResidualNormalization.evidence()` 的完整载荷（含拒绝路径经异常 `.evidence` 携带）；逐函数 `NWM@8ae9b8f2` 溯源头；未改动行逐字节不变断言
+- Regression rows:
+  - 干净 mesh+river 文档 + 目标 T -> 只有 header 行变化，minute token == `target.timestamp()/60` 的 `%.6f`，其余全部行逐字节等同原文件
+  - **脏**文档（CRLF + 行尾空格 + Tab 分隔 + 段间空行 + 混合记法 + 无末尾换行）+ 目标 T -> 同上；且 header 行内除 minute token 外的字节与行尾符不变（这条是判别力承重条：pin 式 `"\t".join` 与整文件 `"\n".join` 在干净输入上恒绿）
+  - 两 token header（`23106\t6`，pin #1197 形状）+ 目标 T -> 抛 `ValueError` 且消息以 `STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID` 起头，**不产出文档**
+  - 含少量负残差、域均在阈值内的文档 -> 负值归零，未含负值的行逐字节不变，`evidence()` 各计数为手算值
+  - 域均超阈值的文档 -> 抛 `ValueError`，`.evidence['accepted'] is False`，**不产出修正后文档**
+  - 任一状态列含 `nan` / `inf` / `-inf` -> 4.2 与 4.4 两个 seam 均拒绝；NaN **不得**被静默归零、`+inf` **不得**原样存活
+  - river 段行数 != `expected_river_count` -> QC 失败并报出实际/期望；含 U+0085 内嵌构造的负例
+  - **未改动的兄弟消费者**：#8 的 `test_cfg_ic.py` 全套（除本 issue 明确收窄接受域的三条）继续全绿，`render(parse(b)) == b` 不回归
+
+#### Boundary-surface checklist（high 强度必填）
+
+- 共享 helper 根：`state/cfg_ic.py` 是**本 issue 唯一被改的既有共享根**；改动限于 #54 第 3/4/5 条，MUST NOT 顺手改分段识别辅助的判定语义（那会让 #8 的 Must-preserve 失效）
+- 公共入口：无（不接入 CLI）
+- 读面：`cfg_ic.parse`，本 issue 不新增读路径，MUST 断言 `max_bytes` 一路传到 `parse` 且模块默认值未变
+- 写/删/覆写面：无（裁决 6）
+- staging/发布/回滚面：无（归 #24）
+- 生产者/消费者证据边界：`StateResidualNormalization.evidence()` 是发布 receipt 的输入，字段名 MUST 与 pin 一致
+- 陈旧状态/幂等边界：重戳与残差均为纯函数，同输入同输出；MUST 有一条「重戳两次结果相同」的幂等断言
+- 未改动的下游消费者：#8 的格式层测试全套；`state/__init__.py` 的既有导出不得改名或改语义
+
+#### Required evidence（每条 input -> expected output）
+
+**重戳（4.3）**
+- 干净 mesh+river 文档 + `datetime(2026,1,2,12,0,tzinfo=UTC)` -> 新文档 `render` 后：header 行 minute token == `f"{1767355200/60:.6f}"` 的手算值，其余**每一行**与原 bytes 逐字节相等（逐行比对，不是整文件 hash——整文件比对说不出是哪一行坏了）
+- **脏文档**（CRLF 行尾 + header 行多空格分隔 + header 行尾空格 + Tab 分隔的数据行 + 段间空行 + 混合记法 + 无末尾换行）+ 同一目标 -> 同上；**且** header 行内除 minute token 外的字节序列与原 header 行相同、行尾符仍为 `\r\n`。这条是裁决 1/2 的唯一判别力来源
+- 两 token header **`3\t6`（配 3 行 mesh，使其能经 `cfg_ic.parse` 构造出文档）** -> `ValueError`，消息以 `STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID` 起头且含 `cfg_ic_header_shape` 的 reason 文字；**断言未产出任何文档**。**MUST NOT 用 pin #1197 的原始 `23106\t6` 字面值**：`cfg_ic.parse` 取 header 首个数值 token 作 `declared_mesh_count` 并强制与实际 mesh 行数相等（`cfg_ic.py:190-192`、`:271-275`），那需要 23106 行 mesh，否则用例会红在 parse 的 `truncated sectioned IC body` 而非 restamp 的形状闸门——即 mutant (g) 的唯一执行点会红在错误原因上
+- 5 个及以上数值 token 的未知 header 布局 -> `ValueError`（pin `cfg_ic_header_shape` 对 `>= 5` 显式 fail-closed，且其 docstring 明记「比 runtime injector 更严」——不得照抄 injector 的宽松分支）
+- 4 token 兼容 header（`<mesh> <river> <lake> <minute>`）-> 重戳成功，minute 落在**最后一个**数值 token 上（不是第 3 个）
+- header 无可解析 minute（数值 token < 2）-> **显式不写用例**：该分支在 shape 闸门之后恒不可达，按 Must add/change B 落成 `# pragma: no cover` 的内部自检。这是**有意的不写**，不是遗漏——两条可写法（手工构造文档、喂 bytes）分别红在 SHAPE_INVALID 与 `unreadable IC header` 上，都不行使本分支
+- naive `datetime(2026,1,2,12,0)` 与 `datetime(2026,1,2,12,0,tzinfo=UTC)` -> 产出同一 minute（钉死 `_ensure_utc` 的 naive-as-UTC 分支）
+- `datetime(2026,1,2,7,0,tzinfo=timezone(timedelta(hours=-5)))` -> 与上条同一 minute（钉死 `astimezone` 分支；漏掉它的实现在只用 UTC 的用例上恒绿）
+- **两条调用路径同源**：以 init 首态语义的 T 与发布语义的 T+12 各调一次**同一个函数**，断言两次只差 `target`；并断言模块内**不存在**第二个重戳入口（源码机检：`state/restamp.py` 的公共符号集不含第二个改 header 的函数）
+- 幂等：`restamp(restamp(doc, T), T)` 的 bytes == `restamp(doc, T)` 的 bytes
+
+**负残差（4.4）**
+- mesh unsat 列含 3 个 -1e-6、river stage 列含 2 个 -5e-4 的文档（mesh 5 行 / river 4 行）-> 归零成功；`evidence()` 的 `normalized_value_count == 5`、`normalized_unsat_row_count == 3`、`normalized_river_row_count == 2`、`mesh_row_count == 5`、`river_row_count == 4`、`mean_unsat_correction_m == 3e-6/5`、`mean_river_correction_m == 1e-3/4`（**逐值手算断言，不是 `> 0` 或 `isinstance`**）
+- **未含负值的行逐字节不变**：上条的 fixture 用脏矩阵构造，断言未改动行（含 header、列头、空行、正值数据行）与原 bytes 逐行相等，且改动行只有负值 token 的字节变化
+- **同一行多个负值 token（裁决 2 的排序不变量）**：`replace_tokens` 自右向左替换，使先落的替换不移动后落 token 的 span。该性质在 round 2 前全仓无 oracle——去掉 `reverse=True` 后 777 全绿，而 verifier 实测它会**静默**产出合法数值行：`mesh_row(1, canopy="-1e-9", unsat="-1e-9")` 配 `data_delimiters=("   ","\t","   ")` 下，`'1   -1e-9\t0.100000   0.100000   -1e-9\t0.100000\n'` 被写成 `'1   0\t0.100000   0.100000   -1e-000000\n'`，即 1e-9 m 的残差被发布成 **-1.0 m**、GW 列被吞掉，而 `accepted` 仍为 True、evidence 仍报 `max_correction_m == 1e-9`。故 MUST 两层各一条：(a) 对**公共辅助** `replace_tokens` / `token_spans` 的直接单元用例，≥2 个替换 index、分隔符混合，断言结果 bytes 逐字面量相等（两个调用点当前都只传单键，多键契约在任何层面都未被测）；(b) 脏矩阵里加一行**同行两个负值**的 mesh 行，断言归零后整行 bytes 逐字面量相等。现有 `_assert_only_one_token_spliced` 按构造断言 `len(differing) == 1`，**结构上无法**覆盖本行——MUST 推广成「接受期望改动 index 集合」，且 MUST NOT 因此放松既有单 token 用例的断言强度
+- unsat 域均恰好 `2.0e-4` -> **接受**；`2.0e-4 + eps` -> 抛 `ValueError`（钉死 `>` 而非 `>=`，两条边界各一条用例；river 域均在 `2.0e-3` 上同样两条）
+- 域均超限 -> `ValueError` 且 `exc.evidence['accepted'] is False`、`exc.evidence['reason']` 含实际域均与上界的 `%.9f` 文本、`exc.evidence['policy'] == "unbounded_physical_zero_projection_v4"`；**断言未产出修正后文档**
+- **单格大幅负值、域均仍在阈值内 -> 接受并归零**：river 段 100 行、其中一格 stage 为 `-0.15` -> `mean_river_correction_m == 0.15/100 == 1.5e-3 < 2.0e-3` 故**接受**，`over_tolerance_clamp_count == 1`、`max_correction_m == 0.15`（钉死 pin 模块头逐字记录的「无逐格上限、可用性优先」owner directive；把 `_NEGATIVE_ZERO_TOLERANCE` 误用成投影闸门的实现会在此变红）。**规模必须与幅度配套算过再写**：域均门的分母是 river 行数，pin 记录的 -17 m 反例要 river ≥ 8500 行才落在阈值内（17/8500 恰为 `2.0e-3`，门为 `>` 故 8500 行仍接受），用小规模 fixture 配大幅值会得到**拒绝**，实现者会据此误判 pin 语义并去加逐格上限
+- 负值幅度 `9e-3`（< `_NEGATIVE_ZERO_TOLERANCE`）-> 归零且 `over_tolerance_clamp_count == 0`；`1.1e-2` -> 归零且 `over_tolerance_clamp_count == 1`（两条边界钉死 tolerance 只切分证据、不闸投影）。**两条负值 MUST 钉在 canopy 列**（非域均列）：`over_tolerance_clamp_count` 的累加与列无关（pin `state_qc.py:246-247`），故 canopy 列完整服务本行的判别目的，同时避开域均门——放 unsat 列时小规模 fixture（mesh 5 行）的域均 `1.8e-3 > 2.0e-4` 会**拒绝**，得到 `ValueError` 而非本行期望的「归零」（同上一行立的规模配套规则）
+- 元素 id 列（列索引 0）为负 -> **不**被归零（pin 的循环自 `range(1, len(row))` 起），且该行字节不变
+- `nan` / `inf` / `-inf` -> 抛 `ValueError`（裁决 4）；**三个值各一条用例且列位置逐条钉死**，理由是三者在 pin 上走四条不同路径：`nan` 放 unsat 列（被静默归零、域均为 nan、两门放行 → accepted）、`+inf` 放 unsat 列（`>= 0.0` 早退、原样存活 → accepted）、`-inf` 放 **canopy 列**（非域均列：归零、只计 `max_correction_m` 与 `over_tolerance_clamp_count` → **accepted**）、`-inf` 放 **unsat 列**（域均 inf → pin 唯一拒绝的那条）。前三条是真 fail-open，只测第四条的实现会全绿——**MUST 四条齐备**
+- 幂等：`normalize(normalize(doc).document)` 的 bytes 与一次的相同，且第二次 `normalized_value_count == 0`
+
+**结构检查（4.2）**
+- 缺 river 段（无 river 列头）+ `expected_river_count=4` -> `passed=False`，`reason` 点名缺失的是 **river 段**（不是 `river row count 0 != expected 4`）
+- river 段存在但行数 3 != `expected_river_count=4` -> `passed=False`，`reason` 含实际 3 与期望 4
+- **U+0085 内嵌**：一条物理 river 行中间插入 U+0085 使 `splitlines` 断成两行 + `expected_river_count` 为真实行数 -> `passed=False`（#54 第 2 条：这是 river 段唯一的门，字节 roundtrip 抓不到它）
+- `expected_*` 全为 `None` -> **行数比对**跳过（pin 语义），结构仍被解析；**段缺席不随之跳过**：
+  mesh + river 双段齐全（无 lake）时 `passed=True`（lake 段本就可选），而缺 river 段时即使
+  `expected_*` 全为 `None` 也 -> `passed=False` 且 reason 点名 river 段、`state_ic_structure_complete`
+  返回 `False`。理由：spec state-tools 的第一条 Requirement 独立要求「至少包含 mesh 状态段与
+  river `Stage` 段」，`结构检查` 的「缺 river 段被拒」Scenario 也不带前置条件；把段缺席挂在调用方
+  计数上，等于让 #16 tracker 的默认调用（全 `None`）把只写到一半、river 段还没落盘的 checkpoint
+  判成「完整」——正是 `state_ic_structure_complete` docstring 自己点名要防的那一幕
+- 任一状态列 `nan` -> `passed=False` 且 reason 指明**非有限**；**并**断言同一行若改为负值则 reason 指明**负值**——两条一起才钉死「finiteness 先于负值」的次序（#54 明文要求；只测 NaN 被拒不区分是哪道门拦的）
+- **次序的精确语义是「行内逐列单遍」而非「整块两遍」**（pin `state_qc.py:826-839`：同一列先 isfinite 再负值再上界）。故 MUST 另有一条：同一行**前列为负值、后列为 NaN** -> reason 报**负值**（两遍式实现——先扫全块非有限、再扫全块负值——会在此报非有限而变红）
+- 状态值 > `_MAX_STATE_VALUE_M`（`1.0e6`）-> `passed=False` 指明超界；恰好 `1.0e6` -> 通过（钉死 `>` 而非 `>=`）
+- 负值 `-9e-3`（幅度 < `_NEGATIVE_ZERO_TOLERANCE`）-> **通过**；`-1.1e-2` -> 拒绝（pin `:832` 的 `value < -_NEGATIVE_ZERO_TOLERANCE`，两条边界）
+- 行短于 `1 + len(columns)` -> `passed=False` 指明缺列（pin `:822-824`）
+- 解析失败的输入（空文件 / 非 UTF-8 / 截断 body）-> `run_state_variable_qc` 返回 `passed=False` 且 `reason` 以 `IC parse failed: ` 起头、`checks['parsed'] is False`，**MUST NOT 抛异常**（pin 明文「parse failure is itself a QC failure, never a crash」）
+- 同一批输入喂 `state_ic_structure_complete` -> 返回 `False`，同样不抛
+- `StateQCResult.to_dict()` 的键集与 pin 逐字一致（`passed` / `checks` / `reason`），`checks` 含 `ic_path` / `parsed` / `row_counts` / `range` 四键
+
+**#54 第 3/4/5 条（格式层，落 `test_cfg_ic.py`）**
+- river 段之后再次出现 mesh 列头 -> `parse` 抛 `ValueError` 点名段重入（#54 推荐 (a)）；**并**断言 #8 既有的合法三段用例不受影响
+- 首行带 UTF-8 BOM 的合法文件 -> `ValueError` 消息含「UTF-8 BOM」字样，**MUST NOT** 再报 `truncated sectioned IC body`（#54 实测该误诊会把运维支到错误方向）
+- BOM + `header 6 6 0 0.0` + 6 行 mesh（#54 实测的静默误解析巧合）-> 同样报 BOM，不再静默通过
+- `CfgIcDocument(...)` 以 `len(roles) != len(lines)` 构造 -> `__post_init__` 抛 `ValueError`；`header_index` 越界、段行号越界各一条
+- `with_replaced_lines({i: "..."})` 替换一行 -> 行尾符沿用原行；替换值内含 `\n` 或行号越界 -> `ValueError`
+- `dataclasses.replace(doc, lines=<长度不同的元组>)` -> `__post_init__` 立即抛 `ValueError`（#54 第 5 条实测的「静默产出看起来正常的 bytes」路径变红）
+
+**预登记必须被杀死的变异体**
+- (a) 重戳改用 pin 式 `"\t".join(header)` 重拼 header 行 -> 脏 header 用例必须变红
+- (b) 重戳改用整文件 `"\n".join(lines)` 重拼 -> CRLF 脏用例必须变红
+- (c) 负残差把 unsat 域均分母误写成 river 行数（或反之）-> 逐值手算证据用例必须变红
+- (d) 两条域均门的 `>` 改 `>=` -> 恰好等于阈值的用例必须变红（四条边界各覆盖一次）
+- (e) 删掉 4.4 的 finiteness 门 -> NaN 用例必须变红（这是裁决 4 的执行证明）
+- (f) `_check_block_range` 里把 isfinite 门挪到负值门**之后** -> 「NaN 报非有限而非报负值」的用例必须变红
+- (g) 重戳略过 `cfg_ic_header_shape` 直接覆写 -> 两 token 用例必须变红
+- (h) 结构检查的段缺席分支退回 pin 的行数消息 -> 「指明缺失段」用例必须变红
+- (i) `with_replaced_lines` 丢弃原行尾符改贴 `\n` -> CRLF 用例必须变红
+- (j) `cfg_ic.py:281-284` 的 mesh 列头守卫体改为 `if False:` -> #54 评论 1 的新用例必须变红（#8 实测该变异在全套 339 条下存活）
+- (k) 模块头偏离清单由八条改回六条 -> 改造后的 `ast` 计数测试必须变红
+
+**变异证明 MUST 按 `openspec/project-profile.md` 的「Mutation-testing hazards」执行**（本仓已实测绊倒多个独立 agent，四种假绿都长得像好消息）：`rsync --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache'` 且副本内 `rm -rf .venv && uv sync`；先断言 `yd_producer.__file__` 落在 scratch 副本内；每个变异体之间 `export PYTHONDONTWRITEBYTECODE=1` 并清 `__pycache__`（(a)/(c)/(d) 极易出等长字面量改动，会复用上一个变异体的 `.pyc`，报出来的是上一个变异体的结果且自洽）；scratch 目录名含 `issue-9` 唯一标识；另跑一个必然变红的控制变异做校准，控制变异若意外全绿要如实说并换一个（profile 记录的近等价变异体反例：`_require` 改 `return None` 在两种规模下都全绿）。
+
+**裁决 6 / 裁决 7 的机检闭合（缺之即两条裁决无执行子句）**
+- `state_qc.py` / `restamp.py` 源码内**无写文件调用**：`ast` 扫描无 `open(..., "w"/"wb"/"a"/"x")`、无 `Path.write_bytes` / `write_text` / `os.replace` / `atomic_write*` 调用（裁决 6）
+- 两模块的模块级定义名字集**不含** rekey 面七符号（`StateCheckpoint`、`StateRunContext`、`_checkpoint_header_minute`、`_valid_time_from_header_minute`、`_checkpoint_with_header_time`、`_lead_hours_from_run_valid_time`、`STATE_CHECKPOINT_IC_HEADER_SHAPE_REKEY_SKIPPED`）与 `water_balance`（裁决 7 + `_check_water_balance` non-goal），复用下方八符号机检的同一 `ast` 名字集手法
+
+**溯源与隔离**
+- `state/state_qc.py` 与 `state/restamp.py` 含 `NWM@8ae9b8f2 packages/common/state_qc.py` / `packages/common/state_cli.py` 模块头；每个移植函数带**自己**的溯源注释，取窗 MUST 按函数边界（切到下一个 `\ndef ` 或用 `ast` 取函数源码段——#8 实测定长窗口会越进下一个函数，6 个辅助里 4 个可被邻居的注释满足），并对每个移植函数验证「删掉自己那行即变红」
+- 两模块源码内无 NWM 包 import、无数据库/scheduler 符号
+- **DB-free 扫描器的行模型（本 issue 改了 #5 的共享守卫，故由本 issue 取证）**：`snapshot_provenance_fixtures._code_lines` 用 tokenize 抹掉注释与语句位字符串，其行数组 MUST 与 tokenize 的行号同源。`str.splitlines()` 会在 `\x0b \x0c \x1c \x1d \x1e \x85 \u2028 \u2029` 上断行，而 tokenize 只认 `\n`——round-2 verifier 实测：`\x0b \x1c \x1d \x1e` 在字符串外触发 `TokenError` 走回退（fail-closed 无害），但 `\x0c \x85 \u2028 \u2029` 能正常 tokenize 并使两者错位，于是**真代码行被当 docstring 抹掉**。取证 MUST 断言**命中**而非行数（只断言 `len(_code_lines(src)) == n` 在坏实现上恒绿，因为 `splitlines()` 对它自己那套行定义是自洽的）：`'\x0c\ndef f():\n    URL = os.getenv("DATABASE_URL")\n    """note: DB-free, honest"""\n    return URL\n'` -> 扫描仍报出 `DATABASE_URL` 命中，且行号与解释器行号一致。修法是 `text.split("\n")`；**MUST NOT** 改用「把 `\x0c`/`\x85` 加进跳过表」或「先归一化源码」——归一化会移动字节偏移，把 `_blank_prose` 的**列**算术也弄错位
+- **扫描器的 tokenize 失败回退**（同一函数 docstring 明写「守卫宁可误报，不可漏报」）：`except (TokenError, SyntaxError)` 分支返回裸行数组这一承诺 MUST 有用例钉住——改成 `return []` 后 777 全绿即为未钉。一条不可 tokenize 的源（如未闭合字符串）内含禁区面 -> 仍报出命中
+- `source_probe.module_docstring_block` 有同源错位，但方向是 fail-**closed**（`splitlines()` 只会比 `\n` 行数多，`[: end_lineno]` 只会**少**切，于是 `head` 变短、`body` 变长，断言只会更严、更响）。修它可选且优先级低于上两条；若修，MUST 保住「返回值是 `source` 的前缀」这一契约（调用方按 `source[len(block):]` 取 body），即 `"\n".join(source.split("\n")[: node.end_lineno]) + "\n"`，并补一条 docstring 结束于 EOF 且无末尾换行的用例
+- 源码机检：`state_qc.py` / `restamp.py` **不重新定义** `_looks_like_column_header` / `_section_from_column_header` / `_native_lake_section_preamble` / `_header_counts` / `_as_float` / `_numeric_row` / `_read_bytes_limited` / `MAX_STATE_IC_BYTES`，而是从 `cfg_ic` 导入（清单 `:44` 的双权威副本禁令，用 `ast` 断言模块级定义名字集不含这八个符号）
+
+**验证命令**
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+- `bash scripts/check-stage-pipeline-log.sh origin/master` -> 退出码 0
+
+#### Non-goals
+
+- **rekey 面**（裁决 7）：`_checkpoint_with_header_time`(`state_cli.py:305`)、`_checkpoint_header_minute`(`:327`)、`_valid_time_from_header_minute`(`:359`)、`_lead_hours_from_run_valid_time`(`:1149`)、`StateCheckpoint`(`:62`)、`StateRunContext`(`:50`)、`STATE_CHECKPOINT_IC_HEADER_SHAPE_REKEY_SKIPPED`(`:87`)、`LOGGER`(`:46`) 一律不落——本 issue 无调用方，落地即死代码。路由：tracker 侧 **#16**，发布侧 **#24**。清单 `:45` 与 `:55` 同步改注
+- **`producer/tests/test_cfg_ic_header.py`**（清单 `:56`）：其引用的三个符号全部出自 `runtime.py` 抽取集（capability 6），缺任一即不可导入；随 **#16/#17** 落地
+- **`_check_water_balance`（pin `state_qc.py:843`）与 `water_balance` 形参**：pin 自标 Lane 2 TODO、恒 `skipped`；数值正确性在本项目显式归 M4。落地即死参数
+- **`MAX_STATE_CHECKPOINT_MANIFEST_BYTES`**：清单 `:45` 已把它移出抽取集（唯一使用点在已剥离的 `_read_state_checkpoint_manifest_payload` 体内）
+- **`_read_limited_text_no_follow`(`:978`) / `_read_limited_bytes_no_follow`(`:966`)**：闭包切点。二者委派 `safe_fs`（**issue #5 在途，本仓未落地**），而 `cfg_ic.parse` 已提供有界读与 `MAX_STATE_IC_BYTES`。切点 MUST 在 `restamp.py` 模块头注明；清单 `:45` 同步记该切点
+- **落盘与发布顺序**：裁决 6，归 #21/#24
+- **把权威 `reach_count`（3988）接进 QC 调用**：`expected_*` 由调用方传入是 pin 约定；接线归 #21/#24。本 issue 只落判定与用例
+- **`_as_float` 的 Python 数字词法宽于 C**（`1_0` → `10.0`）：#54 明文「记在第 1 条内作为已知面，不单独立项」，模块头记录，不收窄
+- **兼容的计数式布局**：#8 已 fail-closed，本 issue 不改该裁决；率定末态基线包的真实格式核实仍路由 **#32**（触发点 #11）
+- 不接入 CLI、不做数值正确性判定（M4）
+
+#### Review focus
+
+- **裁决 1/2 是否真落地**：重戳与残差是否只重写改动行、改动行是否只替换目标 token 的字节。任何 `"\n".join` / `"\t".join` 整行整文件重拼路径都是缺陷——它在干净输入上恒绿，只在脏矩阵上变红
+- **裁决 4 是否两处都做**：`_check_block_range` 的 isfinite 门（含次序）**与** 4.4 投影前的门，缺任一则 NaN 仍被静默归零并接受
+- 域均分母是否分别为 mesh 行数与 river 行数；`_NEGATIVE_ZERO_TOLERANCE` 是否被误用成投影闸门（pin 明确它只切分证据）
+- 是否从 `cfg_ic` 导入八个基座符号而非重新移植（双权威副本禁令）
+- `cfg_ic.py` 的改动是否严格限于 #54 第 3/4/5 条，有无顺手改动分段识别辅助的判定语义（那会让 #8 的 Must-preserve 失效）
+- 是否越界落地了 rekey 面 / 落盘面 / `water_balance` 的死代码
+- 逐值手算证据是否真的逐值（#8 实测：只断 `len()` 与 `isinstance(float)` 时，把三处 `append` 换成全零元组的变异体在全套 46 条下存活）
 
 ## 5. 执行器抽象：JobExecutor 协议与 fake
 

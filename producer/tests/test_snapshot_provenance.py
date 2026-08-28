@@ -57,6 +57,7 @@ from snapshot_provenance_fixtures import (
     SCANNED_ROOTS,
     STATUS_LANDED,
     STRAY_TABLE_LINES,
+    _code_lines,
     _declared_forbidden_surfaces,
     _files_with_marker,
     _forbidden_hits,
@@ -655,6 +656,9 @@ def test_each_forbidden_surface_is_individually_enforced(
     在 `store/object_path.py` 真落一个 registry/journal/reservation 面」这个组合态
     可达且无覆盖。本条给每一项配一个注入式 fixture，`test_forbidden_surfaces_match_
     the_declared_grep` 负责词表本身不被删项。
+
+    注入点是**普通字符串字面量**而不是行尾注释：扫描口径收紧后（注释与 docstring 属惰性
+    散文，不再计为命中，见 `_code_lines`），注释形态的注入不再可达，用例会永远绿。
     """
 
     targets = {
@@ -664,7 +668,7 @@ def test_each_forbidden_surface_is_individually_enforced(
         tmp_path,
         {
             "producer/src/yd_producer/store/safe_fs.py": "x = 1\n",
-            "producer/src/yd_producer/store/leaked.py": f"y = 1  # {token}\n",
+            "producer/src/yd_producer/store/leaked.py": f'y = "{token}"\n',
         },
     )
 
@@ -727,6 +731,174 @@ def test_db_free_scan_catches_unregistered_files_inside_a_snapshot_package(
 
     assert [hit.split(":")[0] for hit in hits] == [
         "producer/src/yd_producer/store/helper.py"
+    ]
+
+
+def test_db_free_scan_ignores_inert_prose_but_not_real_code(tmp_path: Path) -> None:
+    """扫描口径：注释与 docstring 里的禁区词不算命中，**执行得到的代码**里算。
+
+    两向都要有实例，否则这条口径退化成单向豁免：只证「散文不再命中」，把整段扫描改成
+    `return []` 也照样绿；只证「代码仍命中」，则涂白规则是否生效无从判别。
+
+    成因是真的：`state/state_qc.py` / `state/restamp.py` / 已合入 master 的
+    `state/cfg_ic.py` 的模块头都写着「零数据库/scheduler 依赖」——**否定**陈述被裸串扫描
+    判成了肯定命中。
+    """
+
+    targets = {
+        "producer/src/yd_producer/store/safe_fs.py": "packages/common/safe_fs.py"
+    }
+    _fake_repo(
+        tmp_path,
+        {
+            "producer/src/yd_producer/store/safe_fs.py": "x = 1\n",
+            "producer/src/yd_producer/store/prose.py": (
+                '"""零数据库/scheduler 依赖，不读 os.environ。"""\n'
+                "\n"
+                "# 本模块不碰 registry / journal / reservation。\n"
+                "VALUE = 1\n"
+                "\n"
+                "\n"
+                "def helper() -> int:\n"
+                '    """不经 psycopg，也不读 DATABASE_URL。"""\n'
+                "    return VALUE\n"
+            ),
+            "producer/src/yd_producer/store/real.py": (
+                'import os\n\nURL = os.getenv("DATABASE_URL")\n'
+            ),
+        },
+    )
+
+    hits = _forbidden_hits(tmp_path, _scan_files(tmp_path, targets))
+
+    assert hits == [
+        "producer/src/yd_producer/store/real.py:3: DATABASE_URL",
+        "producer/src/yd_producer/store/real.py:3: os.getenv",
+    ]
+
+
+def test_db_free_scan_stays_in_step_with_tokenize_row_numbers(tmp_path: Path) -> None:
+    """`_code_lines` 的行数组与 tokenize 的行号必须同源，否则守卫会**漏报**。
+
+    `str.splitlines()` 还在 `\\x0c`（换页）等字符上断行，`tokenize`（经 `io.StringIO`，
+    `newline="\\n"`）不会。两套行号一旦错位，`_blank_prose` 就按 tokenize 给的行号去
+    splitlines 的数组里涂白，把**真执行代码**当 docstring 抹掉——本例里 docstring 在
+    第 4 行，错位 1 行后被抹掉的正是第 3 行的 `os.getenv("DATABASE_URL")`。
+
+    断言必须落在**命中**上，不能只断 `len(_code_lines(src))`：`splitlines()` 对它自己
+    那套行定义是自洽的，行数断言在坏实现上恒绿。
+    """
+    source = (
+        "\x0c\n"
+        "def helper() -> str:\n"
+        '    url = os.getenv("DATABASE_URL")\n'
+        '    """note: DB-free, honest"""\n'
+        "    return url\n"
+    )
+    # 构造自检：这段源码确实能正常 tokenize（不走 fail-closed 回退），且两套行模型确实
+    # 不一致——否则这条用例对错位变异体没有判别力。
+    assert len(source.splitlines()) != len(source.split("\n")) - 1
+    assert _code_lines(source)[2].strip() == 'url = os.getenv("DATABASE_URL")'
+
+    targets = {
+        "producer/src/yd_producer/store/safe_fs.py": "packages/common/safe_fs.py"
+    }
+    _fake_repo(
+        tmp_path,
+        {
+            "producer/src/yd_producer/store/safe_fs.py": "x = 1\n",
+            "producer/src/yd_producer/store/formfeed.py": source,
+        },
+    )
+
+    hits = _forbidden_hits(tmp_path, _scan_files(tmp_path, targets))
+
+    # 行号 3 = 解释器的行号（`\x0c` 只占第 1 行的一个字符，不另起一行）。
+    assert hits == [
+        "producer/src/yd_producer/store/formfeed.py:3: DATABASE_URL",
+        "producer/src/yd_producer/store/formfeed.py:3: os.getenv",
+    ]
+
+
+def test_db_free_scan_still_sees_code_that_precedes_a_trailing_comment(
+    tmp_path: Path,
+) -> None:
+    """行尾注释的涂白 MUST 从**注释自己的起始列**开始，不能从第 0 列开始。
+
+    `_blank_prose` 的 `begin = start_col if row == start_row else 0` 换成 `begin = 0`
+    的变异体在全套下存活：既有用例里的注释全都**独占一行**（起始列的差别在那里不可
+    观测）。而带行尾注释的代码行在坏实现下会被整行抹掉——本例的两行 pristine 报三条
+    命中，`begin = 0` 下报零条。那是 fail-**OPEN**，正违 `_code_lines` 写死的
+    「守卫宁可误报，不可漏报」。
+
+    断言落在 `begin` 这一半上：兄弟的 `finish` 钳位改坏后行为近乎等价，对着它写的用例
+    钉不住承重的这一半。
+    """
+    source = (
+        "import os\n"
+        'URL = os.getenv("DATABASE_URL")  # 说明：这里读环境变量\n'
+        'Q = "psycopg"  # tail\n'
+    )
+    # 构造自检：正常路径确实**只**抹掉注释、保留其左侧的可执行字节（不走 fail-closed
+    # 回退，也不是整行原样保留）。
+    code_lines = _code_lines(source)
+    assert code_lines[1].startswith('URL = os.getenv("DATABASE_URL")')
+    assert "环境变量" not in code_lines[1]
+    assert code_lines[2].startswith('Q = "psycopg"')
+
+    targets = {
+        "producer/src/yd_producer/store/safe_fs.py": "packages/common/safe_fs.py"
+    }
+    _fake_repo(
+        tmp_path,
+        {
+            "producer/src/yd_producer/store/safe_fs.py": "x = 1\n",
+            "producer/src/yd_producer/store/inline.py": source,
+        },
+    )
+
+    hits = _forbidden_hits(tmp_path, _scan_files(tmp_path, targets))
+
+    assert hits == [
+        "producer/src/yd_producer/store/inline.py:2: DATABASE_URL",
+        "producer/src/yd_producer/store/inline.py:2: os.getenv",
+        "producer/src/yd_producer/store/inline.py:3: psycopg",
+    ]
+
+
+def test_db_free_scan_falls_back_to_raw_lines_when_the_source_cannot_be_tokenized(
+    tmp_path: Path,
+) -> None:
+    """`_code_lines` 的 fail-closed 承诺（「宁可误报，不可漏报」）本身要有用例。
+
+    把 `except (TokenError, SyntaxError)` 分支改成 `return []` 的变异体在 round 2 前
+    全套 777 条全绿——没有任何用例喂过不可 tokenize 的源。
+    """
+    source = (
+        'BROKEN = "unterminated\n'
+        "# 注释里的 psycopg 在正常路径上会被涂白\n"
+        'URL = os.getenv("DATABASE_URL")\n'
+    )
+    # 构造自检：确实走了回退——正常路径会把第 2 行的注释涂白，回退则逐字保留裸行。
+    assert _code_lines(source) == source.split("\n")
+
+    targets = {
+        "producer/src/yd_producer/store/safe_fs.py": "packages/common/safe_fs.py"
+    }
+    _fake_repo(
+        tmp_path,
+        {
+            "producer/src/yd_producer/store/safe_fs.py": "x = 1\n",
+            "producer/src/yd_producer/store/unparseable.py": source,
+        },
+    )
+
+    hits = _forbidden_hits(tmp_path, _scan_files(tmp_path, targets))
+
+    assert hits == [
+        "producer/src/yd_producer/store/unparseable.py:2: psycopg",
+        "producer/src/yd_producer/store/unparseable.py:3: DATABASE_URL",
+        "producer/src/yd_producer/store/unparseable.py:3: os.getenv",
     ]
 
 
