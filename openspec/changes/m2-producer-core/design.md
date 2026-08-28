@@ -42,6 +42,7 @@
 
 1. `controller.run_once(cfg, executor) -> RunReport`（对 tmp 目录树 + fake executor）——最高可本地行使的 seam，一次覆盖 §13.1 控制器行与发布行（前沿、双源并行、raw 缺口、单源失败、无 DONE 崩溃恢复、DONE 最后写、状态保留两份）。
 2. `rawscan.judge(raw_root, source, cycle, config) -> ScanVerdict`（目录 fixture）——完整性规则与 f000 特例的判定边界，独立于控制器演进。（本行于 issue #6 修订：原写作 `raw_scan.scan(raw_root, source, cycle) -> Manifest | Incomplete`。三处修订理由——模块名以 issue #6 的 `yd_producer.rawscan` 为准；规则全集在 `Config` 内，故 `config` 必须是显式形参而非隐式全局；返回 `Manifest` 与 tasks.md 组 3 的切分冲突——manifest 结构归 3.2，3.1 只返回判定结果 `ScanVerdict`。复制与 manifest 生成的 seam 由 3.2 另行钉定。）
+2b. `rawcopy.stage_raw(verdict, raw_root, work_dir, source, cycle, config) -> StagedRaw`（目录 fixture + 合成源 manifest）——issue #7 按上一行的交接钉定：只读复制与临时 `raw-manifest.json` 生成的边界。独立成 seam 而不并入 `judge` 的三个理由——判定是纯函数、staging 是写面，两者的失败语义不同（不完整不是异常 vs 写面失败即异常）；staging 需要 `work_dir` 与源 manifest 两个 `judge` 不需要的入参；produce→converter 的产物契约（entry 逐变量扇出、`idx_selector` 累积语义、manifest 级 forecast hours）只在此边界可断言。编号取 2b 而非重排后续各行，避免与既有引用（本文件与 tasks.md 多处按序号引用 seam 3–7）产生第二份编号。
 3. `state` 模块文件级纯函数（parse/restamp/negative-residual/check，file→file）——格式正确性是状态链安全的根，必须在最细边界钉死。
 4. `forcing.build(work, manifest) -> ForcingPackage` 与 `assemble(work, variant, forcing, state_path) -> RunDir`（合成 canonical/变体 fixture）——§13.1 "DB-free 链"行的验收边界；`state_path` 显式入参保证 warm-start 初态覆盖变体自带率定末态可被断言；快照模块另带 NWM 来源最小测试。
 5. `tracker.capture(shud_dir, target_minute) -> CheckpointResult`（模拟 `cfg.ic.update` 覆写序列）——轮询竞态只能在此边界确定性重放。

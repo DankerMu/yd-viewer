@@ -116,6 +116,14 @@ compute-loop §4.2 禁复制清单逐条核对。结论：**清单 27 行中没�
 
 **APCP 累积元数据的 fail-closed 要求（R4B2，本轮补入；任务号勘误见本段末）**：yd 侧写 raw 清单时，凡 `variable == "apcp"` 的 entry，`accumulation_type`（或其别名 `accumulation_policy`）必须存在且取值在 `{"cumulative_since_cycle", "interval_bucket"}` 内，取 `interval_bucket` 时 `step_range`（或 `stepRange`）也必须存在；缺失即报错停止，**不得继承 pin 上 converter L1726 的 `or "cumulative_since_cycle"` 静默默认，也不得依赖 L678 回退到 entry metadata 顶层这条兜底**。落盘位置固定为**单数 `idx_selector` 子 Mapping**（`accumulation_type` 与 `step_range` 写在其内），复数 `idx_selectors` 可一并落盘以保持与 pin 的 raw manifest 同形，但消费端从不读它，故不得只写复数键；「平铺到 entry metadata 顶层」只是 pin 上 L678 回退分支带来的兼容读法，**不作为 yd 的落盘约定**。同理 manifest 级 `forecast_hours` 缺失即报错，不得落到 converter `_configured_forecast_hours` 的 L1622 自证式回退，也不得落到其 L1616-1620 的均匀步长推导。本节的规范性要求以本段这两条为准；上列各行里的「须承接 / 不得回退」措辞是本段的重述，不另立要求。
 
+**R4B2 的作用域与可用性（issue #7 fixture 复核实测，本轮补入）**：上段的 APCP 两条 fail-closed **只对 GFS 产生约束**，且其元数据在 pin 上并非恒可得。三条实测事实：
+
+1. `IFS_VARIABLES = ("2t", "2d", "10u", "10v", "tp", "sp", "ssr", "str")`（`ifs_adapter.py` L47）**不含 `apcp`**；IFS 的降水变量是 `tp`。
+2. `ifs_adapter.py` 全文**无 `idx_selector`/`idx_selectors`**，且无 `_persist_manifest_metadata`——IFS 的 `manifest.json` 只在构建期一次性写入（L667），带的是与 GFS 同形的 6 个 entry 键，**不含任何累积语义**。IFS 的 `tp`/`ssr`/`str` 同为累积量，pin 未给元数据，yd 侧在本阶段**不为 IFS 发明**该语义（issue #7 Non-goal，记为已知限制）。
+3. `idx_selectors` 的注入只发生在**云镜像**下载路径（`_download_cloud_mirror` L1068-1072）；NOMADS 直连路径（`_download_with_retries`）不注入。故经 NOMADS 下载的 GFS cycle 的源 manifest 无累积语义，按上段第一条会被 yd 整轮 fail closed。这是「宁停勿错」的预期方向，不是缺陷；运行期若命中，处置属运维决策，MUST NOT 以放宽该闸门解决。
+
+另有两条 manifest 级差异（同一实测）：GFS 构建期写 `first_forecast_hour`/`last_forecast_hour`/`requested_forecast_hours`/`forecast_hours` 四键（`gfs_adapter.py` L638-650），**IFS 只写其中三个**（无 `requested_forecast_hours`，`ifs_adapter.py` L652-666）。yd 自产的 `raw-manifest.json` 四键均显式写出，`requested_forecast_hours` 取本轮 `lead_hours` 全集，不依赖源 manifest 是否提供。
+
 **任务号勘误（issue #6 fixture 复核，本轮补入）**：本 §3.1 原文一律写作「任务 3.1」，但 tasks.md 组 3 把任务切成 3.1（完整性判定纯函数）与 3.2（只读复制 + 临时 `raw-manifest.json` 生成）两刀。按该切分：本节表内**布局/文件名/f000/lead 相关行**归 **3.1**；**一切与 raw 清单写入有关的要求**——逐变量扇出、`metadata` 六键契约、`cfgrib_filter_by_keys`/`grib_short_name`、`idx_selector` 单数键落盘、manifest 级 `forecast_hours` 承接，以及上一段 APCP 的两条 fail-closed——**归 3.2**，3.1 不产生任何 manifest 结构。
 
 ### 3.2 另有两处主动排除与一处部分抽取

@@ -601,6 +601,182 @@ Review focus:
 - 是否引入 stdlib 之外的依赖，或运行时 import NWM
 - 预期文件集是否严格由 `lead_hours × bundles` 构造，而非列目录后过滤
 
+### Issue #7 fixture（任务 3.2）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：改动面命中**强制** expanded 触发词 `file output`/`path`/`temp`/`writer`/`schema`/`format`——本任务写文件、定 JSON 契约；profile 的 domain expanded-trigger `raw manifest`/`forcing`/`cycle` 同样命中。另据 PR #38 终局回灌的上游 sizing-retro：唯一 oracle 是合成 fixture 的任务不应默认 compact）
+Repair intensity: high（File IO / path safety / overwrite；producer→converter 的产物契约边界）
+Project profile: yd-viewer
+
+Risk packs（逐条 selected / not selected）:
+- Public API / CLI / script entry: not selected —— 本 issue 只交付库函数，CLI 接线归组 12
+- Config / project setup: selected —— `raw.<source>.variables`/`lead_hours` 决定扇出与复制集；取值域校验已由 3.1 承担，本 issue 只消费
+- File IO / path safety / overwrite: **selected（主风险面）** —— 只读 NWM 原件 + 写 work 副本；containment、不覆盖、不跟随 symlink、部分失败清理
+- Schema / columns / units / field names: **selected** —— `raw-manifest.json` 是 producer→converter 的产物契约（entry 6 键 + `idx_selector` + manifest 级四键）
+- Auth / permissions / secrets: not selected —— 无凭据面；NWM 原件的权限失败已由 3.1 归入 `unreadable_files`，本 issue 只在 `complete=True` 后运行
+- Concurrency / shared state / ordering: selected —— 扫描→复制窗口的 TOCTOU（本 issue 收敛复制期的一半，残余归组 12）
+- Resource limits / large input / discovery: not selected —— 复制集由 `expected_files` 有界钉死（57 lead × bundles），不做目录发现
+- Legacy compatibility / examples: selected —— manifest MUST 与 pin 的 `DownloadManifest.as_dict()` 同形，否则 converter 读不了
+- Error handling / rollback / partial outputs: **selected** —— fail-closed 的零写入拒绝与部分复制失败的清理
+- Release / packaging / dependency compatibility: not selected —— 只用 stdlib，`dependencies = []` 不变
+- Documentation / migration notes: not selected —— 无面向用户的行为变更；契约细则落在本 fixture 与 spec delta
+- Domain：Time series / forcing / temporal boundaries: **selected** —— lead 全集承接与 APCP 累积语义的 fail-closed
+- Domain：NWM 快照溯源与 DB-free 隔离: selected —— 承接 pin 语义、禁运行时 NWM import 与 DB 连接
+- Domain：Geospatial / CRS: not selected —— 本 issue 不解析 GRIB 内容，不触及投影
+- Domain：状态链 / warm-start: not selected —— 与 cfg.ic 状态面无交集
+
+Change surface:
+- 新增 `producer/src/yd_producer/rawcopy.py`（复制 + manifest 生成）
+- 新增 `producer/tests/test_rawcopy.py`
+- 不触碰 `rawscan.py`、`config.py`、CLI 入口、`store/`、`raw/manifest.py`——本 issue 只**消费** `ScanVerdict` 与 `DownloadManifest`/`ManifestEntry` 数据结构，不改其定义
+
+Must preserve:
+- `producer/pyproject.toml` 的 `dependencies = []`（本 issue 只用 stdlib）
+- `rawscan.judge` 的公开面与 `ScanVerdict` 五字段形态逐字不变（由 #6 的 fixture 钉死）
+- `raw/manifest.py` 的 `ManifestEntry`/`DownloadManifest` 语义与 `as_dict()` 键序——它们是 NWM pin 的字节等价面，本 issue 只构造实例，不改类
+- 现有全部 producer 测试继续通过
+
+#### Seam（本 fixture 钉死）
+
+```python
+def stage_raw(
+    verdict: ScanVerdict,      # rawscan.judge 的返回；MUST complete=True，否则拒绝
+    raw_root: str | os.PathLike[str],  # 与 judge 同一入参（源根）
+    work_dir: str | os.PathLike[str],  # 本轮 work/<source>/<cycle>/ 根
+    source: str,               # "ifs" | "gfs"
+    cycle: datetime,           # 与 judge 同一入参（tz-aware UTC 整点）
+    config: Config,
+) -> StagedRaw
+```
+
+`StagedRaw`（frozen dataclass）字段：
+
+- `manifest_path: Path` —— 落盘的 `<work_dir>/raw-manifest.json` 绝对路径
+- `copied_files: tuple[Path, ...]` —— 副本绝对路径，与 `verdict.expected_files` **同序同长**
+- `entries: tuple[ManifestEntry, ...]` —— 写进 manifest 的 entry，按 (lead 升序, `variables` 声明序)
+
+**`(lead, variable, file)` 三元组契约（#6 round 1 cand-05 路由到本 issue 的 seam）**：本 issue 在此确立该键关系，形态为
+`(entry.forecast_hour, entry.variable, entry.local_key)`。同一 (lead, bundle) 的**全部变量 entry 共享同一个 `local_key`**（pin 的逐变量扇出，`NWM@8ae9b8f2 gfs_adapter.py:611-636`：外层 hour 算一次 `local_key`，内层逐变量产 entry）。三元组的完整性由下式定义并 MUST 被断言：
+`{(lead, var) for lead, vars in verdict.expected_variables.items() for var in vars}` 与 `{(e.forecast_hour, e.variable) for e in entries}` **相等**（不是包含）。
+
+消费 `ScanVerdict` 的两条 #6 交接约定：`ScanVerdict` 是持有可变 `dict` 的 frozen dataclass，`hash()` 抛 `TypeError`——MUST NOT 放进 set 或用作 dict key；`ScanVerdict` 不提供三元组，故上式是本 issue 自己从 `expected_files` 与 `expected_variables` 交叉构造的。
+
+#### 落盘布局与 `local_key` 形态（pin 事实转录）
+
+`entry.local_key` 在 pin 上**不是文件系统路径而是 object-store key**，消费端经 `self.object_store.resolve_path(local_key)` 解析（`NWM@8ae9b8f2 workers/canonical_converter/converter.py:1460`）。故本 issue 逐字沿用 pin 的 key 形态并让 object-store 根落在 work 内：
+
+- `local_key = f"raw/{存储身份}/{YYYYMMDDHH}/{bundle 文件名}"`（`gfs_adapter.py:615`）
+- object-store 根 = `work_dir`；于是 `resolve_path` 结果为 `<work_dir>/raw/<存储身份>/<YYYYMMDDHH>/<bundle>`，**位于 `work/raw/` 之下**，满足 spec 的「entry 路径 MUST 只引用 `work/raw/` 临时副本」
+- 存储身份逐源非对称，复用 `rawscan.SOURCE_DIR_NAMES`（`ifs -> "IFS"`、`gfs -> "gfs"`），MUST NOT 另抄一份字面量
+- `remote_url` 沿用源 manifest 的对应值；源 manifest 不可用时（见下）落 `""` 不是可接受形态——见 fail-closed 段
+
+#### 源 manifest 承接（不发明语义）
+
+pin 在 raw cycle 目录内落盘 `manifest.json`（GFS `_persist_manifest_metadata` L1599-1609 调用点 L774；IFS 于 `ifs_adapter.py:667` 构建期一次性写入）。yd MUST **读取** `<raw_root>/<存储身份>/<YYYYMMDDHH>/manifest.json` 并从中承接 entry 级语义，MUST NOT 在 yd 侧发明：
+
+- `grib_short_name`、`cfgrib_filter_by_keys`、`logical_remote_url`、`cycle_time`、`valid_time`、`bundle` —— pin 构建期写的 6 键，逐条承接
+- **累积语义**：pin 下载期把 `IdxSelection.as_metadata()`（键 `step_range`/`accumulation_type`/`idx_record_number`/`selector_warning`）按变量收进**复数** `idx_selectors`（`gfs_adapter.py:1070`），**只有单变量 bundle 才另写单数 `idx_selector`**（L1071-1072）。消费端 `_apcp_selector_metadata`(converter L677) **只读单数键**。yd 的扇出是逐变量的，故每条 entry 的单数键有唯一定义：`idx_selector = 源 manifest 的 idx_selectors[variable]`。两个键都落盘（复数保持与 pin 同形），MUST NOT 只落复数键。
+
+源 manifest 缺失/不可解析/其 entry 集合无法覆盖本轮 (lead, variable) 全集 —— 一律 fail closed，不得以空值或推导补齐。
+
+#### fail-closed 契约（勘察清单 §3.1「APCP 累积元数据的 fail-closed 要求（R4B2）」逐条落地）
+
+1. 凡 `variable == "apcp"` 的 entry，其 `idx_selector.accumulation_type`（或别名 `accumulation_policy`）MUST 存在且取值 ∈ `{"cumulative_since_cycle", "interval_bucket"}`；取 `"interval_bucket"` 时 `step_range`（或别名 `stepRange`）MUST 一并存在。缺失或越域即报错停止。
+2. MUST NOT 继承 pin converter L1726 的 `or "cumulative_since_cycle"` 静默默认；MUST NOT 依赖 converter L678「`idx_selector` 不是 Mapping 就回退到 entry metadata 顶层」这条兜底——yd 的落盘位置固定为**单数 `idx_selector` 子 Mapping**，平铺到顶层不作为 yd 的落盘约定。
+3. manifest 级 metadata MUST 显式写 `forecast_hours`、`first_forecast_hour`、`last_forecast_hour`、`requested_forecast_hours` 四键；缺失即报错。理由：converter `_configured_forecast_hours`(L1611-1622) 缺 `forecast_hours` 时会回落到 L1622 的 `sorted({entry["forecast_hour"]})`——用「实际有的」当「应该有的」，完整性检查恒为真。
+4. 本 fixture 实测的 pin 事实（限定 R4B2 的作用域，MUST 写进实现注释）：`IFS_VARIABLES = ("2t","2d","10u","10v","tp","sp","ssr","str")`（`ifs_adapter.py:47`）**不含 `apcp`**，且 IFS 侧全文无 `idx_selector`——故第 1 条只对 GFS 产生约束。IFS 的降水变量是 `tp`、且同为累积量，但 pin 未给 IFS 任何累积元数据，本 issue **不为 IFS 发明**该语义（见 Non-goals 与 Known limits）。
+5. 已知运行期后果（MUST 记入 PR 已知限制）：pin 只在**云镜像**下载路径注入 `idx_selectors`（`_download_cloud_mirror` L1068-1072）；NOMADS 直连路径（`_download_with_retries`）不注入。故一个经 NOMADS 下载的 GFS cycle 会在本 issue 的第 1 条上 fail closed、整轮拒绝。这是 R4B2 要求的方向（宁停勿错），不是缺陷；运行期若命中需以运维决策而非放宽本闸门处理。
+
+#### 复制语义
+
+- 复制集 **恰好** `verdict.expected_files`，一个不多一个不少；`verdict.complete is False` -> 拒绝，且**不得写任何文件**（含不得建目录、不得写半个 manifest）
+- 复制**前后**对每个源文件取 `os.lstat`，比对 `(st_size, st_mtime_ns, st_ino, st_mode)`；任何一项变化即报错。这同时是「源不可变」的证据与扫描→复制窗口 TOCTOU 的收敛点（残余 TOCTOU 归组 12 控制器，见 Non-goals）
+- 复制 MUST NOT 跟随 symlink 进入 NWM 根之外，MUST NOT 写、删、改、重命名 NWM 原件的任何路径（compute-loop §4.1 硬约束）
+- 目标目录不存在则创建；目标已存在同名文件 -> 报错停止，MUST NOT 覆盖（work 是一次性隔离单元，同名存在意味着调用序错误）
+- 部分失败（第 k 个文件复制失败）-> 报错，并把本轮已写入的 work 侧路径清理干净（不留半套 raw），MUST NOT 让 `raw-manifest.json` 与实际副本不一致
+- 副本与 manifest MUST 全部落在 `work_dir` 之下；`YD_ROOT` 模拟根内 MUST 不出现任何 raw 副本
+
+#### Invariant Matrix
+
+Governing invariant: **本轮 manifest 声明的每一条 (lead, variable) 都对应一个已落在 `work/raw/` 之下的真实副本，其语义键逐字承接自源 manifest；三者中任何一项不成立时，整个 staging 以异常终止且不留任何部分产物。**
+
+Source-of-truth identity/contract: `(entry.forecast_hour, entry.variable, entry.local_key)` 三元组，及其 `idx_selector` 累积语义子 Mapping
+
+Surfaces:
+- Producers: `rawcopy.stage_raw`（唯一写面）
+- Validators/preflight: `verdict.complete` 闸门、源 manifest 解析与覆盖检查、R4B2 fail-closed 检查、复制前后 lstat 比对
+- Storage/cache/query: `<work_dir>/raw/<存储身份>/<cycle>/` 副本树、`<work_dir>/raw-manifest.json`
+- Public routes/entrypoints: none —— CLI 接线归组 12 控制器（本 issue 只交付库函数）
+- Frontend/downstream consumers: 任务 7.1 canonical converter（经 `local_key` + `object_store.resolve_path` 与 `idx_selector` 消费）
+- Failure paths/rollback/stale state: 部分复制失败的 work 侧清理；`complete=False` 与 fail-closed 的零写入拒绝
+- Evidence/audit/readiness: `StagedRaw` 返回值、`raw-manifest.json` 自身
+
+Regression rows:
+- `stage_raw` + 完整 verdict + 带完整 `idx_selectors` 的源 manifest -> 副本齐全、manifest 三元组集合与 `expected_variables` 相等、entry 路径全部解析到 `work/raw/` 之下
+- `stage_raw` + `complete=False` 的 verdict -> 抛错，且 `work_dir` 下零新增路径
+- `stage_raw` + 源 manifest 缺 apcp 的 `accumulation_type` -> 抛错，且 `work_dir` 下零新增路径（不落半个 manifest）
+- `stage_raw` + 源 manifest 的 `accumulation_type` 取域外值（如 `"unknown"`）-> 抛错（不静默降级成 cumulative）
+- `stage_raw` + `accumulation_type == "interval_bucket"` 但缺 `step_range` -> 抛错
+- `stage_raw` + 源 manifest 缺 manifest 级 `forecast_hours` -> 抛错
+- `stage_raw` + 第 k 个源文件在复制中途被替换（lstat 前后不一致）-> 抛错，work 侧不留半套副本
+- `stage_raw` + 目标路径已存在同名文件 -> 抛错，MUST NOT 覆盖
+- `stage_raw` + IFS 源（无 apcp、无 idx_selectors）-> 正常产出，R4B2 第 1 条不触发（作用域证据）
+- `stage_raw` + GFS `f000_special` 生效 -> lead 0 的 entry 变量集等于 `verdict.expected_variables[0]`，且 lead 0 的**文件**仍在副本集内（f000 只削变量集不削文件集）
+- 源文件树（不变的兄弟面）-> 全部 `lstat` 元组在调用前后逐字相等；NWM 根下零新增/删除/改名
+- `YD_ROOT` 模拟根（不变的下游消费面）-> 调用前后内容相等
+
+#### Boundary-surface checklist
+
+- Shared helper roots: `rawscan.SOURCE_DIR_NAMES`（复用不复制）、`raw/manifest.py` 的两个 dataclass（构造不改类）
+- Public entrypoints: none（组 12 接线）
+- Read surfaces: NWM raw 树（只读）、源 `manifest.json`
+- Write/delete/overwrite surfaces: `<work_dir>` 内副本与 manifest；失败清理路径
+- Staging/publish/rollback surfaces: 本 issue 全在 work 内，不触 `YD_ROOT` 发布面
+- Producer/consumer evidence boundaries: `raw-manifest.json` ↔ 任务 7.1 converter
+- Stale-state/idempotency boundaries: 目标同名存在即拒绝（不覆盖、不续跑）
+- Unchanged downstream consumers: `rawscan` 的既有全部用例、`test_manifest.py` 的 pin 快照用例
+
+#### Required evidence（`cd producer && uv run pytest`）
+
+上方 Regression rows 的**每一行**对应一个具名 pytest 用例，且该用例 MUST 由一个能证伪它的变异体验证过（"有一个用例指向它"不构成覆盖）。另加：
+
+- 源不可变的取证 MUST 是 `os.lstat` 全元组比对（size/mtime_ns/ino/mode），MUST NOT 只比对内容——只比内容抓不到 mtime 被改
+- 三元组完整性 MUST 断言**集合相等**，MUST NOT 断言包含；两个方向各需一个杀手变异体（漏一条 entry / 多一条 entry）
+- 零写入拒绝的取证 MUST 是调用前后对 `work_dir` 做递归快照比对，MUST NOT 只断言 `manifest_path` 不存在
+- 变异实验按 profile 的 "Mutation-testing hazards" 与 "Orchestration hazards" 两节执行：唯一命名的私有 scratch 副本、`rsync --exclude='.venv'`、`env -u VIRTUAL_ENV uv sync --frozen`、`PYTHONDONTWRITEBYTECODE=1` 且逐变异体清 `__pycache__`、断言 `yd_producer.__file__` 落在副本内、先跑一个必然变红的控制变异校准
+- 闸门枚举 MUST 用 **AST 遍历全部可执行语句**（不用 grep——grep 看不见 `status = path.stat()` 这类值传播闸门），逐条落进「表内」或「死腿登记」两桶，审计表作为交付物落盘到 `.workplans/pr-<N>/review/`
+- 禁区 grep：`grep -rnE 'psycopg|DATABASE_URL|scheduler|registry|reservation' producer/src/yd_producer/rawcopy.py` -> 零命中
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+
+#### Non-goals
+
+- canonical 转换、forcing 组装（组 6/7/8）——本 issue 只产出 manifest 与副本
+- CLI/控制器接线、前沿推进、work 目录生命周期管理（组 12）——本 issue 只交付库函数，调用序由控制器负责
+- **扫描→复制窗口的残余 TOCTOU**：本 issue 以复制前后 lstat 比对收敛「复制期间源被改」这一半；「judge 判完整之后、stage 调用之前源被删」属调用方时效性，归组 12
+- **不为 IFS 发明累积语义**：pin 侧 IFS 无 `idx_selectors`、`IFS_VARIABLES` 无 `apcp`，R4B2 只约束 GFS。IFS 的 `tp`/`ssr`/`str` 同为累积量但 pin 未给元数据——在 yd 侧补一套等于发明语义，明确不做，记为已知限制并路由 follow-up
+- 不实现第二套下载器、不在 NWM 缺件时代为补齐（compute-loop §4.1）
+- 不做 GRIB 内容校验（归 M4 receipt）——"可读"只到能发起读为止
+- 不改 `rawscan.py`：若实现中发现 `ScanVerdict` 形态不够用，记为偏离并上报，MUST NOT 顺手改 #6 已合入的契约
+
+#### Known limits（MUST 出现在 PR 已知限制，逐条带 follow-up issue 或不落 issue 的一行理由）
+
+- NOMADS 下载路径的 GFS cycle 会在 R4B2 上整轮 fail closed（上方 fail-closed 第 5 条）
+- IFS 累积语义缺口（上方 Non-goals 第 4 条）
+- `work_dir` 的创建/清理生命周期归组 12，本 issue 只保证自己不留半套
+
+#### Review focus
+
+- 三元组完整性是否断言的是**集合相等**而非包含，两个方向是否各有杀手变异体
+- 零写入拒绝是否真的零写入（含目录），取证是否为递归快照比对
+- `local_key` 是否为 object-store key 形态而非绝对文件系统路径，`resolve_path` 后是否确实落在 `work/raw/` 之下
+- `idx_selector` 是否从复数键**按变量**取，而非把整个 `idx_selectors` 塞进单数键
+- R4B2 的域检查是否覆盖别名（`accumulation_policy`/`stepRange`），且是否**没有**引入 `or "cumulative_since_cycle"` 之类的默认
+- 是否出现按 `source == "gfs"` 的硬分支（应由 `variable == "apcp"` 与配置驱动）
+- 存储身份是否复用 `rawscan.SOURCE_DIR_NAMES` 而非另抄字面量
+- 源不可变断言是否含 mtime_ns 与 ino（只比内容不算）
+- 是否引入 stdlib 之外的依赖，或运行时 import NWM
+
 ## 4. state-tools：cfg.ic 工具链
 
 - [x] 4.1 快照并适配 `cfg.ic` 原生分段解析与回写（mesh/river/lake），字节级 roundtrip 测试

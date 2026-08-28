@@ -38,9 +38,48 @@
 - **WHEN** 复制完成
 - **THEN** `YD_ROOT` 模拟根内不出现任何 raw 副本
 
+#### Scenario: 判定不完整时零写入
+- **WHEN** 以 `complete=False` 的判定结果请求复制
+- **THEN** 拒绝并报错，work 根内不出现任何新增路径（含目录与半个 manifest）
+
+#### Scenario: 复制中途源被改动
+- **WHEN** 某个源文件在复制窗口内被替换，复制前后的 `lstat` 元组不一致
+- **THEN** 报错停止，work 内不留半套副本
+
+#### Scenario: 不覆盖已存在的目标
+- **WHEN** 目标副本路径上已存在同名文件
+- **THEN** 报错停止，不覆盖该文件
+
 ### Requirement: 本轮临时 raw manifest
-扫描器 MUST 在 work 内生成 NWM-compatible `raw-manifest.json`，包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息；entry 路径 MUST 只引用 `work/raw/` 临时副本。
+扫描器 MUST 在 work 内生成 NWM-compatible `raw-manifest.json`，包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息；entry 路径 MUST 只引用 `work/raw/` 临时副本。entry MUST 逐变量扇出，同一 bundle 的各变量 entry 共享同一路径键；manifest 声明的 `(lead, variable)` 集合 MUST 与判定结果的预期变量集**相等**。
 
 #### Scenario: manifest 结构与路径
 - **WHEN** 对完整 cycle 生成 manifest
 - **THEN** JSON 含 source/cycle/forecast hours/变量/filter 字段，且所有 entry 路径位于 `work/raw/` 之下
+
+#### Scenario: 逐变量扇出与预期集相等
+- **WHEN** 对完整 cycle 生成 manifest
+- **THEN** entry 的 `(lead, variable)` 集合与判定结果的预期变量集相等，且同一 lead 的各变量 entry 共享同一路径键
+
+### Requirement: manifest 语义键承接与 fail-closed
+manifest 的 entry 级语义键（GRIB filter、累积语义）MUST 逐条承接自 NWM 源 manifest，MUST NOT 在本仓发明或以默认值补齐。降水累积语义缺失或越域时 MUST 报错停止；manifest 级 forecast hours 键 MUST 显式写出，MUST NOT 依赖消费端由实际 entry 反推。
+
+#### Scenario: 源 manifest 不可用
+- **WHEN** 源 manifest 缺失、不可解析，或其 entry 无法覆盖本轮预期的 `(lead, variable)` 全集
+- **THEN** 报错停止，不以空值或推导补齐
+
+#### Scenario: 降水累积语义缺失
+- **WHEN** 某条降水变量 entry 的累积类型缺失
+- **THEN** 报错停止，MUST NOT 静默默认为「自起报累积」
+
+#### Scenario: 累积类型取值越域
+- **WHEN** 累积类型取声明取值域之外的值
+- **THEN** 报错停止
+
+#### Scenario: 区间累积缺少区间范围
+- **WHEN** 累积类型为区间桶但区间范围键缺失
+- **THEN** 报错停止
+
+#### Scenario: manifest 级 forecast hours 缺失
+- **WHEN** 源 manifest 缺少 manifest 级 forecast hours 键
+- **THEN** 报错停止，不落到消费端「由实际 entry 反推应有小时表」的自证式回退
