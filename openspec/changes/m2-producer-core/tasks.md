@@ -632,7 +632,7 @@ Change surface:
 - 不触碰 `config.py`、CLI 入口、`store/`、`raw/manifest.py`——本 issue 只**消费** `ScanVerdict` 与 `DownloadManifest`/`ManifestEntry` 数据结构，不改其定义
 
 Must preserve:
-- `producer/pyproject.toml` 的 `dependencies = []`（本 issue 只用 stdlib）
+- **不新增任何依赖**：`producer/pyproject.toml` 现有 7 个依赖（cfgrib/eccodeslib/numpy/pyproj/pyshp/shapely/xarray），本 issue 只用 stdlib，判别器是 `uv sync --frozen` 无 lock drift。（本行原写作「`dependencies = []`」，系从 #6 fixture 转抄的过期事实，由 issue #7 的实现者证伪并更正——#6 fixture 的同一行同样过期，归 follow-up）
 - `rawscan.judge` 的公开面与 `ScanVerdict` 五字段形态逐字不变（由 #6 的 fixture 钉死）
 - `raw/manifest.py` 的 `ManifestEntry`/`DownloadManifest` 语义与 `as_dict()` 键序——它们是 NWM pin 的字节等价面，本 issue 只构造实例，不改类
 - 现有全部 producer 测试继续通过
@@ -783,7 +783,7 @@ Regression rows:
 - 变异实验按 profile 的 "Mutation-testing hazards" 与 "Orchestration hazards" 两节执行：唯一命名的私有 scratch 副本、`rsync --exclude='.venv'`、`env -u VIRTUAL_ENV uv sync --frozen`、`PYTHONDONTWRITEBYTECODE=1` 且逐变异体清 `__pycache__`、断言 `yd_producer.__file__` 落在副本内、先跑一个必然变红的控制变异校准
 - 闸门枚举 MUST 用 **AST 遍历全部可执行语句**（不用 grep——grep 看不见 `status = path.stat()` 这类值传播闸门），逐条落进「表内」或「死腿登记」两桶，审计表作为交付物落盘到 `.workplans/pr-<N>/review/`
 - DB-free 隔离检查（**刻意不写成「禁区 grep：」**：该前缀是组 2 词表声明集的唯一锚，`test_snapshot_provenance.py::test_forbidden_surfaces_match_the_declared_grep` 断言全文恰有一条，第二条会把那条判别器打红）：`grep -rnE 'psycopg|DATABASE_URL|scheduler|registry|reservation' producer/src/yd_producer/rawcopy.py` -> 零命中
-- `cd producer && uv sync --frozen` -> 无 lock drift（`dependencies = []` 是 Must-preserve 项，本条是它的判别器）
+- `cd producer && uv sync --frozen` -> 无 lock drift（「不新增依赖」是 Must-preserve 项，本条是它的判别器）
 - `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
 - `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
 
@@ -818,7 +818,7 @@ Regression rows:
 - 单 bundle 约束是否在**任何写入之前**短路，且是否真的以 `len(bundles)` 判而非以「渲染出几个文件名」间接判
 - symlink 检查是否覆盖**祖先段**而不只是叶子；拒绝是否发生在复制之前
 - 源侧是否只对 `forecast_hours` 强制、`requested_forecast_hours` 确实**不**强制（IFS 用例是这条的判别器）
-- 八个 `kind` 是否各有具名用例与杀手变异体；是否有裸 `OSError`/`KeyError`/`JSONDecodeError` 从 `stage_raw` 穿出
+- 九个 `kind` 是否各有具名用例与杀手变异体；是否有裸 `OSError`/`KeyError`/`JSONDecodeError` 从 `stage_raw` 穿出
 - 是否引入 stdlib 之外的依赖，或运行时 import NWM
 
 ## 4. state-tools：cfg.ic 工具链
