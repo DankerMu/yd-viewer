@@ -70,6 +70,10 @@
 - **WHEN** 注入的 `run_prepare` fake 返回带非空 `cleanup_warnings` 的报告
 - **THEN** 退出码为 `0`，stderr 含每条告警文本
 
+#### Scenario: 退出码 1 的失败路径同样渲染 notes
+- **WHEN** 注入的 `run_prepare` fake 抛出带 `__notes__` 的 `PrepareError`（note 文本 MUST NOT 是 `str(exc)` 的子串，否则 `_fail` 单独即可满足断言、不具判别性）
+- **THEN** 退出码为 `1`，stderr 同时含异常消息与 note 文本，且不含 `Traceback`
+
 ### Requirement: 拒绝 NWM 数据库环境
 producer 任一入口启动时检测到 `DATABASE_URL` 环境变量 MUST 视为配置错误并拒绝执行（agent-ops §2.2）。
 
