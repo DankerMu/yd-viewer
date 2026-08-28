@@ -119,6 +119,10 @@ class Config:
     output_interval_minutes: int
     checkpoint_hours: tuple[int, ...]
     reach_count: int
+    # NWM@8ae9b8f2 `workers/mapping_builder/cli.py` 的点分 module 名：随快照固定的版本化
+    # 事实，非现场值（归属裁决见 #32）。装载层与其它标量同等待遇——只校验存在性与 `str`
+    # 类型，不校验该 module 是否可导入（那需要活的 NWM 环境，归 prepare 编排）。
+    nwm_mapping_builder_module: str
     cycle: CycleConfig
     variants: VariantsConfig
     raw: RawConfig
@@ -335,6 +339,7 @@ def _build_config(data: Mapping[str, Any]) -> Config:
         output_interval_minutes=_require_int(data, "output_interval_minutes"),
         checkpoint_hours=_require_int_list(data, "checkpoint_hours"),
         reach_count=_require_int(data, "reach_count"),
+        nwm_mapping_builder_module=_require_str(data, "nwm_mapping_builder_module"),
         cycle=_build_cycle(_require_table(data, "cycle")),
         variants=_build_variants(_require_table(data, "variants")),
         raw=_build_raw(_require_table(data, "raw")),
