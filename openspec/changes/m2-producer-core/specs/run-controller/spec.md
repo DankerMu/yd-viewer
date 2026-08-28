@@ -30,6 +30,14 @@
 - **WHEN** 模拟根中存在 T+12 状态与只含 DAT 无 `DONE` 的 T 目录
 - **THEN** run 删除该 T+12 状态与半成品目录，以 T 状态重新组装本轮
 
+#### Scenario: 已 DONE 的产物不在残留集合内
+- **WHEN** 同一棵根里 `output/<T-12>/<source>/DONE` 存在、而 `output/<T>/<source>/` 是无 `DONE` 的半成品
+- **THEN** 只删除 T 的半成品目录，`output/<T-12>/` 及其 `DONE`、`yd.rivqdown.dat` 原样保留
+
+#### Scenario: 清理只作用于本源
+- **WHEN** IFS 有无 `DONE(T)` 的半成品与比 T 更晚的状态，GFS 在同一 cycle 上也有更晚状态
+- **THEN** 只删除 IFS 侧的残留，GFS 的状态与产物不受影响
+
 ### Requirement: raw 缺口阻塞不跳轮
 待跑 T 的 raw 不完整时该源本次 MUST 不提交；raw 一次补齐多轮时 MUST 按时序逐轮全补；中间永久缺轮时 MUST 停在缺口等待，MUST NOT 自动跳过 cycle。
 
@@ -57,11 +65,15 @@ run MUST 经作业执行器抽象为每源提交至多一个作业；提交参�
 - **THEN** 任意时刻该源在 executor 上的在途提交计数不超过 1（逐轮串行）
 
 ### Requirement: 并发与锁
-run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过不排队；锁 MUST 覆盖发现、提交、等待、发布、清理全生命周期。IFS/GFS 最多各一个作业并行。
+run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过不排队；锁 MUST 覆盖发现、提交、等待、发布、清理全生命周期。IFS/GFS 最多各一个作业并行。`cron.lock_path` MUST 是绝对路径：相对路径与 `~` 前缀（`Path` 不展开 `~`）MUST 在创建锁文件之前 fail closed，报错 MUST 指名 `cron.lock_path`。锁文件 MUST NOT 在释放时删除。
 
 #### Scenario: 锁被持有即跳过
 - **WHEN** 锁文件已被另一进程持有时进入 run 包装
 - **THEN** 本次立即退出成功（跳过语义），不执行发现
+
+#### Scenario: 非绝对锁路径即拒
+- **WHEN** `cron.lock_path` 为 `yd.lock` 或 `~/yd.lock`
+- **THEN** run 包装报错退出并指名 `cron.lock_path`，不创建任何锁文件，不执行发现
 
 #### Scenario: 双源并行单源失败不阻塞
 - **WHEN** fake executor 令 IFS 作业失败、GFS 作业成功

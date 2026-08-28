@@ -52,6 +52,8 @@ Mutation-testing hazards（本仓已实测绊倒过多个独立 agent，写进�
 - 跑之前先断言 `yd_producer.__file__` 落在 scratch 副本里，再用一个必然变红的控制变异校准。
 - scratch 目录名取唯一（含 issue/round 标识），并发 agent 共用通用路径会互相覆写脚本。
 - 连续变异体若只差一个**等长字符串字面量**，源文件大小不变；同一秒内写入时 CPython 判定 `.pyc` 仍有效（校验依据只有源文件 mtime 秒级时间戳 + 字节大小），直接复用旧字节码——这一轮报出来的是**上一个变异体**的结果。每个变异体之间 `export PYTHONDONTWRITEBYTECODE=1` 并清掉 `__pycache__`。这类假结果最阴险的地方是它自洽：数字稳定、可复现，只是对应错了变异体。
+- 变异跑 MUST 用 `uv run python -m pytest`，**不得**用 `uv run pytest` 这个 console script。scratch 副本里的 `.venv/bin/pytest` shebang 可能指回另一棵树的解释器，于是测试在原仓库的 `yd_producer` 上跑，全部变异体（含校准变异体）假存活。第 52 行那条 `yd_producer.__file__` 落点断言**检测不到**这一条——断言本身也在错的解释器里跑，落点自然是自洽的。
+- scratch 副本除 `producer/` 外还须带上 `openspec/` 与 `docs/`：多个用例断言 fixture / 文档正文（溯源窗口、偏离清单、行号），缺了它们会得到与变异无关的红。
 - 控制变异要挑真能变红的。已实测的**近等价变异体**反例：`_require` 改成 `return None` 在 77 与 95 两个规模下都全绿——`None` 继续流进 `_require_scalar`/`_require_table`，照样抛 `ConfigError`、照样带对的 `path`，只是措辞退化。校准失败要如实说并换一个，别默默重掷。
 
 Domain risk packs:

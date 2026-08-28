@@ -1784,6 +1784,115 @@ Review focus:
 - 停止原因是否逐类可区分且不以异常逃逸；`OSError`/`UnicodeDecodeError` 是否被吞成分类结果
 - 移植三符号是否与 pin 逐字一致、逐函数带溯源注释、`_as_float` 是否复用 `cfg_ic` 而非重复定义
 
+### Issue #23 fixture（任务 12.2/12.3）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：正面命中 `openspec/project-profile.md` 的 domain expanded-triggers `DONE`、`cycle`、前沿/frontier、状态链 与 `flock`、NFS；且本 issue 是 M2 里**第一处删除 `YD_ROOT` 内路径**的代码——profile 首位风险轴「断链即整链失效」在此从「读错」升级为「删错」）
+Repair intensity: high（12.2 的删除集合直接毗邻状态链；一次多删 T 自己的状态即整链失效且不可逆。适用 `Invariant Matrix`）
+Project profile: yd-viewer
+
+**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：
+
+1. issue #23 的验收标准原文不含 `cron.lock_path` 绝对路径要求；该条由 #32 的裁决在 `tasks.md:166` 路由至本 issue 任务 12.3。本 fixture 消费该路由并按 fail-closed 落地（裁决 8），同批出 `specs/run-controller/spec.md`「并发与锁」的 delta。
+2. issue #22 fixture 裁决 6 把「无 `DONE` 却有多份状态是否算异常」路由至本 issue；本 fixture 裁决 3 给出判定。
+3. issue #59 把「崩溃恢复前置：凭什么断定同源无在途孤儿作业」路由至 **#23 与 #28** 两份 fixture；本 fixture 只对**本 issue 的删除集合**给出边界裁决（裁决 9），完整裁决（含两条候选的取舍）归 #28，理由见该裁决。
+
+**核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
+
+1. **判定与执行严格分离，且判定 MUST 零写入**。产出两个符号：一个纯判定函数返回「本源的残留清单」（更晚状态文件列表 + 半成品 cycle 目录列表 + 保留的 T），一个执行函数按该清单删除。理由不是风格：`tasks.md:1790` 的任务 13.2 逐字写着「复用 12.2 判定，仅接入失败/重跑路径」——失败路径要的是**判定**而不是删除动作，融成一个函数即让 13.2 无从复用。判定函数与 `decide_frontier` 同姿态：只 `stat` / 列目录，MUST NOT 创建、修改或删除任何路径，以递归树快照证明。
+2. **残留集合的定义域是 NFS 侧、逐源**，逐字对齐 compute-loop §10 步骤 4 与 `specs/run-controller/spec.md`「未提交残留清理重跑」：
+   - `states/<source>/` 里 cycle **严格晚于** T 的合法状态文件；
+   - `output/<T>/<source>/` 存在且其下**无 `DONE`** 时，该 source 目录整棵；
+   - **不含** scratch `work/<source>/<T>`（compute-loop §11.3 与 §12 把 work 的删除定为失败收尾与保留清理的动作，归 #26/#28/#13.x），不含 14 天保留窗清理（§12，归 13.3）。
+   输入 T 取 `decide_frontier` 的结论 cycle；`FrontierDecision` 不可跑（带 `stop_reason`）时本源 MUST NOT 进入清理——不知道 T 就无从定义「更晚」。
+3. **全新链同样适用，且 T 仍取最早状态文件名**（结清 #22 裁决 6 路由的张力）：该源无任何 `DONE` 时 T = `states/<source>/` 里最早的合法状态，比它更晚的状态一律是残留。理由：init 只写一份首态（`spec.md`「全新链取首态文件名」），多出来的份只可能来自一次中断的首轮发布；按同一条规则删除后重跑 T，与「无 `DONE` 残留必须可干净重跑」一致。MUST NOT 把「无 `DONE` 却有多份状态」判为异常停源——那会让首轮崩溃永久砖化该源。
+4. **`DONE` 的存在性是每个 `output/<cycle>/<source>/` 的删除前置**，MUST 逐源 stat `DONE` 这个普通文件，MUST NOT 以「目录非空」或「有 `yd.rivqdown.dat`」代替（products-contract §4：`DONE` 是唯一完成标志）。删除的粒度是 `output/<cycle>/<source>/`，**不是** `output/<cycle>/`：另一源可能在同一 cycle 目录下已有 `DONE`。父目录 `output/<T>/` 在删完本源子目录后 MUST 保留（是否删空目录归 13.3 的保留清理）。
+5. **不可见条目永不删除**。`decide_frontier` 的 cycle 可见集判据（10 位数字且 `%Y%m%d%H` 可解析且 `cycle+12h` 不溢出；`states/` 侧另需 `.cfg.ic` 后缀）在本 issue **原样复用**，MUST 从 `controller` 导入而非重写一份。方向与 #22 裁决 5 相反但同源：那里「不可解析 ⇒ 不可见 ⇒ 不砖化该源」，这里「不可解析 ⇒ 无法判定是否比 T 晚 ⇒ 不删」。只删除能被正面识别为残留的路径，是本 issue 的 fail-closed 形态。
+6. **删除原语一律走 `store/safe_fs.py`，两类路径策略不同且不对称，理由须写进模块头**：
+   - 半成品 `output/<cycle>/<source>/` 用 `remove_tree_allow_symlinks`——该原语的 docstring 逐字说明它就是为「内容按构造不可信的 residue/quarantine 树」而存在，且拒绝 symlink 会「permanently lock the run at the hygiene hook」；本处正是该场景（被杀死的发布尝试留下什么都可能）。
+   - 残留状态文件用 `unlink_no_follow`（遇 symlink 抛 `SafeFilesystemError`）。不对称的理由：`states/<source>/<cycle>.cfg.ic` 只由发布器以「普通文件原子 rename」写入（`spec.md`「NFS 提交顺序与 DONE 语义」步骤 3），该位置出现 symlink 不是崩溃残留而是异常，按 fail-closed 停该源。
+   - 两者都 MUST 传 `containment_root=<YD_ROOT>`，落实 compute-loop §12「清理只允许作用于经确认位于 yd 自己根目录下的对象；不得跟随路径进入 NWM raw 根」。MUST NOT 用 `shutil.rmtree` / 裸 `Path.unlink`。
+   - **测试树 MUST 用 `tmp_path.resolve()` 作 `YD_ROOT`**：`safe_fs._open_directory_no_follow` 会把 `containment_root` **自身的每一个祖先分量**重新过一遍 `O_NOFOLLOW`（issue #77 的证据链，`safe_fs.py:824-843`），而 macOS 的 `/var` 是 symlink，未 resolve 的 `tmp_path` 会得到与被测逻辑无关的红。
+7. **清理失败即停该源，MUST NOT 静默继续**。任一删除抛 `SafeFilesystemError` 时本源本次停止（不重跑、不提交），错误 MUST 指名失败的路径。理由与 #22 裁决 9 同向：删了一半就重跑，等于让下一步在一个既非干净也非完整的树上组装。**幂等**：对已清理干净的树重复调用判定+执行是 no-op（清单为空、零删除、零异常），这是 cron 每小时重入的必需性质。
+8. **`cron.lock_path` 非绝对路径 fail closed，闸门位置在 flock 封装的最前**（消费 #32 经 `tasks.md:166` 的路由）。相对路径与 `~` 前缀两种形态都拒（`Path` **不**展开 `~`：`Path("~/x") / "y"` 得到 `'~/x/y'`），报错 MUST 指名 `cron.lock_path`，且 MUST 在**任何文件系统副作用之前**——否则 cron 的工作目录一变，锁文件就落到另一个路径上，两个实例各持各的锁，互斥静默失效，这正是本条要防的危害。**不选**在 `config.py` 装载期强制：`local.toml` 的其余现场路径字段当前都不做绝对性校验，只为本字段在装载期开一个特例会让 `cli-config` spec 的 MUST 范围与实现不一致（`specs/cli-config/spec.md` 的装载 Requirement 未含路径形态约束）；闸放在唯一的消费点更窄且可测。同批已出 `specs/run-controller/spec.md`「并发与锁」的 delta。
+9. **#59 崩溃恢复前置：本 issue 的删除集合与任何 Slurm 作业的写入集合按构造不相交，故 12.2 不需要在途作业存活确认；完整裁决归 #28**。两个窗口逐一点名：
+   - **窗口 1（进程死亡）**：孤儿作业 12345 的 `--chdir` 是 scratch `work/<source>/<T>`（compute-loop §3.3 / §10 步骤 6），它写的全部路径都在 scratch 下。裁决 2 已把 work 排除出本 issue 的删除集合，故「下一 tick 删掉正在被写的 work 目录」这条后果在 12.2 上不可达。NFS 侧的 `output/` 与 `states/` 只由控制器进程写（`spec.md`「NFS 提交顺序与 DONE 语义」的五步全部是控制器动作），而控制器写入被 12.3 的锁覆盖，孤儿的是 Slurm 作业不是控制器。
+   - **窗口 2（已提交但未登记）**：同上——没有任何 job ID 存在，但也没有任何 Slurm 作业会写 NFS 侧路径，故对 12.2 的删除集合同样不可达。
+   - **仍然成立的危害与其落点**：一旦 #28 把 work 的删除接进重跑路径，两个窗口都恢复可达，且窗口 2 按 #59 的构造性不对称无法用 job ID 覆盖。因此 #59 的两条候选（(a) 存活确认 / (b) 见半成品即停等）与 `spec.md`「未提交残留清理重跑」是否需要 delta，**整体归 #28 裁决**，本 issue MUST NOT 替它选。本 issue 的义务是把边界写死在此并在 #59 上留证。
+10. **不接线 `run` CLI**。`cli.py:116` 的 `run` 仍是 `_unimplemented`，接线归任务 14.1（issue #26/#27）。12.3 交付的是一个可复用的上下文管理器 / 包装函数，MUST NOT 修改 `cli.py` 的子命令行为。
+11. **flock 语义钉死**：用 `fcntl.flock(fd, LOCK_EX | LOCK_NB)`，MUST NOT 用 `fcntl.lockf`；释放时 MUST NOT `unlink` 锁文件（删掉后另一实例会在新 inode 上建锁，两个持有者同时成立）；被包裹的可调用对象在跳过分支 MUST NOT 被调用；跳过是**成功**语义（与「跑过了」可区分的返回值，不是异常，不是非零退出）。`fcntl.flock` 的锁挂在 open file description 上，故同一进程内两次独立 `open()` 互相冲突——进程内用例因此是有效判别器，且它**天然**杀死 `flock → lockf` 变异体（`lockf` 是 per-process 的，同进程不冲突，跳过用例会变红）。spec 的 Scenario 写的是「另一进程」，任务 12.3 写的是「进程内测试」：等价性由上一句给出，但 MUST 另加一条子进程用例正面覆盖 spec 的字面 WHEN。
+12. **零新增依赖**：`fcntl`、`os`、`pathlib` 全在 stdlib。本 issue MUST NOT 引入 `filelock` 之类的第三方包。
+
+Must-preserve behavior:
+- `decide_frontier` 与 `controller` 现有导出的行为逐字不变（本 issue 只新增符号）；`producer/tests/test_controller.py` 全套原样通过
+- 「前沿只由 `DONE` 推进」——清理动作 MUST NOT 反过来影响 T 的计算：清理前后对同一棵树调用 `decide_frontier`，T 不变（清理后 T 仍是 T，正是「以 T 状态重新组装本轮」在发现层的可证形式）
+- `states/<source>/<T>.cfg.ic` 在任何路径上都不被删除
+- 已带 `DONE` 的 `output/<cycle>/<source>/` 及其 `yd.rivqdown.dat` 在任何路径上都不被删除
+- `store/safe_fs.py` 零改动（本 issue 是它的消费者，不是它的维护者）
+
+Seams under test:
+- 目录树 fixture（`tmp_path.resolve()` 下的合成 `YD_ROOT`），无注入式 fake——删除是真实文件系统动作，记录型 fake 会让「删对了没有」退化为永真式
+- 锁：真实 `fcntl.flock` + 同进程第二个 fd（跳过语义）+ 一个子进程（spec 字面 WHEN）
+- 时间/cycle：直接构造文件名，不注入时钟
+
+Required evidence:
+- **纯判定零写入**：判定函数调用前后对整棵 `YD_ROOT` 做递归快照（路径、类型、大小、mtime）逐项相等
+- **保留 T**：树含 `DONE(T-12)`、`states/<T>.cfg.ic`、`states/<T+12>.cfg.ic`、无 `DONE` 的 `output/<T>/<source>/`（只含 DAT）-> 清理后 `states/<T>.cfg.ic` 仍在，`states/<T+12>.cfg.ic` 与 `output/<T>/<source>/` 已删，`output/<T-12>/` 整棵未动；再调 `decide_frontier` 仍返回 T
+- **边界方向**：cycle **恰好等于** T 的状态文件永不删（这条是变异体 (a) 的判别器）；cycle 为 `T+12`、`T+24` 的多份更晚状态一次全删
+- **逐源隔离**：IFS 与 GFS 在同一 cycle 上各有更晚状态与半成品，只清 IFS；GFS 侧递归快照不变。`output/<T>/` 父目录在 IFS 子目录删完后仍存在
+- **`DONE` 保护**：`output/<T>/<source>/` 下同时有 `DONE` 与 DAT -> 不在清单内、零删除；把 `DONE` 换成同名**目录**或 symlink -> 按 `DONE` 的普通文件判据视为无 `DONE`（与 `decide_frontier` 的 `DONE` 判据一致），进入清单
+- **空半成品目录**：`output/<T>/<source>/` 存在但为空（mkdir 后即崩）-> 判为半成品并删除
+- **不可见条目不删**：`states/<source>/` 下有 `2026082612.cfg.ic.tmp`、`nine.cfg.ic`、`9999123123.cfg.ic`、`.DS_Store`；`output/` 下有 `stray/`、`.DS_Store` -> 清理后逐个仍在
+- **symlink 策略两侧**：`states/<source>/<T+12>.cfg.ic` 是 symlink -> 停该源并报错指名该路径，链接与其目标都还在；`output/<T>/<source>/` 树内含一个指向 `YD_ROOT` 外的 symlink 条目 -> 该树被删除，链接的**目标**未被删除（unlink link, never traverse）
+- **containment**：`states/<source>/<T+12>.cfg.ic` 是指向 `YD_ROOT` 外普通文件的 symlink 时（上一条）目标存活；另断言判定+执行传入的 `containment_root` 就是 `YD_ROOT`（以越界路径构造的调用被 `safe_fs` 拒绝）
+- **幂等**：同一棵树上连跑两次判定+执行 -> 第二次清单为空、零删除、零异常，树快照与第一次结束时相等
+- **不可跑源不清理**：`FrontierDecision` 带 `stop_reason`（如 `STATE_MISSING`）时该源零删除
+- **全新链**：无任何 `DONE`、`states/` 有 `T`、`T+12` 两份 -> T 取最早、`T+12` 被删（裁决 3）
+- **锁：持有即跳过**：同进程第一个 fd 持锁，第二次进入包装 -> 立即返回跳过结果、被包裹的可调用对象零调用、进程不阻塞（用例带超时）
+- **锁：子进程持有**（spec 字面 WHEN）：子进程持锁期间父进程进入包装 -> 同上
+- **锁：释放后可再取**：第一次正常退出后第二次进入 -> 真正执行；锁文件在释放后**仍存在**（不 unlink）
+- **锁：异常路径也释放**：被包裹的可调用对象抛异常 -> 异常向外传播且锁已释放（同棵树第二次进入能拿到锁）
+- **非绝对锁路径**：`"yd.lock"` 与 `"~/yd.lock"` 两种形态 -> 抛错且消息含 `cron.lock_path`；断言 cwd 下与 `Path.home()` 下**都没有**新建锁文件（副作用先于闸门是本条要杀的形态）
+- 预登记变异体，每条 MUST 被上列用例杀死（跑法见 `openspec/project-profile.md` 的 Mutation-testing hazards，用 `uv run python -m pytest`）：
+  (a) 「更晚」判据 `>` 改 `>=` -> 保留 T 用例变红；
+  (b) 逐源过滤去掉（对 `states/` 全域比较）-> 逐源隔离用例变红；
+  (c) `DONE` 存在性判据改为「目录非空」-> `DONE` 保护用例变红；
+  (d) 可见集门去掉（不可解析文件名也参与比较/删除）-> 不可见条目用例变红；
+  (e) 判定函数里顺手删除（判定与执行融合）-> 零写入快照用例变红；
+  (f) 删除粒度由 `output/<cycle>/<source>/` 放大到 `output/<cycle>/` -> 逐源隔离用例变红；
+  (g) `remove_tree_allow_symlinks` 换成 `rmtree_no_follow` -> 半成品树含 symlink 的用例变红（该变异体正是原语 docstring 说的 permanent lock）；
+  (h) `unlink_no_follow` 换成 `Path.unlink` -> symlink 状态文件用例变红（目标被删或未停源）；
+  (i) 去掉 `containment_root` 参数 -> containment 用例变红；
+  (j) `fcntl.flock` 改 `fcntl.lockf` -> 持有即跳过（进程内）用例变红；
+  (k) 去掉 `LOCK_NB` -> 持有即跳过用例超时变红（用例 MUST 自带超时，否则测试自身挂死）；
+  (l) 跳过分支仍调用被包裹对象 -> 零调用断言变红；
+  (m) 释放时 `unlink` 锁文件 -> 「释放后锁文件仍在」用例变红；
+  (n) 绝对路径闸移到 `open()` 之后 -> 「拒绝后无锁文件」用例变红；
+  (o) 绝对性判据用 `os.path.isabs` 之外的宽松式（如只查开头 `/`，放过 `~`）-> `~/yd.lock` 用例变红
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+
+Non-goals:
+- scratch `work/<source>/<T>` 的删除与孤儿 Slurm 作业存活确认（裁决 9）：归 #28；#59 的两条候选取舍不在本 issue
+- 发布顺序、`DONE` 写入、`DONE` 成功后的旧状态清理（任务 13.1，issue #24）
+- 14 天保留窗清理与 `realpath` 圈定 yd 根（任务 13.3，issue #25）：本 issue 的 containment 用 `safe_fs` 的 `containment_root`，不实现保留窗
+- `run_once` 编排、把锁接进 `cli.py run`（任务 14.1）
+- 状态读路径 stat->open 的 TOCTOU / FIFO 阻塞（issue #63）：本 issue 是该问题的**放大器**（卡死进程持锁 -> 后续 cycle 持续跳过），但加固的三处读路径均不在本 issue 的改动面；毗邻、已跟踪、刻意不动
+- `run_dir` 符号链接祖先致零捕获（issue #77）：面在 checkpoint-tracker 接线，本 issue 只在**测试树**上按同一机制用 `tmp_path.resolve()`（裁决 6 末条），不改 `safe_fs` 也不改 tracker
+- `cron.lock_path` 在 `config.py` 装载期的绝对性校验（裁决 8 明确不选）
+- 真实 NFS/Slurm 行为、数值正确性：归 M4
+
+Review focus:
+- 12.2 的删除集合是否**严格**等于「更晚状态 + 无 `DONE` 的本源半成品目录」——多一类（work、`output/<cycle>/` 父目录、其它源、不可见条目）或少一类都是缺陷
+- 「更晚」的边界方向：T 自己是否可能进入删除集合（任何 `>=`、任何以文件名字符串而非解析后 cycle 比较的写法都要当作缺陷查）
+- 判定函数是否真的零写入（递归树快照是唯一判别条），13.2 是否真的能只复用判定
+- symlink 两侧策略是否按裁决 6 落地且理由写进模块头；有没有出现 `shutil.rmtree` / 裸 `Path.unlink` / 缺 `containment_root`
+- 跳过语义是否与「跑过了」可区分，跳过分支是否真的零副作用；异常路径是否仍释放锁
+- 绝对路径闸是否真的先于任何文件系统副作用（看调用顺序，不看注释）
+- 有没有越界落地 #24 的发布动作、#25 的保留清理或 #28 的 work 删除（含"顺手先放着"的死代码）
+
 ## 13. run-controller（二）：发布、失败与清理
 
 - [ ] 13.1 实现发布器：T+12 checkpoint 重戳到绝对 T+12（复用 4.3）→ DONE 前契约检查（v2、`forecast_days*24` 行、数据列数等于 `reach_count` 且等于变体 reach 数、T+12 可读、合并日志可用）→ DAT 原子 rename 为 `yd.rivqdown.dat` → 状态 rename → `DONE` 最后写 → 删旧状态只留两份 → 删本轮 work；正式文件不继承 scratch uid/gid/mode；记录型文件操作测试顺序与终名
