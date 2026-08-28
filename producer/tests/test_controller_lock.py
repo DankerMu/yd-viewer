@@ -18,6 +18,8 @@ XNU 把 `flock` 与 `lockf` 并进同一条 lock list，测试自持 `flock` 时
 from __future__ import annotations
 
 import contextlib
+import errno
+import fcntl
 import os
 import pathlib
 import signal
@@ -165,6 +167,34 @@ def test_lock_is_released_when_the_action_raises(lock_path: pathlib.Path) -> Non
     assert recovered.acquired is True
     assert after.calls == 1
     assert lock_path.is_file()
+
+
+def test_non_contention_lock_errors_propagate(
+    lock_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`flock` 报竞争以外的错（`EACCES`）-> 原样上抛，MUST NOT 退化成「跳过」。
+
+    分流判据是 `except BlockingIOError`（`EAGAIN`/`EWOULDBLOCK`）**这一条**。放宽成
+    `except OSError` 在其余全部用例下恒绿——真实路径上永远不会有 `EACCES`——却会让一台
+    权限配错、锁文件在只读挂载上、或 `ENOSPC` 的机器把互斥静默变成「永远跳过」：每个
+    tick 都报告成功、每个 tick 都不干活，与本模块存在的理由正相反。
+    """
+    action = RecordingAction()
+    calls: list[int] = []
+
+    def _refuse(fd: int, operation: int) -> None:
+        calls.append(operation)
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+
+    monkeypatch.setattr(runlock.fcntl, "flock", _refuse)
+
+    with _deadline(), pytest.raises(PermissionError) as caught:
+        runlock.run_with_lock(lock_path=lock_path, action=action)
+
+    assert caught.value.errno == errno.EACCES
+    assert action.calls == 0
+    # 只有取锁那一次调用发生：解锁在 `finally` 里，取锁抛出时走不到
+    assert calls == [fcntl.LOCK_EX | fcntl.LOCK_NB]
 
 
 @pytest.mark.parametrize("configured", ["yd.lock", "~/yd.lock"])

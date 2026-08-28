@@ -16,16 +16,30 @@
    T 的合法状态文件 + `output/<T>/<source>/`（存在且其下无 `DONE`）整棵。
    **不含** scratch `work/<source>/<T>`（归 #26/#28）、不含 14 天保留窗清理（归 13.3）、
    不含 `output/<T>/` 父目录、不含其它源。多一类或少一类都是缺陷。
+   `stop_reason` 非空（不可跑）的源 MUST NOT 进入清理——不知道 T 就无从定义「更晚」。
+   **`source` 的输入域在判定入口 fail closed**（裁决 2 增补）：只校验
+   `source == decision.source` 不够——空串会让 `output_root / cycle_id(T) / ""` 塌回
+   `output/<cycle>/`（`Path("/a/b") / ""` 就是 `/a/b`），删除粒度由本源子目录放大为整个
+   cycle 目录，连同另一源已带 `DONE` 的正式产物一起消失；而 `safe_fs` 帮不上忙——它看到
+   的条目名是一个合法的 10 位 cycle id，完全在容纳域内。故 `source` MUST 非空且 MUST 是
+   单个路径分量（`.`、`..`、含分隔符的名字一律报错而不是拿去构造路径）。
 3. **裁决 3（全新链同样适用）**：T 一律取 `FrontierDecision.cycle`——该值在无任何
    `DONE` 时就是 `states/<source>/` 里**最早**的合法状态（`controller._decide` 的
    `min(state_cycles)`）。本模块因此不自己算 T：多出来的状态份数只可能来自一次中断的
    首轮发布，按同一条规则删除后重跑 T，MUST NOT 判为异常停源（那会让首轮崩溃永久
-   砖化该源）。`stop_reason` 非空的源 MUST NOT 进入清理——不知道 T 就无从定义「更晚」。
+   砖化该源）。
 4. **裁决 4（`DONE` 是删除前置，粒度是 source 子目录）**：半成品判据复用
    `controller.done_cycles`（`os.stat` + `stat.S_ISREG`，products-contract §4：`DONE`
    是唯一完成标志），MUST NOT 以「目录非空」或「有 `yd.rivqdown.dat`」代替；空目录
    （mkdir 后即崩）同样是半成品。删除粒度是 `output/<cycle>/<source>/`，**不是**
    `output/<cycle>/`：另一源可能在同一 cycle 目录下已有 `DONE`。
+   **`DONE(retained)` 存在时整个清单为空，不只是半成品那一半**（裁决 4 增补）：该闸在
+   `plan_residue` 一层，两类删除共用。它只在调用方**交来**一个 T 时可达
+   （`decide_frontier` 自己产出的 T 永远不在 `done_cycles` 里），而交来 T 正是任务 13.2
+   的复用姿态；只挡半成品、不挡状态文件，会在「publish 已写 `states/<T+12>` 与
+   `DONE(T)`、其后某步失败」时把刚提交的下一环判为残留删掉，前沿随即永久停在
+   `STATE_MISSING`，直接违反 Must-preserve「清理前后对同一棵树调用 `decide_frontier`，
+   T 不变」。
 5. **裁决 5（不可见条目永不删除）**：cycle 可见集判据（10 位数字、`%Y%m%d%H` 可解析、
    `+12h` 不溢出，`states/` 侧另需 `.cfg.ic` 后缀）从 `controller` **导入**
    （`visible_state_cycles` / `done_cycles` / `cycle_id`），MUST NOT 重写。不可解析 ⇒
@@ -44,8 +58,17 @@
      崩溃残留而是异常，按 fail-closed 停该源。两侧的构造性可信度不同，策略因此不同。
    - 两者都传 `containment_root=<YD_ROOT>`，落实 compute-loop §12「清理只允许作用于经
      确认位于 yd 自己根目录下的对象；不得跟随路径进入 NWM raw 根」。`safe_fs` 全程
-     `O_NOFOLLOW` 逐段锚定，严于「先 `realpath` 再比前缀」（后者在解析与使用之间仍有
-     TOCTOU 窗口）。MUST NOT 用 `shutil.rmtree` / 裸 `Path.unlink`。
+     `O_NOFOLLOW` 逐段锚定，消除了「先 `realpath` 再比前缀」在解析与使用之间的 TOCTOU
+     窗口。MUST NOT 用 `shutil.rmtree` / 裸 `Path.unlink`。
+   - **前置条件：传给 `safe_fs` 的 `containment_root` MUST 是 `Path(yd_root).resolve()`**
+     （裁决 6 增补，round 1 B1）。两者不是包含关系，原措辞「严于 `realpath`」不成立：
+     `safe_fs._open_directory_no_follow` 在 `containment_root` 自身上**从 `/` 重新锚定**
+     并把它的每一个分量过一遍 `O_NOFOLLOW`（`safe_fs.py:824-843`），而 `realpath` 语义
+     恰恰允许 root 经 symlink 到达。`YD_ROOT` 里任一分量是 symlink（现场极常见：NFS 挂
+     载点、`/var` 在 macOS 上就是）时，判定侧（跟随 symlink 的 `os.stat`/`iterdir`）会说
+     该源可跑并算出非空清单，执行侧却每次都抛 `SafeFilesystemError`——每 tick 重演，成为
+     带误导消息的永久停源。故本模块在 `plan_residue` 里一次性 `resolve()`，
+     `ResiduePlan.yd_root` 因此**恒为已解析的绝对路径**。
    - **判定期的类型判据同样不对称**：半成品目录要求 `os.lstat` 下是**真目录**（该位置
      是 symlink 时不能被正面识别为半成品，不删）；状态文件在判定期**只过文件名可见
      集，不做 symlink 过滤**——若判定期就把 symlink 状态滤掉，裁决 6 要的「遇 symlink
@@ -119,7 +142,11 @@ class ResiduePlan:
     本清单，不触发删除）。
     """
 
-    #: 传给 `safe_fs` 的 `containment_root`（compute-loop §12）。
+    #: 传给 `safe_fs` 的 `containment_root`（compute-loop §12）。**契约：MUST 是
+    #: `Path(yd_root).resolve()` 的产物**——`safe_fs` 把容纳根**自身**的每个分量重新过
+    #: `O_NOFOLLOW`（`safe_fs.py:824-843`），未解析的根上任一 symlink 分量会让所有删除
+    #: 永久失败而判定侧照常说「可跑」（裁决 6 增补）。`plan_residue` 负责解析；手工构造
+    #: 本清单的调用方同样受这条约束。
     yd_root: Path
     source: str
     #: 保留的 T：`FrontierDecision.cycle`。`states/<source>/<T>.cfg.ic` 永不进清单。
@@ -144,15 +171,24 @@ def plan_residue(
 
     `decision` 是同一棵树、同一个源上 `controller.decide_frontier` 的结论。它带
     `stop_reason`（不可跑）时返回 `None`：不知道 T 就无从定义「更晚」，该源本次
-    MUST NOT 进入清理（裁决 3）。
+    MUST NOT 进入清理（裁决 2）。
 
     `source` 必须与 `decision.source` 一致——两者分叉会让清单落到另一个源的目录上，
-    正是裁决 2「逐源」要防的形态。
+    正是裁决 2「逐源」要防的形态；且必须是**非空的单个路径分量**（空串会把删除粒度从
+    `output/<T>/<source>/` 塌成整个 `output/<T>/`，连另一源已带 `DONE` 的产物一起删）。
+
+    `yd_root` 在此**一次性 `resolve()`**，清单里的 `yd_root` 因此恒为已解析的绝对路径
+    （裁决 6 增补：`safe_fs` 对容纳根自身逐段 `O_NOFOLLOW`）。判定与执行的相对路径拼接
+    全部基于该已解析根。
+
+    交来的 T 上已有 `DONE` 时清单**整体**为空（两类删除共用同一道闸，裁决 4 增补）：
+    该 cycle 已提交，`states/<T+12>` 是刚写下的下一环而不是残留。
 
     返回的清单可能为空（树是干净的）：那是幂等重入的正常结果，不是异常。
 
     Raises:
-        ValueError: `source` 与 `decision.source` 不一致。
+        ValueError: `source` 与 `decision.source` 不一致，或 `source` 为空 / 不是单个
+            路径分量。
         ResidueError: 判定期有任何一处「无法确定」（裁决 7 同向的 fail-closed）。
     """
     if source != decision.source:
@@ -160,14 +196,26 @@ def plan_residue(
             f"plan_residue 的 source={source!r} 与 decision.source="
             f"{decision.source!r} 不一致：残留清单必须逐源自洽"
         )
+    if not source or source != Path(source).name:
+        raise ValueError(
+            f"plan_residue 的 source={source!r} 不是单个非空路径分量："
+            "空串会让 output/<cycle>/<source>/ 塌回 output/<cycle>/，"
+            "把另一源已带 DONE 的产物一并删除"
+        )
     if decision.cycle is None:
         return None
 
-    root = Path(yd_root)
+    root = Path(yd_root).resolve()
     retained = decision.cycle
     try:
-        states = _later_state_files(root, source, retained)
-        half_products = _half_product_dirs(root, source, retained)
+        if retained in done_cycles(root / "output", source):
+            # 交来的 T 已提交：更晚的状态是刚写下的下一环，半成品目录里就是它自己的
+            # 正式产物。两类删除一并让路（裁决 4 增补）。
+            states: tuple[Path, ...] = ()
+            half_products: tuple[Path, ...] = ()
+        else:
+            states = _later_state_files(root, source, retained)
+            half_products = _half_product_dirs(root, source, retained)
     except DiscoveryUnreadableError as error:
         raise ResidueError(f"{source}: 残留判定无法完成——{error.detail}") from error
 
@@ -221,16 +269,16 @@ def _later_state_files(
 def _half_product_dirs(
     yd_root: Path, source: str, retained: datetime
 ) -> tuple[Path, ...]:
-    """`output/<T>/<source>/` 存在且其下无 `DONE` 时返回它，否则空（裁决 2/4）。
+    """`output/<T>/<source>/` 存在时返回它，否则空（裁决 2/4）。
 
-    `DONE` 的存在性复用 `controller.done_cycles`（普通文件判据 + cycle 可见集），
-    不另起一套：两份判据一旦分叉，「已完成」在发现层与清理层就会不一致。
-    目录形态用 `os.lstat` 判：该位置是 symlink（或普通文件）时不能被正面识别为半成品，
-    不删（裁决 5 的 fail-closed 方向）。空目录**是**半成品（mkdir 后即崩）。
+    `DONE(T)` 的存在性判据**不在这里**：它是两类删除共用的闸，提到了 `plan_residue`
+    一层（裁决 4 增补）——只挡半成品会让「`DONE(T)` 已写、`states/<T+12>` 已提交」的树
+    丢掉下一环。本函数因此只回答「这个位置是不是一个可删的半成品目录」。
+    目录形态用 `os.lstat` 判：该位置是 symlink、普通文件或 FIFO 时不能被正面识别为半
+    成品，不删（裁决 5/6 的 fail-closed 方向；`remove_tree_allow_symlinks` 会把 symlink
+    位置整个 unlink 掉，而那不是崩溃残留树）。空目录**是**半成品（mkdir 后即崩）。
     """
     output_root = yd_root / "output"
-    if retained in done_cycles(output_root, source):
-        return ()
     candidate = output_root / cycle_id(retained) / source
     try:
         mode = os.lstat(candidate).st_mode

@@ -17,7 +17,11 @@ oracle 纪律：删除集合的期望值是**手算**的——由 `frontier_fixt
 
 from __future__ import annotations
 
+import contextlib
+import os
 import pathlib
+import stat
+from collections.abc import Iterator
 
 import pytest
 from frontier_fixtures import (
@@ -74,6 +78,25 @@ def _crash_residue_tree(root: pathlib.Path, source: str = "ifs") -> YdRootBuilde
     builder.write_state(T_PLUS_12, source)
     builder.write_output_dat(T, source)
     return builder
+
+
+def _skip_if_root() -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root 无视 mode 位，`chmod 0o000` 仍可枚举，本用例无判别力")
+
+
+@contextlib.contextmanager
+def _unreadable(path: pathlib.Path) -> Iterator[None]:
+    """把 `path` 临时置为 `chmod 0o000`，退出时**一定**恢复。
+
+    不恢复的话，`snapshot_tree` 的 `rglob` 下降与 pytest 的 tmp 清理都会踩到不可读目录。
+    """
+    original = stat.S_IMODE(path.stat().st_mode)
+    path.chmod(0o000)
+    try:
+        yield
+    finally:
+        path.chmod(original)
 
 
 # --- 判定：零写入 ---
@@ -170,7 +193,14 @@ def test_cleanup_is_scoped_to_one_source(tmp_path: pathlib.Path) -> None:
 
 
 def test_output_dir_with_done_is_never_planned(tmp_path: pathlib.Path) -> None:
-    """`output/<cycle>/<source>/` 下有普通文件 `DONE` 与 DAT 时不在清单内、零删除。"""
+    """端到端形态：`DONE(T)` 已在 -> 前沿推进到 T+12 -> 该树上没有任何残留、零删除。
+
+    这条**不是** `DONE` 前置的判别器（把守卫整条删掉它照样绿：`decision.cycle` 是 T+12，
+    而 `output/<T+12>/` 根本不存在，清单无论如何都是空的）。它钉的是发现层与清理层串起来
+    之后的整体形状：一棵刚发布完的干净树上，清理是 no-op。`DONE` 前置本身由
+    `test_done_is_rechecked_for_the_retained_cycle` 与
+    `test_handed_cycle_with_done_empties_the_whole_plan` 承担。
+    """
     root = _yd_root(tmp_path)
     builder = YdRootBuilder(root=root)
     builder.write_done(D, "ifs")
@@ -222,6 +252,42 @@ def test_done_is_rechecked_for_the_retained_cycle(tmp_path: pathlib.Path) -> Non
     assert snapshot_tree(root) == before
 
 
+def test_handed_cycle_with_done_empties_the_whole_plan(tmp_path: pathlib.Path) -> None:
+    """交来的 T 已有 `DONE` -> **两类**清单都为空（裁决 4 增补，round 1 A1）。
+
+    上一条同姿态用例只放了半成品而没放 `states/<T+12>`，恰好绕开了这条：`DONE` 闸只挡
+    半成品那一半时，`states/<T+12>.cfg.ic`——publish 刚提交的**下一环**——会被判为残留
+    删掉，此后 `decide_frontier` 在 T+12 上永久 `STATE_MISSING`，违反 Must-preserve
+    「清理前后 T 不变」。故断言分两层：清单两臂皆空 + 执行后前沿仍能推进到 T+12 且可跑。
+    """
+    root = _yd_root(tmp_path)
+    builder = YdRootBuilder(root=root)
+    builder.write_done(T, "ifs")
+    builder.write_output_dat(T, "ifs")
+    builder.write_state(T, "ifs")
+    builder.write_state(T_PLUS_12, "ifs")
+    before = snapshot_tree(root)
+
+    handed = controller.FrontierDecision(
+        source="ifs",
+        cycle=parse_cycle(T),
+        stop_reason=None,
+        detail="13.2 复用姿态：DONE(T) 已写、states/<T+12> 已提交，其后某步失败",
+    )
+    plan = residue.plan_residue(yd_root=root, source="ifs", decision=handed)
+
+    assert plan is not None
+    assert plan.state_files == ()
+    assert plan.half_product_dirs == ()
+    assert plan.empty
+    residue.execute_residue_plan(plan)
+
+    assert snapshot_tree(root) == before
+    after = _decide(builder, "ifs")
+    assert after.cycle == parse_cycle(T_PLUS_12)
+    assert after.stop_reason is None
+
+
 @pytest.mark.parametrize("shape", ["directory", "dangling_symlink"])
 def test_non_regular_done_does_not_protect_the_output_dir(
     tmp_path: pathlib.Path, shape: str
@@ -262,6 +328,52 @@ def test_empty_output_dir_is_a_half_product(tmp_path: pathlib.Path) -> None:
 
     assert not builder.source_output_dir(T, "ifs").exists()
     assert (root / "output" / T).is_dir()
+
+
+@pytest.mark.parametrize("shape", ["symlink", "regular_file", "fifo"])
+def test_non_directory_half_product_location_is_never_planned(
+    tmp_path: pathlib.Path, shape: str
+) -> None:
+    """`output/<T>/<source>` 是 symlink / 普通文件 / FIFO -> 都不入清单，执行后仍在。
+
+    半成品的类型判据（`os.lstat` + `S_ISDIR`）是裁决 5/6 的 fail-closed 方向：只删能被
+    **正面**识别为残留目录的路径。去掉这道门的话，`remove_tree_allow_symlinks` 会把这三
+    种形态一律 unlink 掉——symlink 那一支尤其危险，它删的是一条**指向别处**的链接，而那
+    绝不是「被杀死的发布尝试留下的树」。
+    树里同时放了 `states/<T+12>`：它必须照常被删，否则本条会退化成「清单本来就是空的」
+    这种空转断言。
+    """
+    root = _yd_root(tmp_path)
+    outside = tmp_path.resolve() / "outside"
+    (outside / "keep").mkdir(parents=True)
+    (outside / "keep" / "payload.txt").write_text("not residue\n", encoding="utf-8")
+
+    builder = YdRootBuilder(root=root)
+    builder.write_done(D, "ifs")
+    builder.write_output_dat(D, "ifs")
+    builder.write_state(T, "ifs")
+    builder.write_state(T_PLUS_12, "ifs")
+    entry = builder.source_output_dir(T, "ifs")
+    entry.parent.mkdir(parents=True)
+    if shape == "symlink":
+        entry.symlink_to(outside / "keep", target_is_directory=True)
+    elif shape == "regular_file":
+        entry.write_text("half-written\n", encoding="utf-8")
+    else:
+        os.mkfifo(entry)
+
+    plan = _plan(builder, "ifs")
+    assert plan is not None
+    assert plan.half_product_dirs == ()
+    assert plan.state_files == (builder.state_path(T_PLUS_12, "ifs"),)
+    residue.execute_residue_plan(plan)
+
+    # 条目本身还在（`lexists`：symlink 那一支不能靠 `exists()` 判）
+    assert os.path.lexists(entry)
+    assert (outside / "keep" / "payload.txt").is_file()
+    # 执行确实跑过：更晚状态被删、T 自己的状态保留
+    assert not builder.state_path(T_PLUS_12, "ifs").exists()
+    assert builder.state_path(T, "ifs").is_file()
 
 
 # --- 不可见条目 ---
@@ -380,6 +492,92 @@ def test_execute_refuses_targets_outside_the_containment_root(
     assert snapshot_tree(root) == before
 
 
+def test_plan_carries_the_yd_root_as_containment_root(tmp_path: pathlib.Path) -> None:
+    """判别器之一：`plan.yd_root` **就是**传入的 `YD_ROOT`，不是它的祖先。
+
+    上一条只证明「越界的 `containment_root` 会被拒」，不证明生产路径上填进去的是哪一个
+    根。把 `plan.yd_root` 悄悄放宽成 `root.parent`（容纳域随即覆盖 `outside/`、兄弟项目、
+    NWM raw 根）在其余全部用例下恒绿，因为那些用例的删除目标本来就在更宽的域里。
+    """
+    root = _yd_root(tmp_path)
+    builder = _crash_residue_tree(root)
+
+    plan = _plan(builder, "ifs")
+
+    assert plan is not None
+    assert plan.yd_root == root
+    assert plan.yd_root != root.parent
+
+
+def test_execute_refuses_a_state_file_outside_the_containment_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    """判别器之二：清单**只带状态文件**时越界仍被拒（状态那条臂也传 `containment_root`）。
+
+    上面的越界用例的清单两臂俱全，而执行顺序是「先半成品树、后状态文件」——它在第一臂
+    就抛了，状态那条臂的 `containment_root` 单独掉了也走不到、也不会红。故这一条把半成品
+    臂清空，逼执行走到 `unlink_no_follow`。
+    """
+    root = _yd_root(tmp_path)
+    other_root = tmp_path.resolve() / "other"
+    other_root.mkdir()
+    builder = _crash_residue_tree(root)
+    before = snapshot_tree(root)
+
+    trespassing = residue.ResiduePlan(
+        yd_root=other_root,
+        source="ifs",
+        retained_cycle=parse_cycle(T),
+        state_files=(builder.state_path(T_PLUS_12, "ifs"),),
+        half_product_dirs=(),
+    )
+
+    with pytest.raises(SafeFilesystemError):
+        residue.execute_residue_plan(trespassing)
+
+    assert builder.state_path(T_PLUS_12, "ifs").is_file()
+    assert snapshot_tree(root) == before
+
+
+def test_symlinked_yd_root_is_resolved_before_use(tmp_path: pathlib.Path) -> None:
+    """`YD_ROOT` 经 symlink 到达时判定与执行都成功（裁决 6 增补，round 1 B1）。
+
+    `safe_fs._open_directory_no_follow` 把 `containment_root` **自身**的每个分量从 `/`
+    重新过一遍 `O_NOFOLLOW`，而判定侧（`os.stat` / `iterdir`）跟随 symlink。不 `resolve()`
+    的话，根上任一 symlink 分量（NFS 挂载点、macOS 的 `/var`）会让每个 tick 都「判定出
+    非空清单、执行必抛」——带误导消息的永久停源。删除结果 MUST 与直接用实路径一致。
+    """
+    real = tmp_path.resolve() / "real"
+    real.mkdir()
+    link = tmp_path.resolve() / "link"
+    link.symlink_to(real, target_is_directory=True)
+    root = real / "yd"
+    root.mkdir()
+    builder = _crash_residue_tree(root)
+
+    unresolved = link / "yd"
+    plan = residue.plan_residue(
+        yd_root=unresolved,
+        source="ifs",
+        decision=controller.decide_frontier(
+            yd_root=unresolved,
+            source="ifs",
+            raw_complete=RecordingRawComplete(set(_ALL_CYCLES)),
+        ),
+    )
+
+    assert plan is not None
+    assert plan.yd_root == root
+    assert plan.state_files == (builder.state_path(T_PLUS_12, "ifs"),)
+    assert plan.half_product_dirs == (builder.source_output_dir(T, "ifs"),)
+    residue.execute_residue_plan(plan)
+
+    assert not builder.state_path(T_PLUS_12, "ifs").exists()
+    assert not builder.source_output_dir(T, "ifs").exists()
+    assert builder.state_path(T, "ifs").is_file()
+    assert builder.source_output_dir(D, "ifs").joinpath("DONE").is_file()
+
+
 # --- 幂等 ---
 
 
@@ -461,5 +659,63 @@ def test_plan_rejects_a_source_that_disagrees_with_the_decision(
         residue.plan_residue(
             yd_root=root, source="gfs", decision=_decide(builder, "ifs")
         )
+
+    assert snapshot_tree(root) == before
+
+
+def test_empty_source_fails_closed(tmp_path: pathlib.Path) -> None:
+    """`source=""` -> 报错；`output/<T>/` 与另一源的 `DONE` 产物零改动（裁决 2 增补）。
+
+    空串不是「没有源」而是一次**粒度塌陷**：`Path("/a/b") / ""` 就是 `/a/b`，于是
+    `output/<T>/<source>/` 塌回 `output/<T>/`，删除的是整个 cycle 目录，连同 gfs 已经
+    带 `DONE` 的正式产物。`safe_fs` 在这条路上帮不上忙——它看到的条目名是一个合法的
+    10 位 cycle id，完全在容纳域之内。故闸必须在判定入口。
+    """
+    root = _yd_root(tmp_path)
+    builder = YdRootBuilder(root=root)
+    builder.write_done(T, "gfs")
+    builder.write_output_dat(T, "gfs")
+    builder.write_output_dat(T, "ifs")  # 无 DONE 的本源半成品
+    builder.write_state(T, "ifs")
+    before = snapshot_tree(root)
+
+    handed = controller.FrontierDecision(
+        source="",
+        cycle=parse_cycle(T),
+        stop_reason=None,
+        detail="配置里 source 漏填",
+    )
+
+    with pytest.raises(ValueError, match="单个非空路径分量"):
+        residue.plan_residue(yd_root=root, source="", decision=handed)
+
+    assert snapshot_tree(root) == before
+    assert builder.source_output_dir(T, "gfs").joinpath("DONE").is_file()
+    assert (root / "output" / T).is_dir()
+
+
+# --- 判定侧的 fail-closed 收敛 ---
+
+
+def test_unreadable_states_dir_raises_residue_error(tmp_path: pathlib.Path) -> None:
+    """`chmod 0o000` 掉 `states/<source>/` -> `ResidueError`，MUST NOT 返回空清单。
+
+    空清单会让残留留在树上被下一轮当成正常产物；`DiscoveryUnreadableError` 在判定层被
+    吞掉是本模块最危险的 fail-open 形态（裁决 7 同向）。`decision` 刻意在 `chmod` **之前**
+    算好：否则 `decide_frontier` 自己就会收敛成 `DISCOVERY_UNREADABLE`，`plan_residue`
+    直接返回 `None`，用例根本走不到不可读目录，变成空转。
+    """
+    _skip_if_root()
+    root = _yd_root(tmp_path)
+    builder = _crash_residue_tree(root)
+    decision = _decide(builder, "ifs")
+    assert decision.cycle == parse_cycle(T)
+    before = snapshot_tree(root)
+
+    with (
+        _unreadable(builder.states_dir("ifs")),
+        pytest.raises(residue.ResidueError, match="残留判定无法完成"),
+    ):
+        residue.plan_residue(yd_root=root, source="ifs", decision=decision)
 
     assert snapshot_tree(root) == before
