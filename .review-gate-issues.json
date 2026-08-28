@@ -40,7 +40,13 @@
     "5": {
       "ceilingPrs": [],
       "gateEntries": 2,
-      "closed": []
+      "closed": [
+        {
+          "pr": 40,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
     },
     "3": {
       "ceilingPrs": [],
