@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "maxLines": 1000,
+  "exclude": [
+    "producer/tests/test_config.py",
+    "producer/tests/test_geometry.py"
+  ]
+}
