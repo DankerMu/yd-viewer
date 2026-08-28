@@ -185,6 +185,112 @@ Review focus:
 Suggested fixture level: compact - 结构与路径函数用内存对象与 tmp 目录即可
 Minimal mergeable slice: 勘察清单（2.1）——纯文档产物独立合并，快照代码为后继
 
+### 组 2 剩余任务（2.2/2.3）的 issue #5 fixture
+
+Fixture level: expanded（issue #5 分诊上调，理由见 `.workplans/5/triage.md`）
+Repair intensity: high（File IO/path safety + 新建共享 helper 根）
+
+Change surface:
+- 新增 `producer/src/yd_producer/store/{object_store.py,object_path.py,safe_fs.py}`
+- 新增 `producer/src/yd_producer/raw/{source_identity.py,manifest.py,cycle_hours.py,region.py}`
+- 新增 `producer/tests/{test_safe_fs.py,test_object_path.py,test_source_identity.py,test_data_adapter_resolution.py}`（快照）
+- 新增 `producer/tests/{test_object_store.py,test_manifest.py,test_cycle_hours.py,test_region.py}`（新写，见清单 §4 风险 3/4/8）
+- 新增 `producer/tests/test_snapshot_provenance.py`（任务 2.3）
+
+Must preserve:
+- pin `8ae9b8f2` 上被保留符号的语义逐字节等价（modulo 清单 §1 逐行枚举的剥离点）
+- `producer/` 既有测试（config/geometry/smoke）全绿
+- `docs/products-contract.md:37`「`source` 固定小写 `gfs`/`ifs`」
+
+Must add/change:
+- 七个快照源模块，逐文件消费清单 §1 对应行的 `剥离点` 列
+- 清单 §4 风险 3/4/8 点名的新写测试：`ManifestEntry`/`DownloadManifest` 的 `as_dict`/`from_dict` roundtrip 与 `cycle_id_for`；`LocalObjectStore` 与 `normalize_object_key`/`sha256_bytes` 最小用例；`parse_cycle_hours_utc`/`normalize_cycle_hours_utc` 的显式入参用例；`GeoBBox` 构造/校验用例
+- 溯源头部检查测试：以清单 §1 的「目标路径 → NWM 原路径」表为数据源，双向断言
+
+Seams under test（design.md「Sketch seams under test」第 4 条「快照模块另带 NWM 来源最小测试」；本组为其基础结构部分）:
+- 模块级公共函数/数据类（`normalize_source_id`、`ManifestEntry.as_dict`、`GeoBBox`、`validate_object_path`、`LocalObjectStore` 方法、safe_fs 的 no-follow 族）
+- 溯源检查的 seam 是仓库文件树本身（路径表 → 文件头字面量）
+
+Invariant Matrix
+Governing invariant: 每个快照文件（含测试）头部含字面量 `NWM@8ae9b8f2 <NWM 原路径>`，文件内零 DB/scheduler/registry/journal/reservation 面与零环境变量默认，且被保留符号与 pin 语义等价（只允许清单 §1 该行 `剥离点` 枚举的偏差）。
+Source-of-truth identity/contract: 清单 §1 表的「目标路径 ↔ NWM 原路径 ↔ 剥离点」三元组；pin commit `8ae9b8f29c8b72c574e8cbd95f2994160bd42832`。
+Surfaces:
+- Producers: 七个快照源模块 + 四个快照测试文件（写入方即本 PR 的实现者）
+- Validators/preflight: `producer/tests/test_snapshot_provenance.py`（头部与路径表双向）、禁区 grep 断言
+- Storage/cache/query: `store/object_store.py` 的 `LocalObjectStore`（本地文件后端读写）、`store/object_path.py` 的键校验
+- Public routes/entrypoints: none - 本 PR 不接 CLI/controller（issue PR Boundary）
+- Frontend/downstream consumers: none - 组 3/6/7/8/9 尚未落地；`raw/manifest.py` 信封的下游消费在任务 3.2 与 7.1
+- Failure paths/rollback/stale state: `store/safe_fs.py` 的 no-follow / 非常规文件 / 超限拒绝分型；`normalize_source_id` 未知源抛错；`cycle_hours`/`region` 缺参 fail closed
+- Evidence/audit/readiness: 模块头溯源注释本身；`nwm-snapshot-inventory.md` §1 表
+Regression rows:
+- 每个新增快照文件（源与测试） -> 头部第一段注释含 `NWM@8ae9b8f2 <该文件在清单里的原路径>`
+- `yd_producer`/`producer/tests` 内任一含 `NWM@` 的文件不在清单路径表内 -> 检查测试失败（反向守卫，保证后续组落地必须登记）
+- `store/`、`raw/` 全目录 grep `psycopg|DATABASE_URL|scheduler|registry|os.getenv|os.environ` -> 零命中
+- **pin 等价性（`剥离点` 为 `无` 或仅注释改写的四行）**：`producer/src/yd_producer/store/object_path.py`、`store/safe_fs.py`、`producer/tests/test_data_adapter_resolution.py`、`store/object_store.py`，各自 `diff` `git -C <NWM 本地 checkout> show 8ae9b8f29c8b72c574e8cbd95f2994160bd42832:<清单该行原路径>`，忽略新增的溯源头部与 import 路径改写（`packages.common.*`/`workers.data_adapters.*` → `yd_producer.*`）、以及 object_store 行 `剥离点` 点名改写的那条注释 -> 无其他差异。抽取/改写式的七行（`:40` source_identity、`:41` manifest、`:42` cycle_hours、`:43` region、`:50` test_safe_fs、`:51` test_object_path、`:52` test_source_identity）不适用本行，其等价证据是实现者的逐文件剥离点符合性说明
+- `normalize_source_id("IFS"/"ifs"/"Ifs")` -> `"ifs"`；`normalize_source_id("ERA5")` -> 抛错（ERA5 条目已删）
+- `ManifestEntry`/`DownloadManifest` 的 `as_dict` → `from_dict` roundtrip -> 字段等价
+- `DownloadManifest.from_dict` / `ManifestEntry.from_dict` 收到缺必需字段或类型错的 dict -> 稳定抛错，不返回半成品对象
+- `cycle_id_for(<已知 source_id + cycle datetime>)` -> pin 语义的已知 cycle id 字面量（清单 §4 风险 3 点名的新写覆盖）
+- `GeoBBox` 无 bbox 入参 -> fail closed（清单 §4 风险 14：四个 `DEFAULT_BBOX_*` 已删，禁止发明缺省）
+- `env_cycle_hours_utc` 显式入参传 `None` -> 仍走 `normalize_cycle_hours_utc(default, field_name=...)`，零 `os.getenv`
+- `parse_cycle_hours_utc` 收到畸形输入（`"0,25"`、`""`、`"0,abc"`）-> 稳定抛错
+- `validate_object_path` / `normalize_object_key` 收到 `..` 穿越、绝对路径、空键 -> 稳定拒绝
+- `LocalObjectStore` 对已存在对象再写 -> 断言 pin 上的覆盖/no-clobber 语义（以 pin 源码为准，不得在此改语义）
+- `sha256_bytes(<已知字节串>)` -> 已知摘要字面量（独立 oracle：`printf ... | shasum -a 256`）
+- safe_fs：符号链接叶 / 符号链接祖先 / 非常规文件 / 超限读 -> 稳定拒绝（快照测试原有覆盖保留）
+- 既有 `producer/tests/{test_config,test_geometry,test_smoke}.py` -> 保持全绿（未改动兄弟面）
+
+Boundary-surface checklist（high 强度）:
+- 共享 helper 根：`store/`（safe_fs 被组 13 原子 rename 与清理复用）、`raw/`（manifest 信封被组 3/7 消费）——本 PR 是这两个根的出生点，公共符号名与签名一经落地即为后续组的契约
+- 写/覆盖面：`LocalObjectStore` 的写路径、`safe_fs` 的 `atomic_write_bytes_no_follow`/`rename_entry_no_follow`/`rmtree_no_follow`
+- 读面：`read_bytes_limited_no_follow`（字节上限）、`stat_no_follow`
+- 生产者/消费者证据边界：`raw-manifest.json` 信封（本 PR 只交付数据结构，不交付生成逻辑）
+- 未改动的下游消费者：`yd_producer.config`、`yd_producer.geometry`（本 PR 零改动，必须保持全绿）
+
+Risk packs considered (core):
+- Public API / CLI / script entry: not selected - 本 PR 不触碰 CLI/controller（issue PR Boundary「不触碰 CLI/controller」）；模块级公共符号的契约性归下方 Legacy compatibility 包
+- Config / project setup: selected - D4 零默认：`cycle_hours` 与 bbox 由显式入参注入，缺参 fail closed；`region.py` 的四个 `DEFAULT_BBOX_*` 与 `cycle_hours.py` 的 `os.getenv` 必须删净
+- File IO / path safety / overwrite: selected - `safe_fs.py` 整文件即 no-follow/原子写/umask 语义面；`object_store.py`/`object_path.py` 的键与路径校验
+- Schema / columns / units / field names: selected - `ManifestEntry`/`DownloadManifest` 信封是 compute-loop §7.2 的下游 schema 真相；`normalize_source_id` 的小写契约（products-contract.md:37）；`GeoBBox` 字段
+- Auth / permissions / secrets: not selected - 无凭据面；umask/mode 语义归 File IO 包
+- Concurrency / shared state / ordering: not selected - 本组交付的是纯数据结构与无状态文件操作函数，无并发与共享状态；flock 与 NFS 提交顺序归组 12/13
+- Resource limits / large input / discovery: selected - `read_bytes_limited_no_follow` 的字节上限语义随 safe_fs 快照，是后续组读取外部文件的唯一上限闸门
+- Legacy compatibility / examples: selected - 快照必须与 pin `8ae9b8f2` 语义等价（modulo 清单 §1 逐行枚举的剥离点），否则后续 5 组消费出静默偏差
+- Error handling / rollback / partial outputs: selected - safe_fs 的稳定拒绝分型、`normalize_source_id` 未知源抛错、`from_dict` 畸形输入抛错、缺参 fail closed
+- Release / packaging / dependency compatibility: not selected - 七个模块全部纯 stdlib，本 PR 不新增依赖（D5：numpy/xarray/cfgrib 归组 6）；`uv sync --frozen` 无 drift 仍在证据里
+- Documentation / migration notes: not selected - 无对外文档变更；模块头溯源注释即迁移记录，其正确性由 2.3 检查测试机检
+
+Domain packs (from active profile):
+- Geospatial / CRS / shapefile sidecars: not selected - `region.py` 只搬 `GeoBBox` 数据结构，无重投影、无 CRS、无 shapefile sidecar
+- Time series / forcing / temporal boundaries: selected - `manifest.py` 保留的 cycle/lead 排程函数族（`parse_cycle_time`/`valid_time_for`/`generate_segmented_forecast_hours`/`validate_forecast_hours`）与 `cycle_hours.py` 的 00/12 规范化
+- 状态链 / warm-start 定戳一致性: not selected - 本 PR 不读写 `cfg.ic` 与状态目录，该面归组 4/11
+- NWM 快照溯源与 DB-free 隔离: selected - 本 issue 的核心验收（2.3 + 禁区 grep）
+
+Required evidence（每条 input -> expected output）:
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 退出码 0（本 PR 不新增依赖）
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+- 禁区 grep：`grep -rnE 'psycopg|DATABASE_URL|scheduler|registry|journal|reservation|os\.getenv|os\.environ' producer/src/yd_producer/store producer/src/yd_producer/raw` -> 零命中（该断言同时以测试形式固化，不只是人工命令）
+- 溯源头部检查（2.3）：对清单 §1 路径表内每个已存在的目标路径 -> 该文件前 5 行内含字面量 `NWM@8ae9b8f2 <对应原路径>`；表内路径尚未落地的行跳过（后续组落地即自动纳入）
+- 溯源反向守卫（2.3）：`producer/` 内 grep `NWM@` 命中的文件集合 -> 必须是路径表的子集，否则失败并打印越界文件路径
+- 上方 Regression rows 的每一行 -> 对应一个具名 pytest 用例（用例名与断言的期望值须来自 pin 源码或独立 oracle，不得从实现回读）
+
+Non-goals:
+- 清单 §1 的 `direct_grid_contract.py` / `shud_forcing_contract.py` 两行（能力 3 的 direct-grid 契约面）——属 forcing 本体，issue #5 Out of Scope，归组 8
+- converter / forcing / state / tracker 各行——归组 6/7/8/4/9
+- raw 完整性判定与 `raw-manifest.json` 生成逻辑——归任务 3.1/3.2（本 PR 只交付数据结构）
+- `config.toml` 的 bbox / forcing 上限字段落地——清单 §4 风险 14 已显式交接任务 1.1；本 PR 只保证缺参 fail closed
+- 不为 `manifest.py` 保留的排程函数族新写测试——`test_data_adapter_resolution.py` 整文件快照（10 个用例）已覆盖，重写等于二次实现
+- 不改动 pin 上被保留符号的语义以"顺手改好"——语义等价是本 PR 的验收项；改进意见记为 follow-up issue
+
+Review focus:
+- 逐行核对清单 §1 的 11 个 in-scope 行的 `剥离点` 列是否被逐条执行，尤其 `:40` 的 `_STORAGE_SOURCE_IDS` 字面量改写与 `:52` 的 10 处下游断言同步、`:43` 的四个 `DEFAULT_BBOX_*` 与 `_env_float` 删除、`:42` 的 `os.getenv` 删除
+- `:50` 的三处**函数内** import（L37 模块级、L270、L289 函数内）是否删净——函数内 import 漏改不会被 `pytest --collect-only` 抓到
+- 是否存在任何被发明的缺省值（bbox、上限、lead），违反 D4 零默认
+- 2.3 的检查测试是否真的双向（正向逐文件断言 + 反向越界守卫），以及是否会在后续组落地新快照文件时自动生效而非需要手工维护第二份清单
+- import 路径改写是否一致（`packages.common.*` / `workers.data_adapters.*` → `yd_producer.store.*` / `yd_producer.raw.*`，含 `storage.py` → `object_path.py` 的重命名）
+
 ## 3. raw-scan：完整性扫描与临时 manifest
 
 - [ ] 3.1 实现 IFS/GFS 完整性规则判定（00/12 限定、0–168h、变量/bundle 模式、GFS f000 特例、逐文件检查）

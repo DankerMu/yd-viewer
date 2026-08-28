@@ -46,3 +46,11 @@ forcing 生产 MUST 将 canonical 格点直接作为 SHUD forcing 站点（bindi
 #### Scenario: 溯源头部检查
 - **WHEN** 对 `yd_producer` 内标记为快照的模块运行溯源检查测试
 - **THEN** 每个快照文件头部含 `NWM@8ae9b8f2` 与原路径注释
+
+#### Scenario: 未登记快照文件的反向守卫
+- **WHEN** `producer/` 内出现头部含 `NWM@` 但不在快照勘察清单路径表内的文件
+- **THEN** 溯源检查测试失败，指出该文件路径
+
+#### Scenario: 快照 DB-free 隔离
+- **WHEN** 对已落地的快照模块目录运行禁区检查
+- **THEN** 无任何 `psycopg`、`DATABASE_URL`、scheduler/registry import 与环境变量读取
