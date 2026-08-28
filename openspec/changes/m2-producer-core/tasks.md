@@ -774,7 +774,7 @@ pin 的重戳经 `atomic_write_bytes_no_follow` 落 `.{name}.normalized` 点前�
 
 #### Change surface
 
-- 新增 `producer/src/yd_producer/state/state_qc.py`：任务 4.2 结构检查 + 任务 4.4 负残差 + header 判定基座
+- 新增 `producer/src/yd_producer/state/state_qc.py`：任务 4.2 结构检查 + 任务 4.4 负残差；header 判定基座**不在本模块**，从 issue #22 的 `state/header_time.py` 导入并转出（见下方 4.3 段）
 - 新增 `producer/src/yd_producer/state/restamp.py`：任务 4.3 重戳面
 - 改 `producer/src/yd_producer/state/cfg_ic.py`：#54 第 3/4/5 条（分段唯一性守卫、BOM 感知诊断、`__post_init__` 不变量与 `with_replaced_lines`）。**连带强制项**：第 3/4 条各往 `parse` 里新增一条**无 pin 对应物**的 `raise ValueError`，故模块头的「对 pin 的刻意偏离」清单 MUST 由六条扩到**八条**（段重入守卫、BOM 拒绝），且 `__post_init__`/`with_replaced_lines` 若引入新的拒绝路径一并入册。漏更清单是 #8 已复发两轮的同一失败类（`false-exhaustiveness-claim`），本 issue MUST 由上面改造后的 `ast` 计数测试机械闭合
 - 改 `producer/src/yd_producer/state/__init__.py`：导出新符号，并更新模块 docstring 里「4.2–4.4 另行落地」的措辞
