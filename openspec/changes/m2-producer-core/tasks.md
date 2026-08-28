@@ -187,7 +187,7 @@ Minimal mergeable slice: 勘察清单（2.1）——纯文档产物独立合并�
 
 ## 3. raw-scan：完整性扫描与临时 manifest
 
-- [ ] 3.1 实现 IFS/GFS 完整性规则判定（00/12 限定、0–168h、变量/bundle 模式、GFS f000 特例、逐文件检查）
+- [x] 3.1 实现 IFS/GFS 完整性规则判定（00/12 限定、0–168h、变量/bundle 模式、GFS f000 特例、逐文件检查）
 - [ ] 3.2 实现 raw 只读复制到 `work/raw/`（源不可变断言）与临时 `raw-manifest.json` 生成（entry 只引用副本）
 
 依赖：组 1（规则来自 config）、组 2（manifest 结构）
@@ -216,7 +216,8 @@ Seam 与返回形态（本 fixture 钉死）:
 
 ```python
 def judge(raw_root, source, cycle, config) -> ScanVerdict
-# raw_root: str | os.PathLike[str]（NWM raw 根，其下为 <source>/<YYYYMMDDHH>/）
+# raw_root: str | os.PathLike[str]（NWM raw 根，其下为 <存储身份>/<YYYYMMDDHH>/；
+#           存储身份逐源非对称，见下方「raw 布局与文件名」）
 # source:   "ifs" | "gfs"（其它取值 fail closed）
 # cycle:    datetime，MUST tz-aware 且为 UTC，且 minute/second/microsecond MUST 均为 0
 #           （目录名取 UTC 紧凑戳 YYYYMMDDHH，非整点值若放行会被静默截断成另一个 cycle）
@@ -240,7 +241,7 @@ raw 布局与文件名（NWM pin 事实转录，勘察清单 §3.1 桥）:
 - 预期文件集 = `lead_hours × bundles`（tasks.md 组 1 已逐字钉死该公式），无变量维度：pin 上一个 forecast hour 只落**一个**物理 bundle 文件、内含该小时全部变量（`gfs_adapter.py:611-636` 的 `layout="per_forecast_hour"`）
 - `bundles` 元素是 `str.format` 文件名模式，占位符词表**恰好两个具名字段**：`{cycle_hour}`（int，cycle 的 UTC 小时）与 `{lead}`（int）；允许格式说明符，故 pin 的真实形态可表达为 `"gfs.t{cycle_hour:02d}z.pgrb2.0p25.f{lead:03d}.bundle.grib2"`（`gfs_adapter.py:1878-1880`）与 `"ifs.t{cycle_hour:02d}z.f{lead:03d}.bundle.grib2"`（`ifs_adapter.py:1688-1690`）。出现词表外的具名字段、位置字段（`{}`/`{0}`）或语法损坏的模式，一律 fail closed 并在错误中点名该模式与该字段——不得静默留下未替换的 `{...}` 去 stat 一个必然不存在的路径
 - **每个模式 MUST 含 `{lead}`，且渲染出的预期文件集 MUST 单射**（round 1 审核 cand-01，verifier CONFIRMED/FIX_NOW）：只做占位符白名单不足以守住「预期文件集 = `lead_hours × bundles`」——漏写 `{lead}` 的模式（如把 `.f{lead:03d}` 写丢）会让全部 lead 渲染成同一路径，`expected_files` 基数虚高而判定域只剩一个点，57 个 lead 里只要 1 个文件落盘即判整轮完整。这与本 fixture 拒空列表是同一病理的两扇门（一扇让预期集为空、一扇让它塌缩），故一并 fail closed：模式的顶层具名字段集合内没有 `lead` 即 `ConfigError`。注意 `string.Formatter().parse` 不暴露嵌套格式说明符内的字段，故 `"f{cycle_hour:0{lead}d}"` 这类只把 `lead` 写在 spec 里的模式会被拒——方向 fail-closed，属有意为之，须在代码注释写明。漏写 `{cycle_hour}` 无害（cycle 目录已隔离），不必拒。等价地，`expected_files` MUST 无重复项——这条同时覆盖「两个 bundle 模式渲染同名」与「`lead_hours` 含重复值」（cand-05 的错位触发门，见 Non-goals）
-- 渲染结果 MUST 是单个文件名：含路径分隔符或 `..` 段即 fail closed（`config.toml` 虽为版本化文件，但渲染路径逃出 `<raw_root>/<source>/<cycle>/` 就使"只读 NWM 原件"的边界失效）
+- 渲染结果 MUST 是单个文件名：含路径分隔符或 `..` 段即 fail closed（`config.toml` 虽为版本化文件，但渲染路径逃出 `<raw_root>/<存储身份>/<cycle>/` 就使"只读 NWM 原件"的边界失效）
 
 GFS f000 特例（`RawSourceConfig.f000_special`）:
 
@@ -303,20 +304,38 @@ Required evidence（每条 input -> expected output；`cd producer && uv run pyt
 
 Required evidence（round 1 审核后追加；上表的取证方法被变异体证伪或未覆盖的部分）:
 
-- **取证方法修订（cand-06，verifier CONFIRMED）**：上一行只堵住"列目录后过滤"，堵不住"先递归遍历再校验"——实测变异体（在第 1 段之前插入 `raw_root` 的 `rglob` 全树遍历，带 `is_dir()` 守卫）在 47 例下全绿，而它同时违反本 fixture 判定顺序的"任何文件系统访问之前"与 Resource limits pack 的"MUST NOT 递归遍历"。故追加哨兵取证：monkeypatch 把 `pathlib.Path.is_file`/`iterdir`/`rglob` 与 `builtins.open` 换成抛 `AssertionError` 的桩 -> 全部拒绝路径用例（非法 `cycle.hours`、空列表、词表外 `source`、naive cycle、坏模式）仍抛 `ConfigError`；happy path 只桩 `iterdir`/`rglob` -> 判定照常完成。仅以"不存在的 `raw_root`"断言不足以取证该性质
+- **取证方法修订（cand-06 -> r2-cand-01，两轮）**：哨兵 MUST 桩在 **`os` 层**，MUST NOT 只桩 `pathlib` 名字。理由是两轮实测的教训：round 1 版本逐字点名 `pathlib.Path.is_file`/`iterdir`/`rglob` + `builtins.open`，而同轮的 cand-02 修复把实现的文件系统入口换成了 `Path.stat()`——`Path.is_file` 成为死桩，round 2 的五个变异体（`os.walk`/`os.scandir`/`os.listdir`/`os.stat`/带 `except OSError` 的 `Path.stat`，均带 `is_dir()` 守卫或吞异常，插在第 1 段之前）**全部存活**。这条取证一旦以"某个具体名字"表达，就会随实现换原语而静默失效。
+  正确形态：monkeypatch **`os.stat`、`os.scandir`、`os.listdir`** 三个为抛 `AssertionError` 的桩（verifier 实测：只加这三桩，干净实现全绿而上述五个变异体全部变红）。**不必单独桩 `Path.stat`**——3.12 与 3.14 的 `pathlib.Path.stat` 都是 `return os.stat(self, ...)`，`os.walk` 亦经 `os.scandir`，`os` 层是全部 pathlib 拼法的汇流处，这正是"桩不变量而非桩例子"的落点。`builtins.open` 与 `Path.iterdir`/`rglob`/`glob` 可一并保留作纵深。
+  两个用例的桩集不同，MUST 分开写：**拒绝路径**哨兵（非法 `cycle.hours`、空列表、词表外 `source`、naive/非整点 cycle、坏模式）桩上述三者 -> 仍抛 `ConfigError`；**happy path** 哨兵只桩 `os.scandir`/`os.listdir`（与 `Path.iterdir`/`rglob`/`glob`）-> 判定照常完成，**MUST NOT** 桩 `os.stat`/`Path.stat`——逐文件 stat 是 happy path 的规定行为。
+  仅以"不存在的 `raw_root`"断言不足以取证：它只杀得掉**不吞异常**的探针，任何带守卫或 `except OSError` 的探针照样存活
 - **以真实 `open` 而非 `os.access` 判可读的机检（cand-08）**：在 chmod 不可读用例内 `monkeypatch.setattr(os, "access", ...)` 使其被调用即 fail -> 判定照常完成。理由：`chmod 0o000` 在普通 DAC 下两种实现结论一致，对该 MUST 零判别力（实测 `_is_readable` 换成 `os.access` 后 47 例全绿）
 - **cycle 目录不可搜索（cand-02 的负例）**：完整 fixture 后对 `<cycle>` 目录 `chmod 0o000`（`skipif(os.geteuid() == 0)`，`finally` 恢复）-> **不抛裸 `OSError`**，全部预期文件落入 `unreadable_files`，`complete is False`
+- **cycle 路径位置上是普通文件（r2-cand-04，ENOTDIR）**：把 `<cycle>` 目录的位置写成一个普通文件（NWM 半写、人工误放，或 `raw_root` 配错一层）-> `complete is False`，`missing_files == expected_files`，`unreadable_files == ()`。这条与上一条成对，钉死判定顺序第 4 段的**两支分类**：`FileNotFoundError`/`NotADirectoryError` 归 `missing_files`，其余 `OSError` 归 `unreadable_files`；只有 ENOENT 与 EACCES 的用例分不出 `NotADirectoryError` 在哪一支（实测把它从 missing 支删掉，80 例全绿）。macOS/Linux 对 `stat("<普通文件>/child")` 均抛 `NotADirectoryError`，无平台依赖、无需 skipif
+- **裸 `ValueError` 不得外泄（r2-cand-02）**：`bundles` 模式或 `raw_root` 含 NUL 字符（TOML 的 `\u0000` 转义可承载，`tomllib` 接受、装载器只做类型校验）-> **不外泄裸 `ValueError`**。两个入口都要有用例：`raw_root` 那支根本不经过模式校验，故只在渲染侧加守卫关不掉它
 - **模式缺 `{lead}`（cand-01）**：`bundles` 内任一模式不含 `{lead}` -> 抛 `ConfigError` 且 `path` 为该源 bundles 的点分路径、消息点名该模式；另断言合法路径下 `len(set(expected_files)) == len(expected_files)`
 - **预期集单射性的两个兄弟触发门（cand-01/cand-05）**：`bundles` 含两个渲染同名的模式、`lead_hours` 含重复值 -> 各自抛 `ConfigError` 且 `path` 为对应点分路径
 - **lead 升序有判别力（cand-07）**：`lead_hours = (6, 0, 3)` -> `expected_files` 等于按 `(0, 3, 6)` **字面**构造的清单；构造该期望值时 MUST NOT 复用测试助手内部的 `sorted`，否则 oracle 与被测实现共享同一排序行为而恒真（实测去掉实现侧排序后 47 例全绿）
 - **IFS 目录段为大写 `IFS`（cand-03）**：对 `source="ifs"` 断言 `expected_files` 的目录段逐字为 `IFS`；对 `source="gfs"` 断言为 `gfs`。fixture 树 MUST 用与实现**不同来源**的字面量构造（直接写死 `IFS`/`gfs`，不得复用实现导出的映射），否则两侧同步漂移而恒真；另注意 macOS 文件系统大小写不敏感，该用例的判别力来自路径**字面比对**而非文件是否存在
 - **相对 `raw_root`（偏离 13）**：`monkeypatch.chdir(tmp_path)` 后以相对 `raw_root` 调用 -> `expected_files` 全为绝对路径且等于 `tmp_path` 下的字面清单
 - **非 PathLike `raw_root`（偏离 9）**：`judge(123, ...)` -> 抛 `ConfigError` 且 `path is None`（不得外泄裸 `TypeError`）
-- **渲染出 `""` 或 `"."`（偏离 5）**：两者与分隔符/`..` 同样被拒（渲染出 `"."` 会 stat 到 cycle 目录本身）
+- **渲染出 `""`、`"."` 或 `".."`（偏离 5 / r2-cand-03）**：三者与分隔符同样被拒。**三个取值都 MUST 用含 `{lead}` 且渲染结果逐字为该值的模式来构造，并配 `lead_hours` 单元素**——否则用例会被更早的门吸收而零判别力：不含 `{lead}` 的模式（如裸 `".."`）先被 `{lead}` 必需门拦下、报文是"不含 `{lead}`"，而"断言抛 `ConfigError` 且 `path` 为 bundles 点分路径"在两个门下同样成立，于是该参数分不出单文件名约束在不在。多 lead 则会被单射门吸收。这是本 issue 记录在案的**第三处门重叠**（另两处：不含任何占位符的模式被单射门吸收；`""`/`"."` 曾被单射门吸收后由单元素 `lead_hours` 解开）
 - **UTC 判据为零偏移量而非 tzinfo 身份（cand-04）**：以 `zoneinfo.ZoneInfo("UTC")` 或 `timezone(timedelta(0), name="Z")` 构造 cycle -> 判定正常返回。MUST NOT 用 `timezone(timedelta(0))`：CPython 对无名零偏移返回 `timezone.utc` 单例，该取值对本条零判别力（实测判据换成 `tzinfo is UTC` 后 47 例全绿）
 - `cd producer && uv run pytest` -> 退出码 0
 - `cd producer && uv run ruff check .` 与 `uv run ruff format --check .` -> 退出码 0
 - `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
+
+Pattern escalation（round 2 后补入；两个 failure class 连续两轮复发，repair intensity medium 的升级门已触发）:
+
+```text
+Pattern escalation: yes
+Failure class A: contract —— judge 的异常收敛面
+Invariant A: `judge` 对外只抛 `ConfigError`；任何文件系统原语的**全部**异常面 MUST 被显式收敛成 verdict 数据或 `ConfigError`，MUST NOT 逐个 errno/异常类型地补。
+Trigger A: round 1 cand-02（`Path.is_file()` 的 `OSError` 未收敛）-> round 2 r2-cand-02（重写后的 `_check` 丢掉 `Path.is_file()` 原本吞的 `ValueError`）。同一处代码、同一条不变量、连续两轮。
+
+Failure class B: test-evidence —— 取证方法钉的是"例子"而不是"不变量"
+Invariant B: 每条证据行 MUST 表达被测**性质**，且其构造 MUST 与被测实现的具体原语/拼法解耦；用例 MUST 由一个能证伪该性质的变异体验证过。
+Trigger B: round 1 cand-06/07/08（哨兵桩具体名字、oracle 复用实现的 sorted、chmod 用例对 open-vs-access 零判别力）-> round 2 r2-cand-01/03/04（哨兵变死桩、`..` 参数被 `{lead}` 门吸收、ENOTDIR 分支无用例）。
+```
 
 Non-goals:
 
