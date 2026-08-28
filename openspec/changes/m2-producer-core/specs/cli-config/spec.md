@@ -15,8 +15,12 @@
 - **WHEN** 执行 `yd-producer bootstrap`
 - **THEN** 以非零退出码报错，不执行任何业务逻辑
 
+#### Scenario: prepare 的基线包路径必需
+- **WHEN** 执行 `yd-producer prepare` 而不给 `--baseline`
+- **THEN** 以 argparse 用法错误退出，不装载配置、不执行任何业务逻辑（基线包路径只经调用传入，代码 MUST NOT 内置默认路径，compute-loop §6.1）
+
 ### Requirement: config.toml 装载与校验
-装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构、NWM mapping-builder module 点分名 `nwm_mapping_builder_module`（版本化快照事实，非现场值）；任何必需字段缺失或类型错误 MUST fail closed。
+装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构、NWM mapping-builder module 点分名 `nwm_mapping_builder_module` 与每 source 的 NWM canonical grid 标识 `nwm_canonical_grid_id.gfs`/`.ifs`（两者均为版本化快照事实，非现场值）；任何必需字段缺失或类型错误 MUST fail closed。装载器只校验存在性与类型，MUST NOT 做取值域校验（取值域约束归各自的下游 fail-closed 闸门）。
 
 #### Scenario: 完整配置装载成功
 - **WHEN** 载入包含全部必需字段的 `config.toml`
