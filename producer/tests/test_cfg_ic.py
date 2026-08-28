@@ -721,14 +721,15 @@ def test_module_documents_the_deliberate_deviations() -> None:
     assert "刻意偏离" in head
     assert "OSError" in head and "ValueError" in head
     assert "mesh" in head
-    # 偏离清单自称是全集，所以每一条 pin 无对应物的 fail-closed 都必须在清单里点名。
-    assert "五条" in head
+    # 偏离清单自称是全集，所以每一条 pin 无对应物、且可被输入触发的 fail-closed 都必须在
+    # 清单里点名（`parse` 末尾的 unassigned 自检对任何输入都不可达，是不变量断言，不计入）。
+    assert "六条" in head
     assert "mesh 列头" in head
     assert "max_bytes" in head
-    assert head.count("\n1. ") == 1
-    for ordinal in ("\n2. ", "\n3. ", "\n4. ", "\n5. "):
+    assert "计数式兼容布局" in head
+    for ordinal in ("\n1. ", "\n2. ", "\n3. ", "\n4. ", "\n5. ", "\n6. "):
         assert head.count(ordinal) == 1, ordinal
-    assert "\n6. " not in head
+    assert "\n7. " not in head
 
 
 # --- 移植辅助的判定语义（与 pin 逐字一致） ---

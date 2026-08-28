@@ -314,7 +314,7 @@ Minimal mergeable slice: 完整性判定纯函数（3.1）——不含复制与 
 
 ## 4. state-tools：cfg.ic 工具链
 
-- [ ] 4.1 快照并适配 `cfg.ic` 原生分段解析与回写（mesh/river/lake），字节级 roundtrip 测试
+- [x] 4.1 快照并适配 `cfg.ic` 原生分段解析与回写（mesh/river/lake），字节级 roundtrip 测试
 - [ ] 4.2 实现结构检查（缺段、行数与 header 不符、数值区损坏）
 - [ ] 4.3 实现重戳到目标 cycle 绝对时间（只改 header、数据不变；服务 init 首态与发布前 T+12 定戳两条路径）
 - [ ] 4.4 快照负残差归零与域均修正阈值检查纯函数
@@ -347,7 +347,7 @@ Must preserve:
 Must add/change:
 - `parse(path_or_bytes) -> CfgIcDocument`：文档模型 MUST 同时携带 (a) 原始行序列的逐字副本、(b) header 行位置、(c) 每段（mesh / river / lake，lake 可缺）的行区间与行数、(d) 段内数值视图（供 #9 消费的只读派生，非回写来源）
 - `render(doc) -> bytes`：回写 MUST 由逐字行还原，MUST NOT 由数值重新格式化。对任何本解析器接受的输入，`render(parse(b)) == b` 逐字节成立
-- **行归属必须是全覆盖划分**：文档模型 MUST 把每一行恰好归入一个区域（header / 段列头 / 某段的数据行 / lake preamble），MUST NOT 存在"未归属"的行。两条由 pin 语义反推的钉死裁决（roundtrip 无法分辨这两种猜法，必须在此定死，否则 #9 的结构检查会继承一个错误划分）：(a) **header 行 = 首个非空行**（pin 在取 `lines[0]` 前先丢空行）；(b) mesh 段内**超出 header 声明 `mesh_count` 的多余数据行 MUST 抛 `ValueError`**——这是对 pin 的**刻意偏离**并 MUST 在模块头注明：pin 的 `_parse_sectioned_rows`（`state_qc.py:531-534`，其中 `:532-533` 是 `if len(mesh_rows) < mesh_count: mesh_rows.append(row)` 这一对）静默丢弃多余 mesh 行，而格式保真根不得静默丢状态行
+- **行归属必须是全覆盖划分**：文档模型 MUST 把每一行恰好归入一个区域（header / 段列头 / 某段的数据行 / lake preamble / 空行），MUST NOT 存在"未归属"的行。两条由 pin 语义反推的钉死裁决（空行单独成一类：pin 在分段前先丢空行，逐字保真模型必须保留它们才能字节等价，又不能计入任何段的数据行，否则污染 #9 继承的段行数与行区间；见下方证据行 (b)。roundtrip 无法分辨这两种猜法，必须在此定死，否则 #9 的结构检查会继承一个错误划分）：(a) **header 行 = 首个非空行**（pin 在取 `lines[0]` 前先丢空行）；(b) mesh 段内**超出 header 声明 `mesh_count` 的多余数据行 MUST 抛 `ValueError`**——这是对 pin 的**刻意偏离**并 MUST 在模块头注明：pin 的 `_parse_sectioned_rows`（`state_qc.py:531-534`，其中 `:532-533` 是 `if len(mesh_rows) < mesh_count: mesh_rows.append(row)` 这一对）静默丢弃多余 mesh 行，而格式保真根不得静默丢状态行
 - 解析级 fail-closed（本 issue 拥有，语义取自 NWM 场景）：文件不存在、路径为目录或不可读、非 UTF-8、超过字节上界、空文件、header 不可解析、分段体被截断、`max_bytes` 为负值、**输入中不存在任何分段列头（即非原生的计数式兼容布局）**——MUST 抛 `ValueError`，MUST NOT 外泄 `UnicodeDecodeError`，MUST NOT 无界读入，MUST NOT 回退到计数式布局。其中把文件不存在/不可读的 `OSError` 统一封装为 `ValueError` 是对 pin 的**刻意偏离**（pin 的 `_read_bytes_limited` `:563-571` 直接抛 `OSError`，由调用方 `except (OSError, ValueError)` 兜住），本 issue 收敛为单一异常以便调用方无需知道两种类型；MUST 在模块头注明该偏离。仓库级错误封装仍归 #9 的边界
 - **字节上界 MUST 可注入**：`parse(..., max_bytes=MAX_STATE_IC_BYTES)`，模块默认值等于 pin 的 `64 * 1024 * 1024`。理由：上界的两条边界用例（恰好、超一字节）是杀死"`>` 改 `>=`"变异体的唯一手段，而在真实上界上构造 64 MiB 合法文件并逐行保真读入会让每次 `uv run pytest` 多耗数百 MB 内存与可观时间；边界用例 MUST 在**小的注入上界**上跑，另用一条廉价断言钉死模块默认值等于 pin 常量
 - lake preamble（末条 river 行与 lake 列头之间的 `<lake-count> <lake-state-columns>` 行）MUST NOT 被计为 river 行，且回写后仍在原位

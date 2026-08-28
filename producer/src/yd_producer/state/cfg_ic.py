@@ -13,7 +13,11 @@ bytes，**绝不由数值重新格式化**。数值视图 `Section.rows` 是只�
 
 行归属是**全覆盖划分**：每一行恰好一个 `LineRole`，无「未归属」行。
 
-对 pin 的**刻意偏离**（五条，此处即全集）：
+对 pin 的**刻意偏离**（六条，此处即全集）。此清单已把 `parse` 里**全部** `raise ValueError`
+逐条对 pin 的 `_parse_sectioned_rows` / `_parse_ic_file` 核对过：其余 `raise` 均有 pin 对应物
+（超限、非 UTF-8、空文件、不可读 header、非数值数据行、截断 body、截断 lake body）；唯一既无
+pin 对应物又未列入的 `raise` 是 `parse` 末尾的 unassigned 全覆盖划分自检——它对**任何**输入
+都不可达（`pragma: no cover`），是内部不变量断言而非 fail-closed，故不计入偏离。
 
 1. **mesh 段超出 header 声明 `mesh_count` 的多余数据行抛 `ValueError`**。pin 的
    `_parse_sectioned_rows`(:531-534，其中 `:532-533` 是 `if len(mesh_rows) < mesh_count:`
@@ -32,6 +36,13 @@ bytes，**绝不由数值重新格式化**。数值视图 `Section.rows` 是只�
    `handle.read(max_bytes + 1)`：`max_bytes == -2` 会退化为 `read(-1)`，把**整个文件**
    读进内存，随后 `len(data) > max_bytes` 照样抛错——于是这次无界读长得和一次正常拒绝
    一模一样，OOM 保护静默失效。`max_bytes` 在本模块是公开可注入参数，故先验后读。
+6. **body 内不含任何分段列头（计数式兼容布局）时抛 `ValueError`**。pin 的
+   `_parse_sectioned_rows`(:508-509) 在这种输入上返回 `None`，其调用方 `_parse_ic_file`
+   (:463-493) 随即按 header 的 `(mesh, river, lake)` 计数切分数据行并**成功**返回；本模块
+   只支持原生分段布局，在此 fail-closed，是无 pin 对应物的拒绝。理由：格式保真回写要求
+   逐段行归属可判定，而计数式布局没有列头可锚定段边界，靠 header 计数切分一旦与真实 body
+   不符就会把状态行错归到别的段——这正是「绝不静默丢/错置状态行」的同一条根。取舍与未决点
+   见 issue #8 fixture。
 
 对 pin 的**模型扩展**（非偏离，pin 无行模型）：空行单独归 `LineRole.BLANK`。pin 在分段前
 先丢空行，本模块必须保留它们才能字节等价，又不能把它们计入任何段的数据行（会污染 #9 继承
@@ -39,8 +50,7 @@ bytes，**绝不由数值重新格式化**。数值视图 `Section.rows` 是只�
 空行再判定），保真只作用于回写侧。
 
 本模块 stdlib-only：零 NWM 运行时 import、零数据库/scheduler 依赖，不写任何文件
-（`render` 返回 bytes，落盘归调用方）。**只支持原生分段布局**：pin 在无分段列头时回退的
-计数式兼容布局在此 fail-closed 抛 `ValueError`（取舍与未决点见 issue #8 fixture）。
+（`render` 返回 bytes，落盘归调用方）。**只支持原生分段布局**（见上偏离 6）。
 """
 
 from __future__ import annotations
@@ -183,6 +193,7 @@ def parse(
 
     body = significant[1:]
     if not any(_looks_like_column_header(text) for _, text in body):
+        # 刻意偏离 pin：pin 在此返回 None 并成功走计数式兼容布局（见模块头偏离 6）。
         raise ValueError(
             "cfg.ic 不是原生分段布局：未发现任何分段列头"
             "（如 `Index Canopy Snow Surface Unsat GW` / `Index Stage`）；"
