@@ -580,7 +580,8 @@ Must add/change（逐条钉死，实现方消费不重议）:
 
 **C. `sbatch` 输出解析（纯函数）**
 
-- `parse_sbatch_job_id(stdout: str) -> str`：`--parsable` 下 `sbatch` 输出 `<jobid>` 或 `<jobid>;<cluster>`。取 `;` 前首段并 `strip()`；结果为空、或非全数字 -> 抛 `ExecutorError`（`job_id=None`，此刻还没有 id）。多行输出取首个非空行。
+- `parse_sbatch_job_id(stdout: str) -> str`：`--parsable` 下 `sbatch` 输出 `<jobid>` 或 `<jobid>;<cluster>`。取 `;` 前首段并 `strip()`；结果为空、或非全数字 -> 抛 `ExecutorError`（`job_id=None`，此刻还没有 id）。多行输出取首个**非空行**。
+- **「非空行」的判据 MUST 为「`strip()` 后非空」**（本模块所有涉及"非空行"的地方同判据，含 §D 的行数判定）。纯空白行 MUST 被跳过/不计数，MUST NOT 只用 `if line:` 一类真值判断——那会把 `"   "` 当成一行有效输出。**`strip()` 与该判据都是可机检的属性，MUST 各有一条"改坏即变红"的接受态用例**（见 Required evidence；round 3 审核 cand-14 与 gate retro 的直接产物：此前 `strip()` 只写在散文里、未进 Required-evidence 枚举，测试忠实照枚举写，于是该属性三轮无 oracle）。
 
 **D. `sacct` 命令与输出解析（纯函数）**
 
@@ -591,7 +592,7 @@ Must add/change（逐条钉死，实现方消费不重议）:
   - **不取 `Submit`**：`submitted_at` 由 `submit` 取一次本地时钟写定（#10 fixture 的打戳时机 MUST），而 `sacct` 在作业刚提交时可能尚无记录（见 Known limits），提交那一刻根本取不到 `Submit`；若改为 `poll` 时用 `Submit` 覆写，同一字段会在一次 run 内先后报出两个值——一个字段两个权威，比时钟偏斜更坏。故保留本地钟，偏斜风险按 Known limits 归 M4。`-X` **不可省**：缺它 `sacct` 会连作业步（`.batch`/`.extern`）一起吐，解析拿到多行且首行未必是分配本体。
 - `SACCT_ENV: Mapping[str, str]` MUST 至少含 `{"TZ": "UTC", "SLURM_TIME_FORMAT": "standard"}`。**并入语义钉死为叠加而非替换**：`SlurmJobExecutor` 在调用 runner 前构造 `{**os.environ, **SACCT_ENV}` 传入；MUST NOT 只传 `SACCT_ENV`——那会让子进程丢掉 `PATH` 与 Slurm 客户端环境，M4 现场每次 `poll` 都失败，正是这条钉死本要防的失败类。叠加发生在 executor 侧（可测），不在 `subprocess_runner` 侧（不测）。理由：`sacct` 默认吐集群本地时间且格式受该环境变量左右，而 `JobRecord.__post_init__` 对 naive 与非零偏移 `datetime` 一律 fail closed（`executor.py:_require_utc`）——不钉死时区就是把一个必然的 `ExecutorError` 留到 M4 现场触发。
 - `parse_sacct_record(stdout: str, job_id: str) -> tuple[JobState, datetime | None, datetime | None]`：
-  - 非空行数 MUST 恰为 1；为 0 或 >1 -> 抛 `ExecutorError(job_id=job_id)`（`-X` 下多行意味着出现了未预期的作业副本，静默取首行会让 `poll` 报告一个没被查询的实体）。该唯一行按 `|` 拆四列；列数不等于 4 -> 抛 `ExecutorError(job_id=job_id)`；
+  - 非空行数 MUST 恰为 1（「非空行」判据同 §C：`strip()` 后非空）；为 0 或 >1 -> 抛 `ExecutorError(job_id=job_id)`（`-X` 下多行意味着出现了未预期的作业副本，静默取首行会让 `poll` 报告一个没被查询的实体）。该唯一行按 `|` 拆四列；列数不等于 4 -> 抛 `ExecutorError(job_id=job_id)`；
   - 首列 JobID 与查询 `job_id` 不相等 -> 抛 `ExecutorError(job_id=job_id)`（防串台）；
   - State 列先按空格截首词（`sacct` 的 `CANCELLED by 1234` 形态 MUST 归一为 `CANCELLED`），再查 `SLURM_STATE_MAP`；**未知状态串 -> 抛 `ExecutorError(job_id=job_id)`，MUST NOT 兜底映射为 `FAILED`**（兜底会把"没见过的调度器状态"伪装成"作业自身失败"，正是 #10 拆分 `TIMEOUT`/`FAILED` 要保住的那条运维判据）；
   - Start/End 列为 `Unknown` / `None` / 空 -> `None`；否则按 `%Y-%m-%dT%H:%M:%S` 解析并挂 `timezone.utc`；格式不合 -> 抛 `ExecutorError(job_id=job_id)`。
@@ -646,6 +647,8 @@ Required evidence（每条 input -> expected output）:
 
 `sbatch` 输出（C）:
 - `"12345\n"` -> `"12345"`；`"12345;cluster0\n"` -> `"12345"`；`"\n12345\n"` -> `"12345"`
+- **接受态归一化（钉死 `strip()`；去掉 `strip()` 后这两条 MUST 变红）**：`"12345 \n"` -> `"12345"`；`"12345 ; cluster0\n"` -> `"12345"`
+- **接受态「非空行」判据（把 `line.strip()` 换成 `line` 后 MUST 变红）**：`"   \n12345\n"` -> `"12345"`（纯空白行被跳过，不被当作首个非空行）
 - `""`、`"   \n"`、`"abc"`、`";cluster0"` -> 各抛 `ExecutorError` 且 `exc.job_id is None`
 
 `sacct`（D）:
@@ -657,6 +660,7 @@ Required evidence（每条 input -> expected output）:
 - `"12345|PENDING|Unknown|Unknown"` -> `(PENDING, None, None)`；`None` 与空串两种写法同样得 `None`
 - `"12345|BOGUS_STATE|Unknown|Unknown"` -> 抛 `ExecutorError` 且 `exc.job_id == "12345"`（MUST NOT 得到 `FAILED`）
 - `""`（空输出）-> 抛 `ExecutorError`，`exc.job_id == "12345"`（fail closed；见 Known limits 的 sacct 落库延迟一条）
+- **「非空行」判据（把行过滤的 `line.strip()` 换成 `line` 后 MUST 变红）**：`"   \n12345|COMPLETED|2026-08-28T00:00:00|2026-08-28T01:00:00"` -> 正常解析为 `SUCCEEDED`（纯空白行不计入行数，不触发"行数不为 1"）
 - 两行合法记录（`"12345|COMPLETED|...|...\n12345|FAILED|...|..."`）-> 抛 `ExecutorError`，`exc.job_id == "12345"`（MUST NOT 静默取首行）
 - `"12345|COMPLETED|2026-08-28T00:00:00"`（三列）-> 抛 `ExecutorError`
 - `"99999|COMPLETED|...|..."`（JobID 串台）-> 抛 `ExecutorError`，`exc.job_id == "12345"`
@@ -686,6 +690,7 @@ Non-goals:
 - 控制器对本执行器的消费（前沿、双源并行、失败隔离、flock）—— 组 12–14，issue #22–#28
 - 作业取消 / watchdog —— compute-loop §10 明确不做
 - `local.toml` 资源取值的语义校验（`walltime` 格式、`partition` 是否真实存在、`memory` 单位）—— 装载层只校验类型（#2 已裁决"不做值域校验"），真实取值的正确性归 M4 现场
+- **不钉以下三处 `strip()`，按 slack 处理**（round 3 的系统性归一化扫描共发现 6 个存活变异体，其余三处逐条裁决于此，使后续轮次不再重复发现同一批）：`_parse_sacct_time` 对时间列的 `raw.strip()`、JobID 串台比对的 `reported_id.strip()`、状态串截首词前的 `raw_state.strip()`。理由：三者都是 `--parsable2` 输出上不会出现的形态（该模式不产生列内 padding），且都不在 spec 或本 fixture 的任何 MUST 之下；它们是防御性余量，不是被钉死的属性。若日后现场证明 `sacct` 会吐 padding，按文档优先先修订本条再动码。
 - 跨进程的 job 记录持久化：`poll` 依赖实例内提交记录，故只支持"同一 run 进程内提交后轮询"。这正是 `specs/run-controller/spec.md`「并发与锁」的形态（单进程持 flock 覆盖提交→等待→发布全生命周期），非缺陷
 - `squeue` 回退：`sacct` 落库前的查询空窗按 fail closed 处理（见 Known limits），本 issue 不引入第二个查询通道
 
@@ -710,6 +715,7 @@ Review focus:
 - 记录不变式是否仍由 `JobRecord.__post_init__` 独家承担，本模块是否复制了一份（第二权威）
 - 失败路径是否全部收敛到 `ExecutorError` 且 `job_id` 属性可机检定位；runner 的原生异常是否被吞而未转译
 - 传给 runner 的 `env` 是 `os.environ` 叠加 `SACCT_ENV`（子进程仍有 `PATH`），还是把 `SACCT_ENV` 当整个环境替换掉
+- **成功路径的输入归一化是否也有 oracle**（常驻轴，非一次性检查）：`strip()`、"非空行"判据、分隔符切分这一类**接受态**属性，是否各有一条"改坏即变红"的用例——而不是只测失败路径。本 PR 三轮复发的 test-coverage-gap 全部源自这一轴从未进过变异清单（gate retro 的根因结论）
 - argv 断言是否逐元素精确比对，而非"包含某个 flag"式的弱断言
 
 ## 6. forcing-chain（二）：科学计算依赖引入
