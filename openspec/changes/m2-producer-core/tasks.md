@@ -177,8 +177,8 @@ Review focus:
 ## 2. forcing-chain（一）：NWM 快照勘察与基础结构
 
 - [x] 2.1 只读勘察 NWM@`8ae9b8f2`，产出精确快照文件清单（模块 → 原路径 → 目标路径，含 tracker 与补跑），落为 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md`；表格列固定 `| 能力项 | NWM 原路径 | 目标路径 | 剥离点 | 备注 |`，一行一个文件、路径反引号包裹；凡原模块触及 DB/scheduler/registry/journal/reservation 的行，`剥离点` 必须点名具体 import、符号或分支（供 2.2 逐文件消费），无耦合写 `无`，禁止“已剥离 DB 分支”一类无点名的笼统措辞
-- [ ] 2.2 快照 object-store/path 基础函数与 IFS/GFS source、raw manifest 数据结构，含其最小测试；剥离 DB/scheduler 分支
-- [ ] 2.3 增加溯源头部检查测试：所有快照模块（含后续组落地的 converter/forcing/tracker）头部含 `NWM@8ae9b8f2 <原路径>`
+- [x] 2.2 快照 object-store/path 基础函数与 IFS/GFS source、raw manifest 数据结构，含其最小测试；剥离 DB/scheduler 分支
+- [x] 2.3 增加溯源头部检查测试：所有快照模块（含后续组落地的 converter/forcing/tracker）头部含 `NWM@8ae9b8f2 <原路径>`
 
 依赖：无
 §13.1 归属：DB-free 链（基础结构部分）
@@ -234,10 +234,15 @@ Regression rows:
 - `GeoBBox` 无 bbox 入参 -> fail closed（清单 §4 风险 14：四个 `DEFAULT_BBOX_*` 已删，禁止发明缺省）
 - `env_cycle_hours_utc` 显式入参传 `None` -> 仍走 `normalize_cycle_hours_utc(default, field_name=...)`，零 `os.getenv`
 - `parse_cycle_hours_utc` 收到畸形输入（`"0,25"`、`""`、`"0,abc"`）-> 稳定抛错
-- `validate_object_path` / `normalize_object_key` 收到 `..` 穿越、绝对路径、空键 -> 稳定拒绝
+- **键校验的闸门归属（勿读成 `validate_object_path` 单独兜底）**：`normalize_object_key` 拒 `..` 穿越与空键；绝对路径它按 pin 语义 `strip("/")` 后交由 `validate_object_path` 的前缀白名单拒；`validate_object_path` **单独调用时对 `..` 返回 `valid=True`**（pin 语义，该行 `剥离点` 为 `无`，禁止在本 PR 改它）。闭合 containment 的是复合入口 `LocalObjectStore.resolve_path` = `normalize_object_key` → `validate_object_path` → `relative_to(root)`。-> 复合入口对三类输入稳定拒绝；且 `validate_object_path` 的单独permissive行为必须有具名用例钉死，以免组 3/7/13 把它当作穿越闸门
 - `LocalObjectStore` 对已存在对象再写 -> 断言 pin 上的覆盖/no-clobber 语义（以 pin 源码为准，不得在此改语义）
 - `sha256_bytes(<已知字节串>)` -> 已知摘要字面量（独立 oracle：`printf ... | shasum -a 256`）
-- safe_fs：符号链接叶 / 符号链接祖先 / 非常规文件 / 超限读 -> 稳定拒绝（快照测试原有覆盖保留）
+- safe_fs 拒绝分型 -> 稳定拒绝，逐条注明覆盖来源（原措辞「快照测试原有覆盖保留」对**非常规文件**一项前提为假：pin 的 `tests/test_safe_fs.py` 14 个用例里无一触及 `S_ISREG`，round 1 verifier 已在 pin 上核实）：
+  - 符号链接叶 / 符号链接祖先（`directory_identity_no_follow` 面）-> 快照用例 `test_directory_identity_refuses_symlink_components`（parametrized final/ancestor）已覆盖
+  - 超限读 -> `test_object_store.py` 经 `LocalObjectStore.read_bytes_limited` 覆盖 `read_bytes_limited_no_follow` 的字节上限
+  - **非常规文件（FIFO/设备，`safe_fs.py` 的 `S_ISREG` 前后置校验）-> 本 PR 新写具名用例**
+  - **符号链接叶 / 符号链接祖先在写入面（`atomic_write_bytes_no_follow`、`rename_entry_no_follow`）-> 本 PR 新写具名用例**
+  - 新用例禁止写进 `producer/tests/test_safe_fs.py`（该文件是逐字节快照，改它即破坏 pin 等价性行）
 - 既有 `producer/tests/{test_config,test_geometry,test_smoke}.py` -> 保持全绿（未改动兄弟面）
 
 Boundary-surface checklist（high 强度）:
