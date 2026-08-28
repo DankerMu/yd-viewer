@@ -216,13 +216,20 @@ def test_error_message_carries_resolved_absolute_path(monkeypatch, capsys, tmp_p
 
 # --- run 的状态目录守卫（spec「run 永不自动 bootstrap」）---------------------
 
+# 本 lane 的 `yd_root` 一律取 `custom-yd-root` 而非 `yd`：判别性期望值，不是"换个名字好
+# 看"。`write_local` 的 scratch_root 是 `tmp_path/scratch`，故 `scratch_root.parent/"yd"`
+# 与 `tmp_path/"yd"` 逐字相同——守卫若把树认错成 scratch 侧（node-22 上 yd_root 在 NFS、
+# scratch_root 在本地盘，是两棵真不同的树，见 docs/agent-ops.md），用 `yd` 命名的用例仍
+# 全绿（实测该变异体存活全套）。叶名只要不可由 local.toml 其余字段推出，断言的路径就只能
+# 来自 `local.yd_root`。改回 `yd` 即毁掉本 lane 的全部判别力。
+
 
 def test_run_rejects_missing_states_dir_and_creates_nothing(
     monkeypatch, capsys, tmp_path
 ):
     init_fake = Recorder(result=0)
     monkeypatch.setattr(cli, "init", init_fake)
-    yd_root = tmp_path / "yd"
+    yd_root = tmp_path / "custom-yd-root"
     yd_root.mkdir()
     argv = _argv("run", tmp_path, yd_root=yd_root)
 
@@ -241,7 +248,7 @@ def test_run_rejects_missing_states_dir_and_creates_nothing(
 def test_run_rejects_empty_states_dir(monkeypatch, capsys, tmp_path):
     init_fake = Recorder(result=0)
     monkeypatch.setattr(cli, "init", init_fake)
-    yd_root = tmp_path / "yd"
+    yd_root = tmp_path / "custom-yd-root"
     states = yd_root / "states"
     states.mkdir(parents=True)
     argv = _argv("run", tmp_path, yd_root=yd_root)
@@ -259,7 +266,7 @@ def test_run_rejects_states_path_that_is_a_regular_file(monkeypatch, capsys, tmp
     """陈旧普通文件占位：存在性分类先于遍历，`NotADirectoryError` 不得逃逸成 traceback。"""
     init_fake = Recorder(result=0)
     monkeypatch.setattr(cli, "init", init_fake)
-    yd_root = tmp_path / "yd"
+    yd_root = tmp_path / "custom-yd-root"
     yd_root.mkdir()
     states = yd_root / "states"
     states.write_text("stale placeholder\n", encoding="utf-8")
@@ -281,7 +288,7 @@ def test_run_with_non_empty_states_reaches_staged_unimplemented(
     """正控制：守卫全过后进入分阶段未实现分支，退出码 3 且 stderr 指名归属任务号。"""
     init_fake = Recorder(result=0)
     monkeypatch.setattr(cli, "init", init_fake)
-    yd_root = tmp_path / "yd"
+    yd_root = tmp_path / "custom-yd-root"
     states = yd_root / "states"
     states.mkdir(parents=True)
     (states / "gfs").mkdir()
