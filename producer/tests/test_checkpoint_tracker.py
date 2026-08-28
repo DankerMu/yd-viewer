@@ -11,6 +11,64 @@ oracle 纪律：合成 `cfg.ic` 一律由 `cfg_ic_fixtures.build_cfg_ic` 生成�
 判别力纪律：正常捕获路径上，「相等判据放宽」「去掉 `round()`」「去掉已捕获跳过」「去掉
 相邻去重」「补零改掉」「校验内存副本而非回读字节」六种改坏各自都有专属用例接住，见各
 用例的 docstring。
+
+结账表（fixture §G9 类 A 的产物；**#17 落补跑半时 MUST 按同一格式续表**）
+=======================================================================
+
+不变式：捕获阶段的每一个复合守卫的**每一个操作数**、每一个异常元组的**每一个成员**、
+每一个 `is None` 身份判定、每一个传给 `safe_fs` 的关键字实参、每一个共享读取器的解析
+维度，**要么有一个「改坏即变红」的见证，要么有一条书面等价理由**。「这一段有测试」不算
+数；「这个操作数有测试」才算。下表每一格都由一个变异体实测过，不是推断。
+
+轴 1｜异常元组成员 × except 站点
+
+- `OSError` @ `_capture`               -> `test_source_unlinked_between_the_two_reads_never_leaks`（异常外泄 `FileNotFoundError`）
+- `SafeFilesystemError` @ `_capture`   -> `test_filesystem_failure_after_the_match_never_leaks`（异常外泄）
+- `OSError` @ `_discard`               -> `test_discard_failure_never_leaks[oserror-half]`（异常外泄 `PermissionError`）
+- `SafeFilesystemError` @ `_discard`   -> `test_discard_failure_never_leaks[safe-fs-half]`（异常外泄）
+- `OSError` @ `_read_header_minute`    -> `test_missing_source_is_silently_no_result`、`test_hostile_source_shapes_never_leak_an_exception[absent-run-dir]`
+- `SafeFilesystemError` @ `_read_header_minute` -> `test_hostile_source_shapes_never_leak_an_exception[symlinked-source]`、`[directory-source]`
+- `_copy_is_intact` 的 `except ValueError` -> `test_torn_body_is_not_a_capture_and_leaves_no_copy` 等 5 条
+- `_header_minute_of` 的 `except UnicodeDecodeError` -> `test_unreadable_header_is_silently_no_result[not-utf8]`
+
+轴 2｜布尔操作数（**逐操作数**独立）
+
+- `_copy_is_intact`：`header_minute is None` 析取 -> `test_copy_with_unreadable_header_is_not_captured[*]`（异常外泄 `TypeError`）
+- `_copy_is_intact`：`not _header_minute_matches_checkpoint(...)` 合取 -> `test_source_advancing_between_the_two_reads_is_not_captured`
+- `_header_minute_of`：`minute is None` 析取 -> `test_unreadable_header_is_silently_no_result[no-numeric-token]` 等
+- `_header_minute_of`：`not math.isfinite(minute)` 析取 -> `test_non_finite_header_minute_is_silently_no_result[*]`
+- `capture_available`：`not self._observed_header_minutes` 析取 -> 首次观测即 `IndexError`，`test_capture_over_an_overwrite_sequence` 等 23 条
+- `capture_available`：`[-1] != header_minute` 析取 -> `test_repeated_identical_observations_are_deduplicated`
+
+轴 3｜`is None` -> 真值判定（falsy-zero）
+
+- `capture_available` 的 header 判定 -> `test_zero_header_minute_is_a_real_observation`
+- `_header_minute_of` 的返回判定 -> `test_zero_header_minute_is_a_real_observation`（同一条见证覆盖两处）
+- `_copy_is_intact` 的 header 判定 -> **等价**（实测变异存活）。依据：构造期 `hour > 0` 的拒绝
+  使目标分钟恒 ≥ 60，而 `_header_minute_matches_checkpoint` 是精确相等，故 header 为 `0.0`
+  时两种写法都返回 `False`；`0.0` 之外的假值在 `float` 域内不存在（`nan` 已在
+  `_header_minute_of` 出口拦掉）。
+
+轴 4｜`safe_fs` 关键字实参
+
+- `containment_root` ×6 站点 -> **等价**（§G9 已结账 + 本轮六处同时删除实测存活）。依据：
+  目标路径全部由 `self._run_dir` 自构造，越界形态在声明域内不可达。
+- `max_bytes` ×3 站点 -> 各自单独放开为**等价**（§G9 已结账：只有资源放大，无契约可见差异）；
+  三处同时放开 -> `test_oversize_source_is_not_captured`
+- `missing_ok=True` -> **等价**（§G9 已结账 + 本轮实测存活）。依据：`missing_ok=False` 产生的
+  `FileNotFoundError` 是 `OSError`，被 `_discard` 自己的 `except` 吞掉。
+
+轴 5｜共享读取器的解析维度
+
+- 分词 `split()` -> `test_capture_succeeds_on_a_tab_delimited_payload`（真实 native `cfg.ic`
+  是 Tab 分隔，见 `cfg_ic_fixtures` 模块头）
+- 行选择 `lines[0]` -> **DEFER**（Known limits cand-14，归 M4：与 `cfg_ic.parse` 的「首个非空
+  行」定义分歧，本实现与 pin 逐字一致）
+- `splitlines()` -> **等价**（实测变异存活）。依据：改成 `split("\n")` 后唯一的差异是首行内
+  出现 `\r` / `\x85` / `\u2028` 一类分隔符，而这些字符对 `str.split()` 同样是空白，
+  `header_minute_time` 取「最后一个数值 token」的结果不变；空输入两种写法都收敛到 `None`。
+- `if not lines` 守卫 -> `test_unreadable_header_is_silently_no_result[empty]`（异常外泄 `IndexError`）
+- `decode("utf-8")` -> 同轴 1 的 `UnicodeDecodeError` 格（改 `errors="ignore"` 后变红）
 """
 
 from __future__ import annotations
@@ -481,6 +539,135 @@ def test_oversize_source_is_not_captured(tmp_path: pathlib.Path) -> None:
     assert tracker.missing_hours() == (12,)
     assert dict(tracker.captured) == {}
     assert not (tracker.checkpoint_dir / f"{PROJECT}.f012.cfg.ic.update").exists()
+
+
+def test_copy_with_unreadable_header_is_not_captured(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, copy_bytes: bytes
+) -> None:
+    """钉死 `_copy_is_intact` 的 `header_minute is None` 析取（轴 2）。
+
+    删掉该析取后，回读副本的 header 不可读时会把 `None` 喂进 `round()`，抛 `TypeError`
+    并**外泄**——`_copy_is_intact` 在 `_capture` 的 `try` **之外**，没有任何东西接住它。
+    三种域内形态：副本落成零字节 / 非 UTF-8 / 非有限 header。
+    """
+    tracker = _tracker(tmp_path)
+    _write(tracker.source_path, _payload("720.000000"))
+    real_write = safe_fs.atomic_write_bytes_no_follow
+
+    def landing_write(path, content, **kwargs):  # type: ignore[no-untyped-def]
+        return real_write(path, copy_bytes, **kwargs)
+
+    monkeypatch.setattr(safe_fs, "atomic_write_bytes_no_follow", landing_write)
+    tracker.capture_available()
+
+    assert tracker.missing_hours() == (12,)
+    assert dict(tracker.captured) == {}
+    assert not (tracker.checkpoint_dir / f"{PROJECT}.f012.cfg.ic.update").exists()
+
+
+test_copy_with_unreadable_header_is_not_captured = pytest.mark.parametrize(
+    "copy_bytes",
+    [b"", b"\xff\xfe\n", b"3988\tnan\n"],
+    ids=["empty-copy", "not-utf8-copy", "non-finite-copy"],
+)(test_copy_with_unreadable_header_is_not_captured)
+
+
+def test_source_unlinked_between_the_two_reads_never_leaks(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_FS_FAILURES` 的 **`OSError` 半**在 `_capture` 站点的见证（轴 1）。
+
+    只注入**时机**、不注入错误：SHUD 的 rename/unlink-in-place 让源文件在观测读与捕获读
+    之间消失，`safe_fs` 抛的是朴素 `FileNotFoundError`（`OSError`），不是
+    `SafeFilesystemError`。把本站点收窄成只接 `SafeFilesystemError` 后，本条以**异常外泄**
+    变红。
+    """
+    tracker = _tracker(tmp_path)
+    _write(tracker.source_path, _payload("720.000000"))
+    real_ensure = safe_fs.ensure_directory_no_follow
+
+    def unlinking_ensure(path, **kwargs):  # type: ignore[no-untyped-def]
+        tracker.source_path.unlink()
+        return real_ensure(path, **kwargs)
+
+    monkeypatch.setattr(safe_fs, "ensure_directory_no_follow", unlinking_ensure)
+    tracker.capture_available()
+
+    assert tracker.missing_hours() == (12,)
+    assert dict(tracker.captured) == {}
+    assert not (tracker.checkpoint_dir / f"{PROJECT}.f012.cfg.ic.update").exists()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError(13, "Permission denied"),
+        safe_fs.SafeFilesystemError("Target file must not be a symlink"),
+    ],
+    ids=["oserror-half", "safe-fs-half"],
+)
+def test_discard_failure_never_leaks(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """`_FS_FAILURES` **两个成员**在 `_discard` 站点各自的见证（轴 1）。
+
+    副本校验失败后删不掉副本（只读挂载 / 目录权限被收走 → 朴素 `PermissionError`；落点被
+    换成符号链接 → `SafeFilesystemError`）：观测仍 MUST NOT 抛，该小时保持未捕获。两半各
+    一个参数，是为了不让本站点的两格由**同一个**用例产出——那正是被替换掉的采样签名。
+    残留的未验证副本是 Known limits cand-08 的形态——API 仍诚实（`captured` 为空），下游
+    只信 `captured` 记录。
+    """
+    tracker = _tracker(tmp_path)
+    _write(tracker.source_path, _truncated_payload("720.000000"))
+
+    def refusing_unlink(path, **kwargs):  # type: ignore[no-untyped-def]
+        raise error
+
+    monkeypatch.setattr(safe_fs, "unlink_no_follow", refusing_unlink)
+    tracker.capture_available()
+
+    assert tracker.missing_hours() == (12,)
+    assert dict(tracker.captured) == {}
+    # 删除失败 ⇒ 未验证副本留在规范文件名上（cand-08，归 #17）。
+    assert (tracker.checkpoint_dir / f"{PROJECT}.f012.cfg.ic.update").is_file()
+
+
+def test_capture_succeeds_on_a_tab_delimited_payload(tmp_path: pathlib.Path) -> None:
+    """轴 5「分词」的**正向**见证：真实 native `cfg.ic` 是 Tab 分隔的。
+
+    套里其余含 tab 的载荷全在「无结果」用例里，`split()` → `split(' ')` 变异下它们**因
+    错误理由**通过；只有一条 tab 驱动的成功捕获能把全空白分词钉住。依据是本仓自己的
+    `cfg_ic_fixtures` 模块头（真实 `.cfg.ic.update` 为 Tab 分隔），不是 M4 假设。
+    """
+    tracker = _tracker(tmp_path)
+    payload = build_cfg_ic(
+        mesh_count=3, river_count=2, minute="720.000000", delimiter="\t"
+    ).payload
+    assert b"\t" in payload
+    _write(tracker.source_path, payload)
+
+    tracker.capture_available()
+
+    assert tracker.missing_hours() == ()
+    assert tracker.observed_header_minutes == (720.0,)
+    assert tracker.captured[12].path.read_bytes() == payload
+
+
+def test_zero_header_minute_is_a_real_observation(tmp_path: pathlib.Path) -> None:
+    """轴 3：`is None` MUST NOT 退化成真值判定（经典 falsy-zero）。
+
+    模型相对时间 0 分钟（初态）是**可读到的真实 header**，它必须进观测轨迹。捕获侧的影响
+    有界——构造期 `hour > 0` 使 `0.0` 永不命中任何目标，故错在这里不会丢捕获，只会让漏采
+    诊断的现场证据缺一条。
+    """
+    tracker = _tracker(tmp_path)
+    _write(tracker.source_path, _payload("0.000000"))
+
+    tracker.capture_available()
+
+    assert tracker.observed_header_minutes == (0.0,)
+    assert tracker.missing_hours() == (12,)
+    assert dict(tracker.captured) == {}
 
 
 # --- G7 结构、只读性与模块自述 ---

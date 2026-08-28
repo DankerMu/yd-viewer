@@ -1251,8 +1251,8 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 | 1. 异常元组成员 × except 站点 | `_FS_FAILURES` 的两个成员 × `_capture`/`_discard`/`_read_header_minute` 三站点 = 6 格；另加 `_copy_is_intact` 的 `except ValueError` 与 `_header_minute_of` 的 `except UnicodeDecodeError` |
 | 2. 布尔操作数（**逐操作数**独立） | `_copy_is_intact` 的 header 判定（2）、`_header_minute_of` 的返回判定（2）、`capture_available` 的相邻去重条件（2） |
 | 3. `is None` → 真值判定 | `capture_available` 的 header 判定、`_copy_is_intact` 的、`_header_minute_of` 的 |
-| 4. `safe_fs` 关键字实参 | `containment_root` ×4 站点、`max_bytes` ×2 站点、`missing_ok` ×1 |
-| 5. 共享读取器的解析维度 | 分词（`split()`）、行选择（`lines[0]`）、`splitlines()`、`decode` |
+| 4. `safe_fs` 关键字实参 | `containment_root` ×**6** 调用点（建目录 / 源读 / 原子写 / 回读 / `unlink` / header 读）、`max_bytes` ×**3** 调用点（源读 / 回读 / header 读）、`missing_ok` ×1。**计数按代码实测，初稿写的 4 与 2 是错的**（round 2 结账时由实现方指出，按「完备性声明必须可机检」纪律更正） |
+| 5. 共享读取器的解析维度 | 分词（`split()`）、行选择（`lines[0]`）、`splitlines()`、`decode`、以及取首行前的 `if not lines` 空表守卫。**`splitlines()` 一格的判定口径**：变异为 `split("\n")` 或 `splitlines(keepends=True)` 均可，两者都因 `str.split()` 吃掉行尾符而等价——写明口径是为了让审计者与实现方对同一格得出同一结论 |
 
 **已知的既有结账**（可直接引用，不必重跑）：round 1 判定三处大小上界**各自单独**放开为等价（只有资源放大，无契约可见差异，故 §G8 第三条要求三处同时放开）、`missing_ok=True→False` 为等价（产生的 `FileNotFoundError` 是 `OSError`，被 `_discard` 自己的 `except` 吞掉）；round 2 判定两处 `containment_root` 变体为等价（目标自构造、不可判别）。轴 5 的「行选择」已作为 cand-14 记入 Known limits，按 DEFER 结账。
 

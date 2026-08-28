@@ -144,8 +144,11 @@ class CheckpointTracker:
         # 对路径里的 NUL 抛的是 `ValueError` 而不是 `OSError`，`safe_fs` 也不转译它，于是它
         # 绕过 `_FS_FAILURES` 从 `capture_available()` 直接外泄（违偏离 8）。而它**可从配置
         # 到达**——TOML 的基本字符串接受 `\u0000`。MUST NOT 靠把 `ValueError` 并进
-        # `_FS_FAILURES` 来堵：那会连 `state.parse` 的 `ValueError` 一起吞掉，而
-        # `_copy_is_intact` 正靠它做判别。
+        # `_FS_FAILURES` 来堵：契约要的是**构造期**拒绝，而那样堵会把一个可从配置到达的
+        # NUL 变成观测期的静默「无结果」——每一次观测都无结果，整轮零捕获，与「SHUD 从没
+        # 启动」逐字节相同。（旧注释在此写的是「会吞掉 `state.parse` 的 `ValueError`」，
+        # 那条理由不成立：`_copy_is_intact` 在 `_capture` 的 `try` 之外，且它自带局部
+        # `except ValueError`。）
         if "\0" in project_name:
             raise TrackerError(f"project_name 含 NUL 字节：{project_name!r}")
         if "\0" in str(run_dir):
