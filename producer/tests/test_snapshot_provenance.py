@@ -11,8 +11,11 @@
 1. DB-free 扫描集 = 已落地的清单目标（含快照**测试**文件）∪ 这些目标所在的
    `producer/src/yd_producer/<pkg>/` 包目录整目录（未登记的散落文件也逃不掉）。
    后续任务组落地新目标时扫描集自动扩张，无需改本文件。
-2. 「什么算溯源头部」在本文件里只有**一个**定义：`_MARKER_COMMENT`——**整行即溯源
-   头部形式**的 `#` 注释行（注释内容恰为 `NWM@<sha> <原路径>`，允许缩进与行尾空白）。
+2. 「什么算溯源头部」全仓只有**一个**定义：`snapshot_provenance_fixtures.py` 里的
+   `_MARKER_COMMENT`——**整行即溯源头部形式**的 `#` 注释行（注释内容恰为
+   `NWM@<sha> <原路径>`，允许缩进与行尾空白）。
+   `<原路径>` 是**纯仓库相对路径**，字符类派生自清单 §1 的 `NWM 原路径` 列；`路径:行号
+   （括注）` 这类紧贴路径的行级引用不是溯源头部。
    正反向共用它，只在**行预算**上分叉——反向按 grep 语义扫整文件（无预算），正向再叠加
    「行号 ≤ `HEADER_LINE_BUDGET`」与「pin 与原路径逐字段相等」。两侧曾各有一份定义
    （正向是裸前 5 行子串），于是 docstring 形式的标记被正向奖励、又对反向隐形；
@@ -35,339 +38,37 @@
 
 from __future__ import annotations
 
-import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-INVENTORY = (
-    REPO_ROOT
-    / "openspec"
-    / "changes"
-    / "m2-producer-core"
-    / "nwm-snapshot-inventory.md"
+from snapshot_provenance_fixtures import (
+    FORBIDDEN_SURFACES,
+    HEADER_LINE_BUDGET,
+    INVENTORY_BODY_LINES,
+    INVENTORY_ROWS,
+    INVENTORY_STATUS,
+    INVENTORY_TARGETS,
+    MALFORMED_ROWS,
+    PIN_SHORT,
+    PINNED_TARGETS,
+    PROVENANCE_MARKER,
+    REPO_ROOT,
+    SCANNED_ROOTS,
+    STATUS_LANDED,
+    STRAY_TABLE_LINES,
+    _declared_forbidden_surfaces,
+    _files_with_marker,
+    _forbidden_hits,
+    _header_marker_lines,
+    _inventory_body_lines,
+    _landed_targets,
+    _marker_comment_lines,
+    _marker_fields,
+    _parse_inventory_rows,
+    _provenance_header_lines,
+    _scan_files,
 )
-TASKS = REPO_ROOT / "openspec" / "changes" / "m2-producer-core" / "tasks.md"
-
-PIN_SHORT = "8ae9b8f2"
-PROVENANCE_MARKER = f"NWM@{PIN_SHORT}"
-
-#: 溯源头必须落在文件的前几行（清单前言的固定格式 + fixture 的证据口径「前 5 行内」）。
-#: 只约束正向断言；反向守卫按 grep 语义扫整文件。
-HEADER_LINE_BUDGET = 5
-
-#: §1 `落地状态` 列的取值全集。这不是第二份名单——名单仍只有清单表本身，这里只是它
-#: 那一列的**词汇表**；写不进这两个值的单元格是畸形行（拼错一个字就静默解除义务）。
-STATUS_LANDED = "本 issue 落地"
-STATUS_PENDING = "待落地"
-INVENTORY_STATUSES = (STATUS_LANDED, STATUS_PENDING)
-
-#: 反向守卫的扫描根：规格写的是「`producer/` 内」，这里就写 `producer/`，让执行集
-#: 与声明集自证相等，而不是靠「眼下恰好没有第三个子目录」。
-SCANNED_ROOTS = (Path("producer"),)
-
-#: 快照源模块的包根；清单目标落在其下 `<pkg>/` 的，整个 `<pkg>/` 进 DB-free 扫描集。
-SNAPSHOT_PACKAGE_ROOT = Path("producer") / "src" / "yd_producer"
-
-#: DB-free 禁区词表的**执行集**。它的**声明集**是 tasks.md「Required evidence」里
-#: 以 `禁区 grep：` 起头的那条 grep 命令的正则轮换项，由
-#: `_declared_forbidden_surfaces()` 在测试时解析、`test_forbidden_surfaces_match_the_
-#: declared_grep` 断言两者相等——这里刻意不写第二份手工名单，也不写计数地板：
-#: 参数化用例只能证明「表里的每一项都真的被执行」，删掉一项时它是**取消选择**（用例
-#: 数从 8 掉到 4），不是变红；把词表钉在声明上的是那条相等断言。
-FORBIDDEN_SURFACES = (
-    "psycopg",
-    "DATABASE_URL",
-    "scheduler",
-    "registry",
-    "journal",
-    "reservation",
-    "os.getenv",
-    "os.environ",
-)
-
-#: 声明集所在行的锚：Regression rows 里另有一条只含 6 项的同类 grep（无 `journal`/
-#: `reservation`），按 `禁区 grep：` 前缀锚定即可把两者区分开，不必按行号引。
-_FORBIDDEN_GREP = re.compile(r"禁区 grep[：:][^`]*`grep [^']*'([^']+)'")
-
-_BACKTICKED = re.compile(r"`([^`]+)`")
-
-#: 溯源标记的命中口径，**全文件唯一定义**，正反向共用。规格要求的形式是**整行**：
-#: 一条独立 `#` 注释行，其注释内容恰为 `NWM@<sha> <原路径>`（允许缩进与行尾空白，
-#: 路径之后不允许还有其它内容）。锚在注释行上而不是整文件裸串匹配：裸串会命中本文件
-#: 里用 f-string 拼出的 PROVENANCE_MARKER 常量与断言消息本身，从而逼出一份手工豁免
-#: 名单——那正是本守卫要消灭的第二份名单。
-#:
-#: 「整行」这一维是 round-4 的集成红逼出来的，不是洁癖：旧口径「注释行里任何位置出现
-#: `NWM@`」会把 master 上 `producer/src/yd_producer/config.py` 的一处**行内引用**
-#: （`# NWM@<sha> \`x/y.py\` 的某某字段：……`，路径后还有叙述文字）判成未登记快照文件，
-#: 而该文件在清单 §1 里既无「NWM 原路径」也无「剥离点」，登记它等于往清单里塞假数据。
-#: 实测：收紧前在合入 master 的树上 `2 failed`，收紧后同一棵树全绿；已落地的 11 条
-#: 溯源头部（形如 `# NWM@8ae9b8f2 packages/common/safe_fs.py`）收紧后仍全部命中。
-#:
-#: pin 不写进本谓词（`NWM@(?P<pin>\S+)` 而非写死 `NWM@8ae9b8f2`）：写死会让
-#: `test_registered_headers_name_the_pin_and_not_some_other_commit` 永远看不到错 pin
-#: 的行，那条用例即被架空。职责分工是——**形式**归本谓词，**pin 精确**归那条用例，
-#: **原路径精确**归 `_provenance_header_lines` 的字段相等。
-#:
-#: 方向差异只在**行预算**上：反向无预算（整文件 grep），正向叠加 HEADER_LINE_BUDGET。
-#: 命中口径本身不得分叉——正向曾用裸前 5 行子串，于是 docstring 里的标记被正向判为
-#: 合格头部，却对反向隐形。
-#:
-#: **已声明的残留**（规格 forcing-chain「行内引用不触发反向守卫」段落同款）：在一份
-#: 真实拷贝的溯源头部之后故意追加叙述文字，即可让该文件对反向守卫隐形。这需要「绕过
-#: 形式」与「不登记」两个刻意动作，与「同一 commit 内既降级又删文件」并列记为已知
-#: 非目标；本谓词是**登记守卫**，不是抄袭检测器。
-_MARKER_COMMENT = re.compile(
-    r"^[ \t]*#[ \t]*NWM@(?P<pin>\S+)[ \t]+(?P<source>\S+)[ \t]*$"
-)
-
-
-# --- §1 表解析 ---------------------------------------------------------------
-
-
-def _inventory_body_lines(text: str | None = None) -> tuple[list[str], list[str]]:
-    """返回 §1 表的 (表体行, 游离行)；表体不做单元格数量过滤。
-
-    只取 `## 1.` 与下一个 `## ` 之间的区段：§2 的能力项对照表也含反引号包裹的路径，
-    整文件扫描会把它们一并吃进来。表体行的**条数**是下面解析完整性检查的基准，所以
-    这一步刻意不丢弃任何行。
-
-    表行判定按 `lstrip()`：Markdown 允许表行带前导空格，渲染完全相同。按列 0 判定时，
-    把某一行缩进一格就能让它连同其正向溯源义务静默离开表体集，而 `len(rows) ==
-    len(body)` 依旧成立（两侧同步收缩）——这正是本次复核抓到的 P2。
-
-    「游离行」= 区段内含 `|`、却不以 `|` 起头的行。表体判定放宽后，一行要想逃出表体
-    集只剩「彻底不像表行」这一条路，而那条路会被游离行列表接住；调用方按 `malformed`
-    的同一套路把它断成硬失败，因此表体的条数不再能被单行改动悄悄压低。
-    """
-
-    if text is None:
-        text = INVENTORY.read_text(encoding="utf-8")
-    section = re.search(r"^## 1\..*?(?=^## )", text, flags=re.MULTILINE | re.DOTALL)
-    assert section is not None, "找不到 §1 快照清单区段"
-
-    body: list[str] = []
-    stray: list[str] = []
-    for line in section.group(0).splitlines():
-        stripped = line.strip()
-        if "|" not in stripped:
-            continue
-        if not stripped.startswith("|"):
-            stray.append(stripped[:100])
-            continue
-        first_cell = stripped.strip("|").split("|")[0].strip()
-        if first_cell == "能力项" or set(first_cell) <= {"-", ":"}:
-            continue
-        body.append(stripped)
-    return body, stray
-
-
-def _parse_inventory_rows(
-    body_lines: Iterable[str],
-) -> tuple[list[tuple[str, str, str]], list[str]]:
-    """把表体行解析成 (目标路径, NWM 原路径, 落地状态)；解析不了的行进 `malformed`。
-
-    畸形行**不能**静默跳过：清单里塞进一条单元格数不对的行（例如 `剥离点` 里出现未
-    转义的 `|`），会让该行的目标路径连同它的正向溯源断言一起消失，守卫全绿而覆盖变窄。
-
-    `落地状态` 单元格必须**严格**等于 `INVENTORY_STATUSES` 之一：写错一个字（或留空）
-    若被当成「非 `本 issue 落地`」放过，等于把该行的落地义务静默解除——与畸形行同类。
-    """
-
-    rows: list[tuple[str, str, str]] = []
-    malformed: list[str] = []
-    for line in body_lines:
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) != 6:
-            malformed.append(f"单元格数为 {len(cells)}（应为 6）: {line[:100]}")
-            continue
-        source_match = _BACKTICKED.search(cells[1])
-        target_match = _BACKTICKED.search(cells[2])
-        status = cells[4]
-        if source_match is None:
-            malformed.append(f"缺少反引号包裹的 NWM 原路径: {line[:100]}")
-            continue
-        if target_match is None:
-            malformed.append(f"缺少反引号包裹的目标路径: {line[:100]}")
-            continue
-        if status not in INVENTORY_STATUSES:
-            malformed.append(
-                f"落地状态应为 {list(INVENTORY_STATUSES)} 之一，实为 {status!r}: "
-                f"{line[:100]}"
-            )
-            continue
-        target = target_match.group(1)
-        if not target.startswith("producer/"):
-            malformed.append(f"目标路径应落在 producer/ 下: {target}")
-            continue
-        rows.append((target, source_match.group(1), status))
-    return rows, malformed
-
-
-INVENTORY_BODY_LINES, STRAY_TABLE_LINES = _inventory_body_lines()
-INVENTORY_ROWS, MALFORMED_ROWS = _parse_inventory_rows(INVENTORY_BODY_LINES)
-INVENTORY_TARGETS = {target: source for target, source, _ in INVENTORY_ROWS}
-
-#: 守卫的**期望落地集**：清单里自报 `本 issue 落地` 的行。期望集必须来自清单而不是
-#: 文件系统——文件系统派生的期望集会随文件被删而同步收缩，删除完全静默（P1）。
-PINNED_TARGETS = {
-    target: source
-    for target, source, status in INVENTORY_ROWS
-    if status == STATUS_LANDED
-}
-
-#: 目标路径 -> `落地状态` 的查表，供反向（文件 ⇒ 状态）方向使用。`INVENTORY_TARGETS`
-#: 是**状态盲**的，只凭它做集合比较时，降级一行不改变等式任何一侧。
-INVENTORY_STATUS = {target: status for target, _, status in INVENTORY_ROWS}
-
-
-# --- 扫描集派生 --------------------------------------------------------------
-
-
-def _landed_targets(repo_root: Path, targets: Iterable[str]) -> list[Path]:
-    return sorted(
-        repo_root / target for target in targets if (repo_root / target).is_file()
-    )
-
-
-def _scan_files(repo_root: Path, targets: Iterable[str]) -> list[Path]:
-    """DB-free 扫描集：已落地的清单目标 ∪ 它们所在的 yd_producer 包目录整目录。
-
-    目标派生的那一半覆盖快照**测试**文件（治理不变量的「含测试」半边），包目录派生
-    的那一半兜住散落进快照包、却没登记进清单的文件。测试目录不整目录展开：
-    `producer/tests/` 下的自写测试（含本文件的禁区词表、`test_manifest.py` 正文里
-    出现的 "scheduler" 字样）不是快照文件，不受 DB-free 口径约束。
-    """
-
-    package_root = repo_root / SNAPSHOT_PACKAGE_ROOT
-    files: set[Path] = set()
-    for path in _landed_targets(repo_root, targets):
-        files.add(path)
-        try:
-            relative = path.relative_to(package_root)
-        except ValueError:
-            continue
-        if len(relative.parts) >= 2:
-            files.update((package_root / relative.parts[0]).rglob("*.py"))
-    return sorted(files)
-
-
-def _declared_forbidden_surfaces(text: str | None = None) -> tuple[str, ...]:
-    """从 tasks.md 的 `禁区 grep：` 那条命令里解析禁区词表的**声明集**。
-
-    数据源是 fixture 本身，与 §1 清单表同一套「解析、不转录」的口径：手工转录一份
-    Python 副本，正是本文件序言要消灭的第二份名单，也正是 F16 的成因——词表被删项时
-    没有任何东西接住。
-
-    锚定在 `禁区 grep：` 前缀而不是行号：tasks.md 的 Regression rows 里另有一条同类
-    grep 只列 6 项（无 `journal`/`reservation`），按行号引会随文档增删行漂移，按前缀
-    锚可把两者区分开。正则轮换项里被反斜杠转义的点号在这里还原成字面 `.`。
-    """
-
-    if text is None:
-        text = TASKS.read_text(encoding="utf-8")
-    matches = _FORBIDDEN_GREP.findall(text)
-    assert len(matches) == 1, (
-        f"tasks.md 里以「禁区 grep：」起头的 grep 命令应恰有 1 条，实为 {len(matches)} 条"
-    )
-    return tuple(token.replace("\\.", ".") for token in matches[0].split("|"))
-
-
-def _forbidden_hits(repo_root: Path, files: Iterable[Path]) -> list[str]:
-    hits: list[str] = []
-    for path in files:
-        for number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            for token in FORBIDDEN_SURFACES:
-                if token in line:
-                    hits.append(
-                        f"{path.relative_to(repo_root).as_posix()}:{number}: {token}"
-                    )
-    return hits
-
-
-# --- 溯源标记命中（正反向共用的唯一谓词） ------------------------------------
-
-
-def _marker_fields(line: str) -> tuple[str, str] | None:
-    """整行溯源头部形式的解析结果 `(pin, NWM 原路径)`；不是该形式则 `None`。"""
-
-    match = _MARKER_COMMENT.search(line)
-    if match is None:
-        return None
-    return match.group("pin"), match.group("source")
-
-
-def _marker_comment_lines(path: Path) -> list[tuple[int, str]]:
-    """整文件扫描，返回带溯源标记的注释行 `(行号, 行内容)`。
-
-    反向方向的证据口径是 grep 语义、无行预算：把标记压到第 6 行以后就能绕过守卫，
-    正是 round 1 复核抓到的盲区。
-    """
-
-    return [
-        (number, line)
-        for number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), start=1
-        )
-        if _marker_fields(line) is not None
-    ]
-
-
-def _header_marker_lines(path: Path) -> list[tuple[int, str]]:
-    """正向方向：同一谓词命中 ∧ 行号 ≤ 头部行预算。"""
-
-    return [
-        (number, line)
-        for number, line in _marker_comment_lines(path)
-        if number <= HEADER_LINE_BUDGET
-    ]
-
-
-def _provenance_header_lines(path: Path, source: str) -> list[tuple[int, str]]:
-    """正向断言的完整谓词：头部注释行 ∧ pin 与 NWM 原路径**逐字段相等**。
-
-    「前 5 行裸子串」不够：`\"\"\"NWM@8ae9b8f2 ...\"\"\"` 这样的 docstring 形式能通过
-    子串检查，却不是反向守卫认得的头部形式——同一不变量在两个方向上口径分叉。
-
-    字段相等而非子串包含：谓词收紧成整行形式后，注释内容已被切成 `(pin, 原路径)` 两段，
-    子串比较会让 `# NWM@8ae9b8f2 <原路径>xyz` 这类**前缀匹配**通过正向断言，与规格
-    「注释内容恰为 `NWM@<sha> <原路径>`」的「恰为」不符。
-    """
-
-    matched: list[tuple[int, str]] = []
-    for number, line in _header_marker_lines(path):
-        fields = _marker_fields(line)
-        if fields == (PIN_SHORT, source):
-            matched.append((number, line))
-    return matched
-
-
-def _scannable_python_files(root: Path) -> list[Path]:
-    """扫描根下的 `.py` 文件，跳过点开头目录（`.venv` / `.pytest_cache` / `.git` ...）。
-
-    用「点开头」这条规则而不是一份具名黑名单，同样是为了不养第二份名单。
-    """
-
-    return sorted(
-        path
-        for path in root.rglob("*.py")
-        if not any(part.startswith(".") for part in path.relative_to(root).parts[:-1])
-    )
-
-
-def _files_with_marker(repo_root: Path, roots: Iterable[Path]) -> list[Path]:
-    found: list[Path] = []
-    for root in roots:
-        for path in _scannable_python_files(repo_root / root):
-            if _marker_comment_lines(path):
-                found.append(path)
-    return found
-
 
 # --- 表本身没被解析空、也没被静默丢行 -----------------------------------------
 
@@ -785,6 +486,62 @@ def test_reverse_guard_ignores_prose_trailing_inline_citations(
     proper = root / "copied.py"
     proper.write_text(f"# {PROVENANCE_MARKER} {source}\n", encoding="utf-8")
     assert _files_with_marker(tmp_path, SCANNED_ROOTS) == [proper]
+
+
+def test_marker_grammar_rejects_line_citations_glued_to_the_path() -> None:
+    """`<原路径>` 是纯相对路径：`路径:行号（括注）` 紧贴路径的行级引用不是溯源头部。
+
+    实例取自 issue #8 落地的 `producer/src/yd_producer/state/cfg_ic.py`（10 处 `#` 标记全是
+    该形式）。旧文法 `(?P<source>\\S+)` 没有空格可停，把 `state_qc.py:43（逐字移植）`
+    整块吞成路径，整行于是「看起来恰为 `NWM@<sha> <原路径>`」——该文件被反向守卫判成
+    未登记快照（合入 master 的树上实测 `2 failed, 577 passed, 16 skipped`）。
+
+    三个维度各有独立判别器（把文法放回 `\\S+` 时逐条实测变红）：**谓词**归本条；
+    **反向**归真树上的 `..._registered_in_the_inventory` 与
+    `test_landed_targets_are_exactly_...`；**正向**归下一条。
+    """
+
+    glued = f"# {PROVENANCE_MARKER} packages/common/state_qc.py:43（逐字移植）"
+    assert _marker_fields(glued) is None
+    assert (
+        _marker_fields(
+            f"        # {PROVENANCE_MARKER} "
+            "packages/common/state_qc.py:431-435（调用点注释逐字保留）"
+        )
+        is None
+    )
+    # 正对照：去掉紧贴路径的尾随内容，同一条注释仍是合格头部（无行预算方向亦然）。
+    bare = f"# {PROVENANCE_MARKER} packages/common/state_qc.py"
+    assert _marker_fields(bare) == (PIN_SHORT, "packages/common/state_qc.py")
+
+    # 收紧后的文法必须仍接纳清单 §1 声明的**每一条** NWM 原路径（27 条，非 11 条）。
+    for _, source, _ in INVENTORY_ROWS:
+        assert _marker_fields(f"# {PROVENANCE_MARKER} {source}") == (PIN_SHORT, source)
+
+
+def test_forward_guard_ignores_line_citations_inside_the_header_budget(
+    tmp_path: Path,
+) -> None:
+    """正向侧的判别器：行预算内的行级引用不得进入「命中的头部注释行」候选集。
+
+    进了候选集，一份**缺**溯源头部的快照文件在正向失败信息里会拿一条行级引用冒充证据；
+    字段相等只挡住断言本身，挡不住候选集被污染。反向侧同款由 `_marker_comment_lines`
+    承担（见上一条）。
+    """
+
+    citation = tmp_path / "cfg_ic.py"
+    citation.write_text(
+        f"# {PROVENANCE_MARKER} packages/common/state_qc.py:43（逐字移植）\n",
+        encoding="utf-8",
+    )
+
+    assert _header_marker_lines(citation) == []
+    assert _marker_comment_lines(citation) == []
+    # 正对照：换成纯路径后，同一位置立刻是命中的头部注释行。
+    citation.write_text(
+        f"# {PROVENANCE_MARKER} packages/common/state_qc.py\n", encoding="utf-8"
+    )
+    assert len(_header_marker_lines(citation)) == 1
 
 
 def test_forward_guard_requires_the_path_to_match_exactly(tmp_path: Path) -> None:
