@@ -28,7 +28,7 @@
 - **THEN** 拒绝并报错，不进行文件检查
 
 ### Requirement: raw 只读与临时副本
-完整判定后，控制器 MUST 把清单内文件复制到本轮 `work/raw/`；复制前后 NWM 原件的内容与元数据 MUST 保持不变；副本 MUST NOT 写入 `YD_ROOT` 或跨轮保留。
+完整判定后，控制器 MUST 把清单内文件复制到本轮 `work/raw/`；复制前后 NWM 原件的内容与元数据 MUST 保持不变；副本 MUST NOT 写入 `YD_ROOT` 或跨轮保留。完整判定是复制的**必要而非充分**条件：复制侧另有自己的准入条件（源侧链接形态、bundle 布局、调用参数与判定结果的一致性），其中任一条不成立时 MUST 拒绝复制并报错，即便判定结果为完整；拒绝时 MUST NOT 留下任何部分产物。
 
 #### Scenario: 复制不改动源
 - **WHEN** 将 fixture raw 根中的文件复制到 work

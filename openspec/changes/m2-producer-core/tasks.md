@@ -655,14 +655,15 @@ def stage_raw(
 - `copied_files: tuple[Path, ...]` —— 副本绝对路径，与 `verdict.expected_files` **同序同长**
 - `entries: tuple[ManifestEntry, ...]` —— 写进 manifest 的 entry，按 (lead 升序, `variables` 声明序)
 
-失败一律抛 `RawStagingError`（本 issue 新增，`Exception` 子类），带**闭合词表**的 `kind` 字段，供调用方与测试机检；MUST NOT 外泄裸 `OSError`/`KeyError`/`json.JSONDecodeError`。词表恰好八项：
+失败一律抛 `RawStagingError`（本 issue 新增，`Exception` 子类），带**闭合词表**的 `kind` 字段，供调用方与测试机检；MUST NOT 外泄裸 `OSError`/`KeyError`/`json.JSONDecodeError`。词表恰好九项：
 
 | `kind` | 触发 |
 |---|---|
 | `incomplete-verdict` | `verdict.complete is False` |
 | `unsupported-layout` | `len(bundles) != 1`（见下方单 bundle 约束） |
 | `source-symlink` | 源侧 bundle 路径或其祖先段是 symlink |
-| `source-manifest` | 源 manifest 缺失/不可解析/覆盖不全/缺 `forecast_hours`，或形参与 verdict 的路径不一致 |
+| `source-manifest` | 源 manifest 缺失/不可解析/覆盖不全/缺 `forecast_hours` |
+| `verdict-mismatch` | 由形参重新构造的源路径与 `verdict.expected_files` 不一致（含相对 `raw_root` 的处置，见下方复制语义） |
 | `accumulation-metadata` | R4B2 的三条 APCP fail-closed 中任一条不成立 |
 | `source-mutated` | 复制前后源 `lstat` 元组不一致 |
 | `target-exists` | 目标副本路径已存在 |
@@ -714,7 +715,10 @@ pin 在 raw cycle 目录内落盘 `manifest.json`（GFS `_persist_manifest_metad
 - 复制**前后**对每个源文件取 `os.lstat`，比对 `(st_size, st_mtime_ns, st_ino, st_mode)`；任何一项变化即报错。这同时是「源不可变」的证据与扫描→复制窗口 TOCTOU 的收敛点（残余 TOCTOU 归组 12 控制器，见 Non-goals）
 - **源侧 symlink 一律拒绝**（`kind="source-symlink"`）：对每个源 bundle 路径，MUST 逐段 `lstat` 检查——路径自身或 `<raw_root>` 之下的任一祖先段是 symlink 即拒绝，MUST NOT 跟随。这里刻意**比 3.1 更严**：`rawscan._check` 走 `is_file()` 语义、跟随 symlink（`rawscan.py:255-274`），故 `judge` 可能对一个 symlinked bundle 返回 `complete=True`；而本 issue 钉死的源不可变取证是 `os.lstat`（看链本身、不看目标），两者叠加会在「MUST NOT 跟随 symlink」这句话正下方留一个洞：链的元组不变而目标被换掉，取证照样通过。收口方式是拒绝而不是改用 `os.stat`——`stat` 版本要再补目标的 containment 检查与第二个 TOCTOU 窗口，复杂度换不来收益（NWM 经 object store 的 `write_bytes_atomic` 落盘，raw 树内出现 symlink 属异常形态）。该不对称是**有意的**，MUST 写进实现注释：3.1 判「NWM 说它在」，3.2 判「yd 愿意复制它并为其身份背书」
 - 复制 MUST NOT 写、删、改、重命名 NWM 原件的任何路径（compute-loop §4.1 硬约束）
-- 源路径 containment：每个源 bundle 路径 MUST 由 `raw_root`/`SOURCE_DIR_NAMES[source]`/cycle 紧凑戳/bundle 文件名**重新构造**，并与 `verdict.expected_files` 的对应项逐字相等；MUST NOT 直接信任 `expected_files` 里的路径——形参与 verdict 由不同调用点提供，不一致即 `kind="source-manifest"` 报错（调用序错误）
+- 源路径 containment：每个源 bundle 路径 MUST 由 `raw_root`/`SOURCE_DIR_NAMES[source]`/cycle 紧凑戳/bundle 文件名**重新构造**，并与 `verdict.expected_files` 的对应项逐字相等；MUST NOT 直接信任 `expected_files` 里的路径——形参与 verdict 由不同调用点提供，不一致即 `kind="verdict-mismatch"` 报错（调用序错误）。三条落地约束，缺一即该检查要么误报要么无判别力：
+  - **绝对化必须与 `judge` 同法**：`judge` 接受相对 `raw_root` 并以 `Path.cwd()` 提升（`rawscan.py:370-386`，#6 为此钉了一条 Regression row），故 `expected_files` 恒为绝对路径。重新构造 MUST 走同一次提升（相对 `raw_root` 先 `Path.cwd() / root`），否则一个**合法**调用会被本检查误拒。等价的收口方式是 `stage_raw` 要求 `raw_root` 绝对、相对即以 `kind="verdict-mismatch"` 拒绝——二者择一并写进实现注释，MUST NOT 两不沾（既不提升也不拒绝）。
+  - **bundle 文件名 MUST 复用 `rawscan` 的渲染路径**，MUST NOT 在本模块重抄一份模式校验/渲染规则。理由与 `SOURCE_DIR_NAMES` 同：第二份字面量会让两处对同一模式给出不同结果，而本检查恰恰以「两处相等」为判据——自己抄一份等于让检查比对自己，判别力归零。`rawscan` 的 `_render`/`_validate_pattern` 目前是私有的；实现者 MUST 在**不改变 `rawscan` 既有公开行为**的前提下把渲染面提升为可复用（最小改动：加一个薄公开包装并在 `__all__` 登记），这是本 issue 允许触碰 `rawscan.py` 的**唯一**例外，且 MUST 作为偏离逐条上报。
+  - 该检查 MUST 有自己的 `kind` 与自己的具名用例，MUST NOT 折进 `source-manifest`——后者已有四个触发条件，把它折进去就意味着删掉 containment 检查也不会有任何用例变红（本仓记录在案的「声明必须配判别器」失效模式）。
 - 目标目录不存在则创建；目标已存在同名文件 -> 报错停止，MUST NOT 覆盖（work 是一次性隔离单元，同名存在意味着调用序错误）
 - 部分失败（第 k 个文件复制失败）-> 报错，并把本轮已写入的 work 侧路径清理干净（不留半套 raw），MUST NOT 让 `raw-manifest.json` 与实际副本不一致
 - 副本与 manifest MUST 全部落在 `work_dir` 之下；`YD_ROOT` 模拟根内 MUST 不出现任何 raw 副本
@@ -736,12 +740,14 @@ Surfaces:
 
 Regression rows:
 - `stage_raw` + 完整 verdict + 带完整 `idx_selectors` 的源 manifest -> 副本齐全、manifest 三元组集合与 `expected_variables` 相等、entry 路径全部解析到 `work/raw/` 之下
-- `stage_raw` + `complete=False` 的 verdict -> 抛错，且 `work_dir` 下零新增路径
-- `stage_raw` + 源 manifest 缺 apcp 的 `accumulation_type` -> 抛错，且 `work_dir` 下零新增路径（不落半个 manifest）
-- `stage_raw` + 源 manifest 的 `accumulation_type` 取域外值（如 `"unknown"`）-> 抛错（不静默降级成 cumulative）
-- `stage_raw` + `accumulation_type == "interval_bucket"` 但缺 `step_range` -> 抛错
-- `stage_raw` + 源 manifest 缺 manifest 级 `forecast_hours` -> 抛错
-- `stage_raw` + 第 k 个源文件在复制中途被替换（lstat 前后不一致）-> 抛错，work 侧不留半套副本
+- `stage_raw` + `complete=False` 的 verdict -> `kind="incomplete-verdict"`，且 `work_dir` 下零新增路径
+- `stage_raw` + 源 manifest 缺 apcp 的 `accumulation_type` -> `kind="accumulation-metadata"`，且 `work_dir` 下零新增路径（不落半个 manifest）
+- `stage_raw` + 源 manifest 的 `accumulation_type` 取域外值（如 `"unknown"`）-> `kind="accumulation-metadata"`（不静默降级成 cumulative）
+- `stage_raw` + `accumulation_type == "interval_bucket"` 但缺 `step_range` -> `kind="accumulation-metadata"`
+- `stage_raw` + 源 manifest 缺 manifest 级 `forecast_hours` -> `kind="source-manifest"`
+- `stage_raw` + 第 k 个源文件在复制中途被替换（lstat 前后不一致）-> `kind="source-mutated"`，work 侧不留半套副本
+- `stage_raw` + `raw_root` 形参指向另一个根（与 verdict 由不同调用点产生）-> `kind="verdict-mismatch"`，零写入
+- `stage_raw` + **相对** `raw_root` 且与 verdict 同源（合法调用）-> 正常产出（该行是上一行的对照：只有它能证明 containment 检查没有把合法的相对路径调用一并误拒）
 - `stage_raw` + 目标路径已存在同名文件 -> `kind="target-exists"`，MUST NOT 覆盖
 - `stage_raw` + `len(bundles) == 2` 的合法配置 -> `kind="unsupported-layout"`，零写入（多 bundle 下 variable→bundle 无定义）
 - `stage_raw` + 源 bundle 路径本身是 symlink（指向同根内的真实文件）-> `kind="source-symlink"`，零写入；**同一 fixture 下 `judge` 返回 `complete=True`**（钉死 3.1/3.2 的有意不对称）
@@ -749,7 +755,7 @@ Regression rows:
 - `stage_raw` + 第 k 个文件复制时目标不可写（权限/ENOSPC）-> `kind="copy-failed"`，work 侧不留半套副本（与 `source-mutated` 分属两条清理路径，各自具名）
 - `stage_raw` + 源 manifest 的 `forecast_hours` 不覆盖本轮某个 lead -> `kind="source-manifest"`，零写入
 - `stage_raw` + 源 manifest 缺 `requested_forecast_hours`（IFS 的 pin 形态）-> **正常产出**，yd 自己写该键 = `lead_hours` 全集（钉死「不对源侧强制」）
-- 产出的 `raw-manifest.json`（正向 schema 断言）-> `DownloadManifest.from_dict(json.load(...))` roundtrip 成功；`source_id == SOURCE_DIR_NAMES[source]`（逐源大小写非对称，本仓已记录的 CONFIRMED/FIX_NOW 陷阱）；每条 entry 的 `metadata` 含且仅含承接的 6 键加 `idx_selector`/`idx_selectors`；`idx_selector` 是该变量的 Mapping 而非被整个 `idx_selectors` 塞进去；manifest 级四键齐全且 `forecast_hours == requested_forecast_hours == sorted(expected_variables)`；`expected_checksum`/`expected_size_bytes`/`manifest_uri` 三者均为 `None`
+- 产出的 `raw-manifest.json`（正向 schema 断言）-> `DownloadManifest.from_dict(json.load(...))` roundtrip 成功；`source_id == SOURCE_DIR_NAMES[source]`（逐源大小写非对称，本仓已记录的 CONFIRMED/FIX_NOW 陷阱）；每条 entry 的 `metadata` 含且仅含承接的 6 键加 `idx_selector`/`idx_selectors`（**IFS 源两个 idx 键均不出现**——pin 侧 IFS 无累积语义，写空 Mapping 等于发明一个「查过了、是空的」的声明；该断言对 IFS 是「两键缺席」而非「两键为空」）；`idx_selector` 是该变量的 Mapping 而非被整个 `idx_selectors` 塞进去；manifest 级四键齐全且 `forecast_hours == requested_forecast_hours == sorted(expected_variables)`；`expected_checksum`/`expected_size_bytes`/`manifest_uri` 三者均为 `None`
 - `stage_raw` + IFS 源（无 apcp、无 idx_selectors）-> 正常产出，R4B2 第 1 条不触发（作用域证据）
 - `stage_raw` + GFS `f000_special` 生效 -> lead 0 的 entry 变量集等于 `verdict.expected_variables[0]`，且 lead 0 的**文件**仍在副本集内（f000 只削变量集不削文件集）
 - 源文件树（不变的兄弟面）-> 全部 `lstat` 元组在调用前后逐字相等；NWM 根下零新增/删除/改名
