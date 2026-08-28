@@ -142,7 +142,8 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 
 - cycle 固定 00/12；
 - IFS/GFS 0–168h raw 完整性规则、变量和 bundle 文件模式；
-- 两个模型变体相对路径；
+- 两个模型变体相对路径（相对 `yd_root`，不得为绝对路径）；
+- 每个 source 的 NWM canonical grid 标识（`prepare` 传给 mapping-builder 的 `grid_id`）；它随 NWM 快照固定、不随现场变化，与 `nwm_mapping_builder_module` 同属版本化快照事实，故与后者一同落 `config.toml` 而非 `local.toml`；
 - `forecast_days=7`；
 - `output_interval_minutes=60`；
 - `checkpoint_hours=[12]`；
