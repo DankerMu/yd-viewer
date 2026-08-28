@@ -1374,7 +1374,23 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 - 新增 `producer/tests/test_checkpoint_tracker.py`
 - **不改动** `producer/src/yd_producer/state/**` 与 `producer/tests/test_cfg_ic.py`（裁决修订 R1：header 分钟读取从 master 的 `state/header_time.py` **消费**，不再自行移植）
 - 修改 `.large-file-guard.json`（合并 master 的搭车修改，见裁决修订 R1）
-- 修改 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md`（§1 第 6/7 行 `落地状态` 与 `备注`）、`design.md`（D9）、本文件（本 fixture + 勾选 9.1）
+- 修改 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md`（§1 第 6/7 行 `落地状态` 与 `备注`；round 3 F1 另作废 `state_cli.py` 行与 cap 5 重戳行的 rekey 面 tracker 半路由）、`design.md`（D9 + 两条补记）、本文件（本 fixture + 勾选 9.1）
+- 修改 `openspec/changes/m2-producer-core/specs/checkpoint-tracker/spec.md`（**收窄运行期 T+12 捕获的 epoch 接受面**——删「（或等价的 T+12 绝对分钟）」并加一段把 epoch 明确划出 tracker）与 `docs/compute-loop-design.md`（§9.2 步骤 3 同步同一条收窄）。**这两处是本 issue 唯一改到 spec / 设计文档正文的地方**：Known limits cand-19 要求 M4 首次真跑核验真实 header 形态，若判定为 epoch 形式则偏离 4 必须重新裁决，届时 MUST 连同这两处一并放宽，不得只改 fixture。
+- **改动面枚举的机检口径**（round 3 Phase 7 P3-1：本枚举曾漏掉上面这两个文件，是 record-fidelity 枚举不完备的第四例）：散文枚举天生不可机检（round 3 Phase 7 P3-1 即由此漏掉两个文件，是 record-fidelity 枚举不完备的第四例），故本节另钉一份**逐字可 diff 的路径全集**：
+
+```text
+.large-file-guard.json
+docs/compute-loop-design.md
+openspec/changes/m2-producer-core/design.md
+openspec/changes/m2-producer-core/nwm-snapshot-inventory.md
+openspec/changes/m2-producer-core/specs/checkpoint-tracker/spec.md
+openspec/changes/m2-producer-core/tasks.md
+producer/src/yd_producer/tracker/__init__.py
+producer/src/yd_producer/tracker/checkpoint_tracker.py
+producer/tests/test_checkpoint_tracker.py
+```
+
+该块 MUST 与 `git diff origin/master --name-only | sort` 逐行相等（9 行）。合并前跑一次 `diff`，不等即视为本节陈旧。上面的散文条目只解释「改了什么、为什么」，**全集以本块为准**。
 - **不改动** `executor.py`、`slurm.py`、`config.py`、`cli.py`、`geometry.py`、`nwm.py`、`rawscan.py`、`store/**`、`raw/**`、`pyproject.toml`、`uv.lock`
 
 **Must-preserve behavior**：
