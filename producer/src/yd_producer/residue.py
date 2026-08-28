@@ -23,6 +23,12 @@
    cycle 目录，连同另一源已带 `DONE` 的正式产物一起消失；而 `safe_fs` 帮不上忙——它看到
    的条目名是一个合法的 10 位 cycle id，完全在容纳域内。故 `source` MUST 非空且 MUST 是
    单个路径分量（`.`、`..`、含分隔符的名字一律报错而不是拿去构造路径）。
+   **两个点名 MUST 被显式列举拒绝，MUST NOT 依赖 `Path(source).name` 的顺带效果**
+   （round 2）：`Path("..").name` 就是 `".."`，单分量判据放行它，清单随即变成
+   `output/<T>/..`——整棵 `output/` 树；`safe_fs` 虽会在执行期以
+   「Unsafe directory entry name」拒绝，但那是一条误导消息的永久停源，且判定被任务 13.2
+   单独消费（不执行），错的是**清单**本身。`Path(".").name` 是空串，只是顺带被单分量判据
+   挡住——依赖 pathlib 的这个性质会让本条契约随实现细节静默失效。
 3. **裁决 3（全新链同样适用）**：T 一律取 `FrontierDecision.cycle`——该值在无任何
    `DONE` 时就是 `states/<source>/` 里**最早**的合法状态（`controller._decide` 的
    `min(state_cycles)`）。本模块因此不自己算 T：多出来的状态份数只可能来自一次中断的
@@ -175,7 +181,9 @@ def plan_residue(
 
     `source` 必须与 `decision.source` 一致——两者分叉会让清单落到另一个源的目录上，
     正是裁决 2「逐源」要防的形态；且必须是**非空的单个路径分量**（空串会把删除粒度从
-    `output/<T>/<source>/` 塌成整个 `output/<T>/`，连另一源已带 `DONE` 的产物一起删）。
+    `output/<T>/<source>/` 塌成整个 `output/<T>/`，连另一源已带 `DONE` 的产物一起删；
+    `"."` 同样塌回该 cycle 目录，`".."` 更把清单放大成整棵 `output/`——两个点名都被
+    **显式**拒绝，不靠 `Path(source).name` 顺带挡）。
 
     `yd_root` 在此**一次性 `resolve()`**，清单里的 `yd_root` 因此恒为已解析的绝对路径
     （裁决 6 增补：`safe_fs` 对容纳根自身逐段 `O_NOFOLLOW`）。判定与执行的相对路径拼接
@@ -196,11 +204,13 @@ def plan_residue(
             f"plan_residue 的 source={source!r} 与 decision.source="
             f"{decision.source!r} 不一致：残留清单必须逐源自洽"
         )
-    if not source or source != Path(source).name:
+    if not source or source in {".", ".."} or source != Path(source).name:
         raise ValueError(
             f"plan_residue 的 source={source!r} 不是单个非空路径分量："
             "空串会让 output/<cycle>/<source>/ 塌回 output/<cycle>/，"
-            "把另一源已带 DONE 的产物一并删除"
+            "'.' 同样塌回该 cycle 目录（pathlib 丢弃单点分量），"
+            "'..' 更把删除面放大为整个 output/ 树；"
+            "三者都会把另一源已带 DONE 的产物一并删除"
         )
     if decision.cycle is None:
         return None

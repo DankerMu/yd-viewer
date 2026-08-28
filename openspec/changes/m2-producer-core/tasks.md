@@ -1855,6 +1855,10 @@ Required evidence:
 - **`containment_root` 就是 `YD_ROOT`**（两个独立判别器，缺一不可）：其一，`plan_residue` 产出的 `plan.yd_root` 等于 `Path(传入的 YD_ROOT).resolve()`——传入值已是实路径时即等于它本身，经 symlink 到达时等于解析后的实路径（见下一条用例）；把它改成 `root.parent` 会静默放宽容纳域而现有用例全绿；其二，越界的手搓 plan **只带 `state_files`、`half_product_dirs` 为空**时执行仍被拒（现有越界用例走的是半成品那条臂，状态文件那条臂的 `containment_root` 掉了也不会红）
 - **`YD_ROOT` 经 symlink 到达时清理仍成功**（裁决 6 增补）：以 `link -> real` 构造根并把未 resolve 的 `link/yd` 传给 `plan_residue` -> 判定与执行都成功，删除结果与直接用 `real/yd` 一致。这条钉住「判定侧跟随 symlink 而执行侧对 symlink 致命」的不对称
 - **`source` 输入域**（裁决 2 增补）：`source=""` -> 报错，且 `output/<cycle>/` 与另一源的 `DONE` 产物零改动
+- **`source` 输入域 MUST 逐合取项各有判别器**（round 2；上一条只跑 `""`，闸里其余两项无判别器）：同一条用例参数化跑 `["", ".", "..", "a/b", "ifs/"]` 五个形态，每个都断言抛 `ValueError`、树的递归快照不变、另一源的 `DONE` 产物仍在。映射逐条不可省——`""` 只被 `not source` 挡；`"."` 与 `".."` 只被**显式点名集**挡（`Path("..").name` 就是 `".."`，`Path(".").name` 是空串只属 pathlib 的顺带效果，MUST NOT 依赖）；`"a/b"` 与 `"ifs/"` 只被单分量判据挡
+- **`..` 条目名的拒绝 MUST 有消费者侧的钉子**（round 2；`store/safe_fs.py` 零改动，故义务落在本 issue 的用例里）：手搓一份 `half_product_dirs` 含 `output/<T>/..` 的 `ResiduePlan` -> `execute_residue_plan` 抛 `SafeFilesystemError` 且 `kind == "unsafe"`，执行前后 `YD_ROOT` 递归快照逐字节相等、另一源的 `DONE` 产物仍在。理由：该保证由 `safe_fs.remove_tree_allow_symlinks` 首行的 `_reject_unsafe_entry_name` 独家承载，仓内无用例钉住它
+- **`ResiduePlan.empty` 的半成品臂 MUST 有判别器**（round 2）：树为 `DONE(D)` + `states/<source>/<T>.cfg.ic` + **空的** `output/<T>/<source>/` -> `plan.state_files == ()`、`plan.half_product_dirs` 非空、`plan.empty is False`。两个断言缺一不可：没有 `state_files == ()` 这条前提，用例对 `return not self.state_files` 没有判别力
+- **执行序 MUST 有判别器**（round 2）：模块头逐字钉死「先半成品树、后更晚状态」。判别树为 `states/<source>/<T+12>.cfg.ic` 是指向 `YD_ROOT` 外普通文件的 symlink + 同时存在半成品树 -> 抛 `SafeFilesystemError` 之后半成品目录**已不存在**、symlink 与其目标都还在。两种顺序都抛，只有钉死的顺序会先删半成品
 - **半成品位置不是目录时不删**（裁决 6 的类型判据）：`output/<T>/<source>` 分别是 symlink、普通文件、FIFO 三种形态 -> 三者都不入清单，执行后条目仍在
 - **判定侧的 fail-closed 收敛**：`chmod 0o000` 掉 `states/<source>/` -> `plan_residue` 抛 `ResidueError`，MUST NOT 返回空清单（空清单会让残留留在树上被下一轮当成正常产物）
 - **锁的竞争/真错分流**：monkeypatch `fcntl.flock` 抛 `PermissionError(EACCES)` -> 异常向外传播，MUST NOT 变成 `acquired=False`，且被包裹的可调用对象零调用
@@ -1865,7 +1869,7 @@ Required evidence:
 - **锁：释放后可再取**：第一次正常退出后第二次进入 -> 真正执行；锁文件在释放后**仍存在**（不 unlink）
 - **锁：异常路径也释放**：被包裹的可调用对象抛异常 -> 异常向外传播且锁已释放（同棵树第二次进入能拿到锁）
 - **非绝对锁路径**：`"yd.lock"` 与 `"~/yd.lock"` 两种形态 -> 抛错且消息含 `cron.lock_path`；断言 cwd 下与 `Path.home()` 下**都没有**新建锁文件，且被包裹的可调用对象零调用（spec Scenario 逐字要求「不执行发现」；副作用先于闸门是本条要杀的形态）
-- 预登记变异体（(a)–(aa) 共 27 条，此处刻意写全数；(t)–(aa) 由 round 1 核验门追加），每条 MUST 被上列用例杀死（跑法见 `openspec/project-profile.md` 的 Mutation-testing hazards，用 `uv run python -m pytest`）：
+- 预登记变异体（(a)–(af) 共 32 条，此处刻意写全数；(t)–(aa) 由 round 1 核验门追加，(ab)–(af) 由 round 2 核验门追加），每条 MUST 被上列用例杀死（跑法见 `openspec/project-profile.md` 的 Mutation-testing hazards，用 `uv run python -m pytest`）：
   (a) 「更晚」判据 `>` 改 `>=` -> 保留 T 用例变红；
   (b) 逐源过滤去掉（对 `states/` 全域比较）-> 逐源隔离用例变红；
   (c) `DONE` 存在性判据改为「目录非空」-> `DONE` 保护用例变红；
@@ -1893,12 +1897,18 @@ Required evidence:
   (y) 去掉半成品的 `S_ISDIR` 类型判据 -> symlink/普通文件/FIFO 三形态用例变红；
   (z) `plan_residue` 把 `DiscoveryUnreadableError` 吞成空清单而不抛 `ResidueError` -> `chmod 0o000` 用例变红；
   (aa) `except BlockingIOError` 放宽为 `except OSError` -> `PermissionError` 用例变红（该变异体在 round 1 实测存活，全套 993 绿）
+  (ab) `source` 闸去掉 `.` / `..` 的显式点名（回到只有 `not source` 与单分量两项）-> `source=".."` 参数用例变红（`Path("..").name` 就是 `".."`，单分量判据放行它，清单随即是 `output/<T>/..`——整棵 `output/`；该变异体在 round 2 实测存活，全套 1003 绿）；
+  (ac) 整道 `source` 闸退化成 `if not source:`（点名集与单分量两项一并去掉）-> `source` 参数用例的 `"."` / `".."` / `"a/b"` / `"ifs/"` 四腿变红（round 2 实测存活：此前该用例只跑 `""`，其余两项无判别器）；
+  (ad) `safe_fs.remove_tree_allow_symlinks` 首行的 `_reject_unsafe_entry_name(name)` 删除（**变异只在 scratch 副本内做**，`store/safe_fs.py` 仓内零改动）-> `..` 条目名用例变红。这条登记的是**消费者侧依赖**：`..` 清单不会真删到 `output/` 是由该行独家承载的，而仓内此前无任何用例钉住它（round 2 实测：删掉该行后全套 1003 绿，且 `..` 清单会真的删掉另一源已提交的 `DONE` 产物）；
+  (ae) `ResiduePlan.empty` 退化成 `return not self.state_files`（丢掉半成品那条臂）-> 半成品独臂清单用例变红（round 2 实测存活：既有断言用的树两臂要么同空、要么同非空；`empty` 是公开 API 且 13.2 只消费清单不执行，按它分支的调用方会静默跳过真实半成品）；
+  (af) `execute_residue_plan` 的两个删除循环对调（先状态、后半成品）-> 执行序用例变红（round 2 实测存活。判别树：`states/<source>/<T+12>.cfg.ic` 是 symlink + 同时有半成品树；两种顺序都抛 `SafeFilesystemError`，但钉死的顺序在抛之前已把半成品删掉，对调后半成品每 tick 原地不动）
 - `cd producer && uv run pytest` -> 退出码 0
 - `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
 - `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
 - `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
 
 Known limits（合并时按此验收，不得按「Scenario 全绿」验收）:
+- **变异体 (z) 在 root 身份下不可杀**（round 2 核验裁为 DISCARD，记录而不改用例）：(z) 的唯一判别器 `test_unreadable_states_dir_raises_residue_error` 以 `_skip_if_root()` 自跳过——root 无视 mode 位，`chmod 0o000` 仍可枚举，用例在该身份下本就无判别力。故以 root 跑变异证明时 (z) 必然「存活」，那是身份造成的假阳性而不是覆盖缺口。CI 跑的是 GitHub 托管的 `ubuntu-latest`（非 root），(z) 在每个 PR 上都被杀死；本地以 root 复现变异批次时 MUST 换非 root 身份，MUST NOT 因此去掉那道 skip（去掉只会把用例变成恒真的空转）。
 - spec 的 Scenario「崩溃残留恢复」后半句「以 T 状态重新组装本轮」依赖 `run_once`（任务 14.1，issue #26/#27）。本 issue 只能让**删除**半句变绿，重组半句以「清理后 `decide_frontier` 仍返回 T」这一发现层可证形式代替（见 Must-preserve）。该 Scenario 的完整验收归 14.1。
 
 Non-goals:

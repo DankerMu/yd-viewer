@@ -330,6 +330,28 @@ def test_empty_output_dir_is_a_half_product(tmp_path: pathlib.Path) -> None:
     assert (root / "output" / T).is_dir()
 
 
+def test_plan_with_only_a_half_product_is_not_empty(tmp_path: pathlib.Path) -> None:
+    """半成品**独臂**的清单 `empty is False`（round 2：`empty` 的半成品臂此前无判别器）。
+
+    `ResiduePlan.empty` 是公开 API，且任务 13.2 只消费清单、不执行——把它退化成
+    `not self.state_files` 时全套仍绿（既有断言用的树两臂要么同空、要么同非空），而按
+    `empty` 分支的调用方会把一个真实半成品静默跳过，残留留在 NFS 上被下一轮当成正常
+    产物。故这条用例的承重断言是「`state_files` 为空**而** `empty is False`」。
+    """
+    root = _yd_root(tmp_path)
+    builder = YdRootBuilder(root=root)
+    builder.write_done(D, "ifs")
+    builder.write_state(T, "ifs")
+    builder.source_output_dir(T, "ifs").mkdir(parents=True)
+
+    plan = _plan(builder, "ifs")
+
+    assert plan is not None
+    assert plan.state_files == ()
+    assert plan.half_product_dirs == (builder.source_output_dir(T, "ifs"),)
+    assert plan.empty is False
+
+
 @pytest.mark.parametrize("shape", ["symlink", "regular_file", "fifo"])
 def test_non_directory_half_product_location_is_never_planned(
     tmp_path: pathlib.Path, shape: str
@@ -578,6 +600,71 @@ def test_symlinked_yd_root_is_resolved_before_use(tmp_path: pathlib.Path) -> Non
     assert builder.source_output_dir(D, "ifs").joinpath("DONE").is_file()
 
 
+def test_execute_refuses_a_dotdot_entry_name(tmp_path: pathlib.Path) -> None:
+    """清单里带 `..` 的半成品条目 -> `SafeFilesystemError(kind="unsafe")`，树逐字不变。
+
+    这是**消费者侧**的钉子：`safe_fs.remove_tree_allow_symlinks` 第一行的
+    `_reject_unsafe_entry_name` 是「`output/<T>/..` 不会真被删」这条保证的唯一承载物，
+    而仓内没有任何用例钉住它（round 2 实测：把该行删掉，全套仍绿，随后 `..` 清单会真的
+    删掉另一源已提交的 `DONE` 产物）。`store/safe_fs.py` 在本 issue 零改动，故义务落在
+    这里：本模块交出去的清单形态一旦退化，拒绝行为 MUST 仍然可观测。
+    """
+    root = _yd_root(tmp_path)
+    builder = _crash_residue_tree(root)
+    builder.write_done(T, "gfs")
+    builder.write_output_dat(T, "gfs")
+    before = snapshot_tree(root)
+
+    degenerate = residue.ResiduePlan(
+        yd_root=root,
+        source="ifs",
+        retained_cycle=parse_cycle(T),
+        state_files=(),
+        half_product_dirs=(root / "output" / T / "..",),
+    )
+
+    with pytest.raises(SafeFilesystemError) as error:
+        residue.execute_residue_plan(degenerate)
+
+    assert error.value.kind == "unsafe"
+    assert snapshot_tree(root) == before
+    assert builder.source_output_dir(T, "gfs").joinpath("DONE").is_file()
+
+
+def test_half_products_are_removed_before_state_files(tmp_path: pathlib.Path) -> None:
+    """执行序钉死「先半成品树、后更晚状态」（模块头逐字写着这条）。
+
+    判别器：`states/<source>/<T+12>.cfg.ic` 是 symlink（`unlink_no_follow` 必抛）且同时
+    存在半成品树。两种顺序都抛 `SafeFilesystemError`，但只有钉死的顺序会在抛之前把半成品
+    删掉；顺序对调则半成品每 tick 都原地不动。round 2 实测：对调两个循环后全套仍绿。
+    """
+    root = _yd_root(tmp_path)
+    outside = tmp_path.resolve() / "outside"
+    outside.mkdir()
+    target = outside / "state-target.cfg.ic"
+    target.write_text("outside the yd root\n", encoding="utf-8")
+
+    builder = YdRootBuilder(root=root)
+    builder.write_done(D, "ifs")
+    builder.write_output_dat(D, "ifs")
+    builder.write_state(T, "ifs")
+    builder.write_output_dat(T, "ifs")
+    link = builder.write_state_as_symlink_to(T_PLUS_12, "ifs", target)
+
+    plan = _plan(builder, "ifs")
+    assert plan is not None
+    assert plan.state_files == (link,)
+    assert plan.half_product_dirs == (builder.source_output_dir(T, "ifs"),)
+
+    with pytest.raises(SafeFilesystemError):
+        residue.execute_residue_plan(plan)
+
+    # 半成品先删：抛出发生在**状态那条臂**，故半成品已不在。
+    assert not builder.source_output_dir(T, "ifs").exists()
+    assert link.is_symlink()
+    assert target.is_file()
+
+
 # --- 幂等 ---
 
 
@@ -663,13 +750,24 @@ def test_plan_rejects_a_source_that_disagrees_with_the_decision(
     assert snapshot_tree(root) == before
 
 
-def test_empty_source_fails_closed(tmp_path: pathlib.Path) -> None:
-    """`source=""` -> 报错；`output/<T>/` 与另一源的 `DONE` 产物零改动（裁决 2 增补）。
+@pytest.mark.parametrize("bad_source", ["", ".", "..", "a/b", "ifs/"])
+def test_empty_source_fails_closed(tmp_path: pathlib.Path, bad_source: str) -> None:
+    """越界的 `source` -> 报错；`output/<T>/` 与另一源的 `DONE` 产物零改动（裁决 2 增补）。
 
     空串不是「没有源」而是一次**粒度塌陷**：`Path("/a/b") / ""` 就是 `/a/b`，于是
     `output/<T>/<source>/` 塌回 `output/<T>/`，删除的是整个 cycle 目录，连同 gfs 已经
     带 `DONE` 的正式产物。`safe_fs` 在这条路上帮不上忙——它看到的条目名是一个合法的
     10 位 cycle id，完全在容纳域之内。故闸必须在判定入口。
+
+    五个形态各是闸里一个合取项的**唯一**判别器（round 2：整道闸退化成 `if not source:`
+    时全套仍绿，说明单分量那一项此前无判别器）：
+    - `""` 只被 `not source` 挡（`Path("").name` 是空串，单分量判据放行它）；
+    - `"."` 只被显式点名集挡（`Path(".").name` 是空串，看似被单分量判据挡住，但那是
+      pathlib 的顺带效果；放行后 `output/<T>/.` 被 pathlib 归一成 `output/<T>`，删的是
+      整个 cycle 目录）；
+    - `".."` 只被显式点名集挡（`Path("..").name` 就是 `".."`，单分量判据放行它），放行后
+      清单是 `output/<T>/..`——整棵 `output/`；
+    - `"a/b"` 与 `"ifs/"` 只被单分量判据挡（`Path("ifs/").name` 是 `"ifs"`）。
     """
     root = _yd_root(tmp_path)
     builder = YdRootBuilder(root=root)
@@ -680,14 +778,14 @@ def test_empty_source_fails_closed(tmp_path: pathlib.Path) -> None:
     before = snapshot_tree(root)
 
     handed = controller.FrontierDecision(
-        source="",
+        source=bad_source,
         cycle=parse_cycle(T),
         stop_reason=None,
-        detail="配置里 source 漏填",
+        detail="配置里 source 写坏",
     )
 
     with pytest.raises(ValueError, match="单个非空路径分量"):
-        residue.plan_residue(yd_root=root, source="", decision=handed)
+        residue.plan_residue(yd_root=root, source=bad_source, decision=handed)
 
     assert snapshot_tree(root) == before
     assert builder.source_output_dir(T, "gfs").joinpath("DONE").is_file()
