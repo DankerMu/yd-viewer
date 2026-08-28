@@ -9,8 +9,9 @@
 """
 
 import builtins
+import errno
 import os
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -438,6 +439,22 @@ def test_unknown_source_rejected(tmp_path, source):
 
 
 @pytest.mark.parametrize(
+    "cycle", [date(2026, 3, 4), "2026030400", 1772582400, None], ids=str
+)
+def test_non_datetime_cycle_rejected(tmp_path, cycle):
+    """非 `datetime` 的 cycle MUST 落在类型守卫上，MUST NOT 让下一行 `utcoffset()`
+    抛裸 `AttributeError`（judge 对外只抛 `ConfigError`）。
+
+    `date` 是最现实的一种传参错：`date` 不是 `datetime` 的子类的反面——`datetime`
+    **是** `date` 的子类，故上游任何写成 `date` 的日期戳都会静默走到这里。
+    """
+    with pytest.raises(ConfigError) as excinfo:
+        judge(tmp_path, "gfs", cycle, make_config())
+
+    assert excinfo.value.path is None
+
+
+@pytest.mark.parametrize(
     ("label", "cycle"),
     [
         ("naive", datetime(2026, 3, 4, 0)),  # noqa: DTZ001 — 本用例专测 naive 被拒
@@ -494,21 +511,26 @@ def test_named_zero_offset_timezone_accepted(tmp_path, label, tzinfo):
 
 
 @pytest.mark.parametrize(
-    ("label", "pattern", "field"),
+    ("label", "pattern", "field", "reason"),
     [
-        ("unknown_named", "gfs.{member}.f{lead:03d}.grib2", "member"),
-        ("auto_positional", "gfs.{}.f{lead:03d}.grib2", ""),
-        ("indexed_positional", "gfs.{0}.f{lead:03d}.grib2", "0"),
+        ("unknown_named", "gfs.{member}.f{lead:03d}.grib2", "member", "词表外的字段"),
+        ("auto_positional", "gfs.{}.f{lead:03d}.grib2", "", "自动编号的位置字段"),
+        ("indexed_positional", "gfs.{0}.f{lead:03d}.grib2", "0", "位置字段"),
         # 模式里另含一个裸 `{lead}`：否则 `fields` 只有 `lead.real`，"必须含
         # `{lead}`"那道门会先拦下它，而两道门的报文都含模式本身与 `lead.real`
         # 子串，本参数就分不出词表门在不在（削弱词表门后 `(0).real` 正常渲染，
         # judge 直接返回 verdict，用例变红）。
-        ("attribute_access", "gfs.f{lead:03d}.{lead.real}.grib2", "lead.real"),
-        ("broken_syntax", "a{lead", None),
-        ("bad_format_spec", "gfs.f{lead:s}.grib2", None),
+        (
+            "attribute_access",
+            "gfs.f{lead:03d}.{lead.real}.grib2",
+            "lead.real",
+            "词表外的字段",
+        ),
+        ("broken_syntax", "a{lead", None, "语法错误"),
+        ("bad_format_spec", "gfs.f{lead:s}.grib2", None, "渲染失败"),
     ],
 )
-def test_bundle_pattern_vocabulary_enforced(tmp_path, label, pattern, field):
+def test_bundle_pattern_vocabulary_enforced(tmp_path, label, pattern, field, reason):
     config = make_config(
         gfs=make_source(
             lead_hours=GFS_LEADS,
@@ -524,8 +546,19 @@ def test_bundle_pattern_vocabulary_enforced(tmp_path, label, pattern, field):
     assert excinfo.value.path == "raw.gfs.bundles"
     message = str(excinfo.value)
     assert pattern in message
-    if field:
+    # 拒绝**归因** MUST 落在真正犯规的那道门/那一类上：六个参数分属四种成因（词表外
+    # 具名、自动编号位置、编号位置、模式语法、渲染），报文若把它们混为一谈，运维就得
+    # 靠猜来改 `config.toml`。这条断言也是"分类支存在"的唯一取证——把 `field == ""`
+    # 或 `field.isdigit()` 支变异掉不改变任何返回值，只改这段归因文本。
+    assert reason in message
+    if field is not None:
+        # `is not None` 而非真值判断：`auto_positional` 的 field 是 `""`，真值判断会
+        # 把它静默跳过，该参数就退化成"只要抛 ConfigError 就算过"。
         assert field in message
+        # 词表门 MUST 是拒绝的**来源**，MUST NOT 由 `_render` 的异常兜底偶然满足：
+        # 后者的 `__cause__` 是 KeyError/IndexError，且报文里没有词表枚举句。
+        assert not isinstance(excinfo.value.__cause__, (KeyError, IndexError))
+        assert "只接受" in message
 
 
 @pytest.mark.parametrize(
@@ -762,8 +795,22 @@ def test_non_pathlike_raw_root_rejected(raw_root):
 # --- 判定期不访问文件系统（哨兵）--------------------------------------------
 
 
-def _boom(*args, **kwargs):
-    raise AssertionError("判定期不得访问文件系统")
+# 被桩原语的调用记录。判别力 MUST 落在"有没有被调用"上，MUST NOT 落在"桩抛了什么
+# 异常"：任何宽捕获（`except Exception`，乃至裸 `except:`）都能把桩抛出的异常吞掉，
+# 那样的哨兵对"实现里多了一个带兜底的探针"零判别力。`AssertionError` 仍然抛（纵深：
+# 桩被调用后立即中止，不让被测代码拿到伪造的返回值继续往下走），但断言看的是 `_CALLS`。
+# MUST NOT 改用 `BaseException` 子类——裸 `except:` 同样吞得掉，换不来判别力。
+_CALLS: list[str] = []
+
+
+def _recording_boom(name: str):
+    """记录式哨兵桩：先记下被调原语名，再抛 `AssertionError`。"""
+
+    def stub(*args, **kwargs):
+        _CALLS.append(name)
+        raise AssertionError(f"判定期不得访问文件系统：{name}")
+
+    return stub
 
 
 def _reject_case_configs():
@@ -874,18 +921,23 @@ def test_rejections_happen_before_any_filesystem_access(
     桩 MUST 落在 `os.stat`/`os.scandir`/`os.listdir` 这三个**汇流处**，MUST NOT 只点
     名 pathlib 侧的某个方法：`pathlib.Path.stat` 就是 `return os.stat(self, ...)`、
     `os.walk` 经 `os.scandir`，而点名具体拼法的桩会随实现换原语静默变成死桩（本文件
-    上一版桩 `Path.is_file`，实现改用 `Path.stat()` 后五个探针变异体全部存活）。桩体
-    抛 `AssertionError` 而非 `OSError` 也是刻意的：`os.walk` 与 `except OSError` 的
-    探针吞不掉它。pathlib 侧与 `builtins.open` 的桩保留作纵深。
+    上一版桩 `Path.is_file`，实现改用 `Path.stat()` 后五个探针变异体全部存活）。桩是
+    **记录式**的（见 `_recording_boom`）：判据是 `_CALLS == []`，即"这些原语一次都没被
+    调用"，而不是"桩抛出的异常穿出了 judge"——后者对任何带 `except Exception` 兜底的
+    探针零判别力。pathlib 侧与 `builtins.open` 的桩保留作纵深。
     """
-    monkeypatch.setattr(os, "stat", _boom)
-    monkeypatch.setattr(os, "scandir", _boom)
-    monkeypatch.setattr(os, "listdir", _boom)
-    monkeypatch.setattr(Path, "is_file", _boom)
-    monkeypatch.setattr(Path, "iterdir", _boom)
-    monkeypatch.setattr(Path, "rglob", _boom)
-    monkeypatch.setattr(Path, "glob", _boom)
-    monkeypatch.setattr(builtins, "open", _boom)
+    _CALLS.clear()
+    for module, attr in (
+        (os, "stat"),
+        (os, "scandir"),
+        (os, "listdir"),
+        (Path, "is_file"),
+        (Path, "iterdir"),
+        (Path, "rglob"),
+        (Path, "glob"),
+        (builtins, "open"),
+    ):
+        monkeypatch.setattr(module, attr, _recording_boom(f"{module.__name__}.{attr}"))
 
     try:
         with pytest.raises(ConfigError):
@@ -897,27 +949,35 @@ def test_rejections_happen_before_any_filesystem_access(
         # 自己的 tmp_path 清理一起炸掉，把"用例红了"污染成整场会话的噪声。
         monkeypatch.undo()
 
+    assert _CALLS == []
+
 
 def test_happy_path_never_lists_directories(tmp_path, monkeypatch):
     """预期集严格由 `lead_hours × bundles` 构造：判定期一次目录枚举都不发生。
 
     只桩**枚举**原语（`os.scandir`/`os.listdir` 及 pathlib 侧拼法），MUST NOT 桩
-    `os.stat`/`Path.stat`：逐文件 stat 正是 happy path 的规定行为。
+    `os.stat`/`Path.stat`：逐文件 stat 正是 happy path 的规定行为，也 MUST NOT 桩
+    `builtins.open`：`_is_readable` 的真实读同理。判据同样是 `_CALLS == []`。
     """
+    _CALLS.clear()
     expected = literal_expected(tmp_path, "gfs", GFS_LEADS, GFS_BUNDLES)
     populate(expected)
-    monkeypatch.setattr(os, "scandir", _boom)
-    monkeypatch.setattr(os, "listdir", _boom)
-    monkeypatch.setattr(Path, "iterdir", _boom)
-    monkeypatch.setattr(Path, "rglob", _boom)
-    monkeypatch.setattr(Path, "glob", _boom)
-    monkeypatch.setattr(Path, "walk", _boom)
+    for module, attr in (
+        (os, "scandir"),
+        (os, "listdir"),
+        (Path, "iterdir"),
+        (Path, "rglob"),
+        (Path, "glob"),
+        (Path, "walk"),
+    ):
+        monkeypatch.setattr(module, attr, _recording_boom(f"{module.__name__}.{attr}"))
 
     try:
         verdict = judge(tmp_path, "gfs", CYCLE, make_config())
     finally:
         monkeypatch.undo()
 
+    assert _CALLS == []
     assert verdict.expected_files == expected
     assert verdict.complete is True
 
@@ -934,11 +994,58 @@ def test_readability_is_decided_by_real_open_not_os_access(tmp_path, monkeypatch
     populate(expected)
     victim = expected[2]
     victim.chmod(0o000)
-    monkeypatch.setattr(os, "access", _boom)
+    _CALLS.clear()
+    monkeypatch.setattr(os, "access", _recording_boom("os.access"))
     try:
         verdict = judge(tmp_path, "gfs", CYCLE, make_config())
     finally:
         victim.chmod(0o644)
+
+    # 同记录式判据：`os.access` 一次都不该被调用。抛出的 `AssertionError` 若被实现里
+    # 的宽捕获吞掉，本断言仍然红。
+    assert _CALLS == []
+    assert verdict.complete is False
+    assert verdict.unreadable_files == (victim,)
+    assert verdict.missing_files == ()
+
+
+def test_open_succeeds_but_first_read_fails_is_unreadable(tmp_path, monkeypatch):
+    """ "可读"的判据是**真的读出一个字节**，不是"`open` 没报错"。
+
+    生产 raw 根在 NFS 上：陈旧文件句柄（ESTALE）与 EIO 都会让 `open` 成功、首次
+    `read` 失败。这是本地权限位造不出来的形态，故在 `builtins.open` 这个系统边界上
+    做定向注入——只对一个受害路径生效，其余路径走真实 `open`。
+    """
+    expected = literal_expected(tmp_path, "gfs", GFS_LEADS, GFS_BUNDLES)
+    populate(expected)
+    victim = expected[1]
+    real_open = builtins.open
+
+    class _ReadFails:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *exc_info):
+            return self._handle.__exit__(*exc_info)
+
+        def read(self, *args, **kwargs):
+            raise OSError(errno.EIO, "Input/output error")
+
+    def fake_open(file, *args, **kwargs):
+        handle = real_open(file, *args, **kwargs)
+        if os.fspath(file) == os.fspath(victim):
+            return _ReadFails(handle)
+        return handle
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    try:
+        verdict = judge(tmp_path, "gfs", CYCLE, make_config())
+    finally:
+        monkeypatch.undo()
 
     assert verdict.complete is False
     assert verdict.unreadable_files == (victim,)
