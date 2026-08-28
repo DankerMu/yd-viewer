@@ -24,6 +24,12 @@
    完整性检查会真空通过。§1 区段内任何「含 `|` 却不构成表行」的行都是硬失败。
 5. 「哪些目标必须已落地」由清单 §1 的 `落地状态` 列驱动，不由文件系统派生：期望集
    一旦派生自磁盘，删文件时期望与实际同步收缩，删除就完全静默。
+6. `落地状态` 列的义务是**双向**的，两个方向各有判别器：正向「标了 `本 issue 落地`
+   ⇒ 文件必须在」由 `test_landed_snapshot_files_carry_their_provenance_header` 的
+   缺席分支承担；反向「文件在且带溯源头 ⇒ 必须标 `本 issue 落地`」由
+   `test_files_carrying_a_provenance_header_are_marked_landed` 承担。只做正向时，
+   把一行降级成 `待落地` 是零信号的（全套 359 passed 不变），随后再删文件也零失败——
+   一次改词就静默解除了该行的全部落地义务。
 """
 
 from __future__ import annotations
@@ -179,6 +185,10 @@ PINNED_TARGETS = {
     for target, source, status in INVENTORY_ROWS
     if status == STATUS_LANDED
 }
+
+#: 目标路径 -> `落地状态` 的查表，供反向（文件 ⇒ 状态）方向使用。`INVENTORY_TARGETS`
+#: 是**状态盲**的，只凭它做集合比较时，降级一行不改变等式任何一侧。
+INVENTORY_STATUS = {target: status for target, _, status in INVENTORY_ROWS}
 
 
 # --- 扫描集派生 --------------------------------------------------------------
@@ -384,8 +394,35 @@ def test_rows_that_stop_looking_like_table_rows_are_reported_as_stray() -> None:
 
 
 def test_pinned_targets_come_from_the_status_column_not_the_filesystem() -> None:
-    # P1 的机制断言：期望落地集派生自 `落地状态` 列。若它派生自文件系统，删掉一个
-    # 已钉住的快照文件时期望与实际同步收缩，删除完全静默。
+    """P1 的机制断言：期望落地集派生自 `落地状态` 列，不派生自文件系统。
+
+    **执行集的实测口径（不要按名字读成更多）**：把 `PINNED_TARGETS` 换回文件系统派生
+    （`(REPO_ROOT / target).is_file()`，即 P1 原样复发）时，全仓当前状态下全套 362
+    passed 一条不红——因为两种派生在「每个 `本 issue 落地` 行的文件都在、每个 `待落地`
+    行的文件都不在」这个状态下**取值相同**。两者取值分叉只有两种状态：钉住的文件被删，
+    或 `待落地` 行的文件出现；这两种状态都已被
+    `test_landed_snapshot_files_carry_their_provenance_header` 判红（缺席分支 / 在场必须
+    带头部分支）。所以那条变异体在「全套还能绿」的状态空间里是**等价变异体**，不是漏网
+    之鱼；删文件的检测由该正向用例的 `status` 形参承担，与 `PINNED_TARGETS` 的定义无关。
+
+    下面两条断言是把模块常量与状态列做**机制绑定**（同义重述），实测只在上述分叉状态里
+    与正向用例一同变红；保留它是为了让「换回文件系统派生」这件事在改动点上就有一条具名
+    断言接住，而不是宣称它独立地钉死了 P1。
+
+    末段的解析器断言与模块常量无关：它只证明「按状态列过滤」这个表达式对两行虚构清单
+    行的行为正确（两行的文件都不在磁盘上）。
+    """
+
+    # 机制绑定：模块常量 == 按状态列现算的期望集。
+    assert PINNED_TARGETS == {
+        target: source
+        for target, source, status in INVENTORY_ROWS
+        if status == STATUS_LANDED
+    }
+    # 且它对文件系统免疫：`待落地` 行即使文件已在磁盘上，也不得混进期望集。
+    assert all(INVENTORY_STATUS[target] == STATUS_LANDED for target in PINNED_TARGETS)
+
+    # 解析器一侧：两行的目标路径在磁盘上都不存在，期望集却只含标了「本 issue 落地」的那行。
     section = (
         "## 1. 快照清单\n\n"
         "| 能力项 | NWM 原路径 | 目标路径 | 剥离点 | 落地状态 | 备注 |\n"
@@ -401,7 +438,6 @@ def test_pinned_targets_come_from_the_status_column_not_the_filesystem() -> None
     rows, _ = _parse_inventory_rows(body)
 
     pinned = [target for target, _, status in rows if status == STATUS_LANDED]
-    # 两行的目标路径在磁盘上都不存在，期望集却只含标了「本 issue 落地」的那一行。
     assert pinned == ["producer/src/yd_producer/x/x.py"]
     assert not (REPO_ROOT / pinned[0]).exists()
 
@@ -494,6 +530,44 @@ def test_every_file_with_a_provenance_header_is_registered_in_the_inventory() ->
     assert not unregistered, (
         "以下文件带溯源标记但不在 nwm-snapshot-inventory.md §1 路径表内，"
         f"请先登记再落地：{unregistered}"
+    )
+
+
+def test_files_carrying_a_provenance_header_are_marked_landed() -> None:
+    """`落地状态` 义务的**反向**：文件在场且带溯源头 ⇒ §1 里必须标「本 issue 落地」。
+
+    正向（标了落地 ⇒ 文件必须在）由
+    `test_landed_snapshot_files_carry_their_provenance_header` 的缺席分支承担，但它只在
+    文件**不存在**时才读状态列。于是把任一行降级成 `待落地`、文件原样不动，是零信号的：
+    `INVENTORY_TARGETS` 状态盲，`landed == with_header` 两侧都不变，全套 359 passed 不变；
+    随后再删该文件也零失败。本条补上缺的那个方向，让「降级」成为必须显式重写清单行的动作。
+
+    **残留（不得声称已完全关闭）**：一次提交里同时降级并删除某一行的文件，仍能全绿——
+    本条只看在场文件，文件没了就没有反向义务。彻底关闭需要一份冻结路径名单，而那是已裁定
+    的非目标（`openspec/changes/m2-producer-core/tasks.md:293`，PR 偏离 F8/F10）：名单会与
+    清单表构成第二份名录并要求后续任务组手工同步。本条的执行集 = 「在场且带头部的已登记
+    文件」，不多不少。
+
+    未登记的带头文件不在本条范围内（`.get()` 取不到即跳过）——那是
+    `test_every_file_with_a_provenance_header_is_registered_in_the_inventory` 的职责，
+    在这里重复报会让同一个缺陷红两次而遮蔽真正的降级信号。
+    """
+
+    demoted: list[str] = []
+    checked: list[str] = []
+    for path in _files_with_marker(REPO_ROOT, SCANNED_ROOTS):
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        status = INVENTORY_STATUS.get(relative)
+        if status is None:
+            continue
+        checked.append(relative)
+        if status != STATUS_LANDED:
+            demoted.append(f"{relative}（§1 落地状态为「{status}」）")
+
+    assert checked, "没有任何带溯源头的已登记文件进入检查，检查本身失效"
+    assert not demoted, (
+        "以下文件已落地并带溯源头，§1 却没标「"
+        f"{STATUS_LANDED}」——落地状态不得先于文件翻转：{demoted}"
     )
 
 

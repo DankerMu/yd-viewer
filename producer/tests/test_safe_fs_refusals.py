@@ -1,4 +1,4 @@
-"""`yd_producer.store.safe_fs` 拒绝分型的新写覆盖（fixture safe_fs 回归行点名的两条腿）。
+"""`yd_producer.store.safe_fs` 的新写覆盖：拒绝分型两条腿 + 限量读的字节上限。
 
 本文件**不是**快照：pin `8ae9b8f2` 的 `tests/test_safe_fs.py` 14 个用例里无一触及
 `S_ISREG`，也无一在写入面（`atomic_write_bytes_no_follow` / `rename_entry_no_follow`）
@@ -12,8 +12,19 @@
   两腿的消息**逐字节相同**（是两个各自独立的字面量），所以断言消息只能证明「拒了」，
   不能区分是哪条腿拒的；前置腿由 `os.open` recorder 用例单独钉死（拒绝发生在打开之前），
   后置腿由前置 stat 谎报用例钉死。
-- 写入面符号链接：`atomic_write_bytes_no_follow` 对叶走 `_reject_existing_symlink`，
-  对祖先走 `_open_parent_dir` → `_open_child_dir` 的 `O_NOFOLLOW` 分量走。
+- 写入面符号链接的**叶**：`atomic_write_bytes_no_follow` 走 `_reject_existing_symlink`，
+  这条腿是单点的——把它的 `S_ISLNK` 判断摘掉，`test_atomic_write_refuses_a_symlink_leaf`
+  独家变红。
+- 写入面符号链接的**祖先**、以及 `rename_entry_no_follow` 两侧父目录：pin 在这里是
+  **纵深防御**，同一次拒绝有多条独立的腿（`_DIR_FLAGS` 的 `O_NOFOLLOW` 组件行走、
+  `_verify_fd_matches_path` 的前后两次调用、`open_directory_no_follow` 里 `_lstat_dir`
+  的 `S_ISLNK`/`S_ISDIR` 与目录身份复核）。实测口径：单摘任何一条腿，本文件这两条用例
+  都**不**变红（例如摘掉 `O_NOFOLLOW` 只有快照用例
+  `test_directory_identity_refuses_symlink_components` 变红）。所以它们声明并强制的是
+  **端到端结果**——「符号链接祖先/父目录上的写与改名一律被拒，且真实目录不被触碰」，
+  不是任何一条具体的腿；非空洞性由「三条腿同时摘掉」（写入面）与「父目录先 `resolve()`
+  再打开」（改名面，两个参数化各有自己的判别器）证明。具体某条腿的归属由快照用例
+  `test_safe_fs.py` 承担，不由本文件声称。
 - `rename_entry_no_follow` 的叶语义**不是**拒绝：其 docstring 明写符号链接
   「is MOVED as a link and never followed or inspected」，本文件按 pin 语义钉死这一点；
   它的拒绝面在两侧父目录（`open_directory_no_follow` 的组件行走）。
@@ -21,6 +32,10 @@
 平台口径：符号链接组件的拒绝在 macOS 上以 `ENOTDIR`、在 Linux 上以 `ELOOP` 到达
 （`_open_child_dir` 两个分支都归一成 `SafeFilesystemError`），故一律只断异常**类型**，
 不断消息，与快照用例 `test_directory_identity_refuses_symlink_components` 同口径。
+
+本文件还承担一条**非拒绝**性质：`read_bytes_limited_no_follow` 的字节上限（见文件末节）。
+它不是拒绝分型，但落点相同——`test_safe_fs.py` 是逐字节等价的快照、不得改动，而这条
+性质在别处无人钉死。
 """
 
 from __future__ import annotations
@@ -35,6 +50,7 @@ from yd_producer.store.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     open_file_no_follow,
+    read_bytes_limited_no_follow,
     read_bytes_no_follow,
     rename_entry_no_follow,
 )
@@ -211,3 +227,49 @@ def test_rename_entry_moves_a_symlink_leaf_as_a_link(root: Path) -> None:
     assert (dest_parent / "moved").is_symlink()
     assert os.readlink(dest_parent / "moved") == str(payload)
     assert payload.read_bytes() == b"untouched"
+
+
+# --- 限量读的字节上限（非拒绝性质：有界读） ------------------------------------
+
+
+def test_read_bytes_limited_reads_at_most_one_sentinel_byte_past_the_ceiling(
+    root: Path,
+) -> None:
+    """`read_bytes_limited_no_follow` 的**上限**方向：至多读回 `max_bytes + 1` 字节。
+
+    期望值取自 pin 的实现契约（docstring「Read at most max_bytes plus one sentinel
+    byte」＋ `limit = max_bytes + 1` 的有界循环），不从运行结果回读。
+
+    声明集 / 执行集：这条断言同时钉死**两个方向**，因为它断的是**相等**而不是不等式。
+
+    - 上限方向（内存有界）：循环换成一次性无界 `os.read` / `limit` 放大成
+      `max_bytes * 1000 + 1` 时返回 100 字节，本条红。此前全仓无人钉死这一维——
+      `test_object_store.py` 的「超限读」用例由 `object_store.py` 事后的
+      `len(content) > max_bytes` 独立检查满足，把整个上限删掉全套仍全绿。
+    - 下限方向（哨兵字节存在，超限可判定）：`limit` 改成 `max_bytes` 时返回 4 字节，
+      本条同样红（快照用例 `test_read_bytes_limited_refuses_beyond_the_byte_ceiling`
+      原本只钉住这一维）。
+
+    内容用互不相同的字节而非等长填充：一并钉死「读回的是文件**前缀**」，而不只是长度。
+    """
+
+    payload = bytes(range(100))
+    target = root / "payload.bin"
+    target.write_bytes(payload)
+
+    content = read_bytes_limited_no_follow(target, max_bytes=4, containment_root=root)
+
+    assert content == payload[:5]
+
+
+def test_read_bytes_limited_returns_the_whole_file_when_it_fits(root: Path) -> None:
+    # 上限那一维的对照：文件短于上限时按 EOF 收尾、返回全文，不会为凑满 `limit`
+    # 而阻塞或补齐。少了这条，「至多」可能被实现成「恰好」。
+    payload = bytes(range(3))
+    target = root / "short.bin"
+    target.write_bytes(payload)
+
+    assert (
+        read_bytes_limited_no_follow(target, max_bytes=10, containment_root=root)
+        == payload
+    )

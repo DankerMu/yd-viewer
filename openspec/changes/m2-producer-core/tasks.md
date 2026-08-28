@@ -239,7 +239,7 @@ Regression rows:
 - `sha256_bytes(<已知字节串>)` -> 已知摘要字面量（独立 oracle：`printf ... | shasum -a 256`）
 - safe_fs 拒绝分型 -> 稳定拒绝，逐条注明覆盖来源（原措辞「快照测试原有覆盖保留」对**非常规文件**一项前提为假：pin 的 `tests/test_safe_fs.py` 14 个用例里无一触及 `S_ISREG`，round 1 verifier 已在 pin 上核实）：
   - 符号链接叶 / 符号链接祖先（`directory_identity_no_follow` 面）-> 快照用例 `test_directory_identity_refuses_symlink_components`（parametrized final/ancestor）已覆盖
-  - 超限读 -> `test_object_store.py` 经 `LocalObjectStore.read_bytes_limited` 覆盖 `read_bytes_limited_no_follow` 的字节上限
+  - 超限读的**两个方向要分开记**：下界（溢出可检测，即必须多读出一个哨兵字节）由 `test_object_store.py::test_read_bytes_limited_refuses_beyond_the_byte_ceiling` 经 `LocalObjectStore.read_bytes_limited` 覆盖；上界（有界读本身，即绝不把整个文件读进内存）由本 PR 新写的 `test_safe_fs_refusals.py::test_read_bytes_limited_reads_at_most_one_sentinel_byte_past_the_ceiling` 直接钉 `read_bytes_limited_no_follow`。**原措辞把上界也算在 object_store 那条名下是假覆盖**（round 3 r3-cand-01）：把 `safe_fs.py` 的上限整段删掉、或放大一千倍，那条用例照样绿——它由 `object_store.py:220` 自己的事后 `len(content) > max_bytes` 检查满足，与内层是否有界无关
   - **非常规文件（FIFO/设备，`safe_fs.py` 的 `S_ISREG` 前后置校验）-> 本 PR 新写具名用例**
   - **写入面符号链接，两个函数语义不同，勿合并成一句拒绝声明**：`atomic_write_bytes_no_follow` 的符号链接叶与符号链接祖先 -> 拒绝，本 PR 新写具名用例；`rename_entry_no_follow` 的符号链接**祖先（父目录，源与目的两侧）** -> 拒绝（两侧父目录均 `O_DIRECTORY|O_NOFOLLOW` 打开并自 containment root 逐段走），本 PR 新写具名用例；`rename_entry_no_follow` 的符号链接**叶** -> **不拒绝，按搬移语义整体移动该链接本身**（pin docstring 原文：a symlink at `name` is MOVED as a link and never followed or inspected），本 PR 新写具名用例钉死这一搬移语义，不得写成拒绝断言
   - 新用例禁止写进 `producer/tests/test_safe_fs.py`（该文件是逐字节快照，改它即破坏 pin 等价性行）
@@ -279,7 +279,8 @@ Required evidence（每条 input -> expected output）:
 - 禁区 grep：`grep -rnE 'psycopg|DATABASE_URL|scheduler|registry|journal|reservation|os\.getenv|os\.environ' producer/src/yd_producer/store producer/src/yd_producer/raw` -> 零命中（该断言同时以测试形式固化，不只是人工命令）
 - 溯源头部检查（2.3）：对清单 §1 路径表内每个已存在的目标路径 -> 该文件前 5 行内存在一条 **`#` 注释行**，其内容含字面量 `NWM@8ae9b8f2 <对应原路径>`（与 Regression row `:226`、规格 Scenario 共用同一谓词；写在 docstring 或字符串里不算数——此处刻意不留第二份更弱的口径）
 - 溯源反向守卫（2.3）：扫描根即 `producer/`（与规格字面相等），按「相对路径分量以 `.` 开头即跳过」的规则排除 `.venv`/`.pytest_cache` 等（规则而非具名名单，不引入第二份名单）；其下带溯源注释谓词命中的文件集合 -> 必须是清单 §1 路径表的子集，多一个即失败。实测 2786 个 `.py` → 跳点开头目录后 26 个 → 带标记 11 个
-- 上方 Regression rows 的每一行 -> 对应一个具名 pytest 用例（用例名与断言的期望值须来自 pin 源码或独立 oracle，不得从实现回读）
+- 上方 Regression rows 的每一行 -> 对应一个具名 pytest 用例（用例名与断言的期望值须来自 pin 源码或独立 oracle，不得从实现回读），**且该用例必须能杀死对应行为的变异体**——「有一个具名用例指向它」不构成覆盖。round 3 的 r3-cand-01 正是踩在这条的旧措辞上：`超限读` 行确实指向一个真实存在的具名用例，而把 `safe_fs.py` 的字节上限整段删掉，那个用例照样绿（它由 `object_store.py` 自己的事后长度检查满足）。声明覆盖与实际覆盖之间必须有变异证明这一层机械绑定，否则假覆盖行可以长期存活
+- **完整性断言无变异证明不得写入**：凡形如「只增加/不解除」「等价或更强」「已覆盖」「每一/全部/恰好」的断言，写进 fixture、清单序言或 PR 偏离记录之前，必须先构造出证明它的变异体；双向声明要两个方向各有一个判别器。本 change 已有两处这样的断言被事后证伪——6.2 P1 的「等价或更强」（实为不可比）与偏离 F10 的「只增加义务、不解除任何一条」（一个词的降级即解除一个文件的义务），两处都是在无变异证明的情况下写下的
 
 Non-goals:
 - 清单 §1 的 `direct_grid_contract.py` / `shud_forcing_contract.py` 两行（能力 3 的 direct-grid 契约面）——属 forcing 本体，issue #5 Out of Scope，归组 8
