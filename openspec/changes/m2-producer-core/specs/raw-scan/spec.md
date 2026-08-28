@@ -20,8 +20,8 @@
 - **THEN** 判定不完整（不以末 lead 推断整轮就绪）
 
 #### Scenario: GFS f000 特例
-- **WHEN** 扫描 GFS cycle 且 f000 按规则属预期特例形态
-- **THEN** 按特例规则参与完整性判定，不误报缺失
+- **WHEN** 扫描的 source 按 config 声明 f000 特例（`raw.<source>.f000_special = true`）且 lead 0 在该源预期 lead 全集内
+- **THEN** lead 0 的文件仍属预期文件集，但其预期变量集排除该时刻无定义的累积/平均量；不因这些变量缺席而判不完整，也不因特例而放行缺失的 lead 0 文件
 
 #### Scenario: 非 00/12 cycle 被拒绝
 - **WHEN** 请求扫描 06Z cycle
