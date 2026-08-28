@@ -18,7 +18,13 @@
         34
       ],
       "gateEntries": 2,
-      "closed": []
+      "closed": [
+        {
+          "pr": 34,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
     },
     "18": {
       "ceilingPrs": [],
