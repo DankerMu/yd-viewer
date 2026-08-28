@@ -77,6 +77,7 @@ def make_config(
         output_interval_minutes=60,
         checkpoint_hours=(12,),
         reach_count=3988,
+        nwm_mapping_builder_module="workers.mapping_builder.cli",
         cycle=CycleConfig(hours=tuple(cycle_hours)),
         variants=VariantsConfig(gfs="input/models/yd_gfs", ifs="input/models/yd_ifs"),
         raw=RawConfig(
