@@ -151,6 +151,30 @@ def test_complete_when_all_expected_files_exist(tmp_path, source, leads, bundles
     assert verdict.complete is True
 
 
+def test_12z_cycle_uses_12z_dir_and_12z_filenames(tmp_path):
+    """12Z 的 happy path（round 4 r4-cand-03）。
+
+    全部产出 verdict 的用例都跑 00Z 时，把 cycle 小时带进路径的两道门（`{cycle_hour}`
+    的实参、cycle 目录戳）与常量 `0` 不可区分。预期清单在此**逐字**构造：目录段
+    `2026030412`、文件名含 `t12z`，MUST NOT 复用模块级 `CYCLE_DIR` 常量、`cycle_dir`
+    或 `literal_expected` —— 复用即让 oracle 与被测实现共享同一个小时来源而恒真。
+    """
+    base = tmp_path / "gfs" / "2026030412"
+    expected = (
+        base / "gfs.t12z.pgrb2.0p25.f000.bundle.grib2",
+        base / "gfs.t12z.pgrb2.0p25.f003.bundle.grib2",
+        base / "gfs.t12z.pgrb2.0p25.f006.bundle.grib2",
+    )
+    populate(expected)
+
+    verdict = judge(
+        tmp_path, "gfs", datetime(2026, 3, 4, 12, tzinfo=UTC), make_config()
+    )
+
+    assert verdict.expected_files == expected
+    assert verdict.complete is True
+
+
 def test_missing_middle_lead_file_is_listed(tmp_path):
     expected = literal_expected(tmp_path, "gfs", GFS_LEADS, GFS_BUNDLES)
     populate(expected)
@@ -358,6 +382,9 @@ def test_cycle_hours_outside_domain_rejected(tmp_path):
         judge(tmp_path, "gfs", CYCLE, config)
 
     assert excinfo.value.path == "cycle.hours"
+    # 报文 MUST 点名**犯规取值**：只断言 path 时，把报文里的 `illegal` 枚举删掉不会
+    # 变红，运维就只知道"这项配错了"而不知道错在哪个小时。
+    assert "6" in str(excinfo.value)
 
 
 def test_empty_cycle_hours_rejected(tmp_path):
@@ -430,12 +457,35 @@ def test_non_00_12_cycle_rejected(tmp_path, raw_root_exists):
     assert excinfo.value.path == "cycle.hours"
 
 
+def test_cycle_hour_outside_configured_hours_rejected(tmp_path):
+    """请求门的判据 MUST 是 `config.cycle.hours` 而非常量域（round 4 r4-cand-02）。
+
+    `cycle.hours` 取 `{0, 12}` 的真子集是设计内合法取值（运维用 `cycle.hours = [0]`
+    表达"本环境只跑 00Z"）。上方 06Z 用例走默认 `(0, 12)`，06 在两个判据下同样被拒，
+    对本条零判别力；这里 12Z 落在常量域内、落在配置域外，两个判据由此分开。
+    """
+    with pytest.raises(ConfigError) as excinfo:
+        judge(
+            tmp_path,
+            "gfs",
+            datetime(2026, 3, 4, 12, tzinfo=UTC),
+            make_config(cycle_hours=(0,)),
+        )
+
+    assert excinfo.value.path == "cycle.hours"
+    # 报文 MUST 点名**配置声明的**小时集（而非常量域），否则删掉该枚举不变红。
+    assert "00Z" in str(excinfo.value)
+
+
 @pytest.mark.parametrize("source", ["ecmwf", "GFS", "", "raw"])
 def test_unknown_source_rejected(tmp_path, source):
     with pytest.raises(ConfigError) as excinfo:
         judge(tmp_path, source, CYCLE, make_config())
 
     assert excinfo.value.path is None
+    # 报文 MUST 点名合法词表：`path is None` 这一条对报文内容零判别力。
+    assert "'ifs'" in str(excinfo.value)
+    assert "'gfs'" in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
@@ -559,6 +609,43 @@ def test_bundle_pattern_vocabulary_enforced(tmp_path, label, pattern, field, rea
         # 后者的 `__cause__` 是 KeyError/IndexError，且报文里没有词表枚举句。
         assert not isinstance(excinfo.value.__cause__, (KeyError, IndexError))
         assert "只接受" in message
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "gfs.f{lead:{member}}.grib2",
+        "gfs.f{lead:{0}}.grib2",
+        "gfs.f{lead:{lead[0]}}.grib2",
+        "gfs.f{lead:{lead.nosuch}}.grib2",
+    ],
+)
+def test_nested_spec_render_failure_is_configerror(tmp_path, pattern):
+    """嵌套 format_spec 绕过词表门后的渲染失败（round 4 r4-cand-01）。
+
+    `string.Formatter().parse` 不暴露嵌套格式说明符内的字段（实现注释 rawscan.py:212
+    已载明），故内层字段对词表门不可见、`{lead}` 门放行，直到 `_render` 的
+    `str.format` 才抛。四个内层形态分别触发 `KeyError`/`IndexError`/`TypeError`/
+    `AttributeError`，是 `_render` 那个 except 五元组里除 `ValueError` 外四腿在本模块
+    被声明输入域上的唯一取证。
+
+    **MUST NOT 断言 `__cause__` 的异常类型**：日后若在 `_validate_pattern` 补
+    format_spec 门，该异常将由词表门直接 raise 而无 `__cause__`，钉 cause 会让用例
+    二次重写。
+    """
+    config = make_config(
+        gfs=make_source(
+            lead_hours=GFS_LEADS,
+            variables=GFS_VARIABLES,
+            bundles=(pattern,),
+            f000_special=True,
+        )
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        judge(tmp_path, "gfs", CYCLE, config)
+
+    assert excinfo.value.path == "raw.gfs.bundles"
 
 
 @pytest.mark.parametrize(
@@ -696,6 +783,9 @@ def test_expected_set_must_be_injective(tmp_path, label, source_kwargs, dotted_p
         judge(tmp_path, "gfs", CYCLE, config)
 
     assert excinfo.value.path == dotted_path
+    if label == "duplicate_lead_hours":
+        # 报文 MUST 点名重复的那个 lead。
+        assert "lead 3" in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
