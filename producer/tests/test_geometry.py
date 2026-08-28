@@ -24,6 +24,7 @@ from geometry_fixtures import (
     METRIC_GUARD,
     AlbersParams,
     SyntheticBaseline,
+    river_anchors,
     shared_edge_anchors,
     sidecar,
     write_bowtie_domain_layer,
@@ -1306,6 +1307,17 @@ def test_write_viewer_geojson_writes_exactly_two_files(
         assert "Infinity" not in text and "NaN" not in text
         assert _strict_loads(text)["type"] == "FeatureCollection"
 
+    # 文件名与内容的绑定：只校验「能解析且是 FeatureCollection」的话，两份文档互换
+    # 落点仍然全绿，而那对 viewer 是灾难（把流域轮廓当河网画，每个 reach_id -> DAT
+    # 列的查找全部落空）。故按文件断言各自的结构判别式。
+    rivers_doc = _strict_loads(rivers_out.read_text(encoding="utf-8"))
+    boundary_doc = _strict_loads(boundary_out.read_text(encoding="utf-8"))
+    assert len(rivers_doc["features"]) == len(adjacent_baseline.river_anchors)
+    for feature in rivers_doc["features"]:
+        assert set(feature["properties"]) == {"reach_id"}
+    assert len(boundary_doc["features"]) == 1
+    assert boundary_doc["features"][0]["properties"] == {}
+
 
 def test_write_viewer_geojson_creates_missing_out_dir(
     adjacent_baseline: SyntheticBaseline, tmp_path
@@ -1566,9 +1578,14 @@ def test_write_viewer_geojson_writes_into_existing_out_dir(
     )
 
     assert rivers_out.is_file() and boundary_out.is_file()
-    assert _strict_loads(rivers_out.read_text(encoding="utf-8"))["type"] == (
-        "FeatureCollection"
-    )
+    rivers_doc = _strict_loads(rivers_out.read_text(encoding="utf-8"))
+    boundary_doc = _strict_loads(boundary_out.read_text(encoding="utf-8"))
+    assert rivers_doc["type"] == "FeatureCollection"
+    assert {key for f in rivers_doc["features"] for key in f["properties"]} == {
+        "reach_id"
+    }
+    assert len(boundary_doc["features"]) == 1
+    assert boundary_doc["features"][0]["properties"] == {}
     assert bystander.read_text(encoding="utf-8") == "无关文件"
     assert sorted(p.name for p in out_dir.iterdir()) == [
         "boundary.geojson",
@@ -1603,3 +1620,34 @@ def test_write_viewer_geojson_rollback_touches_only_promoted_paths(
     assert "未能删除" not in str(excinfo.value)
     assert (occupied / "sentinel.txt").read_text(encoding="utf-8") == "调用方的东西"
     assert list(out_dir.iterdir()) == [occupied]
+
+
+def test_rivers_geojson_pairs_reach_id_with_record_order_not_sorted(tmp_path) -> None:
+    """`Index` 非升序时，`reach_id` 必须**按 DBF 记录顺序**与要素逐条配对。
+
+    此前所有能走到成功构建的 fixture 写的都是 `Index = range(1, N+1)`，于是
+    「保序」与「排序后再配对」这两种实现完全同形——在 `zip` 之前插一句
+    `reach_ids = sorted(reach_ids)` 全套仍然全绿。用乱序 `Index` 把这一维度钉死：
+    错配的后果是 viewer 拿着某条河的 `reach_id` 去画另一条河的几何。
+    """
+    indices = [7, 3, 11]
+    shp_path, written = write_rivers_layer(
+        tmp_path / "shuffled.shp", river_count=3, index_values=indices
+    )
+    assert list(written) == indices
+
+    doc = build_rivers_geojson(shp_path)
+
+    assert [f["properties"]["reach_id"] for f in doc["features"]] == indices
+    # 同一条要素的几何也必须还是第 i 组锚点——否则「顺序对了但内容错位」仍能蒙混
+    anchors = river_anchors(3)
+    for feature, feature_anchors in zip(doc["features"], anchors, strict=True):
+        geom = feature["geometry"]
+        parts = (
+            [geom["coordinates"]]
+            if geom["type"] == "LineString"
+            else geom["coordinates"]
+        )
+        assert len(parts) == len(feature_anchors)
+        for part, part_anchors in zip(parts, feature_anchors, strict=True):
+            _assert_matches_anchors([tuple(p) for p in part], part_anchors)

@@ -487,3 +487,15 @@ def write_bowtie_domain_layer(
             writer.record(index)
     _write_prj(shp_path, albers.to_esri_wkt())
     return shp_path
+
+
+def river_anchors(
+    count: int, albers: AlbersParams | None = None
+) -> tuple[tuple[Anchors, ...], ...]:
+    """`write_rivers_layer(river_count=count)` 写进图层的那组 lon/lat 锚点。
+
+    `write_rivers_layer` 只返回路径与 index 序列；需要坐标 oracle 的用例（例如
+    「`Index` 非升序时 `reach_id` 仍与要素逐条对应」）用本函数取同一组锚点，
+    避免测试去 import 生成器的私有实现。
+    """
+    return _river_anchors(count, albers or AlbersParams())
