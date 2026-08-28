@@ -185,21 +185,21 @@ def test_relative_paths_are_resolved_before_reaching_loaders(monkeypatch, tmp_pa
     """CLI 边界 `Path.resolve()` 后再交给装载器（库层仍忠实回显它收到的入参）。"""
     from yd_producer import config as config_module
 
-    write_config(tmp_path)
-    write_local(tmp_path)
+    # 刻意不用 `config.toml`/`local.toml` 两个缺省名：用缺省名时，一个忽略入参、直接
+    # `Path("config.toml").resolve()` 的实现在 cwd=tmp_path 下产出同一个绝对路径，断言
+    # 无判别力。
+    write_config(tmp_path, "c1.toml")
+    write_local(tmp_path, name="l1.toml")
     load_config = Recorder(delegate=config_module.load_config)
     load_local = Recorder(delegate=config_module.load_local)
     monkeypatch.setattr(cli, "load_config", load_config)
     monkeypatch.setattr(cli, "load_local", load_local)
     monkeypatch.chdir(tmp_path)
 
-    assert (
-        _exit_code(["init", "--config", "config.toml", "--local", "local.toml"], {})
-        == 3
-    )
+    assert _exit_code(["init", "--config", "c1.toml", "--local", "l1.toml"], {}) == 3
 
-    assert load_config.calls[0][0][0] == (tmp_path / "config.toml").resolve()
-    assert load_local.calls[0][0][0] == (tmp_path / "local.toml").resolve()
+    assert load_config.calls[0][0][0] == (tmp_path / "c1.toml").resolve()
+    assert load_local.calls[0][0][0] == (tmp_path / "l1.toml").resolve()
 
 
 def test_error_message_carries_resolved_absolute_path(monkeypatch, capsys, tmp_path):
@@ -230,6 +230,10 @@ def test_run_rejects_missing_states_dir_and_creates_nothing(
 
     err = capsys.readouterr().err
     assert str(yd_root / "states") in err
+    # 三条 lane 各断言**本 lane 独有**的措辞：只断言退出码与路径的话，把"不存在"这条
+    # 分类整个删掉、由 `is_dir()` 分支兜底报「不是目录」，用例照样绿，而运维会去查文件
+    # 类型，真因却是 `.venv`/`states` 缺失（agent-ops §7.2 禁止他们自行重建）。
+    assert "不存在" in err
     assert not (yd_root / "states").exists()  # 未自建
     assert init_fake.count == 0
 
@@ -244,7 +248,9 @@ def test_run_rejects_empty_states_dir(monkeypatch, capsys, tmp_path):
 
     assert _exit_code(argv, env={}) == 1
 
-    assert str(states) in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert str(states) in err
+    assert "为空" in err
     assert list(states.iterdir()) == []
     assert init_fake.count == 0
 
@@ -263,6 +269,7 @@ def test_run_rejects_states_path_that_is_a_regular_file(monkeypatch, capsys, tmp
 
     err = capsys.readouterr().err
     assert str(states) in err
+    assert "不是目录" in err
     assert "Traceback" not in err
     assert states.read_text(encoding="utf-8") == "stale placeholder\n"
     assert init_fake.count == 0
@@ -299,6 +306,7 @@ def test_prepare_stops_when_interpreter_missing(monkeypatch, capsys, tmp_path):
 
     err = capsys.readouterr().err
     assert str(absent) in err
+    assert "不存在" in err  # 与"不是普通文件"/"不可执行"两 lane 区分
     assert runner.count == 0
 
 
@@ -314,6 +322,7 @@ def test_prepare_stops_when_interpreter_not_executable(monkeypatch, capsys, tmp_
 
     err = capsys.readouterr().err
     assert str(script) in err
+    assert "不可执行" in err
     assert runner.count == 0
 
 

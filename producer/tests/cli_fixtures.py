@@ -6,18 +6,29 @@ round-trip 用例逐值承重），这里只需要"一份能过装载器的齐�
 
 TOML 逐字写出而非由 dict 渲染：入口层测试不校验 schema，写死文本更易读，且新增必需字段
 时这里会直接红（`ConfigError`），不会静默漂移。
+
+唯一的例外是 `nwm_mapping_builder_module`：它必须能取**第二个不同的值**，否则"薄外壳调
+用的 module 名取自 `config.toml`"这条断言的期望值与一个把 module 名写死回代码的实现产出
+完全相同（实测：把 `config.nwm_mapping_builder_module` 换成字面量后全套仍全绿）。故该行
+从模板里拆出来单独参数化——不用 `str.format`：TOML 里 `bundles` 含 `{lead}` 占位符。
 """
 
 import os
 from pathlib import Path
 
+MAPPING_BUILDER_MODULE = "workers.mapping_builder.cli"
+# 第二个点分名，与上面**必须不同**：判别性期望值，不是"另一个合法配置"。
+ALT_MAPPING_BUILDER_MODULE = "other.builder.entry"
+
 # `nwm_mapping_builder_module` 是 issue #3 随 #32 三步落地的必需键；缺它则装载即 fail closed
-CONFIG_TOML = """\
+_CONFIG_HEAD = """\
 forecast_days = 7
 output_interval_minutes = 60
 checkpoint_hours = [12]
 reach_count = 3988
-nwm_mapping_builder_module = "workers.mapping_builder.cli"
+"""
+
+_CONFIG_TAIL = """\
 
 [cycle]
 hours = [0, 12]
@@ -41,8 +52,6 @@ f000_special = true
 [slurm]
 required_fields = ["partition", "account", "cpus", "memory", "walltime"]
 """
-
-MAPPING_BUILDER_MODULE = "workers.mapping_builder.cli"
 
 _LOCAL_TEMPLATE = """\
 yd_root = {yd_root}
@@ -74,9 +83,21 @@ def _quote(value: str | os.PathLike[str]) -> str:
     return f'"{text}"'
 
 
-def write_config(tmp_path: Path, name: str = "config.toml") -> Path:
+def render_config(module: str = MAPPING_BUILDER_MODULE) -> str:
+    """渲染一份齐备 `config.toml` 文本，`nwm_mapping_builder_module` 取 `module`。"""
+    return (
+        _CONFIG_HEAD + f"nwm_mapping_builder_module = {_quote(module)}\n" + _CONFIG_TAIL
+    )
+
+
+def write_config(
+    tmp_path: Path,
+    name: str = "config.toml",
+    *,
+    module: str = MAPPING_BUILDER_MODULE,
+) -> Path:
     path = tmp_path / name
-    path.write_text(CONFIG_TOML, encoding="utf-8")
+    path.write_text(render_config(module), encoding="utf-8")
     return path
 
 

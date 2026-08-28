@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from cli_fixtures import (
+    ALT_MAPPING_BUILDER_MODULE,
     MAPPING_BUILDER_MODULE,
     write_config,
     write_fake_interpreter,
@@ -47,8 +48,8 @@ class CountingRunner:
         return subprocess.run(command, check=False, **kwargs)
 
 
-def _load(tmp_path, **local_kwargs):
-    config = load_config(write_config(tmp_path))
+def _load(tmp_path, module=MAPPING_BUILDER_MODULE, **local_kwargs):
+    config = load_config(write_config(tmp_path, module=module))
     local = load_local(write_local(tmp_path, **local_kwargs), config)
     return local, config
 
@@ -64,6 +65,9 @@ def test_missing_interpreter_raises_and_starts_no_process(tmp_path):
         invoke_mapping_builder(local, config, ["--package-path", "x"], runner)
 
     assert excinfo.value.path == "nwm.python"
+    # 三态各断言**本态独有**的措辞：只断言 `path` 的话，三条消息互换后用例照样绿，
+    # 而运维看到的补救方向就指错了（agent-ops §7.2 禁止他们重建 .venv）。
+    assert "不存在" in str(excinfo.value)
     assert runner.calls == []
 
 
@@ -77,6 +81,7 @@ def test_directory_interpreter_raises_and_starts_no_process(tmp_path):
         invoke_mapping_builder(local, config, [], runner)
 
     assert excinfo.value.path == "nwm.python"
+    assert "不是普通文件" in str(excinfo.value)
     assert runner.calls == []
 
 
@@ -91,13 +96,20 @@ def test_non_executable_interpreter_raises_and_starts_no_process(tmp_path):
         invoke_mapping_builder(local, config, [], runner)
 
     assert excinfo.value.path == "nwm.python"
+    assert "不可执行" in str(excinfo.value)
     assert runner.calls == []
 
 
 # --- 真子进程：调用形态 ------------------------------------------------------
 
 
-def _run_fake(tmp_path, checkout_name="checkout", exit_code=0, args=("--dry-run",)):
+def _run_fake(
+    tmp_path,
+    checkout_name="checkout",
+    exit_code=0,
+    args=("--dry-run",),
+    module=MAPPING_BUILDER_MODULE,
+):
     checkout = tmp_path.resolve() / checkout_name
     checkout.mkdir()
     record = tmp_path.resolve() / f"record-{checkout_name}.json"
@@ -106,7 +118,9 @@ def _run_fake(tmp_path, checkout_name="checkout", exit_code=0, args=("--dry-run"
         record,
         exit_code=exit_code,
     )
-    local, config = _load(tmp_path, checkout_root=checkout, python=script)
+    local, config = _load(
+        tmp_path, module=module, checkout_root=checkout, python=script
+    )
     runner = CountingRunner()
     completed = invoke_mapping_builder(local, config, list(args), runner)
     return (
@@ -141,6 +155,24 @@ def test_checkout_root_change_moves_cwd_and_pythonpath(tmp_path):
     assert second["cwd"] == str(second_checkout)
     assert first["pythonpath"].split(os.pathsep)[0] == str(first_checkout)
     assert second["pythonpath"].split(os.pathsep)[0] == str(second_checkout)
+
+
+def test_module_name_follows_config_value(tmp_path):
+    """`-m` 后的 module 名取自 `config.toml`，而非代码里的常量。
+
+    与 `test_fake_interpreter_receives_exact_command_and_context` 不重复：那条按 fixture
+    钉死默认值，期望值与"把 `workers.mapping_builder.cli` 写死回 `nwm.py`"的实现产出完全
+    相同（实测该变异体在 204 条下全部存活）。判别力只能来自**第二个不同的值**，形态照搬
+    上面 checkout_root 的两值对照。
+    """
+    assert MAPPING_BUILDER_MODULE != ALT_MAPPING_BUILDER_MODULE
+    _, _, first, _, _ = _run_fake(tmp_path, checkout_name="module-a")
+    _, _, second, _, _ = _run_fake(
+        tmp_path, checkout_name="module-b", module=ALT_MAPPING_BUILDER_MODULE
+    )
+
+    assert first["argv"][1:3] == ["-m", MAPPING_BUILDER_MODULE]
+    assert second["argv"][1:3] == ["-m", ALT_MAPPING_BUILDER_MODULE]
 
 
 def test_command_contains_no_interpreter_fallback(tmp_path):
