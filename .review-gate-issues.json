@@ -1,5 +1,18 @@
 {
   "issues": {
+    "2": {
+      "ceilingPrs": [
+        30
+      ],
+      "gateEntries": 2,
+      "closed": [
+        {
+          "pr": 30,
+          "outcome": "closed",
+          "rounds": 5
+        }
+      ]
+    },
     "18": {
       "ceilingPrs": [],
       "gateEntries": 2,
