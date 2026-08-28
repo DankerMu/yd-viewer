@@ -78,9 +78,14 @@ __all__ = [
     "CYCLE_STRIDE",
     "MAX_HEADER_LINE_BYTES",
     "STATE_SUFFIX",
+    "DiscoveryUnreadableError",
     "FrontierDecision",
     "StopReason",
+    "cycle_id",
     "decide_frontier",
+    "done_cycles",
+    "parse_cycle_id",
+    "visible_state_cycles",
 ]
 
 #: `cycle_id` 的唯一形态（products-contract §3.1）：10 位 UTC `YYYYMMDDHH`。
@@ -158,7 +163,7 @@ def decide_frontier(
     """
     try:
         return _decide(yd_root=yd_root, source=source, raw_complete=raw_complete)
-    except _DiscoveryUnreadable as error:
+    except DiscoveryUnreadableError as error:
         return FrontierDecision(
             source=source,
             cycle=None,
@@ -167,8 +172,16 @@ def decide_frontier(
         )
 
 
-class _DiscoveryUnreadable(Exception):
-    """内部信号：某处文件系统探测**无法确定**。只允许在 `decide_frontier` 内被捕获。"""
+class DiscoveryUnreadableError(Exception):
+    """探测信号：某处文件系统探测**无法确定**（`ENOENT`/`ENOTDIR` 之外的 `OSError`）。
+
+    原名 `_DiscoveryUnreadable`，随 `done_cycles` / `visible_state_cycles` /
+    `parse_cycle_id` / `cycle_id` 一并**提升为公开符号**（issue #23 裁决 5：残留清理
+    MUST 复用本模块的 cycle 可见集与 `DONE` 判据而不是重写一份三道门，那两份判据一旦
+    分叉，「更晚」的定义就会与前沿的定义不一致）。捕获点因此从「只允许在
+    `decide_frontier` 内」扩为「`decide_frontier` 与 `residue.plan_residue`」——两处都
+    把它收敛成本源的停止语义，MUST NOT 被吞成「空集合」。行为逐字未变。
+    """
 
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
@@ -181,17 +194,17 @@ def _decide(
     source: str,
     raw_complete: Callable[[datetime], bool],
 ) -> FrontierDecision:
-    """`decide_frontier` 的判定体；探测层的「无法确定」以 `_DiscoveryUnreadable` 上抛。"""
+    """`decide_frontier` 的判定体；探测层的「无法确定」以 `DiscoveryUnreadableError` 上抛。"""
     yd_root = Path(yd_root)
     states_dir = yd_root / "states" / source
-    done_cycles = _done_cycles(yd_root / "output", source)
+    completed = done_cycles(yd_root / "output", source)
 
-    if done_cycles:
-        latest_done = max(done_cycles)
+    if completed:
+        latest_done = max(completed)
         target = latest_done + CYCLE_STRIDE
-        origin = f"最新 DONE cycle {_cycle_id(latest_done)} + 12h"
+        origin = f"最新 DONE cycle {cycle_id(latest_done)} + 12h"
     else:
-        state_cycles = _visible_state_cycles(states_dir)
+        state_cycles = visible_state_cycles(states_dir)
         if not state_cycles:
             return FrontierDecision(
                 source=source,
@@ -202,16 +215,16 @@ def _decide(
                 ),
             )
         target = min(state_cycles)
-        origin = f"全新链最早状态文件名 {_cycle_id(target)}"
+        origin = f"全新链最早状态文件名 {cycle_id(target)}"
 
-    state_path = states_dir / f"{_cycle_id(target)}{STATE_SUFFIX}"
+    state_path = states_dir / f"{cycle_id(target)}{STATE_SUFFIX}"
     stop_reason, note = _classify_state(state_path, target)
     if stop_reason is not None:
         return FrontierDecision(
             source=source,
             cycle=None,
             stop_reason=stop_reason,
-            detail=f"{source}: 待跑 T={_cycle_id(target)}（{origin}）；{note}",
+            detail=f"{source}: 待跑 T={cycle_id(target)}（{origin}）；{note}",
         )
 
     if not raw_complete(target):
@@ -220,7 +233,7 @@ def _decide(
             cycle=None,
             stop_reason=StopReason.RAW_INCOMPLETE,
             detail=(
-                f"{source}: 待跑 T={_cycle_id(target)}（{origin}）；"
+                f"{source}: 待跑 T={cycle_id(target)}（{origin}）；"
                 "该 cycle 的 raw 未齐，停在缺口等待，不跳轮"
             ),
         )
@@ -230,7 +243,7 @@ def _decide(
         cycle=target,
         stop_reason=None,
         detail=(
-            f"{source}: 待跑 T={_cycle_id(target)}（{origin}）；"
+            f"{source}: 待跑 T={cycle_id(target)}（{origin}）；"
             f"状态 {state_path} 时间头对应绝对 T，raw 完整"
         ),
     )
@@ -239,11 +252,11 @@ def _decide(
 # --- cycle 可见集 ---
 
 
-def _cycle_id(cycle: datetime) -> str:
+def cycle_id(cycle: datetime) -> str:
     return cycle.strftime(CYCLE_ID_FORMAT)
 
 
-def _parse_cycle_id(name: str) -> datetime | None:
+def parse_cycle_id(name: str) -> datetime | None:
     """10 位 ASCII 数字、`%Y%m%d%H` 可解析、且 `+12h` 可表示时返回 UTC aware 时刻。
 
     三道门缺一不可：`str.isdigit()` 会接受 Unicode 数字；`2026023100`（2 月 31 日）与
@@ -267,16 +280,18 @@ def _parse_cycle_id(name: str) -> datetime | None:
 
 
 def _iter_entry_names(directory: Path) -> list[str]:
-    """列目录。目录**不存在**才视为空集合；列不出来一律 `_DiscoveryUnreadable`。"""
+    """列目录。目录**不存在**才视为空集合；列不出来一律 `DiscoveryUnreadableError`。"""
     try:
         return [entry.name for entry in directory.iterdir()]
     except (FileNotFoundError, NotADirectoryError):
         return []
     except OSError as error:
-        raise _DiscoveryUnreadable(f"目录 {directory} 无法枚举（{error}）") from error
+        raise DiscoveryUnreadableError(
+            f"目录 {directory} 无法枚举（{error}）"
+        ) from error
 
 
-def _done_cycles(output_root: Path, source: str) -> set[datetime]:
+def done_cycles(output_root: Path, source: str) -> set[datetime]:
     """该源已完成的 cycle 集合。
 
     `DONE` MUST 是**普通文件**（products-contract §4.1）：目录、断链 symlink、FIFO 都不
@@ -287,7 +302,7 @@ def _done_cycles(output_root: Path, source: str) -> set[datetime]:
     """
     cycles: set[datetime] = set()
     for name in _iter_entry_names(output_root):
-        cycle = _parse_cycle_id(name)
+        cycle = parse_cycle_id(name)
         if cycle is None:
             continue
         done_path = output_root / name / source / "DONE"
@@ -296,7 +311,7 @@ def _done_cycles(output_root: Path, source: str) -> set[datetime]:
         except (FileNotFoundError, NotADirectoryError):
             continue
         except OSError as error:
-            raise _DiscoveryUnreadable(
+            raise DiscoveryUnreadableError(
                 f"DONE 判定失败：{done_path} 无法确定（{error}）"
             ) from error
         if stat.S_ISREG(mode):
@@ -304,13 +319,13 @@ def _done_cycles(output_root: Path, source: str) -> set[datetime]:
     return cycles
 
 
-def _visible_state_cycles(states_dir: Path) -> set[datetime]:
+def visible_state_cycles(states_dir: Path) -> set[datetime]:
     """`states/<source>/` 下**文件名可见**的 cycle 集合（形态门，不判内容）。"""
     cycles: set[datetime] = set()
     for name in _iter_entry_names(states_dir):
         if not name.endswith(STATE_SUFFIX):
             continue
-        cycle = _parse_cycle_id(name[: -len(STATE_SUFFIX)])
+        cycle = parse_cycle_id(name[: -len(STATE_SUFFIX)])
         if cycle is None:
             continue
         cycles.add(cycle)
@@ -327,7 +342,7 @@ def _classify_absent_state(state_path: Path) -> tuple[StopReason, str]:
     except (FileNotFoundError, NotADirectoryError):
         return (StopReason.STATE_MISSING, f"状态 {state_path} 不存在")
     except OSError as error:
-        raise _DiscoveryUnreadable(
+        raise DiscoveryUnreadableError(
             f"状态 {state_path} 的存在性无法判定（{error}）"
         ) from error
     if stat.S_ISLNK(link_mode):
@@ -343,7 +358,7 @@ def _classify_state(
     存在性探测用 `os.stat`（跟随 symlink，裁决 4）与 `os.lstat`，**不用** 裸
     `Path.exists()`/`Path.is_symlink()`：后者只吞 `ENOENT/ENOTDIR/EBADF/ELOOP/EINVAL`，
     父目录 `chmod 0o000` 时 `PermissionError` 会直接逃出 `decide_frontier`。元数据探测的
-    「无法确定」以 `_DiscoveryUnreadable` 上抛（裁决 9）；文件自身读不出来才是
+    「无法确定」以 `DiscoveryUnreadableError` 上抛（裁决 9）；文件自身读不出来才是
     `STATE_UNREADABLE`。
     """
     try:
@@ -351,7 +366,7 @@ def _classify_state(
     except (FileNotFoundError, NotADirectoryError):
         return _classify_absent_state(state_path)
     except OSError as error:
-        raise _DiscoveryUnreadable(
+        raise DiscoveryUnreadableError(
             f"状态 {state_path} 的存在性无法判定（{error}）"
         ) from error
     if not stat.S_ISREG(info.st_mode):
@@ -390,7 +405,7 @@ def _classify_state(
             StopReason.HEADER_TIME_MISMATCH,
             (
                 f"状态 {state_path} 的 header 分钟时标 {observed!r} 不对应绝对 T="
-                f"{_cycle_id(target)}（期望 {expected_minute} 分钟，"
+                f"{cycle_id(target)}（期望 {expected_minute} 分钟，"
                 f"实得 {round(observed)}）；相对分钟一律不接受"
             ),
         )
