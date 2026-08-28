@@ -53,8 +53,6 @@ PORTED_HELPERS = (
     "_section_from_column_header",
     "_native_lake_section_preamble",
     "_as_float",
-    "_header_minute_index",
-    "header_minute_time",
 )
 
 
@@ -855,48 +853,6 @@ def test_lake_preamble_requires_an_immediately_following_lake_header() -> None:
         is None
     )
 
-
-# --- header minute-time（任务 9.1 的轮询判据；与 `_header_counts` 同一条规则） ---
-
-
-@pytest.mark.parametrize(
-    ("header", "expected"),
-    [
-        (["3988", "11", "720.000000"], 720.0),
-        # 4 token（含 lake count）取**最后一个**数值 token，不误取 lake count。
-        (["23106", "3988", "0", "720"], 720.0),
-        # 恰两个数值 token：第一个是 count，第二个才是 minute-time。
-        (["23106", "6"], 6.0),
-        # 单个数值 token 是 count，不是 minute-time。
-        (["23106"], None),
-        ([], None),
-        (["mesh", "river"], None),
-        # 非数值 token 被跳过，不打断计数。
-        (["mesh", "3988", "720"], 720.0),
-    ],
-)
-def test_header_minute_time_reads_the_last_numeric_token(
-    header: list[str], expected: float | None
-) -> None:
-    assert cfg_ic.header_minute_time(header) == expected
-
-
-@pytest.mark.parametrize(
-    ("header", "expected"),
-    [
-        (["3988", "11", "720.000000"], 2),
-        (["23106", "3988", "0", "720"], 3),
-        (["23106", "6"], 1),
-        (["23106"], None),
-        ([], None),
-        (["mesh", "river"], None),
-        (["mesh", "3988", "720"], 2),
-    ],
-)
-def test_header_minute_index_points_at_the_trailing_numeric_token(
-    header: list[str], expected: int | None
-) -> None:
-    assert cfg_ic._header_minute_index(header) == expected
 
 # --- #54 第 3/4/5 条：段重入守卫、BOM 感知诊断、文档构造期不变量 ---
 

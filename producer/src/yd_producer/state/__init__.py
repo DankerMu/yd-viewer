@@ -24,7 +24,6 @@ from yd_producer.state.cfg_ic import (
     CfgIcDocument,
     LineRole,
     Section,
-    header_minute_time,
     parse,
     render,
 )
@@ -64,7 +63,6 @@ __all__ = [
     "cfg_ic_header_minute_index",
     "cfg_ic_header_minute_time",
     "cfg_ic_header_shape",
-    "header_minute_time",
     "normalize_negative_residuals",
     "parse",
     "render",
