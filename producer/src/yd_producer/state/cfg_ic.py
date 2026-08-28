@@ -13,11 +13,13 @@ bytes，**绝不由数值重新格式化**。数值视图 `Section.rows` 是只�
 
 行归属是**全覆盖划分**：每一行恰好一个 `LineRole`，无「未归属」行。
 
-对 pin 的**刻意偏离**（六条，此处即全集）。此清单已把 `parse` 里**全部** `raise ValueError`
+对 pin 的**刻意偏离**（八条，此处即全集）。此清单已把 `parse` 里**全部** `raise ValueError`
 逐条对 pin 的 `_parse_sectioned_rows` / `_parse_ic_file` 核对过：其余 `raise` 均有 pin 对应物
 （超限、非 UTF-8、空文件、不可读 header、非数值数据行、截断 body、截断 lake body）；唯一既无
 pin 对应物又未列入的 `raise` 是 `parse` 末尾的 unassigned 全覆盖划分自检——它对**任何**输入
 都不可达（`pragma: no cover`），是内部不变量断言而非 fail-closed，故不计入偏离。
+清单的穷尽性由 `test_cfg_ic.py` 的 `ast` 计数测试机械闭合（`parse` 体内 `raise` 总数 ==
+偏离数 + 有 pin 对应物数 + 不可达自检数），docstring 里的条数写错即变红。
 
 1. **mesh 段超出 header 声明 `mesh_count` 的多余数据行抛 `ValueError`**。pin 的
    `_parse_sectioned_rows`(:531-534，其中 `:532-533` 是 `if len(mesh_rows) < mesh_count:`
@@ -43,11 +45,34 @@ pin 对应物又未列入的 `raise` 是 `parse` 末尾的 unassigned 全覆盖�
    逐段行归属可判定，而计数式布局没有列头可锚定段边界，靠 header 计数切分一旦与真实 body
    不符就会把状态行错归到别的段——这正是「绝不静默丢/错置状态行」的同一条根。取舍与未决点
    见 issue #8 fixture。
+7. **同名分段列头第二次出现时抛 `ValueError`（段重入守卫）**。pin 的分段走查只把
+   `section` 变量重新置位、数据行继续往同一个 list 累加，于是 river 段之后再出现一次 mesh
+   列头会让 `mesh.span` 把 river 的列头与数据行整段吞进区间内（issue #54 第 3 条实测：
+   `mesh span (2, 7)` 覆盖 idx 3 的 river 列头与 idx 4 的 river 数据行）。`Section.span`
+   的契约是「段内可能夹杂空行」，而不是「夹着另一个段」；#9 是 `span` 的第一个消费方，故按
+   #54 推荐 (a) 在此 fail-closed。
+8. **首行以 U+FEFF（UTF-8 BOM）起头时抛 `ValueError` 并点名 BOM**。pin 无 BOM 面。
+   `str.strip()` **不**剥 U+FEFF，于是 header 首 token 被 `_as_float` 判为 None、被
+   `_header_counts` 的推导式静默丢掉，计数 token 整体左移一位：`declared_mesh_count` 拿到
+   的是 mesh **列数**而不是行数（issue #54 第 4 条实测：BOM + `3 6 0 0.0` + 3 行 mesh 报
+   `truncated sectioned IC body: have mesh=3; header declares mesh=6`，把运维支到「文件被
+   截断」的错误方向；mesh 行数恰等于列数时更会**静默误解析**通过）。故在解码后、任何分段
+   判定之前显式拒绝并直说 BOM。
 
-对 pin 的**模型扩展**（非偏离，pin 无行模型）：空行单独归 `LineRole.BLANK`。pin 在分段前
-先丢空行，本模块必须保留它们才能字节等价，又不能把它们计入任何段的数据行（会污染 #9 继承
-的段行数与行区间），故显式成为第五类归属。**检测路径仍按 pin 归一化**（先 `strip()`、跳过
-空行再判定），保真只作用于回写侧。
+对 pin 的**模型扩展**（非偏离，pin 无对应面，故不计入上面的八条）：
+
+- 空行单独归 `LineRole.BLANK`。pin 在分段前先丢空行，本模块必须保留它们才能字节等价，又
+  不能把它们计入任何段的数据行（会污染 #9 继承的段行数与行区间），故显式成为第五类归属。
+  **检测路径仍按 pin 归一化**（先 `strip()`、跳过空行再判定），保真只作用于回写侧。
+- `CfgIcDocument.__post_init__` 的构造期不变量校验与 `CfgIcDocument.with_replaced_lines`
+  的行替换 API（issue #54 第 5 条）。pin 没有文档模型，故这两处的 `raise ValueError`
+  既无 pin 对应物、也不是对 pin 判定语义的偏离，而是本模块自有 API 的前置条件。它们是
+  **文档改写的唯一合法入口**：裸 `dataclasses.replace(doc, lines=...)` 一旦改变行数就会
+  让 `roles` / `header_index` / 各段行号全部过期，而 `render` 照样返回看起来正常的 bytes
+  （#54 实测）；`__post_init__` 把这条静默路径变红。`with_replaced_lines` 同时重算被替换
+  数据行的 `Section.rows`——`rows` 是 `lines` 的派生视图，滞留旧值会造出「文本已归零、
+  `rows` 仍是负数」的错位文档。上面的 `ast` 计数测试把这两个函数的 `raise` 单独计一类，
+  漏登记同样变红。
 
 本模块 stdlib-only：零 NWM 运行时 import、零数据库/scheduler 依赖，不写任何文件
 （`render` 返回 bytes，落盘归调用方）。**只支持原生分段布局**（见上偏离 6）。
@@ -55,8 +80,9 @@ pin 对应物又未列入的 `raise` 是 `parse` 末尾的 unassigned 全覆盖�
 
 from __future__ import annotations
 
+import dataclasses
 import enum
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,6 +95,25 @@ __all__ = [
     "parse",
     "render",
 ]
+
+#: UTF-8 BOM 的解码形态。`str.strip()` 不剥它，故必须显式判（见模块头偏离 8）。
+_UTF8_BOM = "\ufeff"
+
+#: `str.splitlines` 会在这些字符上断行——它们全部**不是** C/Fortran 行读者的换行。
+#: `with_replaced_lines` 用它判「替换值是否会改变行数」，比只判 `"\n"` 严（U+0085 走的
+#: 正是这条：issue #54 第 2 条实测它能把一条物理行断成两条逻辑行）。
+_LINE_BREAK_CHARS = (
+    "\n",
+    "\r",
+    "\v",
+    "\f",
+    "\x1c",
+    "\x1d",
+    "\x1e",
+    "\x85",
+    "\u2028",
+    "\u2029",
+)
 
 # NWM@8ae9b8f2 packages/common/state_qc.py:43（逐字移植）
 # Upper bound (bytes) on a SHUD ``.cfg.ic`` state file the QC parser will read into
@@ -131,6 +176,108 @@ class CfgIcDocument:
     declared_mesh_count: int
     declared_lake_count: int | None
 
+    def __post_init__(self) -> None:
+        """构造期不变量校验（issue #54 第 5 条）。
+
+        `parse` 自己不可能产出违反项，但 `dataclasses.replace(doc, lines=...)` 可以：一旦
+        行数变化，`roles` / `header_index` / 各段行号全部过期，而 `render` 照样返回
+        **看起来正常**的 bytes。此处把那条静默路径变红。写面请改用
+        `with_replaced_lines`，它行数恒定故所有派生行号继续有效。
+        """
+        line_count = len(self.lines)
+        if len(self.roles) != line_count:
+            raise ValueError(
+                "CfgIcDocument roles/lines length mismatch: "
+                f"len(roles)={len(self.roles)} != len(lines)={line_count}"
+            )
+        if not 0 <= self.header_index < line_count:
+            raise ValueError(
+                f"CfgIcDocument header_index {self.header_index} out of range "
+                f"[0, {line_count})"
+            )
+        for section in (self.mesh, self.river, self.lake):
+            if section is None:
+                continue
+            if not 0 <= section.column_header_index < line_count:
+                raise ValueError(
+                    f"CfgIcDocument {section.name} column_header_index "
+                    f"{section.column_header_index} out of range [0, {line_count})"
+                )
+            for index in section.data_line_indices:
+                if not 0 <= index < line_count:
+                    raise ValueError(
+                        f"CfgIcDocument {section.name} data line index {index} "
+                        f"out of range [0, {line_count})"
+                    )
+        if self.lake_preamble_index is not None and not (
+            0 <= self.lake_preamble_index < line_count
+        ):
+            raise ValueError(
+                f"CfgIcDocument lake_preamble_index {self.lake_preamble_index} "
+                f"out of range [0, {line_count})"
+            )
+
+    def with_replaced_lines(self, replacements: Mapping[int, str]) -> CfgIcDocument:
+        """按行号替换行文本，返回新文档。**行数恒定**，故派生行号继续有效。
+
+        `replacements` 的值是**不含行尾符**的行体；每行的原行尾符由本 API 原样贴回
+        （原行无行尾符——文件末行无换行——则替换后也无）。这是 4.3 重戳与 4.4 负残差
+        改写文档的**唯一**入口：未列入 `replacements` 的行逐字节保持原样，故「只有被
+        刻意改动的那几行重新序列化」是结构性保证，而不是实现自觉。
+
+        被替换的**数据行**的数值视图 `Section.rows` 随之重算——`rows` 是 `lines` 的派生
+        视图，让它滞留旧值会造出「文本已归零、`rows` 仍是负数」的错位文档（负残差归零的
+        幂等性正是在此被证伪的）。重算不出数值行（替换值非数值）即 `ValueError`。
+
+        越界行号、或替换值内含任何会被 `str.splitlines` 断行的字符（即会改变行数）一律
+        抛 `ValueError`。
+        """
+        line_count = len(self.lines)
+        new_lines = list(self.lines)
+        for index, text in replacements.items():
+            if not isinstance(index, int) or isinstance(index, bool):
+                # TRY004 豁免的理由：本模块族的约定是「结构性/语义性拒绝一律 `ValueError`」（#8 确立），
+                # 调用方无需分辨两种异常类型；此处刻意不抛 `TypeError`。
+                raise ValueError(  # noqa: TRY004
+                    f"line index must be int, got {index!r}"
+                )
+            if not 0 <= index < line_count:
+                raise ValueError(f"line index {index} out of range [0, {line_count})")
+            for char in _LINE_BREAK_CHARS:
+                if char in text:
+                    raise ValueError(
+                        "replacement line text must not contain a line break "
+                        f"({char!r} found at line {index}); "
+                        "with_replaced_lines keeps the line count constant"
+                    )
+            original = self.lines[index]
+            body = original.splitlines()[0] if original.splitlines() else ""
+            new_lines[index] = text + original[len(body) :]
+
+        replaced = set(replacements)
+
+        def _refreshed(section: Section | None) -> Section | None:
+            if section is None or replaced.isdisjoint(section.data_line_indices):
+                return section
+            rows: list[tuple[float, ...]] = []
+            for index in section.data_line_indices:
+                row = _numeric_row(new_lines[index])
+                if row is None:
+                    raise ValueError(
+                        f"replacement for {section.name} data line {index} is not a "
+                        f"numeric row: {new_lines[index]!r}"
+                    )
+                rows.append(tuple(row))
+            return dataclasses.replace(section, rows=tuple(rows))
+
+        return dataclasses.replace(
+            self,
+            lines=tuple(new_lines),
+            mesh=_refreshed(self.mesh),
+            river=_refreshed(self.river),
+            lake=_refreshed(self.lake),
+        )
+
 
 def parse(
     source: Path | str | bytes,
@@ -168,6 +315,14 @@ def parse(
         raw = data.decode("utf-8")
     except UnicodeDecodeError as error:
         raise ValueError(f"IC file is not valid UTF-8: {error}") from error
+    if raw.startswith(_UTF8_BOM):
+        # 刻意偏离 pin：pin 无 BOM 面，BOM 会被误诊成 truncated（见模块头偏离 8）。
+        raise ValueError(
+            "IC file starts with a UTF-8 BOM (U+FEFF): "
+            "文件带 UTF-8 BOM，请以无 BOM 的 UTF-8 重新导出 cfg.ic。"
+            "BOM 会让 header 的首个计数 token 无法解析、计数整体左移一位，"
+            "从而把根因误诊成文件被截断"
+        )
 
     lines = tuple(raw.splitlines(keepends=True))
     roles: list[LineRole | None] = [None] * len(lines)
@@ -217,10 +372,18 @@ def parse(
             section = _section_from_column_header(
                 text, stage_section_count=stage_section_count
             )
+            if section in column_header_indices:
+                # 刻意偏离 pin：pin 只把 `section` 重新置位、数据行继续往同一个 list 累加，
+                # 于是 `Section.span` 会吞进另一个段的列头与数据行（见模块头偏离 7）。
+                raise ValueError(
+                    f"duplicate sectioned IC column header for section {section!r}: "
+                    f"first at line {column_header_indices[section]}, "
+                    f"again at line {line_index} ({text!r})"
+                )
             if section in {"river", "lake"}:
                 stage_section_count += 1
             roles[line_index] = LineRole.COLUMN_HEADER
-            column_header_indices.setdefault(section, line_index)
+            column_header_indices[section] = line_index
             continue
 
         row = _numeric_row(text)

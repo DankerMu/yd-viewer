@@ -177,7 +177,7 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 
 实现完成后，所有操作只走本仓 CLI：
 
-- `prepare`：一次性从外部基线包生成 `yd_gfs`、`yd_ifs` 与两个 GeoJSON；
+- `prepare --baseline <基线模型包路径>`：一次性从外部基线包生成 `yd_gfs`、`yd_ifs` 与两个 GeoJSON；基线包路径只在本次调用传入，不入 `config.toml`/`local.toml`（compute-loop §6.1）；
 - `init`：只在全新根建立首态；已有任一状态或 `DONE` 时必须拒绝；
 - `run`：日常循环，不自动 bootstrap。
 

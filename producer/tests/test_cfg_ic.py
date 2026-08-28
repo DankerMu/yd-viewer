@@ -17,6 +17,7 @@ oracle——段归属偏移一行、preamble 计入 river 只在这里变红。
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 import math
 import os
@@ -24,6 +25,7 @@ import pathlib
 import stat
 
 import pytest
+import source_probe
 from cfg_ic_fixtures import (
     LAKE_COLUMN_HEADER,
     LAKE_COLUMN_HEADER_TOKENS,
@@ -32,7 +34,10 @@ from cfg_ic_fixtures import (
     RIVER_COLUMN_HEADER,
     RIVER_STAGE_COLUMN_HEADER_TOKENS,
     build_cfg_ic,
+    build_cfg_ic_rows,
     build_compat_layout,
+    mesh_row,
+    with_bom,
 )
 
 from yd_producer.state import cfg_ic
@@ -717,6 +722,31 @@ def test_provenance_windows_do_not_leak_into_neighbour_functions() -> None:
         ), helper
 
 
+#: `parse` 体内每一条 `raise` 的分类表。总数 MUST 与 `ast` 数出来的 `raise` 节点数闭合，
+#: 故往 `parse` 里加一条 fail-closed 而不更新模块头清单会**立刻变红**。
+#:
+#: 这张表取代了原来的自指写法（#54 评论 2）：旧版只断 docstring 写着「六条」、从代码零导出，
+#: 于是 docstring 写「三条」时它绿（第 4 条偏离当时确实存在）、写「五条」时它仍绿（第 6 条
+#: 仍在清单外）——对「偏离清单漏登记」这一类恒绿，而那正是它本该守住的东西。
+PARSE_RAISE_CLASSIFICATION = {
+    # 模块头逐条登记的、对 pin 的刻意偏离（无 pin 对应物的 fail-closed）。
+    "deliberate_deviations": 8,
+    # 有 pin 对应物：超限 / 非 UTF-8 / 空文件 / 不可读 header / 非数值数据行 /
+    # 截断 body / 截断 lake body。
+    "pin_counterparts": 7,
+    # `pragma: no cover` 的全覆盖划分自检：对任何输入都不可达，是不变量断言。
+    "unreachable_invariant": 1,
+}
+
+#: 文档改写 API 的拒绝路径（模块头「模型扩展」一节登记，不计入上面的八条偏离）。
+DOCUMENT_API_RAISE_COUNTS = {
+    # roles/lines 长度、header_index、段列头行号、段数据行号、lake preamble 行号。
+    "CfgIcDocument.__post_init__": 5,
+    # 行号非 int、行号越界、替换值含断行字符、被替换的数据行重算不出数值。
+    "CfgIcDocument.with_replaced_lines": 4,
+}
+
+
 def test_module_documents_the_deliberate_deviations() -> None:
     source = pathlib.Path(cfg_ic.__file__).read_text(encoding="utf-8")
     head = source[: source.index('"""', 3) + 3]
@@ -725,13 +755,33 @@ def test_module_documents_the_deliberate_deviations() -> None:
     assert "mesh" in head
     # 偏离清单自称是全集，所以每一条 pin 无对应物、且可被输入触发的 fail-closed 都必须在
     # 清单里点名（`parse` 末尾的 unassigned 自检对任何输入都不可达，是不变量断言，不计入）。
-    assert "六条" in head
     assert "mesh 列头" in head
     assert "max_bytes" in head
     assert "计数式兼容布局" in head
-    for ordinal in ("\n1. ", "\n2. ", "\n3. ", "\n4. ", "\n5. ", "\n6. "):
-        assert head.count(ordinal) == 1, ordinal
-    assert "\n7. " not in head
+    assert "段重入" in head or "分段列头第二次出现" in head
+    assert "BOM" in head
+    # 声明的条数由 docstring **解析**得出（不是 `"八条" in head` 那种子串断言——实测该写法
+    # 对「八条改回六条」的变异体存活，因为后文「故不计入上面的八条偏离」也含「八条」），
+    # 并与代码侧的分类表闭合；分类表又与 `ast` 计数闭合（见下一条）。
+    declared = source_probe.declared_deviation_count(head)
+    assert declared == PARSE_RAISE_CLASSIFICATION["deliberate_deviations"] == 8
+    for ordinal in range(1, declared + 1):
+        assert head.count(f"\n{ordinal}. ") == 1, ordinal
+    assert f"\n{declared + 1}. " not in head
+
+
+def test_deviation_list_is_closed_against_the_actual_raise_count() -> None:
+    """穷尽性的机械闭合：`parse` 体内 `raise` 总数 == 分类表之和。
+
+    往 `parse` 里加一条 `raise ValueError` 而不回来更新模块头清单与分类表，此条变红。
+    """
+    source = source_probe.read_source(cfg_ic.__file__)
+
+    assert source_probe.count_raises(source, "parse") == sum(
+        PARSE_RAISE_CLASSIFICATION.values()
+    )
+    for name, expected in DOCUMENT_API_RAISE_COUNTS.items():
+        assert source_probe.count_raises(source, name) == expected, name
 
 
 # --- 移植辅助的判定语义（与 pin 逐字一致） ---
@@ -847,3 +897,198 @@ def test_header_minute_index_points_at_the_trailing_numeric_token(
     header: list[str], expected: int | None
 ) -> None:
     assert cfg_ic._header_minute_index(header) == expected
+
+# --- #54 第 3/4/5 条：段重入守卫、BOM 感知诊断、文档构造期不变量 ---
+
+
+def test_duplicate_section_column_header_is_refused() -> None:
+    """#54 第 3 条推荐 (a)：river 段之后再次出现 mesh 列头即 `ValueError`。
+
+    pin 只把 `section` 重新置位，于是 `mesh.span == (2, 7)` 会把 river 的列头与数据行
+    整段吞进区间内，而 `Section.span` 的契约是「段内可能夹杂空行」。
+    """
+    payload = (
+        b"2 6 27000000.000000\n"
+        b"Index Canopy Snow Surface Unsat GW\n"
+        b"1 0.1 0.2 0.3 0.4 0.5\n"
+        b"Index Stage\n"
+        b"1 0.5\n"
+        b"Index Canopy Snow Surface Unsat GW\n"
+        b"2 0.1 0.2 0.3 0.4 0.5\n"
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        cfg_ic.parse(payload)
+
+    message = str(excinfo.value)
+    assert "duplicate sectioned IC column header" in message
+    assert "'mesh'" in message
+
+
+def test_legal_three_section_layout_is_unaffected_by_the_re_entry_guard() -> None:
+    """守卫不得误伤合法三段文件（mesh / river / lake 各恰一次）。"""
+    for mesh_count in MESH_SIZES:
+        synthetic = build_cfg_ic(mesh_count=mesh_count, river_count=4, lake_count=2)
+        doc = cfg_ic.parse(synthetic.payload)
+        assert cfg_ic.render(doc) == synthetic.payload
+        assert doc.mesh.column_header_index == synthetic.mesh_column_header_index
+        assert doc.river is not None and doc.lake is not None
+
+
+def test_utf8_bom_is_diagnosed_as_a_bom_not_as_a_truncated_body() -> None:
+    """#54 第 4 条：BOM 会把运维支到「文件被截断」的错误方向。"""
+    payload = with_bom(build_cfg_ic(mesh_count=3, river_count=4).payload)
+
+    with pytest.raises(ValueError) as excinfo:
+        cfg_ic.parse(payload)
+
+    message = str(excinfo.value)
+    assert "UTF-8 BOM" in message
+    assert "truncated sectioned IC body" not in message
+
+
+def test_utf8_bom_on_the_silently_misparsed_coincidence_is_also_refused() -> None:
+    """#54 实测的静默误解析巧合：mesh 行数恰等于列数（6）时 BOM 文件会**通过**。"""
+    payload = with_bom(
+        build_cfg_ic_rows(
+            mesh_rows=[mesh_row(index) for index in range(1, 7)],
+            header_tokens=("6", "6", "0", "0.0"),
+        ).payload
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        cfg_ic.parse(payload)
+
+    assert "UTF-8 BOM" in str(excinfo.value)
+
+
+def test_mesh_column_header_guard_is_exercised() -> None:
+    """#54 评论 1：该守卫此前无任何用例（`if False:` 变异下全套 339 条全绿）。"""
+    payload = b"0 6 27000000.000000\nIndex Stage\n1 0.100000\n"
+
+    with pytest.raises(ValueError) as excinfo:
+        cfg_ic.parse(payload)
+
+    assert str(excinfo.value) == "sectioned IC body has no mesh column header"
+
+
+def _valid_doc() -> cfg_ic.CfgIcDocument:
+    return cfg_ic.parse(build_cfg_ic(mesh_count=3, river_count=4).payload)
+
+
+def test_document_post_init_rejects_a_roles_lines_length_mismatch() -> None:
+    doc = _valid_doc()
+
+    with pytest.raises(ValueError) as excinfo:
+        dataclasses.replace(doc, roles=doc.roles[:-1])
+
+    assert "roles/lines length mismatch" in str(excinfo.value)
+
+
+def test_document_post_init_rejects_an_out_of_range_header_index() -> None:
+    doc = _valid_doc()
+
+    with pytest.raises(ValueError) as excinfo:
+        dataclasses.replace(doc, header_index=len(doc.lines))
+
+    assert "header_index" in str(excinfo.value)
+
+
+def test_document_post_init_rejects_out_of_range_section_line_numbers() -> None:
+    doc = _valid_doc()
+
+    with pytest.raises(ValueError) as excinfo:
+        dataclasses.replace(
+            doc,
+            mesh=dataclasses.replace(doc.mesh, column_header_index=len(doc.lines)),
+        )
+    assert "column_header_index" in str(excinfo.value)
+
+    with pytest.raises(ValueError) as excinfo:
+        dataclasses.replace(
+            doc,
+            mesh=dataclasses.replace(doc.mesh, data_line_indices=(len(doc.lines),)),
+        )
+    assert "data line index" in str(excinfo.value)
+
+    with pytest.raises(ValueError) as excinfo:
+        dataclasses.replace(doc, lake_preamble_index=len(doc.lines))
+    assert "lake_preamble_index" in str(excinfo.value)
+
+
+def test_naked_dataclasses_replace_with_a_different_line_count_fails_immediately() -> (
+    None
+):
+    """#54 第 5 条实测的「静默产出看起来正常的 bytes」路径在此变红。"""
+    doc = _valid_doc()
+
+    with pytest.raises(ValueError):
+        dataclasses.replace(doc, lines=(*doc.lines, "9 0.1 0.2 0.3 0.4 0.5\n"))
+
+
+def test_with_replaced_lines_keeps_the_original_line_ending() -> None:
+    synthetic = build_cfg_ic(mesh_count=3, river_count=4, eol="\r\n")
+    doc = cfg_ic.parse(synthetic.payload)
+    index = synthetic.mesh_data_indices[0]
+
+    replaced = doc.with_replaced_lines({index: "1 0 0 0 0 0"})
+
+    assert replaced.lines[index] == "1 0 0 0 0 0\r\n"
+    assert replaced.mesh.rows[0] == (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    for other in range(len(doc.lines)):
+        if other != index:
+            assert replaced.lines[other] == doc.lines[other]
+
+
+def test_with_replaced_lines_keeps_a_missing_trailing_newline_missing() -> None:
+    synthetic = build_cfg_ic(mesh_count=3, river_count=4, trailing_newline=False)
+    doc = cfg_ic.parse(synthetic.payload)
+    last = len(doc.lines) - 1
+
+    replaced = doc.with_replaced_lines({last: "4 0"})
+
+    assert replaced.lines[last] == "4 0"
+    assert not cfg_ic.render(replaced).endswith(b"\n")
+
+
+@pytest.mark.parametrize("char", ["\n", "\r", "\x85", " "])
+def test_with_replaced_lines_refuses_a_replacement_that_would_change_the_line_count(
+    char: str,
+) -> None:
+    doc = _valid_doc()
+
+    with pytest.raises(ValueError) as excinfo:
+        doc.with_replaced_lines({doc.mesh.data_line_indices[0]: f"1 0{char}2 0"})
+
+    assert "must not contain a line break" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("index", [-1, 10_000])
+def test_with_replaced_lines_refuses_an_out_of_range_index(index: int) -> None:
+    doc = _valid_doc()
+
+    with pytest.raises(ValueError) as excinfo:
+        doc.with_replaced_lines({index: "1 0"})
+
+    assert "out of range" in str(excinfo.value)
+
+
+def test_with_replaced_lines_refuses_a_non_integer_index() -> None:
+    doc = _valid_doc()
+
+    with pytest.raises(ValueError) as excinfo:
+        doc.with_replaced_lines({"2": "1 0"})  # type: ignore[dict-item]
+
+    assert "must be int" in str(excinfo.value)
+
+
+def test_with_replaced_lines_refuses_a_data_row_replacement_that_is_not_numeric() -> (
+    None
+):
+    """`Section.rows` 是 `lines` 的派生视图，重算不出数值即 fail-closed。"""
+    doc = _valid_doc()
+
+    with pytest.raises(ValueError) as excinfo:
+        doc.with_replaced_lines({doc.mesh.data_line_indices[0]: "Index Canopy"})
+
+    assert "is not a numeric row" in str(excinfo.value)
