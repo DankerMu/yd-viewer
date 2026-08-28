@@ -388,6 +388,23 @@ def test_parse_sacct_record_fails_closed(stdout):
     assert excinfo.value.job_id == "12345"
 
 
+def test_parse_sacct_record_extra_columns_reports_arity():
+    """多列必须命中列数守卫本身，而非解包时的 ValueError。
+
+    共享的 fails_closed 参数化只断言"抛了 ExecutorError"，多列这一例在 `columns`
+    改成 `columns[:4]` 之类的写法下会退化成静默错解析。这里单列一个用例，直接钉
+    住列数契约的措辞（期望 4 列 / 实际 5 列），把 oracle 从"抛了点什么"提升到
+    "抛的是列数不符"。
+    """
+    with pytest.raises(ExecutorError) as excinfo:
+        parse_sacct_record(
+            "12345|COMPLETED|2026-08-28T00:00:00|2026-08-28T01:00:00|extra", "12345"
+        )
+    assert excinfo.value.job_id == "12345"
+    assert "期望 4 列" in str(excinfo.value)
+    assert "实际 5 列" in str(excinfo.value)
+
+
 # --- E. 协议一致性与组装 -----------------------------------------------------
 
 
