@@ -266,6 +266,33 @@ class YdRootBuilder:
         self.written_states.setdefault(source, {})[cycle_text] = absolute_minute(cycle)
         return path
 
+    def write_state_newline_free(
+        self, cycle_text: str, source: str, *, size_bytes: int, payload: str
+    ) -> Path:
+        """写一份**整篇没有 `\\n`** 的状态文件：整个文件就是一条候选 header 行。
+
+        `payload` ∈ {printable, nul}：前者是可打印字节（`b"1 "` 重复，流式写入，不在测试
+        进程里驻留整份载荷），后者是 `truncate` 出来的全 NUL 稀疏文件（NUL 是合法 UTF-8
+        且不是 `str.strip()` 的空白，所以同样构成一条巨大的非空行）。两种载荷都是候选行
+        上界的判别构造：无上界的读法会把整份文件实体化成 str 再 `.split()`。
+        """
+        path = self._prepare(cycle_text, source)
+        if payload == "printable":
+            block = b"1 " * (512 * 1024)  # 1 MiB，无 `\n`
+            assert b"\n" not in block
+            whole, tail = divmod(size_bytes, len(block))
+            with open(path, "wb") as handle:
+                handle.writelines(block for _ in range(whole))
+                handle.write(block[:tail])
+        elif payload == "nul":
+            with open(path, "wb") as handle:
+                handle.truncate(size_bytes)
+        else:  # pragma: no cover - 构造器自检
+            raise ValueError(f"unknown payload shape: {payload!r}")
+        assert path.stat().st_size == size_bytes
+        self.written_states.setdefault(source, {})[cycle_text] = None
+        return path
+
     def write_states_clutter(self, source: str) -> None:
         """`states/<source>/` 下的非法条目：发布临时名、子目录、点文件、非法日期名。"""
         directory = self.states_dir(source)

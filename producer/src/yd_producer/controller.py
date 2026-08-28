@@ -76,6 +76,7 @@ from yd_producer.state.header_time import (
 __all__ = [
     "CYCLE_ID_FORMAT",
     "CYCLE_STRIDE",
+    "MAX_HEADER_LINE_BYTES",
     "STATE_SUFFIX",
     "FrontierDecision",
     "StopReason",
@@ -90,6 +91,9 @@ STATE_SUFFIX = ".cfg.ic"
 CYCLE_STRIDE = timedelta(hours=12)
 #: 首行有界读的分块大小：只影响峰值内存，不影响判定。
 _READ_CHUNK_BYTES = 64 * 1024
+#: 候选 header 行的字节上界（裁决 4 二次增补）：原生 header 只有 3–4 个 token，
+#: 64 KiB 已留出两个数量级余量。累计到这个长度仍未遇到 `\n` 的行一律 `STATE_UNREADABLE`。
+MAX_HEADER_LINE_BYTES = 64 * 1024
 
 
 class StopReason(enum.Enum):
@@ -104,7 +108,8 @@ class StopReason(enum.Enum):
     #: 待跑 T 的状态文件不存在（MUST NOT 回退到更旧状态或互借另一源）。
     STATE_MISSING = "state_missing"
     #: 状态文件**自身**存在但读不出来：非普通文件、断链 symlink、`open`/`read` 被权限
-    #: 拒绝、非 UTF-8 或超字节上界。元数据探测层面的不可确定归 `DISCOVERY_UNREADABLE`。
+    #: 拒绝、非 UTF-8、超字节上界，或候选 header 行超 `MAX_HEADER_LINE_BYTES`。
+    #: 元数据探测层面的不可确定归 `DISCOVERY_UNREADABLE`。
     STATE_UNREADABLE = "state_unreadable"
     #: header 形状非法、分钟时标非有限值，或其绝对时间不对应 T。
     HEADER_TIME_MISMATCH = "header_time_mismatch"
@@ -402,6 +407,20 @@ def _read_header_line(state_path: Path, *, size: int) -> str | StopReason | None
     到十倍量级（round 1 验证闸门 batch resource-limits cand-04 实测），正好架空
     `MAX_STATE_IC_BYTES` 自述的 OOM 保护意图。
 
+    **候选行本身也有界**（裁决 4 二次增补，round 2 batch resource-and-coverage-2
+    cand-12）：字节预算只约束「读了多少」，不约束「首行有多长」。首个 `MAX+1` 字节里没有
+    `\n` 时（64 MiB 无换行文本，或截断/预分配出来的**全 NUL** 文件——NUL 是合法 UTF-8 且
+    不是 `str.strip()` 的空白，整个文件成为一个巨大的 header 行），`pending`、
+    `bytes(pending)`、`decode()` 与调用方的 `.split()` 各自实体化一份文件大小的对象，实测
+    端到端 traced peak 576 MiB / `ru_maxrss` 681 MiB。故候选行累计超过
+    `MAX_HEADER_LINE_BYTES` 仍未遇到 `\n` 时**立即**判 `STATE_UNREADABLE` 并停止读取。
+    判定在**两处**：行尾在后续 chunk 里才出现的超长行同样被拒（否则 (cap, cap+chunk] 这段
+    长度会从「读满才判」的那道闸里漏过去）。跳过前导空行时已丢弃的空白**不计入**候选行
+    长度——`pending` 里只留当前这一行。副作用是单独一条**超过上界的空白行**（如 1 MB 空格）
+    也按超界拒绝而非跳过：fail-closed 方向一致，且真实写入侧不产出这种行。
+    这条**改变了可观测行为**：全 NUL 的 64 MiB 状态由 `HEADER_TIME_MISMATCH` 变为
+    `STATE_UNREADABLE`——两者都停源，方向不变。
+
     行切分只认 `\\n`（不是 `str.splitlines()` 的全套行分隔符）：只读首行的语义下，本仓
     写入侧只产出 `\\n`，而 `splitlines()` 的 `\\r`/`\\x0b`/`U+2028` 需要先解码整个缓冲区
     才能定位，与有界读互斥。
@@ -425,12 +444,16 @@ def _read_header_line(state_path: Path, *, size: int) -> str | StopReason | None
                     newline = pending.find(b"\n")
                     if newline < 0:
                         break
+                    if newline > MAX_HEADER_LINE_BYTES:
+                        return StopReason.STATE_UNREADABLE
                     line = _decode_line(bytes(pending[:newline]))
                     del pending[: newline + 1]
                     if line is None:
                         return StopReason.STATE_UNREADABLE
                     if line.strip():
                         return line
+                if len(pending) > MAX_HEADER_LINE_BYTES:
+                    return StopReason.STATE_UNREADABLE
     except OSError:
         return StopReason.STATE_UNREADABLE
     if budget <= 0 and pending:

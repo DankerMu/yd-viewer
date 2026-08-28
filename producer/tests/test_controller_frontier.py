@@ -400,6 +400,69 @@ def test_first_line_read_stays_bounded_on_a_large_valid_state(
     assert peak < size, (peak, size)
 
 
+@pytest.mark.parametrize("payload", ["printable", "nul"])
+def test_newline_free_giant_first_line_is_refused_within_bounded_memory(
+    tmp_path: pathlib.Path, payload: str
+) -> None:
+    """裁决 4 二次增补：整篇无 `\\n` 的 64 MiB 状态 -> `STATE_UNREADABLE`，峰值有界。
+
+    两种载荷各一条：可打印字节，以及**全 NUL**（NUL 是合法 UTF-8 且不是 `str.strip()`
+    的空白，所以整个文件构成一条巨大的非空 header 行——round 2 验证闸门 cand-12 实测
+    端到端 traced peak 576 MiB）。字节预算只约束「读了多少」，判别力全在候选行上界：
+    去掉 `MAX_HEADER_LINE_BYTES` 截断后，这条会同时在**结论**（变成
+    `HEADER_TIME_MISMATCH`）和**峰值**两处变红。
+    """
+    builder = YdRootBuilder(tmp_path)
+    builder.write_done(D, "ifs")
+    path = builder.write_state_newline_free(
+        T, "ifs", size_bytes=MAX_STATE_IC_BYTES, payload=payload
+    )
+    size = path.stat().st_size
+    assert size == MAX_STATE_IC_BYTES  # 恰好在字节上界内：超界闸不承担本条的判别力
+    raw = _all_complete()
+
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        line = controller._read_header_line(path, size=size)
+        _, read_peak = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        # 64 MiB 文件上跳过快照比对：摘要要读满整份文件，与本条的判别力无关
+        decision = _decide(builder, "ifs", raw, check_writes=False)
+        _, end_to_end_peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert line is controller.StopReason.STATE_UNREADABLE
+    _assert_stopped(decision, controller.StopReason.STATE_UNREADABLE)
+    assert raw.asked == []
+    # 读取本身与上界同量级（实测 197 KiB ≈ 3x cap）；端到端另留一档余量
+    assert read_peak < 8 * controller.MAX_HEADER_LINE_BYTES, (read_peak, size)
+    assert end_to_end_peak < 32 * controller.MAX_HEADER_LINE_BYTES, (
+        end_to_end_peak,
+        size,
+    )
+    assert end_to_end_peak < size // 32, (end_to_end_peak, size)
+
+
+def test_long_blank_prefix_before_the_header_is_still_read(
+    tmp_path: pathlib.Path,
+) -> None:
+    """跳过的前导空行 MUST NOT 计入候选行长度：数 MB 空行之后的首行仍被正确读出。
+
+    与上一条成对：只看「无换行 -> 拒绝」的话，一个把**已丢弃的空白**也计入上界的实现
+    同样恒绿，却会把合法状态误判成 `STATE_UNREADABLE`。
+    """
+    builder = YdRootBuilder(tmp_path)
+    builder.write_done(D, "ifs")
+    blank_bytes = 4 * 1024 * 1024  # 远超 MAX_HEADER_LINE_BYTES 的空行前缀
+    assert blank_bytes > controller.MAX_HEADER_LINE_BYTES
+    path = builder.write_state_trailing_header(T, "ifs", blank_bytes=blank_bytes)
+    assert path.stat().st_size > blank_bytes
+    # 4 MiB 文件上跳过快照比对：摘要要读满整份文件，与本条的判别力无关
+    _assert_runnable(_decide(builder, "ifs", _all_complete(), check_writes=False), T)
+
+
 # --- 枚举/探测失败：不存在 ≠ 不可确定（裁决 9） ---
 
 
@@ -507,6 +570,38 @@ def test_unreadable_states_parent_dir_is_classified_not_raised(
     _assert_stopped(decision, controller.StopReason.DISCOVERY_UNREADABLE)
     assert str(builder.state_path(T, "ifs")) in decision.detail
     assert raw.asked == []
+
+
+def test_discovery_unreadable_is_isolated_per_source(tmp_path: pathlib.Path) -> None:
+    """新停止原因同样逐源隔离（裁决 9 的遗漏行，round 2 cand-14）。
+
+    同一棵树、同一个不可读窗口内问两次：`output/<cycle>/gfs/` 不可读 -> gfs
+    `DISCOVERY_UNREADABLE`，ifs 仍得到正常可跑结论。既有的逐源行只覆盖「缺失」与
+    `STATE_MISSING`，四条 discovery 用例又全是单源；把 `_done_cycles` 改成枚举
+    `output/<cycle>/` 的目录项（而非逐源 stat `DONE`）会让 gfs 的 EACCES 漏给 ifs。
+    """
+    _skip_if_root()
+    builder = YdRootBuilder(tmp_path)
+    for source in ALL_SOURCES:
+        builder.write_done(T, source)
+        builder.write_state(T_PLUS_12, source)
+
+    raw = _all_complete()
+    before = snapshot_tree(builder.root)
+    with _unreadable(tmp_path / "output" / T / "gfs"):
+        gfs = controller.decide_frontier(
+            yd_root=builder.root, source="gfs", raw_complete=raw
+        )
+        ifs = controller.decide_frontier(
+            yd_root=builder.root, source="ifs", raw_complete=raw
+        )
+    assert snapshot_tree(builder.root) == before
+
+    _assert_stopped(gfs, controller.StopReason.DISCOVERY_UNREADABLE)
+    assert "DONE" in gfs.detail
+    assert str(tmp_path / "output" / T / "gfs" / "DONE") in gfs.detail
+    _assert_runnable(ifs, T_PLUS_12)
+    assert raw.asked == [T_PLUS_12]  # gfs 停在探测层，根本没走到 raw
 
 
 def test_absent_directories_still_mean_empty_sets(tmp_path: pathlib.Path) -> None:
