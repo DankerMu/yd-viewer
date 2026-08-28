@@ -8,8 +8,10 @@ oracle 纪律：结构索引期望值一律来自 `cfg_ic_fixtures` 的**构造�
 oracle——段归属偏移一行、preamble 计入 river 只在这里变红。
 
 包络纪律：合成生成器的发射包络 MUST 覆盖解析器接受域，否则包络外的正确行为分支没有任何
-用例把守。三条已实测过的缺口在此各有专用用例：Tab 分隔（真实生产文件的分隔符）、文件首
-部空行（钉死「header 行 = 首个非空行」）、`lake_count=0`（lake 段存在但为空）。
+用例把守。已实测过的缺口在此各有专用用例：Tab 分隔（真实生产文件的分隔符）、文件首部空行
+（钉死「header 行 = 首个非空行」）、`lake_count=0`（lake 段存在但为空）、river 列头拼写
+`Index River_Stage`（**真实 `.cfg.ic.update` 的拼写**）、lake 列头拼写 `Index Lake_Stage`、
+段内数据行之间的空行（`data_line_indices` 不连续、`span` 宽于行数）。
 """
 
 from __future__ import annotations
@@ -24,8 +26,11 @@ import stat
 import pytest
 from cfg_ic_fixtures import (
     LAKE_COLUMN_HEADER,
+    LAKE_COLUMN_HEADER_TOKENS,
+    LAKE_STAGE_COLUMN_HEADER_TOKENS,
     MESH_COLUMN_HEADER,
     RIVER_COLUMN_HEADER,
+    RIVER_STAGE_COLUMN_HEADER_TOKENS,
     build_cfg_ic,
     build_compat_layout,
 )
@@ -252,6 +257,105 @@ def test_tab_delimited_native_layout_roundtrips_and_indexes(mesh_count: int) -> 
     assert doc.lake.data_line_indices == built.lake_data_indices
     assert doc.lake_preamble_index == built.lake_preamble_index
     assert _roles(doc) == built.roles
+
+
+@pytest.mark.parametrize("mesh_count", MESH_SIZES)
+@pytest.mark.parametrize(
+    ("lake_header_tokens", "case"),
+    [
+        (LAKE_COLUMN_HEADER_TOKENS, "qhh"),
+        (LAKE_STAGE_COLUMN_HEADER_TOKENS, "underscored-lake"),
+    ],
+)
+def test_underscored_stage_column_headers_roundtrip_and_index(
+    mesh_count: int, lake_header_tokens: tuple[str, ...], case: str
+) -> None:
+    """`Index\\tRiver_Stage` 是真实 `.cfg.ic.update` 的 river 列头拼写。
+
+    NWM pin 的 QHH 布局 fixture（`tests/test_state_qc.py` :96/:154/:187）与 checkpoint
+    断言（`tests/test_shud_runtime.py` :518/:549）都写这个拼写；只有 pin 的**合成** writer
+    `_write_native_ic` :611 用 `Index\\tStage`。生成器此前只会发合成拼写，于是「解析器认
+    `river_stage`」这一支无人把守：删掉该 token 后整套用例仍全绿，而真实生产文件会以
+    `non-numeric IC data row: 'Index\\tRiver_Stage'` 直接解析失败。
+    `Lake_Stage` 同属一类（解析器接受、pin 无实例），在同一条轴上一并覆盖。
+    """
+    river_count = mesh_count - 1
+    built = build_cfg_ic(
+        mesh_count=mesh_count,
+        river_count=river_count,
+        lake_count=2,
+        delimiter="\t",
+        river_header_tokens=RIVER_STAGE_COLUMN_HEADER_TOKENS,
+        lake_header_tokens=lake_header_tokens,
+    )
+    assert b"Index\tRiver_Stage" in built.payload
+    assert ("\t".join(lake_header_tokens)).encode() in built.payload
+    assert b"Index\tStage\n" not in built.payload
+
+    doc = cfg_ic.parse(built.payload)
+
+    assert cfg_ic.render(doc) == built.payload
+    assert doc.header_index == built.header_index
+    assert doc.mesh.column_header_index == built.mesh_column_header_index
+    assert doc.mesh.data_line_indices == built.mesh_data_indices
+    assert doc.river is not None
+    assert doc.river.column_header_index == built.river_column_header_index
+    assert doc.river.data_line_indices == built.river_data_indices
+    assert doc.river.row_count == river_count
+    assert doc.lake is not None
+    assert doc.lake.column_header_index == built.lake_column_header_index
+    assert doc.lake.data_line_indices == built.lake_data_indices
+    assert doc.lake.row_count == 2
+    assert doc.declared_lake_count == 2
+    assert doc.lake_preamble_index == built.lake_preamble_index
+    assert _roles(doc) == built.roles
+
+
+@pytest.mark.parametrize("mesh_count", MESH_SIZES)
+def test_intra_section_blank_lines_keep_data_indices_non_contiguous(
+    mesh_count: int,
+) -> None:
+    """段内数据行之间可以夹空行：`data_line_indices` 因此不是连续区间。
+
+    `Section` 的文档承诺这一点，但生成器此前只在段与段之间插空行，于是「`span` 由首尾行号
+    定」这一支无人把守——把 `span` 写成 `(first, first + len(indices))` 全绿。
+    """
+    built = build_cfg_ic(
+        mesh_count=mesh_count,
+        river_count=3,
+        lake_count=2,
+        intra_section_blank_lines=True,
+    )
+    # 空行确实插进去了（旗标没有静默失效）：三段的首两条数据行号都不相邻。
+    for indices in (
+        built.mesh_data_indices,
+        built.river_data_indices,
+        built.lake_data_indices,
+    ):
+        assert indices[1] - indices[0] == 2
+
+    doc = cfg_ic.parse(built.payload)
+
+    assert cfg_ic.render(doc) == built.payload
+    assert _roles(doc) == built.roles
+    sections = ((doc.mesh, built.mesh_data_indices),)
+    assert doc.river is not None
+    assert doc.lake is not None
+    sections += (
+        (doc.river, built.river_data_indices),
+        (doc.lake, built.lake_data_indices),
+    )
+    for section, expected in sections:
+        assert section.data_line_indices == expected
+        assert section.row_count == len(expected)
+        # span 含首尾，且因段内空行而**宽于**数据行数——这正是把 span 写成
+        # `(first, first + row_count)` 时唯一会变红的地方。
+        assert section.span == (expected[0], expected[-1] + 1)
+        assert section.span[1] - section.span[0] == len(expected) + 1
+    blank_indices = {i for i, role in enumerate(_roles(doc)) if role == "blank"}
+    assert blank_indices
+    for _, expected in sections:
+        assert blank_indices.intersection(range(expected[0], expected[-1] + 1))
 
 
 @pytest.mark.parametrize("leading", [1, 2])

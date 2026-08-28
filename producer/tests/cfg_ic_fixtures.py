@@ -10,7 +10,9 @@ r"""合成 `cfg.ic` 生成器（程序化，零二进制入库）。
   `tests/test_state_qc.py::_write_native_ic`：`"\t".join(...)` / `Index\tLakeStage`）
 - 行尾：LF / CRLF、文件有无末尾换行
 - 空白：行尾多余空格、段间空行（含纯空白行）、**文件首部的空行**（钉死「header 行 =
-  首个非空行」）
+  首个非空行」）、**段内数据行之间的空行**（`Section.data_line_indices` 因此不连续）
+- 列头拼写：river 段 `Index Stage` 与 **`Index River_Stage`**、lake 段 `Index LakeStage`
+  与 **`Index Lake_Stage`**（四种拼写解析器都接受，见 `_looks_like_column_header`）
 - 数值记法混合：`0.100000` / `1e-3` / `-0.0` / `2.5E+01`
 - lake 段：缺席 / 非空 / **存在但为空（`lake_count=0`）**
 """
@@ -24,6 +26,15 @@ from pathlib import Path
 MESH_COLUMN_HEADER_TOKENS = ("Index", "Canopy", "Snow", "Surface", "Unsat", "GW")
 RIVER_COLUMN_HEADER_TOKENS = ("Index", "Stage")
 LAKE_COLUMN_HEADER_TOKENS = ("Index", "LakeStage")
+
+#: river 段的**生产拼写**：真实 SHUD `.cfg.ic.update` 写的是 `Index\tRiver_Stage`
+#: （NWM pin `tests/test_state_qc.py` :96/:154/:187 的 QHH 布局 fixture 与
+#: `tests/test_shud_runtime.py` :518/:549 的 checkpoint 断言为证）；pin 里只有**合成**
+#: writer `_write_native_ic` :611 用 `Index\tStage`。
+RIVER_STAGE_COLUMN_HEADER_TOKENS = ("Index", "River_Stage")
+#: lake 段的下划线拼写：解析器接受（`_section_from_column_header` 显式判 `lake_stage`），
+#: 但 pin 的 fixture 里没有实例——收进包络是为了「接受什么就发什么」，不宣称它是 QHH 形状。
+LAKE_STAGE_COLUMN_HEADER_TOKENS = ("Index", "Lake_Stage")
 
 #: 空格分隔的列头文本（移植辅助的判定语义用例直接消费）。
 MESH_COLUMN_HEADER = " ".join(MESH_COLUMN_HEADER_TOKENS)
@@ -99,10 +110,13 @@ def build_cfg_ic(
     trailing_spaces: bool = False,
     blank_lines: bool = False,
     leading_blank_lines: int = 0,
+    intra_section_blank_lines: bool = False,
     mixed_notation: bool = False,
     minute: str = DEFAULT_MINUTE,
     mesh_state_columns: int = MESH_STATE_COLUMNS,
     lake_body_rows: int | None = None,
+    river_header_tokens: tuple[str, ...] = RIVER_COLUMN_HEADER_TOKENS,
+    lake_header_tokens: tuple[str, ...] = LAKE_COLUMN_HEADER_TOKENS,
 ) -> SyntheticCfgIc:
     """生成一份原生分段 `cfg.ic`。
 
@@ -110,7 +124,9 @@ def build_cfg_ic(
     （preamble 声明 0 行 + lake 列头 + 零条数据行），这在解析器接受域内。
     `lake_body_rows` 用于制造「preamble 声明数与实际 lake 行数不符」的截断体（默认等于
     `lake_count`）。`leading_blank_lines` 在 header 之前插空行（偶数位空串、奇数位纯空白），
-    用于钉死「header 行 = 首个非空行」。
+    用于钉死「header 行 = 首个非空行」。`intra_section_blank_lines` 在每个**至少两行数据**
+    的段的首条数据行之后插一条空行，使该段的数据行号不连续。
+    `river_header_tokens` / `lake_header_tokens` 选择段列头拼写（生产拼写见模块头常量）。
     """
     emitter = _Emitter(
         eol=eol,
@@ -136,17 +152,21 @@ def build_cfg_ic(
             values.append(_value(counter, mixed=mixed_notation))
             counter += 1
         mesh_data_indices.append(emitter.emit([str(element), *values], "data"))
+        if intra_section_blank_lines and element == 1 and mesh_count >= 2:
+            emitter.blank()
 
     river_header_index: int | None = None
     river_data_indices: list[int] = []
     if river_count > 0:
         if blank_lines:
             emitter.blank(whitespace=True)
-        river_header_index = emitter.emit(RIVER_COLUMN_HEADER_TOKENS, "column_header")
+        river_header_index = emitter.emit(river_header_tokens, "column_header")
         for element in range(1, river_count + 1):
             stage = _value(counter, mixed=mixed_notation)
             counter += 1
             river_data_indices.append(emitter.emit([str(element), stage], "data"))
+            if intra_section_blank_lines and element == 1 and river_count >= 2:
+                emitter.blank(whitespace=True)
 
     lake_preamble_index: int | None = None
     lake_header_index: int | None = None
@@ -157,12 +177,14 @@ def build_cfg_ic(
         lake_preamble_index = emitter.emit(
             (str(lake_count), str(LAKE_STATE_COLUMNS)), "lake_preamble"
         )
-        lake_header_index = emitter.emit(LAKE_COLUMN_HEADER_TOKENS, "column_header")
+        lake_header_index = emitter.emit(lake_header_tokens, "column_header")
         body_rows = lake_count if lake_body_rows is None else lake_body_rows
         for element in range(1, body_rows + 1):
             stage = _value(counter, mixed=mixed_notation)
             counter += 1
             lake_data_indices.append(emitter.emit([str(element), stage], "data"))
+            if intra_section_blank_lines and element == 1 and body_rows >= 2:
+                emitter.blank()
 
     # 末尾空行只在有末尾换行时发；否则最后一行会是空串，行数与 splitlines 不对齐。
     if blank_lines and trailing_newline:
