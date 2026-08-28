@@ -7,6 +7,8 @@ lon/lat 锚点提供，测试断言被测工具能把 Albers 米制坐标还原�
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import pathlib
 import shutil
@@ -19,20 +21,27 @@ from geometry_fixtures import (
     METRIC_GUARD,
     AlbersParams,
     SyntheticBaseline,
+    shared_edge_anchors,
     sidecar,
     write_empty_layer,
     write_layer_with_null_shape,
+    write_out_of_domain_layer,
+    write_rivers_layer,
     write_synthetic_baseline,
 )
-from shapely.geometry import Polygon
+from shapely.geometry import LinearRing, Point, Polygon
+from shapely.geometry import shape as shapely_shape
 from shapely.geometry.base import BaseGeometry
 
 from yd_producer.geometry import (
     GeometryError,
+    build_boundary_geojson,
+    build_rivers_geojson,
     load_prj_crs,
     read_shapefile,
     reproject_geometry,
     to_wgs84_transformer,
+    write_viewer_geojson,
 )
 
 TOLERANCE_DEG = 1e-6
@@ -955,3 +964,438 @@ def test_read_shapefile_shx_record_length_shift_names_both_files(
     assert str(shx) in message
     assert str(baseline.rivers_shp) in message
     assert str(sidecar(baseline.rivers_shp, ".dbf")) not in message
+
+
+# --- viewer GeoJSON 生成（任务 10.2） --------------------------------------
+
+
+@pytest.fixture
+def adjacent_baseline(tmp_path) -> SyntheticBaseline:
+    """两个沿经度方向共边的单元，使合并边界的期望形状由构造已知。"""
+    return write_synthetic_baseline(
+        tmp_path / "adjacent", river_count=3, unit_count=2, adjacent_units=True
+    )
+
+
+def _reject_constant(name: str):
+    raise AssertionError(f"GeoJSON 含非有限常量 {name}（RFC 8259 不允许）")
+
+
+def _strict_loads(text: str):
+    """按 RFC 8259 严格解析：`Infinity`/`NaN` 直接判失败。
+
+    Python 的 `json.loads` 非标准地接受裸 `Infinity`，浏览器的 `JSON.parse` 不接受；
+    `parse_constant` 是 stdlib 里唯一能把这条非标准宽容关掉的钩子。
+    """
+    return json.loads(text, parse_constant=_reject_constant)
+
+
+def _coords(geom: dict) -> list[tuple[float, float]]:
+    """GeoJSON 几何 -> 扁平顶点列表（只用于域/有限性这类逐点断言）。"""
+    points: list[tuple[float, float]] = []
+
+    def walk(node) -> None:
+        # `shapely.geometry.mapping` 返回的是嵌套元组，序列化/反序列化后是列表，
+        # 两种表示都要能走通。
+        if node and all(isinstance(v, (int, float)) for v in node):
+            points.append((node[0], node[1]))
+            return
+        for child in node:
+            walk(child)
+
+    walk(geom["coordinates"])
+    return points
+
+
+def _match_anchor_set(
+    actual: list[tuple[float, float]],
+    expected: set[tuple[float, float]],
+) -> None:
+    """顶点集合比对（一一配对，容差 1e-6 度）。
+
+    合并结果的起点与环向由 GEOS 决定、`orient` 还会再翻一次，故这里按集合比；
+    期望值仍全部来自生成器锚点，不来自被测库。
+    """
+    remaining = list(expected)
+    assert len(actual) == len(remaining), f"顶点数不符: {actual} vs {remaining}"
+    for lon, lat in actual:
+        hit = [
+            anchor
+            for anchor in remaining
+            if abs(lon - anchor[0]) <= TOLERANCE_DEG
+            and abs(lat - anchor[1]) <= TOLERANCE_DEG
+        ]
+        assert len(hit) == 1, f"顶点 ({lon}, {lat}) 未唯一匹配到锚点 {remaining}"
+        remaining.remove(hit[0])
+    assert not remaining
+
+
+def test_rivers_geojson_feature_count_and_reach_id_order(
+    baseline: SyntheticBaseline,
+) -> None:
+    doc = build_rivers_geojson(baseline.rivers_shp)
+
+    assert doc["type"] == "FeatureCollection"
+    assert len(doc["features"]) == len(baseline.river_anchors)
+    assert [f["properties"]["reach_id"] for f in doc["features"]] == list(
+        baseline.river_indices
+    )
+
+
+def test_rivers_geojson_properties_contain_only_reach_id(
+    baseline: SyntheticBaseline,
+) -> None:
+    doc = build_rivers_geojson(baseline.rivers_shp)
+
+    for feature in doc["features"]:
+        assert feature["type"] == "Feature"
+        assert set(feature["properties"]) == {"reach_id"}
+        assert type(feature["properties"]["reach_id"]) is int
+
+
+def test_rivers_geojson_coordinates_restore_anchors(
+    baseline: SyntheticBaseline,
+) -> None:
+    doc = build_rivers_geojson(baseline.rivers_shp)
+
+    for feature, anchors in zip(doc["features"], baseline.river_anchors, strict=True):
+        geom = feature["geometry"]
+        parts = (
+            [geom["coordinates"]]
+            if geom["type"] == "LineString"
+            else geom["coordinates"]
+        )
+        assert len(parts) == len(anchors)
+        for part, part_anchors in zip(parts, anchors, strict=True):
+            _assert_matches_anchors([tuple(p) for p in part], part_anchors)
+
+
+def test_rivers_geojson_coordinates_within_lonlat_domain(
+    baseline: SyntheticBaseline,
+) -> None:
+    doc = build_rivers_geojson(baseline.rivers_shp)
+
+    points = [p for f in doc["features"] for p in _coords(f["geometry"])]
+    assert points
+    for lon, lat in points:
+        assert -180.0 <= lon <= 180.0
+        assert -90.0 <= lat <= 90.0
+        assert math.isfinite(lon) and math.isfinite(lat)
+
+
+def test_rivers_geojson_uses_lon_lat_axis_order(baseline: SyntheticBaseline) -> None:
+    """轴序回归：锚点 lon≈103 / lat≈33 差异显著，互换必然越界且远离锚点。"""
+    anchor_lon, anchor_lat = baseline.river_anchors[0][0][0]
+    assert abs(anchor_lon - anchor_lat) > 1.0
+
+    first = build_rivers_geojson(baseline.rivers_shp)["features"][0]
+    lon, lat = _coords(first["geometry"])[0]
+
+    assert lon == pytest.approx(anchor_lon, abs=TOLERANCE_DEG)
+    assert lat == pytest.approx(anchor_lat, abs=TOLERANCE_DEG)
+
+
+def test_rivers_geojson_multipart_line_structure_preserved(
+    baseline: SyntheticBaseline,
+) -> None:
+    last_anchors = baseline.river_anchors[-1]
+    assert len(last_anchors) > 1, "生成器保证最后一条河段是多部件折线"
+
+    geom = build_rivers_geojson(baseline.rivers_shp)["features"][-1]["geometry"]
+
+    assert geom["type"] == "MultiLineString"
+    assert len(geom["coordinates"]) == len(last_anchors)
+    assert [len(part) for part in geom["coordinates"]] == [
+        len(part) for part in last_anchors
+    ]
+
+
+def test_rivers_geojson_missing_index_field_raises(tmp_path) -> None:
+    shp_path, _ = write_rivers_layer(tmp_path / "nofield.shp", index_field="")
+
+    with pytest.raises(GeometryError) as excinfo:
+        build_rivers_geojson(shp_path)
+
+    assert str(shp_path) in str(excinfo.value)
+    assert "Index" in str(excinfo.value)
+
+
+def test_rivers_geojson_duplicate_index_raises(tmp_path) -> None:
+    shp_path, _ = write_rivers_layer(
+        tmp_path / "dup.shp", river_count=3, index_values=[5, 7, 5]
+    )
+
+    with pytest.raises(GeometryError) as excinfo:
+        build_rivers_geojson(shp_path)
+
+    message = str(excinfo.value)
+    assert "5" in message and "1" in message and "3" in message
+    assert str(shp_path) in message
+
+
+def test_rivers_geojson_non_integer_index_raises(tmp_path) -> None:
+    shp_path, _ = write_rivers_layer(
+        tmp_path / "text.shp",
+        index_field_spec=("C", 20, 0),
+        index_values=["abc", "def"],
+    )
+
+    with pytest.raises(GeometryError) as excinfo:
+        build_rivers_geojson(shp_path)
+
+    assert str(shp_path) in str(excinfo.value)
+
+
+def test_rivers_geojson_empty_layer_returns_empty_collection(
+    tmp_path, baseline: SyntheticBaseline
+) -> None:
+    """0 要素是合法输入：`reach_count` 一致性校验属 prepare 编排（10.3）。"""
+    shp_path = write_empty_layer(tmp_path / "empty.shp", baseline.prj_wkt)
+
+    doc = build_rivers_geojson(shp_path)
+
+    assert doc == {"type": "FeatureCollection", "features": []}
+
+
+def test_boundary_geojson_merges_adjacent_units_into_one_polygon(
+    adjacent_baseline: SyntheticBaseline,
+) -> None:
+    doc = build_boundary_geojson(adjacent_baseline.domain_shp)
+
+    assert len(doc["features"]) == 1
+    feature = doc["features"][0]
+    assert feature["properties"] == {}
+    assert feature["geometry"]["type"] == "Polygon"
+
+    shells = [unit[0] for unit in adjacent_baseline.domain_anchors]
+    seam = set(shared_edge_anchors(adjacent_baseline))
+    outer_corners = {anchor for shell in shells for anchor in _open_ring(shell)} - seam
+    expected = outer_corners | seam
+
+    exterior = _open_ring([tuple(p) for p in feature["geometry"]["coordinates"][0]])
+    _match_anchor_set(exterior, expected)
+
+    lons = [lon for lon, _ in exterior]
+    lats = [lat for _, lat in exterior]
+    assert min(lons) == pytest.approx(min(a[0] for a in expected), abs=TOLERANCE_DEG)
+    assert max(lons) == pytest.approx(max(a[0] for a in expected), abs=TOLERANCE_DEG)
+    assert min(lats) == pytest.approx(min(a[1] for a in expected), abs=TOLERANCE_DEG)
+    assert max(lats) == pytest.approx(max(a[1] for a in expected), abs=TOLERANCE_DEG)
+
+
+def test_boundary_geojson_dissolves_shared_edge(
+    adjacent_baseline: SyntheticBaseline,
+) -> None:
+    """共享边中点严格落在合并面内部——内部边界确已溶解。"""
+    (lon_a, lat_a), (lon_b, lat_b) = shared_edge_anchors(adjacent_baseline)
+    midpoint = Point((lon_a + lon_b) / 2.0, (lat_a + lat_b) / 2.0)
+
+    doc = build_boundary_geojson(adjacent_baseline.domain_shp)
+    merged = shapely_shape(doc["features"][0]["geometry"])
+
+    assert merged.covers(midpoint)
+    assert merged.contains(midpoint)
+    assert merged.boundary.distance(midpoint) > TOLERANCE_DEG
+
+
+def test_boundary_geojson_preserves_interior_ring(
+    adjacent_baseline: SyntheticBaseline,
+) -> None:
+    hole_anchors = adjacent_baseline.domain_anchors[0][1]
+
+    geom = build_boundary_geojson(adjacent_baseline.domain_shp)["features"][0][
+        "geometry"
+    ]
+
+    rings = geom["coordinates"]
+    assert len(rings) == 2, "恰保留 1 个内环"
+    _assert_ring_matches_anchors([tuple(p) for p in rings[1]], hole_anchors)
+
+
+def test_boundary_geojson_disjoint_units_stay_multipolygon(
+    baseline: SyntheticBaseline,
+) -> None:
+    """默认布局的两个单元互不相接：结果为 2 成员 MultiPolygon，不额外要求连通性。"""
+    geom = build_boundary_geojson(baseline.domain_shp)["features"][0]["geometry"]
+
+    assert geom["type"] == "MultiPolygon"
+    assert len(geom["coordinates"]) == 2
+
+
+@pytest.mark.parametrize("adjacent", [True, False])
+def test_boundary_geojson_ring_orientation_follows_rfc7946(
+    tmp_path, adjacent: bool
+) -> None:
+    """RFC 7946：外环逆时针、内环顺时针。
+
+    期望值由 RFC 给定；shapefile 约定与之相反且实测 `unary_union` 输出外环为顺时针，
+    故这是一条必须显式做的转换，不是 no-op。
+    """
+    source = write_synthetic_baseline(
+        tmp_path / "orient", unit_count=2, adjacent_units=adjacent
+    )
+
+    geom = build_boundary_geojson(source.domain_shp)["features"][0]["geometry"]
+    polygons = (
+        [geom["coordinates"]] if geom["type"] == "Polygon" else geom["coordinates"]
+    )
+    assert polygons
+    for rings in polygons:
+        assert LinearRing(rings[0]).is_ccw, "外环必须逆时针"
+        for hole in rings[1:]:
+            assert not LinearRing(hole).is_ccw, "内环必须顺时针"
+
+
+def test_boundary_geojson_empty_layer_raises(tmp_path, baseline) -> None:
+    shp_path = write_empty_layer(tmp_path / "empty.shp", baseline.prj_wkt)
+
+    with pytest.raises(GeometryError) as excinfo:
+        build_boundary_geojson(shp_path)
+
+    assert str(shp_path) in str(excinfo.value)
+
+
+def test_rivers_geojson_non_finite_coordinate_names_reach_id(tmp_path) -> None:
+    """投影域外顶点被 pyproj 静默映射为 inf；必须在构建期就地报错并点名要素。"""
+    shp_path = write_out_of_domain_layer(tmp_path / "oob.shp", index=7)
+
+    with pytest.raises(GeometryError) as excinfo:
+        build_rivers_geojson(shp_path)
+
+    assert "7" in str(excinfo.value)
+
+
+def test_boundary_geojson_non_finite_coordinate_names_layer(tmp_path) -> None:
+    shp_path = write_out_of_domain_layer(tmp_path / "oob.shp", polygon=True)
+
+    with pytest.raises(GeometryError) as excinfo:
+        build_boundary_geojson(shp_path)
+
+    assert str(shp_path) in str(excinfo.value)
+
+
+def test_write_viewer_geojson_writes_exactly_two_files(
+    adjacent_baseline: SyntheticBaseline, tmp_path
+) -> None:
+    out_dir = tmp_path / "out"
+
+    rivers_out, boundary_out = write_viewer_geojson(
+        rivers_shp=adjacent_baseline.rivers_shp,
+        domain_shp=adjacent_baseline.domain_shp,
+        out_dir=out_dir,
+    )
+
+    assert rivers_out == out_dir / "rivers.geojson"
+    assert boundary_out == out_dir / "boundary.geojson"
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "boundary.geojson",
+        "rivers.geojson",
+    ]
+    for path in (rivers_out, boundary_out):
+        text = path.read_text(encoding="utf-8")
+        assert "Infinity" not in text and "NaN" not in text
+        assert _strict_loads(text)["type"] == "FeatureCollection"
+
+
+def test_write_viewer_geojson_creates_missing_out_dir(
+    adjacent_baseline: SyntheticBaseline, tmp_path
+) -> None:
+    out_dir = tmp_path / "missing" / "nested"
+    assert not out_dir.exists()
+
+    rivers_out, boundary_out = write_viewer_geojson(
+        rivers_shp=adjacent_baseline.rivers_shp,
+        domain_shp=adjacent_baseline.domain_shp,
+        out_dir=out_dir,
+    )
+
+    assert rivers_out.is_file() and boundary_out.is_file()
+
+
+def test_write_viewer_geojson_is_deterministic(
+    adjacent_baseline: SyntheticBaseline, tmp_path
+) -> None:
+    outputs = []
+    for run in ("first", "second"):
+        rivers_out, boundary_out = write_viewer_geojson(
+            rivers_shp=adjacent_baseline.rivers_shp,
+            domain_shp=adjacent_baseline.domain_shp,
+            out_dir=tmp_path / run,
+        )
+        outputs.append((rivers_out.read_bytes(), boundary_out.read_bytes()))
+
+    assert outputs[0] == outputs[1]
+
+
+@pytest.mark.parametrize("fault", ["empty", "non_finite"])
+def test_write_viewer_geojson_broken_domain_leaves_no_rivers_file(
+    baseline: SyntheticBaseline, tmp_path, fault: str
+) -> None:
+    """河网合法、domain 损坏：out_dir 必须干净，不得留下半份产物。"""
+    if fault == "empty":
+        broken_domain = write_empty_layer(tmp_path / "empty.shp", baseline.prj_wkt)
+    else:
+        broken_domain = write_out_of_domain_layer(
+            tmp_path / "oob_domain.shp", polygon=True
+        )
+    out_dir = tmp_path / "out"
+
+    with pytest.raises(GeometryError):
+        write_viewer_geojson(
+            rivers_shp=baseline.rivers_shp,
+            domain_shp=broken_domain,
+            out_dir=out_dir,
+        )
+
+    assert not (out_dir / "rivers.geojson").exists()
+    assert not out_dir.exists() or list(out_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("fault", ["duplicate_index", "non_finite"])
+def test_write_viewer_geojson_faulty_rivers_writes_nothing(
+    baseline: SyntheticBaseline, tmp_path, fault: str
+) -> None:
+    if fault == "duplicate_index":
+        rivers_shp, _ = write_rivers_layer(
+            tmp_path / "dup.shp", river_count=3, index_values=[5, 7, 5]
+        )
+    else:
+        rivers_shp = write_out_of_domain_layer(tmp_path / "oob.shp", index=7)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    with pytest.raises(GeometryError):
+        write_viewer_geojson(
+            rivers_shp=rivers_shp,
+            domain_shp=baseline.domain_shp,
+            out_dir=out_dir,
+        )
+
+    assert list(out_dir.iterdir()) == []
+
+
+def test_write_viewer_geojson_rolls_back_when_second_write_fails(
+    adjacent_baseline: SyntheticBaseline, tmp_path
+) -> None:
+    """第二份落盘失败：已写出的 `rivers.geojson` 必须被回滚，不留半份产物。
+
+    失败用真实机制触发——`boundary.geojson` 这个名字被一个目录占住，`write_text`
+    抛 `IsADirectoryError`（`OSError` 子类）；不 monkeypatch 被测函数自身的写出逻辑。
+    """
+    out_dir = tmp_path / "out"
+    occupied = out_dir / "boundary.geojson"
+    occupied.mkdir(parents=True)
+
+    with pytest.raises(GeometryError) as excinfo:
+        write_viewer_geojson(
+            rivers_shp=adjacent_baseline.rivers_shp,
+            domain_shp=adjacent_baseline.domain_shp,
+            out_dir=out_dir,
+        )
+
+    assert str(out_dir) in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert not (out_dir / "rivers.geojson").exists()
+    # 回滚只删本次写出的路径，调用方原有的占位目录必须原样保留
+    assert occupied.is_dir()
+    assert list(out_dir.iterdir()) == [occupied]
