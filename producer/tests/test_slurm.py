@@ -278,6 +278,23 @@ def test_parse_sbatch_job_id_accepts_parsable_forms(stdout, expected):
     assert parse_sbatch_job_id(stdout) == expected
 
 
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ("12345 \n", "12345"),
+        ("12345 ; cluster0\n", "12345"),
+    ],
+)
+def test_parse_sbatch_job_id_strips_surrounding_whitespace(stdout, expected):
+    """接受态钉死 `strip()`：去掉它这两条即变红（`"12345 "` 不是全数字，会抛错）。"""
+    assert parse_sbatch_job_id(stdout) == expected
+
+
+def test_parse_sbatch_job_id_skips_whitespace_only_line():
+    """「非空行」判据是「`strip()` 后非空」：换成 `if not line:` 即变红。"""
+    assert parse_sbatch_job_id("   \n12345\n") == "12345"
+
+
 @pytest.mark.parametrize("stdout", ["", "   \n", "abc", ";cluster0"])
 def test_parse_sbatch_job_id_rejects_malformed_output(stdout):
     """此刻还没有 id，故 `exc.job_id` 必须是 `None`。"""
@@ -316,6 +333,14 @@ def test_parse_sacct_record_returns_utc_aware_times():
     for value in (started_at, ended_at):
         assert value.tzinfo is not None
         assert value.utcoffset() == timedelta(0)
+
+
+def test_parse_sacct_record_skips_whitespace_only_line():
+    """纯空白行不计入行数：过滤器换成 `if line:` 会误判 2 行而变红。"""
+    state, _, _ = parse_sacct_record(
+        "   \n12345|COMPLETED|2026-08-28T00:00:00|2026-08-28T01:00:00", "12345"
+    )
+    assert state is JobState.SUCCEEDED
 
 
 def test_slurm_state_map_is_exactly_the_pinned_table():
