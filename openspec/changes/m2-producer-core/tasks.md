@@ -335,7 +335,7 @@ Project profile: yd-viewer
 
 Change surface:
 - 新增 `producer/src/yd_producer/state/__init__.py` 与 `producer/src/yd_producer/state/cfg_ic.py`：格式保真的解析/回写层
-- 从 NWM pin 移植的分段识别辅助（逐函数带 `NWM@8ae9b8f2 packages/common/state_qc.py` 溯源注释）：`_looks_like_column_header`（`:741`）、`_section_from_column_header`（`:751`）、`_native_lake_section_preamble`（`:762`）、`_header_counts`（`:574`）、`_numeric_row`（`:730`，仅作内部分类器）、`_read_bytes_limited`（含其说明「为何刻意不走 no-follow 安全读」的 docstring，原样保留）与 `MAX_STATE_IC_BYTES`
+- 从 NWM pin 移植的分段识别辅助（逐函数带 `NWM@8ae9b8f2 packages/common/state_qc.py` 溯源注释）：`_looks_like_column_header`（`:741`）、`_section_from_column_header`（`:751`）、`_native_lake_section_preamble`（`:762`）、`_header_counts`（`:574`）、`_numeric_row`（`:730`，仅作内部分类器）、`_read_bytes_limited`（含其说明「为何刻意不走 no-follow 安全读」的 docstring，原样保留）、`_as_float`（`:878-882`，`_header_counts` 的被调用方，随之强制移植）与 `MAX_STATE_IC_BYTES`（`:43`）
 - 新增 `producer/tests/test_cfg_ic.py` 与合成 fixture 构造器
 - 快照清单 `nwm-snapshot-inventory.md:44` 的目标路径 `state/state_qc.py` 由 **#9** 补齐：本 issue 只落格式层子集到 `state/cfg_ic.py`，不建空的 `state_qc.py` 占位（避免死代码），该行的落地状态在本 PR 内标注为「部分（格式层）」
 
@@ -347,8 +347,8 @@ Must preserve:
 Must add/change:
 - `parse(path_or_bytes) -> CfgIcDocument`：文档模型 MUST 同时携带 (a) 原始行序列的逐字副本、(b) header 行位置、(c) 每段（mesh / river / lake，lake 可缺）的行区间与行数、(d) 段内数值视图（供 #9 消费的只读派生，非回写来源）
 - `render(doc) -> bytes`：回写 MUST 由逐字行还原，MUST NOT 由数值重新格式化。对任何本解析器接受的输入，`render(parse(b)) == b` 逐字节成立
-- **行归属必须是全覆盖划分**：文档模型 MUST 把每一行恰好归入一个区域（header / 段列头 / 某段的数据行 / lake preamble），MUST NOT 存在"未归属"的行。两条由 pin 语义反推的钉死裁决（roundtrip 无法分辨这两种猜法，必须在此定死，否则 #9 的结构检查会继承一个错误划分）：(a) **header 行 = 首个非空行**（pin 在取 `lines[0]` 前先丢空行）；(b) mesh 段内**超出 header 声明 `mesh_count` 的多余数据行 MUST 抛 `ValueError`**——这是对 pin 的**刻意偏离**并 MUST 在模块头注明：pin 的 `_parse_sectioned_rows`（`state_qc.py:528-531`）静默丢弃多余 mesh 行，而格式保真根不得静默丢状态行
-- 解析级 fail-closed（本 issue 拥有，语义取自 NWM 场景）：文件不存在、路径为目录或不可读、非 UTF-8、超过字节上界、空文件、header 不可解析、分段体被截断、**输入中不存在任何分段列头（即非原生的计数式兼容布局）**——MUST 抛 `ValueError`，MUST NOT 外泄 `UnicodeDecodeError`，MUST NOT 无界读入，MUST NOT 回退到计数式布局。其中把文件不存在/不可读的 `OSError` 统一封装为 `ValueError` 是对 pin 的**刻意偏离**（pin 的 `_read_bytes_limited` `:563-571` 直接抛 `OSError`，由调用方 `except (OSError, ValueError)` 兜住），本 issue 收敛为单一异常以便调用方无需知道两种类型；MUST 在模块头注明该偏离。仓库级错误封装仍归 #9 的边界
+- **行归属必须是全覆盖划分**：文档模型 MUST 把每一行恰好归入一个区域（header / 段列头 / 某段的数据行 / lake preamble），MUST NOT 存在"未归属"的行。两条由 pin 语义反推的钉死裁决（roundtrip 无法分辨这两种猜法，必须在此定死，否则 #9 的结构检查会继承一个错误划分）：(a) **header 行 = 首个非空行**（pin 在取 `lines[0]` 前先丢空行）；(b) mesh 段内**超出 header 声明 `mesh_count` 的多余数据行 MUST 抛 `ValueError`**——这是对 pin 的**刻意偏离**并 MUST 在模块头注明：pin 的 `_parse_sectioned_rows`（`state_qc.py:531-534`，其中 `:532-533` 是 `if len(mesh_rows) < mesh_count: mesh_rows.append(row)` 这一对）静默丢弃多余 mesh 行，而格式保真根不得静默丢状态行
+- 解析级 fail-closed（本 issue 拥有，语义取自 NWM 场景）：文件不存在、路径为目录或不可读、非 UTF-8、超过字节上界、空文件、header 不可解析、分段体被截断、`max_bytes` 为负值、**输入中不存在任何分段列头（即非原生的计数式兼容布局）**——MUST 抛 `ValueError`，MUST NOT 外泄 `UnicodeDecodeError`，MUST NOT 无界读入，MUST NOT 回退到计数式布局。其中把文件不存在/不可读的 `OSError` 统一封装为 `ValueError` 是对 pin 的**刻意偏离**（pin 的 `_read_bytes_limited` `:563-571` 直接抛 `OSError`，由调用方 `except (OSError, ValueError)` 兜住），本 issue 收敛为单一异常以便调用方无需知道两种类型；MUST 在模块头注明该偏离。仓库级错误封装仍归 #9 的边界
 - **字节上界 MUST 可注入**：`parse(..., max_bytes=MAX_STATE_IC_BYTES)`，模块默认值等于 pin 的 `64 * 1024 * 1024`。理由：上界的两条边界用例（恰好、超一字节）是杀死"`>` 改 `>=`"变异体的唯一手段，而在真实上界上构造 64 MiB 合法文件并逐行保真读入会让每次 `uv run pytest` 多耗数百 MB 内存与可观时间；边界用例 MUST 在**小的注入上界**上跑，另用一条廉价断言钉死模块默认值等于 pin 常量
 - lake preamble（末条 river 行与 lake 列头之间的 `<lake-count> <lake-state-columns>` 行）MUST NOT 被计为 river 行，且回写后仍在原位
 
@@ -405,6 +405,10 @@ Required evidence（每条 input -> expected output）:
 - 合法的**计数式兼容布局**文件（无任何分段列头）-> 抛 `ValueError`，消息指明需要原生分段布局（钉死 Non-goals 的 native-only 裁决，防止实现顺手移植 pin 的回退分支）
 - 路径不存在 / 路径是目录 / 路径不可读 -> 均抛 `ValueError`（而非 `OSError`）
 - 恰好等于**注入上界**字节的合法文件 -> 解析成功；上界 + 1 字节 -> 抛 `ValueError` 且消息含上界语义；另断言模块默认 `max_bytes == 64 * 1024 * 1024`
+- `max_bytes` 为负 -> 抛 `ValueError` 且**在任何读取之前**（round 1 验证闸门 batch 3 cand-1 CONFIRMED/FIX_NOW：`handle.read(max_bytes + 1)` 在 `max_bytes == -2` 时退化为 `read(-1)`，实测把整个文件读入，随后 `len(data) > max_bytes` 仍然抛错，于是这次无界读**长得和一次正常拒绝一模一样**）
+- **生成器发射包络 MUST 覆盖解析器接受域**（round 1 验证闸门 batch 1 的不变式闭合，5 条同类 CONFIRMED/FIX_NOW）：凡解析器接受的输入形态，合成生成器 MUST 能构造。已实测的三处缺口逐条补齐并各配一条断言——(a) **Tab 分隔**：真实 native `cfg.ic` 是 Tab 分隔（pin `tests/test_state_qc.py` 的 `_write_native_ic` 用 `"\t".join(...)`、QHH fixture 用 `Index\tRiver_Stage`），而脏矩阵此前 100% 空格分隔，实测「`render` 把 `\t` 归一为空格」的变异体在全套 46 条下存活，却会逐字节损坏每一个生产文件；(b) **首行为空行/纯空白行** -> `doc.header_index == 1`（resp. 2）、`doc.roles[0] is BLANK`，钉死上方「header 行 = 首个非空行」裁决——该裁决此前无任何用例，实测退回 `lines[0]` 的变异体全绿；(c) **`lake_count=0`（lake 段存在但为空）** -> `doc.lake is not None`、`row_count == 0`、`span is None`、`declared_lake_count == 0`，钉死「lake 缺席」与「lake 段空」可区分——pin 的 `_native_lake_section_preamble` 只拒 `lake_count < 0`，故空 lake 段在接受域内
+- **数值视图 MUST 断言值而非只断形状**（batch 1 cand-2）：以 mixed_notation 构造的手算元组逐值断言（如 `mesh.rows[0] == (1.0, 0.1, 0.001, -0.0, 25.0, 0.0)`）。此前只断 `len()` 与 `isinstance(float)`，实测把三处 `append` 全换成 `tuple(0.0 for _ in row)` 后 46 条全绿——而 #9 的负残差处理正是消费这个视图，全零视图会报告"零负残差"并且什么都不修正
+- **逐函数溯源断言 MUST 按函数边界取窗**（batch 1 cand-4）：现行 `source[marker:marker+1200]` 定长窗口会越进下一个函数，实测 6 个辅助里有 4 个可被**邻居的**溯源注释满足（`_numeric_row` 窗口内有 3 个标记），删掉 `_numeric_row` 自己那行注释后全绿。改为切到下一个 `\ndef ` 或用 `ast` 取函数源码段，并对 6 个辅助逐一验证「删掉自己那行即变红」
 - 空文件 / 非 UTF-8 字节串（`b"\xff\xfe\x00\x01..."`）/ 非数值行 / 截断 body -> 均抛 `ValueError`，MUST NOT 外泄 `UnicodeDecodeError`
 - 模块头溯源断言：`state/cfg_ic.py` 含 `NWM@8ae9b8f2 packages/common/state_qc.py`；模块源码内无 `import` NWM 包、无数据库符号
 - **预登记必须被杀死的变异体**：(a) `render` 改为按 float 重新格式化 -> 脏输入用例必须变红；(b) 段归属判定偏移一行 -> 结构索引 oracle 必须变红；(c) lake preamble 计入 river 行 -> 三段用例必须变红；(d) 上界比较由 `>` 改 `>=` -> 恰好上界用例必须变红。**变异证明 MUST 按 `openspec/project-profile.md:50-55` 的"Mutation-testing hazards"执行**（本仓已实测绊倒多个独立 agent，四种假绿都长得像好消息）：`rsync --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache'` 且副本内 `rm -rf .venv && uv sync`、先断言 `yd_producer.__file__` 落在 scratch 副本内、每个变异体之间 `PYTHONDONTWRITEBYTECODE=1` 并清 `__pycache__`（(a)/(c) 易出等长字面量改动，会复用上一个变异体的 `.pyc`）、scratch 目录名含 `issue-8` 唯一标识，并另跑一个必然变红的控制变异做校准
