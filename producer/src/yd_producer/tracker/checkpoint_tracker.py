@@ -45,6 +45,11 @@ pin 原语 → 本仓 `safe_fs` 的映射（无对应物的一个都不新造）
 - `unlink_no_follow` → `safe_fs.unlink_no_follow`（`missing_ok=True`）
 - `sha256_bytes` → `hashlib.sha256(...).hexdigest()`
 - `state_ic_structure_complete` → `yd_producer.state.parse`（见上偏离 5）
+- `cfg_ic_header_minute_time`(pin `packages/common/state_qc.py:629`) →
+  `yd_producer.state.cfg_ic_header_minute_time`（`state/header_time.py`，任务 12.1 已落）。
+  本模块**消费** master 的这一份，不在本仓再移植第二份「最后一个数值 token 即 minute-time」
+  的实现；`state/**` 相对 master 零改动。非有限（`nan` / `inf`）判定不属 header 语义、属轮询
+  语义，故留在本模块 `_header_minute_of` 的单一出口，不上移。
 
 `CapturedCheckpoint` 的字段裁剪（去掉 pin 的 `valid_time` / `relative_path` /
 `original_shud_filename` / `checkpoint_filename` / `provenance`）是偏离 6「不写 manifest」的
@@ -61,6 +66,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from yd_producer import state
+from yd_producer.state import cfg_ic_header_minute_time
 from yd_producer.store import safe_fs
 
 __all__ = ["CapturedCheckpoint", "CheckpointTracker", "TrackerError"]
@@ -301,9 +307,10 @@ class CheckpointTracker:
 def _header_minute_of(data: bytes) -> float | None:
     """由 `.cfg.ic` 字节取 header 分钟：首行的**最后一个数值 token**。
 
-    这条规则在本仓的唯一实现是 `state.header_minute_time`（与 `cfg_ic._header_counts` 的
-    `numeric[:-1]` 同源、同一份 pin），此处 MUST NOT 另写一份：两份实现一旦漂移，轮询与
-    结构检查会对「哪个 token 是 minute-time」产生分歧。
+    这条规则在本仓的唯一实现是 `state.cfg_ic_header_minute_time`（`state/header_time.py`，
+    与 `cfg_ic._header_counts` 的 `numeric[:-1]` 同源、同一份 pin），本模块**消费**它，
+    此处 MUST NOT 另写一份：两份实现一旦漂移，轮询与结构检查会对「哪个 token 是
+    minute-time」产生分歧。
     """
     try:
         text = data.decode("utf-8")
@@ -312,8 +319,8 @@ def _header_minute_of(data: bytes) -> float | None:
     lines = text.splitlines()
     if not lines:
         return None
-    minute = state.header_minute_time(lines[0].split())
-    # 非有限判定放在**这里**、也就是「读」这一步的出口：`header_minute_time` 与 pin 一样
+    minute = cfg_ic_header_minute_time(lines[0].split())
+    # 非有限判定放在**这里**、也就是「读」这一步的出口：`cfg_ic_header_minute_time` 与 pin 一样
     # 只做裸 `float()`，`nan` / `inf` / `-inf` 都解析成功。放行下去，`round(nan)` 抛
     # `ValueError`、`round(inf)` 抛 `OverflowError`，两者都会穿透 `capture_available` 外泄
     # （违偏离 8）；记进观测轨迹同样有害——`nan != nan` 让相邻去重永不生效，轨迹被无限

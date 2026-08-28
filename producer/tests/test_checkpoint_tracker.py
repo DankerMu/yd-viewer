@@ -1,5 +1,5 @@
 # NWM@8ae9b8f2 tests/test_shud_runtime.py
-"""`yd_producer.tracker.checkpoint_tracker` 的行为测试（任务 9.1）。
+r"""`yd_producer.tracker.checkpoint_tracker` 的行为测试（任务 9.1）。
 
 重放纪律：SHUD 的就地覆写用「按序覆写 `source_path` + 按序调用 `capture_available()`」
 确定性重放，不起真进程、不 sleep——本模块本来就不含轮询循环。
@@ -20,7 +20,14 @@ oracle 纪律：合成 `cfg.ic` 一律由 `cfg_ic_fixtures.build_cfg_ic` 生成�
 维度，**要么有一个「改坏即变红」的见证，要么有一条书面等价理由**。「这一段有测试」不算
 数；「这个操作数有测试」才算。下表每一格都由一个变异体实测过，不是推断。
 
-轴 1｜异常元组成员 × except 站点
+**计数口径（Phase 6.2 审计第 2 条：同一张表不得读出两个总数）**：本表按**行**结账，共
+**35 行 = 29 见证 + 5 等价 + 1 DEFER**。行数**不等于**单元数：轴 4 的三行按 `safe_fs` 的
+**关键字实参名**分组登记，三行分别覆盖 6 / 3 / 1 个**调用点单元**（共 10 个），其余 32 行
+一行一单元；故逐调用点口径下总数为 **42 单元**（32 + 10）。引用本表数目时 MUST 写明取的是
+哪个口径。分轴：轴 1 = 8 行 / 8 单元、轴 2 = 6 / 6、轴 3 = 3 / 3、轴 4 = 3 行 / 10 单元、
+轴 5 = 5 / 5、轴 6 = 10 / 10。
+
+轴 1｜异常元组成员 × except 站点（8 行：8 见证）
 
 - `OSError` @ `_capture`               -> `test_source_unlinked_between_the_two_reads_never_leaks`（异常外泄 `FileNotFoundError`）
 - `SafeFilesystemError` @ `_capture`   -> `test_filesystem_failure_after_the_match_never_leaks`（异常外泄）
@@ -31,7 +38,7 @@ oracle 纪律：合成 `cfg.ic` 一律由 `cfg_ic_fixtures.build_cfg_ic` 生成�
 - `_copy_is_intact` 的 `except ValueError` -> `test_torn_body_is_not_a_capture_and_leaves_no_copy` 等 5 条
 - `_header_minute_of` 的 `except UnicodeDecodeError` -> `test_unreadable_header_is_silently_no_result[not-utf8]`
 
-轴 2｜布尔操作数（**逐操作数**独立）
+轴 2｜布尔操作数（**逐操作数**独立；捕获阶段一侧，构造期一侧见轴 6）（6 行：6 见证）
 
 - `_copy_is_intact`：`header_minute is None` 析取 -> `test_copy_with_unreadable_header_is_not_captured[*]`（异常外泄 `TypeError`）
 - `_copy_is_intact`：`not _header_minute_matches_checkpoint(...)` 合取 -> `test_source_advancing_between_the_two_reads_is_not_captured`
@@ -40,7 +47,7 @@ oracle 纪律：合成 `cfg.ic` 一律由 `cfg_ic_fixtures.build_cfg_ic` 生成�
 - `capture_available`：`not self._observed_header_minutes` 析取 -> 首次观测即 `IndexError`，`test_capture_over_an_overwrite_sequence` 等 23 条
 - `capture_available`：`[-1] != header_minute` 析取 -> `test_repeated_identical_observations_are_deduplicated`
 
-轴 3｜`is None` -> 真值判定（falsy-zero）
+轴 3｜`is None` -> 真值判定（falsy-zero）（3 行：2 见证 + 1 等价）
 
 - `capture_available` 的 header 判定 -> `test_zero_header_minute_is_a_real_observation`
 - `_header_minute_of` 的返回判定 -> `test_zero_header_minute_is_a_real_observation`（同一条见证覆盖两处）
@@ -49,26 +56,63 @@ oracle 纪律：合成 `cfg.ic` 一律由 `cfg_ic_fixtures.build_cfg_ic` 生成�
   时两种写法都返回 `False`；`0.0` 之外的假值在 `float` 域内不存在（`nan` 已在
   `_header_minute_of` 出口拦掉）。
 
-轴 4｜`safe_fs` 关键字实参
+轴 4｜`safe_fs` 关键字实参（3 行 / 10 调用点单元：3 行全为等价，本轴零见证）
 
 - `containment_root` ×6 站点 -> **等价**（§G9 已结账 + 本轮六处同时删除实测存活）。依据：
   目标路径全部由 `self._run_dir` 自构造，越界形态在声明域内不可达。
-- `max_bytes` ×3 站点 -> 各自单独放开为**等价**（§G9 已结账：只有资源放大，无契约可见差异）；
-  三处同时放开 -> `test_oversize_source_is_not_captured`
+- `max_bytes` ×3 调用点（源读 / 回读 / header 读）-> 三者**各自单独**放开均为**等价**
+  （§G9 已结账，本轮重跑 `a4-maxbytes-srcread-only` / `-copyread-only` / `-headerread-only`
+  三个单站点变异体各 ×100，全绿）。依据：只有资源放大，无契约可见差异。
+  **本行不携任何见证，且轴 4 三处同时放开仍是绿的**（Phase 6.2 审计实测，
+  本轮复现）。`test_oversize_source_is_not_captured`（§G8 第三条）变红靠的是**另一组**
+  三处上限：源读、回读，加上 `state.parse` **自带**的 `len(data) > max_bytes` 判定
+  （`state/cfg_ic.py:313` 的 `IC file exceeds size limit of …`；fixture 的 Phase 6.2
+  审计结论把它记成 `:166`，实测在 master 与本分支上都是 `:313`）。那一条是 `parse` 的内部
+  判定、**不是传给 `safe_fs` 的关键字实参，因而不属轴 4 单元**，不在本表登记（它的
+  结账在 §G8 第三条）。把它写成本行的见证，就是 Phase 6.2 审计判为「记账为假」
+  的那一条（cand-15「转述即核实」同形）。
 - `missing_ok=True` -> **等价**（§G9 已结账 + 本轮实测存活）。依据：`missing_ok=False` 产生的
   `FileNotFoundError` 是 `OSError`，被 `_discard` 自己的 `except` 吞掉。
 
-轴 5｜共享读取器的解析维度
+轴 5｜共享读取器的解析维度（5 行：3 见证 + 1 等价 + 1 DEFER）
 
 - 分词 `split()` -> `test_capture_succeeds_on_a_tab_delimited_payload`（真实 native `cfg.ic`
   是 Tab 分隔，见 `cfg_ic_fixtures` 模块头）
 - 行选择 `lines[0]` -> **DEFER**（Known limits cand-14，归 M4：与 `cfg_ic.parse` 的「首个非空
   行」定义分歧，本实现与 pin 逐字一致）
-- `splitlines()` -> **等价**（实测变异存活）。依据：改成 `split("\n")` 后唯一的差异是首行内
-  出现 `\r` / `\x85` / `\u2028` 一类分隔符，而这些字符对 `str.split()` 同样是空白，
-  `header_minute_time` 取「最后一个数值 token」的结果不变；空输入两种写法都收敛到 `None`。
+- `splitlines()` -> **等价（限声明域）**（实测变异存活）。**声明域**：源文件由 SHUD 在
+  Linux 上写出，行尾为 `\n`（单独的 `\r` 行尾不在域内）。域内，改成 `split("\n")`
+  后唯一的差异是首行内出现 `\x85` / `\u2028` 一类 `splitlines()` 认、`split("\n")` 不认的
+  分隔符，而这些字符对 `str.split()` 同样是空白，`cfg_ic_header_minute_time` 取「最后一个
+  数值 token」的结果不变；空输入两种写法都收敛到 `None`。**域外不成立**（Phase 6.2
+  审计 Note）：行尾是单独 `\r`（CR-only）时，`split("\n")` 会把整份文件并成一「行」，
+  取到的是**全文最后一个数值 token** 而不是 header 的那个，两种写法分岔。若 M4 真跑
+  发现真实 `cfg.ic.update` 的行尾不是 `\n`，本格 MUST 重新裁决。
 - `if not lines` 守卫 -> `test_unreadable_header_is_silently_no_result[empty]`（异常外泄 `IndexError`）
 - `decode("utf-8")` -> 同轴 1 的 `UnicodeDecodeError` 格（改 `errors="ignore"` 后变红）
+
+轴 6｜`__init__` 构造期守卫（10 行：10 见证；Phase 6.2 审计第 3 条新纳入）
+
+**范围缺口如实登记**：§G9 原「范围」是 `_capture` / `_copy_is_intact` / `_discard` /
+`capture_available` 四个函数加两个共享读取器，**不含 `__init__`**。审计者顺手探到
+`"/" in project_name or "\\" in project_name` 的第二个操作数无见证（删掉后全量套件纯绿），
+根因是**范围本身**漏了构造期——这是本轮第三个同形复发点，不是一次孤立疏漏。范围据此
+扩到 `__init__`，其十个操作数逐一结账如下（下列用例删掉对应守卫/操作数后各自变红）。
+
+- `not hours` -> `test_construction_rejects_unusable_checkpoint_hours[hours0-为空]`
+- `hour <= 0` -> 同上 `[hours1-非正]`（`(0,)`）与 `[hours2-非正]`（`(-12,)`）
+- `len(set(hours)) != len(hours)` -> 同上 `[hours3-重复]`
+- `not project_name` -> `test_construction_rejects_unusable_project_name[]`（空串）
+- `"/" in project_name` 析取 -> 同上 `[a/b]`
+- `"\\" in project_name` 析取（源码写作 `"\\"`，即单个反斜杠）-> 同上 `[a\\b]`
+  （pytest id 对反斜杠做转义显示）。**Phase 6.2 审计第 3 条补入**：本格原先无见证。
+  POSIX 下反斜杠不是路径分隔符，该操作数是对 Windows 的防御性收窄，用户可见影响低；
+  纪律是逐操作数结账，不按影响打折
+- `project_name in {".", ".."}` 的 `"."` 成员 -> 同上 `[.]`
+- `project_name in {".", ".."}` 的 `".."` 成员 -> 同上 `[..]`
+- `"\0" in project_name` -> `test_construction_rejects_nul_bytes_in_paths[project-name-nul]`
+  （以 `ValueError` 从 `capture_available()` **外泄**的形态变红，不是断言失败）
+- `"\0" in str(run_dir)` -> 同上 `[run-dir-nul]`（同形态）
 """
 
 from __future__ import annotations
@@ -151,10 +195,16 @@ def test_construction_rejects_unusable_checkpoint_hours(
         _tracker(tmp_path, checkpoint_hours=hours)
 
 
-@pytest.mark.parametrize("project_name", ["", "a/b", ".", ".."])
+@pytest.mark.parametrize("project_name", ["", "a/b", "a\\b", ".", ".."])
 def test_construction_rejects_unusable_project_name(
     tmp_path: pathlib.Path, project_name: str
 ) -> None:
+    r"""构造期 fail closed 的名字一侧，**逐操作数**各一例（结账表轴 6）。
+
+    `"a\\b"` 是 Phase 6.2 审计第 3 条补入的：`"/" in project_name or "\\" in project_name`
+    的第二个操作数原先无见证——删掉它全量套件纯绿。POSIX 下反斜杠不是路径分隔符，该操作数
+    是对 Windows 的防御性收窄，用户可见影响低；纪律是逐操作数结账，不按影响打折。
+    """
     with pytest.raises(TrackerError):
         _tracker(tmp_path, project_name=project_name)
 
