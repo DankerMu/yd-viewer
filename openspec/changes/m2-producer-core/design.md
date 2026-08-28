@@ -41,6 +41,8 @@
 
 配套的取舍，逐条（细则见 tasks.md `### Issue #16 fixture（任务 9.1）` §F）：捕获半按 D4 零默认改写——目标小时取 `Config.checkpoint_hours` 显式入参而非 manifest 的三路 fail-open 解析，`project_name`/`run_dir` 为显式入参而非 pin 的四路 fallback，**不含轮询循环与 `time.sleep`**（观测由调用方驱动，连带消掉 pin 的 `0.01` 秒轮询默认），只接受相对分钟 header（epoch 形式归 #9 重戳与发布路径，本模块对其 fail closed），结构校验复用本仓 `state.parse` 而非 pin 的 `state_ic_structure_complete`（后者属任务 4.2/issue #9），IO 原语全部复用 `store/safe_fs` 而不移植 pin 的 staged-IO 族。因此**捕获半零环境变量读取**，第 6 行 D4 段声明为「合法保留项」的两处 `SLURM_*` 读取（随 `write_manifest` → `_manifest_provenance` → `_task_outcome_attempt_identity`）在 #16 完全不涉及，其去留由 #17 定夺。
 
+**D9 补记（2026-08-28，越界撤回）**：#16 起初还在 `state/cfg_ic.py` 新增了 `header_minute_time` 与 `_header_minute_index` 两个 pin 移植（理由是避免「哪个 token 是 minute-time」出现双权威），属对 issue "PR Boundary: tracker 模块与测试" 的刻意越界。评审期间 issue #22（任务 12.1）在 master 落了 `state/header_time.py`，含同一 pin 行段的同两个符号，落点更宽更正。#16 据此**撤回全部越界改动**，改为消费 `yd_producer.state.cfg_ic_header_minute_time`：越界归零，双权威顾虑由单一权威模块彻底解决。裁决细则见 tasks.md `### Issue #16 fixture` 的「落点裁决修订 R1」。
+
 ## Sketch seams under test
 
 测试行使的公共边界，从高到低（每 seam 一行理由）：
