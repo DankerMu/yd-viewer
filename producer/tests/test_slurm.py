@@ -187,6 +187,8 @@ def test_sbatch_command_rejects_missing_resource_field(missing):
             make_spec(resources=resources), required_fields=REQUIRED_FIVE
         )
     assert missing in str(excinfo.value)
+    # 装配期失败尚未产生 job id
+    assert excinfo.value.job_id is None
 
 
 def test_sbatch_command_rejects_extra_resource_field():
@@ -197,6 +199,7 @@ def test_sbatch_command_rejects_extra_resource_field():
             make_spec(resources=resources), required_fields=REQUIRED_FIVE
         )
     assert "nodes" in str(excinfo.value)
+    assert excinfo.value.job_id is None
 
 
 def test_sbatch_command_rejects_field_without_flag():
@@ -206,6 +209,7 @@ def test_sbatch_command_rejects_field_without_flag():
     with pytest.raises(ExecutorError) as excinfo:
         build_sbatch_command(make_spec(resources=resources), required_fields=required)
     assert "gres" in str(excinfo.value)
+    assert excinfo.value.job_id is None
 
 
 def test_sbatch_command_allows_surplus_flags_in_translation_table():
@@ -409,6 +413,7 @@ def test_submit_builds_argv_and_stamps_with_injected_clock():
         spec, required_fields=REQUIRED_FIVE
     )
     assert record.job_id == "12345"
+    assert record.name == "ifs-2026082800"
     assert record.state is JobState.PENDING
     assert record.started_at is None
     assert record.ended_at is None
@@ -424,6 +429,7 @@ def test_poll_queries_sacct_and_rebuilds_record_from_submission():
     record = executor.poll("12345")
 
     assert runner.calls[1][0] == build_sacct_command("12345")
+    assert record.job_id == "12345"
     assert record.state is JobState.RUNNING
     assert record.started_at == datetime(2026, 8, 28, 0, 0, 0, tzinfo=UTC)
     assert record.ended_at is None
@@ -502,6 +508,8 @@ def test_submit_translates_runner_exception(error, diagnostic):
         executor.submit(make_spec())
     assert str(error) in str(excinfo.value)
     assert diagnostic in str(excinfo.value)
+    # 提交尚未拿到 id，失败与具体作业无关
+    assert excinfo.value.job_id is None
 
 
 @pytest.mark.parametrize(
@@ -526,6 +534,8 @@ def test_poll_translates_runner_exception(error, diagnostic):
         executor.poll("12345")
     assert str(error) in str(excinfo.value)
     assert diagnostic in str(excinfo.value)
+    # 轮询失败涉事作业明确，转译 MUST 带上该 id
+    assert excinfo.value.job_id == "12345"
 
 
 def test_poll_lets_job_record_invariant_reject_backwards_start():
@@ -535,8 +545,9 @@ def test_poll_lets_job_record_invariant_reject_backwards_start():
         ["12345\n", f"12345|COMPLETED|{before_submit}|2026-08-28T01:00:00"]
     )
     executor.submit(make_spec())
-    with pytest.raises(ExecutorError):
+    with pytest.raises(ExecutorError) as excinfo:
         executor.poll("12345")
+    assert excinfo.value.job_id == "12345"
 
 
 @pytest.mark.parametrize("omitted", ["required_fields", "clock", "runner"])

@@ -434,7 +434,7 @@ Review focus:
 ## 5. 执行器抽象：JobExecutor 协议与 fake
 
 - [x] 5.1 定义 `JobExecutor` 协议（submit/poll、job ID/partition/终态/起止时间语义）与进程内 fake（成功/失败/超时可编排），接口契约测试
-- [ ] 5.2 实现 Slurm 生产执行器（`sbatch`/`sacct` 封装，参数全部装配自 `local.toml`、零内置默认）；本阶段不做行为测试（M4 oracle），本地判据 = 参数装配纯函数检查 + 协议一致性
+- [x] 5.2 实现 Slurm 生产执行器（`sbatch`/`sacct` 封装，参数全部装配自 `local.toml`、零内置默认）；本阶段不做行为测试（M4 oracle），本地判据 = 参数装配纯函数检查 + 协议一致性
 
 依赖：组 1（Slurm 字段结构）
 §13.1 归属：控制器（支撑）
@@ -574,7 +574,7 @@ Must add/change（逐条钉死，实现方消费不重议）:
 1. `"sbatch"`、`"--parsable"`
 2. `"--job-name", spec.name`
 3. `"--chdir", str(spec.work_dir)`
-4. `"--output", str(spec.log_path)`、`"--error", str(spec.log_path)`（stdout/stderr 合并进同一份 `logs/<source>/<T>.log`，`specs/run-controller/spec.md`「失败处理」要求"合成一份"。两个 flag **都显式给出**，MUST NOT 依赖"省略 `--error` 时 Slurm 隐式并流"这一隐含默认）
+4. `"--output", str(spec.log_path)`、`"--error", str(spec.log_path)`——**同一个路径**，使 stdout 与 stderr 落进同一份文件；两个 flag **都显式给出**，MUST NOT 依赖"省略 `--error` 时 Slurm 隐式并流"这一隐含默认。`spec.log_path` 是**调用方给定的作业日志路径**（计算节点可见，即 scratch 侧），**不是** `logs/<source>/<T>.log` 本身：后者只在失败轮存在（compute-loop §13 的产物表）、由控制器作为唯一 NFS writer 写入（agent-ops §8.4，且 §8.5 禁止把 NFS 路径当作发布目标交给看不到 NFS 的计算节点），其**写入与合并归发布器 #24**（#10 fixture 的 Non-goals 已如此归属）。本模块只把这个路径当值传递，不打开、不创建（round 2 审核 cand-10，verifier CONFIRMED/FIX_NOW：早先此处把两者写成同一份文件，与 §D 自相矛盾）
 5. 资源 flag：按 `required_fields` 的字段名 **`sorted()` 升序**逐项展开为 `SBATCH_FLAGS[name], str(value)`（排序而非沿用 `required_fields` 的书写序，是为了让产物只依赖键集不依赖 `config.toml` 里的行序；`str(value)` 使 `cpus = 8` 这类 int 取值可入 argv）
 6. `"--wrap", shlex.join(spec.command)`
 
@@ -585,7 +585,9 @@ Must add/change（逐条钉死，实现方消费不重议）:
 **D. `sacct` 命令与输出解析（纯函数）**
 
 - `build_sacct_command(job_id: str) -> tuple[str, ...]` MUST 为 `("sacct", "-j", job_id, "-X", "--noheader", "--parsable2", "--format=JobID,State,Start,End")`。**四列止步于此是本 fixture 的明示裁决，不是遗漏**——两项本可加的列各有归属，逐条见下：
-  - **不取 `ExitCode`**：`specs/run-controller/spec.md`「失败处理」MUST 要求合并日志含退出码，但 `JobRecord`（#10 已合并、frozen、全字段无默认）没有承载它的字段；加字段即改 `executor.py` 的公共 schema，与本 issue「`executor.py` 零改动」和 #10 既有测试直接冲突，属跨 issue 变更。故本 issue **不取该列**。承载体的裁决 issue 是**已存在的 #47**「失败日志退出码的载体待裁决」（PR #39 已 DEFER 到此），**不另开新 issue**——本 fixture 早先写的"Phase 8 经 issue-scribe 落一条 tracked issue"是重复路由，已更正。#11 侧按 #47 推荐的**方案 (b) 带外流转**裁决并点名机制：**退出码由作业自身的批处理封装（`spec.command` 所指的 yd CLI 作业体）写进它自己的作业日志，再由发布器 #24 在合成 `logs/<source>/<T>.log` 时并入**；本模块只负责把 `--output`/`--error` 指向该日志路径，不经 `sacct` 取退出码。#24 侧的落地与 #47 的最终关闭仍归 #47。
+  - **不取 `ExitCode`**：`specs/run-controller/spec.md`「失败处理」MUST 要求合并日志含退出码，但 `JobRecord`（#10 已合并、frozen、全字段无默认）没有承载它的字段；加字段即改 `executor.py` 的公共 schema，与本 issue「`executor.py` 零改动」和 #10 既有测试直接冲突，属跨 issue 变更。故本 issue **不取该列**，理由**只**有两条、且都是本 issue 自身的边界：`JobRecord`（#10 已合并、frozen、全字段无默认）没有承载退出码的字段，加字段即改 `executor.py` 的公共 schema，与本 issue「`executor.py` 零改动」冲突；且本 fixture 已把 `build_sacct_command` 的 argv 逐元素钉死，改列即改那条 oracle。
+
+承载体的裁决 issue 是**已存在的 #47**「失败日志退出码的载体待裁决」（PR #39 已 DEFER 到此），**不另开新 issue**——本 fixture 早先写的"Phase 8 经 issue-scribe 落一条 tracked issue"是重复路由，已更正。**本 fixture MUST NOT 替 #47 作裁决**：#47 的方案 (b) 含两个并列支——「由作业自身的批处理封装写进它自己的日志（该日志由 #24 合并）」**或**「由 #11 另起一次 `sacct` 取得」——**两支在 #47 处均保持开放**。本 fixture 早先的措辞只复述了前一支并加了"不经 `sacct` 取退出码"，等于替 #47 关掉了后一支（round 2 审核 cand-09，verifier CONFIRMED/FIX_NOW），已删除。若 #47 最终选 `sacct` 支，届时按文档优先原则先修订本 fixture 钉死的 argv 再动码。在 #47 落定前，**#24 的日志合成 MUST NOT 假定退出码来自本模块**。
   - **不取 `Submit`**：`submitted_at` 由 `submit` 取一次本地时钟写定（#10 fixture 的打戳时机 MUST），而 `sacct` 在作业刚提交时可能尚无记录（见 Known limits），提交那一刻根本取不到 `Submit`；若改为 `poll` 时用 `Submit` 覆写，同一字段会在一次 run 内先后报出两个值——一个字段两个权威，比时钟偏斜更坏。故保留本地钟，偏斜风险按 Known limits 归 M4。`-X` **不可省**：缺它 `sacct` 会连作业步（`.batch`/`.extern`）一起吐，解析拿到多行且首行未必是分配本体。
 - `SACCT_ENV: Mapping[str, str]` MUST 至少含 `{"TZ": "UTC", "SLURM_TIME_FORMAT": "standard"}`。**并入语义钉死为叠加而非替换**：`SlurmJobExecutor` 在调用 runner 前构造 `{**os.environ, **SACCT_ENV}` 传入；MUST NOT 只传 `SACCT_ENV`——那会让子进程丢掉 `PATH` 与 Slurm 客户端环境，M4 现场每次 `poll` 都失败，正是这条钉死本要防的失败类。叠加发生在 executor 侧（可测），不在 `subprocess_runner` 侧（不测）。理由：`sacct` 默认吐集群本地时间且格式受该环境变量左右，而 `JobRecord.__post_init__` 对 naive 与非零偏移 `datetime` 一律 fail closed（`executor.py:_require_utc`）——不钉死时区就是把一个必然的 `ExecutorError` 留到 M4 现场触发。
 - `parse_sacct_record(stdout: str, job_id: str) -> tuple[JobState, datetime | None, datetime | None]`：
@@ -690,7 +692,7 @@ Non-goals:
 Known limits（每条在 PR 工作说明中复述，并按 Phase 8 规则路由）:
 - **`sacct` 落库延迟**：作业刚提交时 `sacct` 可能尚无记录，本模块按 fail closed 抛 `ExecutorError`。M2 无真实调度器，无法判定该窗口是否需要重试/回退 `squeue`；归 M4 现场验证。
 - **时钟偏斜**：`submitted_at` 取本地时钟、`started_at` 由 Slurm 报告，登录节点与计算节点时钟偏斜可能触发 `JobRecord` 的 `submitted_at <= started_at` 不变式而抛 `ExecutorError`。M2 不引入容差（容差是一个内置默认，正是本 issue 要消除的形态）；归 M4 现场验证。
-- **退出码不经本模块（带外流转，机制已点名）**：`specs/run-controller/spec.md`「失败处理」要求合并日志含退出码，本模块的 `sacct --format` 明示不取 `ExitCode`。按 **#47** 推荐的方案 (b)：退出码由作业自身的批处理封装写进作业日志，由 **#24** 在合成 `logs/<source>/<T>.log` 时并入。裁决 issue 是已存在的 **#47**，不另开新件。
+- **退出码不经本模块（承载体裁决仍在 #47，本 fixture 不预判）**：`specs/run-controller/spec.md`「失败处理」要求合并日志含退出码，本模块的 `sacct --format` 明示不取 `ExitCode`（理由见 §D，均为本 issue 自身边界）。承载体的裁决 issue 是已存在的 **#47**，不另开新件；其方案 (b) 的两个并列支（作业体自写日志由 #24 合并 / 由 #11 另起一次 `sacct`）**均未被本 fixture 关闭**。在 #47 落定前 **#24** 的日志合成 MUST NOT 假定退出码来自本模块。
 - **进程死亡窗口（孤儿作业）**：`poll` 只认本实例提交过的 `job_id`（fixture §E 的 MUST），故 run 进程在等待期被杀后，flock 随进程释放而 Slurm 作业仍在跑，下一个 tick 无从发现它——按「未提交残留清理重跑」删 work 并重新提交，会出现同源两个在途作业（违反 agent-ops §8.3），且孤儿作业继续往被删的目录写。**更正本 fixture 早先的措辞**：Non-goals 里「跨进程 job 记录持久化…正是「并发与锁」的形态，非缺陷」只对**进程存活**的正常路径成立；崩溃一支不被「并发与锁」覆盖。归属：崩溃恢复前置由 **#23/#28** 的 fixture 裁决（按 receipt 里的 job ID 作一次存活确认，或"见半成品 work 即停该源等人工"）。
 - **已提交但未登记窗口**：`submit` 先调 runner 再解析 job id，故 `sbatch` 退出 0、作业已排队、而 stdout 形态超出 §C 钉死的域时，`parse_sbatch_job_id` 抛错且 `self._records` 里什么都没有——后果与上一条同类。缓解：错误消息带原始行/原始 stdout，运维可人工定位。归属同上（**#23/#28**）。
 - **`poll` 抛错 ≠ 作业失败**：`ExecutorError` 只有 `job_id` 一个结构化属性，「`sacct` 尚未落库」与「解析失败」抛的是同一个无类别异常，控制器没有可机检的判别位。本 issue 不加判别位（那要么改 `executor.py` 的公共异常、要么在协议层外另立一套，均越界）；**#26** 的 fixture MUST 钉死「`poll` 抛出异常不得直接触发「失败处理」的 work 删除」。
