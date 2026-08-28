@@ -9,6 +9,7 @@ from yd_producer.state.cfg_ic import (
     CfgIcDocument,
     LineRole,
     Section,
+    header_minute_time,
     parse,
     render,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "CfgIcDocument",
     "LineRole",
     "Section",
+    "header_minute_time",
     "parse",
     "render",
 ]
