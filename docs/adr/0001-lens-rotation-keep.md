@@ -50,3 +50,29 @@
 
 按 skill 规则，keep/cut 是**人工裁决、默认 keep**。此处按默认 keep 记录并给出依据，
 **尚未经人工确认**；如需改为 cut，直接修改本文件状态即可，无需回溯已合并的 PR。
+
+## 复议记录
+
+### 2026-08-28：issue #11 / PR #57 合并后
+
+`loop_log_audit.py` 再次报出同一条 DECIDABLE。新归因：**9 个多轮合并 PR，
+core=28、rotated=34**（上次 8 个 PR、23 / 33）。本次 PR 贡献 core +5、rotated +1。
+
+**决策不变：keep。** 复议条件逐条核对，均未触发：
+
+- 「rotated 命中连续两个 PR 全为 P3」：PR #57 的 rotated 命中是 round 2 的
+  spec-compliance `ruling-overreach`，**P1/major** —— 而且抓的是编排者自己写的 fixture
+  越权替 issue #47 作裁决，属于固定阵容结构上抓不到的一类（写 fixture 的人不会
+  自查越权）。连续两个 P3 不成立。
+- 「已闭合项被重报超过该轮 finding 总数一半」：#57 四轮零重报。
+
+新增一条支持 keep 的证据：round 4 换进 invariant-state 后三位 reviewer 零 finding，
+而正是这一轮独立扫了 29 个变异体、判定枚举完备性 closed —— 轮换进来的 lens 的价值
+不止于「多抓几条」，也包括**给出固定阵容给不出的收敛证明**。
+
+已知的指标缺陷（本次发现，记录不修）：`loop_log_audit.py` 读的是每条记录的
+`catches` 键，而 issue #5 / PR #40 那行写成了 `findings`，因此该 PR 对轮换归因
+贡献为 0，审计口径其实是 9 个 PR 里的 8 个。结论方向不受影响（#40 的 round 4/5
+命中全部来自轮换进来的 lens，补上只会让 rotated 更高）。
+
+状态仍为**默认 keep、待人工确认**。
