@@ -19,6 +19,7 @@ r"""合成 `cfg.ic` 生成器（程序化，零二进制入库）。
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -217,3 +218,158 @@ def build_compat_layout(*, mesh_count: int, river_count: int) -> bytes:
     for element in range(1, river_count + 1):
         lines.append(f"{element} {_PLAIN_NOTATION}")
     return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+#: UTF-8 BOM 的字节形态（#54 第 4 条）。
+UTF8_BOM_BYTES = b"\xef\xbb\xbf"
+#: U+0085 NEXT LINE：`str.splitlines` 在它上面断行，C/Fortran 行读者不会（#54 第 2 条）。
+NEL = "\x85"
+
+
+def build_cfg_ic_rows(
+    *,
+    mesh_rows: Sequence[Sequence[str]],
+    river_rows: Sequence[Sequence[str]] | None = None,
+    lake_rows: Sequence[Sequence[str]] | None = None,
+    header_tokens: Sequence[str] | None = None,
+    minute: str = DEFAULT_MINUTE,
+    mesh_state_columns: int = MESH_STATE_COLUMNS,
+    eol: str = "\n",
+    delimiter: str = " ",
+    header_delimiter: str | None = None,
+    trailing_spaces: str = "",
+    header_trailing_spaces: str | None = None,
+    blank_lines: bool = False,
+    trailing_newline: bool = True,
+    river_header_tokens: tuple[str, ...] = RIVER_COLUMN_HEADER_TOKENS,
+    lake_header_tokens: tuple[str, ...] = LAKE_COLUMN_HEADER_TOKENS,
+) -> SyntheticCfgIc:
+    """生成一份原生分段 `cfg.ic`，**每一行的 token 文本由调用方逐个给出**。
+
+    与 `build_cfg_ic` 的分工：`build_cfg_ic` 按规模批量发，用于 roundtrip / 结构索引；
+    本函数让调用方钉死每一格的**文本记法**（负值、`nan`/`inf`、边界值、混合记法），是
+    4.2 / 4.4 逐值手算证据的构造入口。每行第一个 token 是元素 id。
+
+    `header_tokens` 为 None 时发 native 三 token 头 `<mesh> <mesh-state-columns> <minute>`；
+    给了就逐字发（用于两 token 的 #1197 形状、四 token 兼容布局、>=5 token 未知布局）。
+    `header_delimiter` / `header_trailing_spaces` 让 header 行的空白布局独立于数据行——
+    脏矩阵要的正是「header 多空格 + 行尾空格 + 数据行 Tab 分隔」这种混排。
+    """
+    header_delimiter = delimiter if header_delimiter is None else header_delimiter
+    header_trailing_spaces = (
+        trailing_spaces if header_trailing_spaces is None else header_trailing_spaces
+    )
+    texts: list[str] = []
+    roles: list[str] = []
+
+    def emit(tokens: Sequence[str], role: str, *, sep: str, tail: str) -> int:
+        texts.append(sep.join(tokens) + tail)
+        roles.append(role)
+        return len(texts) - 1
+
+    def blank() -> None:
+        texts.append("")
+        roles.append("blank")
+
+    if header_tokens is None:
+        header_tokens = (str(len(mesh_rows)), str(mesh_state_columns), minute)
+    header_index = emit(
+        header_tokens, "header", sep=header_delimiter, tail=header_trailing_spaces
+    )
+    if blank_lines:
+        blank()
+
+    mesh_header_index = emit(
+        MESH_COLUMN_HEADER_TOKENS, "column_header", sep=delimiter, tail=trailing_spaces
+    )
+    mesh_data_indices = [
+        emit(row, "data", sep=delimiter, tail=trailing_spaces) for row in mesh_rows
+    ]
+
+    river_header_index: int | None = None
+    river_data_indices: list[int] = []
+    if river_rows is not None:
+        if blank_lines:
+            blank()
+        river_header_index = emit(
+            river_header_tokens, "column_header", sep=delimiter, tail=trailing_spaces
+        )
+        river_data_indices = [
+            emit(row, "data", sep=delimiter, tail=trailing_spaces) for row in river_rows
+        ]
+
+    lake_preamble_index: int | None = None
+    lake_header_index: int | None = None
+    lake_data_indices: list[int] = []
+    if lake_rows is not None:
+        if blank_lines:
+            blank()
+        lake_preamble_index = emit(
+            (str(len(lake_rows)), str(LAKE_STATE_COLUMNS)),
+            "lake_preamble",
+            sep=delimiter,
+            tail=trailing_spaces,
+        )
+        lake_header_index = emit(
+            lake_header_tokens, "column_header", sep=delimiter, tail=trailing_spaces
+        )
+        lake_data_indices = [
+            emit(row, "data", sep=delimiter, tail=trailing_spaces) for row in lake_rows
+        ]
+
+    lines = tuple(text + eol for text in texts)
+    if not trailing_newline:
+        lines = lines[:-1] + (texts[-1],)
+
+    return SyntheticCfgIc(
+        payload="".join(lines).encode("utf-8"),
+        lines=lines,
+        roles=tuple(roles),
+        header_index=header_index,
+        mesh_column_header_index=mesh_header_index,
+        mesh_data_indices=tuple(mesh_data_indices),
+        river_column_header_index=river_header_index,
+        river_data_indices=tuple(river_data_indices),
+        lake_preamble_index=lake_preamble_index,
+        lake_column_header_index=lake_header_index,
+        lake_data_indices=tuple(lake_data_indices),
+    )
+
+
+#: mesh 段的列名序列（小写），与 `MESH_COLUMN_HEADER_TOKENS` 的位置一一对应（去掉 Index）。
+MESH_VALUE_COLUMNS = ("canopy", "snow", "surface", "unsat", "gw")
+
+
+def mesh_row(element: int, **overrides: str) -> tuple[str, ...]:
+    """一条 mesh 数据行的 token 文本：`Index Canopy Snow Surface Unsat GW`。
+
+    `overrides` 按**列名**（小写）覆写单格文本，故用例可以写
+    `mesh_row(1, unsat="-1e-6")` 而不必数到第几个位置——列名是 4.4 投影列定位的真相来源。
+    """
+    values = dict.fromkeys(MESH_VALUE_COLUMNS, _PLAIN_NOTATION)
+    unknown = set(overrides) - set(values)
+    if unknown:
+        raise AssertionError(f"unknown mesh column(s): {sorted(unknown)}")
+    values.update(overrides)
+    return (str(element), *(values[name] for name in MESH_VALUE_COLUMNS))
+
+
+def river_row(element: int, stage: str = _PLAIN_NOTATION) -> tuple[str, ...]:
+    """一条 river 数据行的 token 文本：`Index Stage`。"""
+    return (str(element), stage)
+
+
+def with_bom(payload: bytes) -> bytes:
+    """在文件最前面贴 UTF-8 BOM（#54 第 4 条的复现输入）。"""
+    return UTF8_BOM_BYTES + payload
+
+
+def inject_nel(payload: bytes, *, physical_line: str, replacement: str) -> bytes:
+    """把一条**物理行**换成含 U+0085 的等价文本，使 `splitlines` 把它断成两条逻辑行。
+
+    字节 roundtrip 恒为 True（`render` 只拼接原始行），故这条 fail-open 只能由行数门抓。
+    """
+    text = payload.decode("utf-8")
+    if text.count(physical_line) != 1:
+        raise AssertionError(f"expected exactly one occurrence of {physical_line!r}")
+    return text.replace(physical_line, replacement).encode("utf-8")
