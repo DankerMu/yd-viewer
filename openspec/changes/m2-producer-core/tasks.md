@@ -472,7 +472,7 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 ## 10. prepare-variants：变体与几何
 
 - [x] 10.1 引入几何依赖（pyshp/pyproj/shapely）并 `uv lock`，构造带自定义 Albers `.prj` 的合成 shapefile 基线 fixture，实现 `.prj` 解析与重投影工具，CI 绿
-- [ ] 10.2 实现 `rivers.geojson`（`reach_id`=DBF Index、数量一致）与 `boundary.geojson`（单元合并边界）生成，落点 `input/viewer/`
+- [x] 10.2 实现 `rivers.geojson`（`reach_id`=DBF Index、数量一致）与 `boundary.geojson`（单元合并边界）生成，落点 `input/viewer/`
 - [ ] 10.3 实现 prepare 编排：拒绝覆盖检查 → 薄外壳按源两次调用 builder（记录型假 builder 断言两次入参 source/grid 不同、输出分别落 `yd_gfs`/`yd_ifs`）→ 变体 reach 数等于 `reach_count` 校验 → 提交到 `input/models/` 与 `input/viewer/` → scratch 清理
 
 依赖：组 1（薄外壳、`reach_count`）
@@ -575,6 +575,138 @@ Review focus:
 - `pyproject.toml` 三个依赖是否落在 `[project].dependencies` 运行依赖（而非 dev group），`uv.lock` 是否同步
 - 是否越界实现了 10.2/10.3 的内容（GeoJSON 序列化、边界合并、编排）
 - 重投影是否对所有几何类型逐部件/逐环处理，而非只处理外环或首个部件
+
+### Issue #19 fixture（任务 10.2）
+
+Fixture level: expanded
+Upstream suggested level: expanded（agree）
+Repair intensity: high
+Project profile: yd-viewer
+
+Change surface:
+- 扩展 `producer/src/yd_producer/geometry.py`：新增 `build_rivers_geojson` / `build_boundary_geojson` / `write_viewer_geojson` 三个公开函数；`GeometryError` 仍是模块唯一公开异常
+- 扩展 `producer/tests/geometry_fixtures.py`，三处（穷举）：
+  - **单元相邻布局**：新增关键字参数使相邻单元沿**经度方向**共边（共享边为经线段），令合并边界由构造已知；默认布局（互不相接）不变
+  - **故障 DBF 图层**：现 `_write_layer` 把字段写死 `writer.field("Index", "N", 10, 0)`、索引写死 `range(1, N+1)`，无法生成「缺 `Index` 字段」「`Index` 重复」「`Index` 为 C 型文本非数字」三种图层；新增关键字参数放开**字段名 / 字段类型 / 显式 index 值序列**三者（默认值保持现行为）
+  - **越域坐标图层**：直接写入源 CRS 的原始米制坐标（issue #19 评论实测的 `1e12` 量级），**绕过锚点正向投影与 `METRIC_GUARD`**，并给该要素一个已知 `Index`
+  - 三处扩展同受 `geometry_fixtures.py` 既有独立性硬约束：MUST NOT 从 `yd_producer.geometry` import 任何 CRS/transformer 构造或重投影函数
+- 扩展 `producer/tests/test_geometry.py`
+- 不新增依赖、不改 `pyproject.toml`/`uv.lock`；不触碰 CLI 入口、config、forcing/state/controller
+
+Must preserve:
+- `load_prj_crs` / `to_wgs84_transformer` / `reproject_geometry` / `read_shapefile` 的签名与失败契约（10.1 已钉死，10.3 待消费）不变
+- `geometry_fixtures.py` 的独立性硬约束：生成器 MUST NOT 从 `yd_producer.geometry` import 任何 CRS/transformer 构造或重投影函数；新增的相邻布局与越域图层同受此约束
+- 生成器现有默认行为保持不变（`river_count=3`、`unit_count=2`、现默认单元间距、DBF 字段定义 `("Index", "N", 10, 0)` 与 `range(1, N+1)` 的索引序列），#18 既有测试逐条继续通过；相邻布局、故障 DBF、越域图层一律以**新增关键字参数或新增函数**引入
+- `config.py` 的 stdlib 中立性；CI 四个 job 全绿
+
+Must add/change:
+- `build_rivers_geojson(shp_path) -> dict`：读基线河网 shapefile，返回 EPSG:4326 的 GeoJSON `FeatureCollection`
+  - 要素数量与基线河段数严格相等，**顺序与 DBF 记录顺序一致**（确定性输出，逐次运行字节一致）
+  - 每个要素 `properties` **只含** `reach_id`，取自 DBF `Index` 字段并转 `int`；不透传其它 DBF 字段（viewer 只消费 `reach_id`，products-contract §6）
+  - DBF 缺 `Index` 字段、`Index` 值非整数、或 `Index` 在图层内重复 -> 抛 `GeometryError` 且消息点名该图层路径与出问题的记录序号（fail closed：重复 `reach_id` 会让 viewer 的 DAT 列定位静默错位）
+  - 0 要素的合法图层 -> 返回 0 要素的 `FeatureCollection`，**不报错**（`reach_count` 一致性校验属 10.3）
+- `build_boundary_geojson(shp_path) -> dict`：读 domain 单元面图层，返回 EPSG:4326 的 `FeatureCollection`，**恰含 1 个要素**（合并边界），`properties` 为空对象 `{}`
+  - 合并顺序钉死：**先在基线源投影 CRS 内 `unary_union` 合并，再对合并结果整体重投影**（等积 Albers 平面内合并；在经纬度域合并会让共享边在角度空间不严格重合而留下缝隙/线状伪影）
+  - 单元共边处的内部边界 MUST 被溶解：合并结果内不得出现原单元的公共边
+  - 内环（洞）MUST 保留
+  - 单元互不相接时结果为 `MultiPolygon`（不额外要求连通性——spec 与 products-contract 均未要求，不凭空发明约束）
+  - 0 要素的 domain 图层 -> 抛 `GeometryError` 且消息含该路径（无单元即无边界，不返回空要素集）
+- 两个 builder 的输出 MUST 满足 RFC 7946 环向（**外环逆时针、内环顺时针**）。shapefile 约定与之相反（外环顺时针），且实测 `unary_union` 输出为顺时针，故这是一条必须显式做、且可被证伪的转换
+- 所有坐标 MUST 为有限值：序列化 MUST 用 `json.dumps(..., allow_nan=False)`（或等价的逐要素有限性守卫），非有限坐标 -> 抛 `GeometryError` 且**点名该要素**（河网点名 `reach_id`，边界点名图层路径），**不写出任何含裸 `Infinity`/`NaN` 的文件**
+  - 硬原因（issue #19 评论实测，pyproj 3.7.2）：`reproject_geometry` 走 `shapely_transform(transformer.transform, geom)`，pyproj 默认 `errcheck=False`，投影域外顶点静默变 `inf`；`json.dumps` 默认发裸 `Infinity`，Python 的 `json.loads` 接受而浏览器 `JSON.parse` 拒绝——一个坏顶点会让 viewer 整层河网变白
+- `write_viewer_geojson(*, rivers_shp, domain_shp, out_dir) -> tuple[Path, Path]`：把两份 FeatureCollection 写成 `out_dir/rivers.geojson` 与 `out_dir/boundary.geojson`，返回二者路径
+  - `out_dir` 由调用方给出（10.3 的 scratch 目录），不存在时创建；**本函数不解析 `YD_ROOT`、不做拒绝覆盖检查、不做提交与清理**（均属 10.3）
+  - **无部分产物**：两份文档 MUST 先全部构建并序列化成字符串成功后再落盘；任一图层失败时 `out_dir` 内不得留下任何本次写出的文件
+  - 编码 UTF-8；`ensure_ascii=False`；坐标不做精度截断（精度策略属后继性能议题，非本 issue）
+
+Seams under test:
+- `build_rivers_geojson(path) -> dict`、`build_boundary_geojson(path) -> dict`（file -> 内存 GeoJSON 对象，纯函数）
+- `write_viewer_geojson(*, rivers_shp, domain_shp, out_dir) -> (Path, Path)`（唯一写盘 seam，落点由入参给定）
+- 上游 seam 缺口同 #18：design.md 的 5 条主干 seam 不含几何层；本 fixture 就地声明，不改 design.md
+
+测试 oracle（**禁止手写期望坐标，禁止用被测库自判**）:
+- 期望坐标一律来自 `geometry_fixtures` 的 lon/lat 锚点：生成器正向投影写入 shapefile，测试断言 builder 输出还原回锚点（容差 1e-6 度）
+- **该纪律的唯一显式豁免**：越域坐标图层。合法 lon/lat 锚点正向投影只会得到有限 Albers 坐标，非有限回归无法经锚点路径构造，故该图层直写原始米制坐标；它验的是错误路径与失败归属，不做坐标往返断言
+- 合并边界的期望形状**由构造已知**：两个**沿经度方向共边**的单元（新增相邻布局参数）合并后外环顶点集 = 两单元外角锚点 ∪ 共享边端点。相邻方向必须是经度方向：共享边端点落在纬线弧上，在 Albers 平面内与两侧外角**不共线**，因而必然是 union 输出的顶点；若改成纬度方向堆叠，共享边端点落在（Albers 内为直线的）经线上，该 oracle 就变成对 GEOS 是否保留共线节点的赌注，min/max lon/lat 等于两单元锚点的极值；**不得在测试内用 shapely 再做一次 union 当期望值**（被测库自判，与 #18 禁止共用 transformer 构造路径同纪律）
+- 内部边界溶解的判据取构造已知的点：共享边中点严格落在合并面内部（`covers` 为真且不在 `boundary` 上）
+- 环向断言用 shapely 的 `is_ccw` 判定，但期望值（外环 CCW / 内环 CW）由 RFC 7946 给定，非由实现产出反推
+
+Risk packs considered (core):
+- Public API / CLI / script entry: selected - 三个新函数是 10.3 编排的消费契约
+- Config / project setup: not selected - 不读配置
+- File IO / path safety / overwrite: selected - 首次写盘；无部分产物是硬要求（覆盖/发布/清理语义属 10.3）
+- Schema / columns / units / field names: selected - GeoJSON 是 viewer 的输入 schema；`reach_id`/DBF `Index`/轴序/环向全在此面
+- Auth / permissions / secrets: not selected - 无凭据
+- Concurrency / shared state / ordering: not selected - 纯函数 + 单次写出，无共享状态（要素顺序确定性在 schema 面覆盖）
+- Resource limits / large input / discovery: not selected - 真实基线 3988 河段 / 7891 单元，一次性 prepare，量级小
+- Legacy compatibility / examples: not selected - viewer 尚无既有 GeoJSON 消费实现可破坏
+- Error handling / rollback / partial outputs: selected - 非有限坐标、重复/缺失 `Index`、空 domain 均须 fail closed 且不留半成品
+- Release / packaging / dependency compatibility: not selected - 不动依赖与 lock
+- Documentation / migration notes: not selected - products-contract §6 已描述产物，无需改文档
+
+Domain packs (from active profile):
+- Geospatial / CRS / shapefile sidecars: selected - 本 issue 的全部内容
+- Time series / forcing / temporal boundaries: not selected - 无时间面
+- 状态链 / warm-start 定戳一致性: not selected - 不读写状态
+- NWM 快照溯源与 DB-free 隔离: not selected - 无快照代码
+
+Required evidence（每条 input -> expected output）:
+- N 条河段的合成基线 -> `rivers.geojson` 含恰 N 个要素，`reach_id` 序列等于生成器写入的 `Index` 序列且顺序一致
+- 每个河段要素 `properties` 的键集合恰为 `{"reach_id"}`；`reach_id` 类型为 `int`
+- 河网坐标 -> 逐点还原到锚点，差 < 1e-6 度；全部落 lon ∈ [-180,180]、lat ∈ [-90,90]
+- 轴序回归：取经纬差异显著的锚点，断言坐标第一分量为经度（lon/lat 互换必然失败）
+- 多部件折线 -> GeoJSON 类型为 `MultiLineString`，part 数与各 part 顶点数与基线一致
+- DBF 缺 `Index` 字段 -> `GeometryError`，消息含图层路径
+- `Index` 重复（同一图层两条记录同值）-> `GeometryError`，消息点名重复值与记录序号；**不写出任何文件**
+- `Index` 值非整数（生成器以 C 型文本字段写入非数字值）-> `GeometryError`
+- 0 要素河网图层 -> 0 要素 `FeatureCollection`，不报错
+- **合并边界（共边单元）** -> `boundary.geojson` 恰 1 个要素，`type` 为 `Polygon`；外环还原坐标集合等于两单元外角锚点 ∪ 共享边端点（差 < 1e-6 度）；min/max lon/lat 等于锚点极值
+- 共享边中点严格在合并面内部（内部边界已溶解）
+- 带洞单元 -> 合并结果保留恰 1 个内环，其还原坐标与洞锚点一致
+- 互不相接的两个单元（生成器默认布局）-> `type` 为 `MultiPolygon`，含 2 个成员
+- 环向：`boundary.geojson` 外环 CCW、内环 CW；`rivers.geojson` 不受环向约束
+- 0 要素 domain 图层 -> `GeometryError`，消息含该路径
+- **非有限坐标：** 含投影域外顶点的河网图层（生成器新增，要素带已知 `Index`）-> `GeometryError`，消息含该要素的 `reach_id`；`out_dir` 内无任何文件；写出的文本中不出现 `Infinity`/`NaN`
+- 非有限坐标出现在 domain 图层 -> `GeometryError`，消息含图层路径；无文件残留
+- `write_viewer_geojson` 成功路径 -> `out_dir` 下恰有 `rivers.geojson` 与 `boundary.geojson` 两个文件，返回值与之相等；两文件均能被 `json.loads(..., parse_constant=<拒绝>)` 或严格解析器接受
+- **无部分产物：** domain 图层损坏而河网合法 -> 抛 `GeometryError` 且 `out_dir` 内不存在 `rivers.geojson`
+- `out_dir` 不存在 -> 被创建后写入成功
+- 确定性：同一基线连续调用两次，两次输出字节完全一致
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check .` 与 `uv run ruff format --check .` -> 退出码 0
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+- CI producer job 绿
+
+Invariant Matrix:
+- Governing invariant: 写出的两份 GeoJSON MUST 是 RFC 8259 合法（零非有限数）、EPSG:4326 经纬度、`reach_id` 与基线 DBF `Index` 一一对应且数量相等的文档；任何一处失败必须在落盘前抛 `GeometryError` 并点名责任要素/文件，磁盘上不留部分或非法产物
+- Source-of-truth identity/contract: 基线 shapefile 的 DBF `Index` 字段（-> `reach_id`）与 `.prj` 自定义 Albers（-> 坐标语义）
+- Producers: `geometry.build_rivers_geojson` / `build_boundary_geojson` / `write_viewer_geojson`
+- Validators/preflight: `reach_id` 存在性/整数性/唯一性检查；有限坐标守卫（`json.dumps(allow_nan=False)` 或等价）；空 domain 检查
+- Storage/cache/query: `out_dir/rivers.geojson`、`out_dir/boundary.geojson`（10.3 再提交到 `YD_ROOT/input/viewer/`）
+- Public routes/entrypoints: 无 CLI 面；三个函数由 10.3 的 prepare 编排调用
+- Frontend/downstream consumers: viewer 前端按 `reach_id` 关联 DAT 流量列（products-contract §6）；viewer 不读 shapefile、不做投影
+- Failure paths/rollback/stale state: 先构建后落盘的两阶段写出；失败时 `out_dir` 无本次产物；不做覆盖判定（10.3）
+- Evidence/audit/readiness: `producer/tests/test_geometry.py` 的 GeoJSON 用例组；`geometry_fixtures.py` 的相邻布局与越域图层生成器
+- Regression rows:
+  - 合法共边基线 -> 2 份文件写出，N 个 `reach_id` 与 `Index` 一一对应，边界为单一 Polygon 且共享边溶解
+  - 投影域外顶点 / 重复 `Index` / 空 domain -> `GeometryError` 点名责任对象，`out_dir` 内零文件
+  - #18 既有的 `load_prj_crs`/`read_shapefile`/`reproject_geometry` 用例 -> 全部保持通过，签名与失败归属不变
+
+Non-goals:
+- prepare 编排：`YD_ROOT` 解析、拒绝覆盖检查、薄外壳两次调用 builder、`reach_count` 一致性校验、提交到 `input/models/`+`input/viewer/`、scratch 清理（任务 10.3）
+- #36（`to_wgs84_transformer` 接受 ballpark 基准变换，`transformer.accuracy == -1.0`）与 #37（`.shx` 记录内容未校验）——既有开口，本 issue 不修
+- 真实基线的要素数（3988 河段 / 7891 单元）验证（M4 真实数据阶段）
+- GeoJSON 坐标精度截断与文件体积优化
+- viewer 侧读取与渲染
+
+Review focus:
+- 合并边界的期望值是否由构造/锚点给出，而非在测试里再跑一次 shapely union（被测库自判 = 永真式）
+- 非有限坐标守卫是否**在落盘前**生效、是否点名具体要素，而非只在文件写完后校验
+- 失败路径是否真的零残留：河网先写、domain 后失败的顺序下 `out_dir` 是否干净
+- `reach_id` 是否严格来自 DBF `Index` 且保序，重复/缺失是否 fail closed
+- 环向转换是否显式实现（`unary_union` 实测输出为顺时针，未转换即违反 RFC 7946）
+- 是否越界实现了 10.3 的编排、覆盖检查或 `YD_ROOT` 解析
+- 生成器新增能力是否仍与 `yd_producer.geometry` 独立、是否改动了 #18 的默认布局与默认 DBF 字段定义
 
 ## 11. init-bootstrap：首态建链
 
