@@ -156,6 +156,10 @@ class JobRecord:
             )
         if self.started_at is not None and self.submitted_at > self.started_at:
             raise ExecutorError("`started_at` 不得早于 `submitted_at`", job_id)
+        if self.ended_at is not None and self.submitted_at > self.ended_at:
+            # 未起跑即终止（`started_at is None` 的 FAILED/TIMEOUT）时，这是唯一挡住
+            # 负墙钟时长的守卫；`started_at` 存在时它由上下两条推出，故无条件成立
+            raise ExecutorError("`ended_at` 不得早于 `submitted_at`", job_id)
         if (
             self.started_at is not None
             and self.ended_at is not None

@@ -271,6 +271,7 @@ def test_unorchestrated_name_is_rejected_and_not_recorded():
     # 失败提交既不入账也不消耗时钟与 job id
     record = fake.submit(make_spec("known"))
     assert record.submitted_at == tick(0)
+    assert record.job_id == "fake-1"
     assert len(fake.submissions) == 1
 
 
@@ -300,18 +301,21 @@ def test_unorchestrated_name_is_rejected_and_not_recorded():
     ],
 )
 def test_illegal_outcome_is_rejected(kwargs):
-    with pytest.raises(ExecutorError):
+    with pytest.raises(ExecutorError) as exc:
         FakeOutcome(**kwargs)
+    assert exc.value.job_id is None
 
 
 def test_step_clock_rejects_naive_start():
-    with pytest.raises(ExecutorError):
+    with pytest.raises(ExecutorError) as exc:
         StepClock(start=NAIVE, step=STEP)
+    assert exc.value.job_id is None
 
 
 def test_step_clock_rejects_non_utc_aware_start():
-    with pytest.raises(ExecutorError):
+    with pytest.raises(ExecutorError) as exc:
         StepClock(start=shifted(0), step=STEP)
+    assert exc.value.job_id is None
 
 
 def test_step_clock_timestamps_are_utc_aware():
@@ -349,6 +353,13 @@ def test_step_clock_timestamps_are_utc_aware():
         {"submitted_at": tick(0), "started_at": tick(2), "ended_at": tick(1)},
         # ⑤ SUCCEEDED 却没有起跑时间
         {"state": JobState.SUCCEEDED, "started_at": None, "ended_at": tick(2)},
+        # ⑦ 未起跑即终止，但 ended_at 早于 submitted_at（负墙钟时长）
+        {
+            "state": JobState.FAILED,
+            "started_at": None,
+            "submitted_at": tick(2),
+            "ended_at": tick(1),
+        },
         # ⑥ naive datetime（逐字段各一条）
         {"submitted_at": NAIVE},
         {"started_at": NAIVE},
@@ -356,8 +367,9 @@ def test_step_clock_timestamps_are_utc_aware():
     ],
 )
 def test_illegal_record_cannot_be_constructed(overrides):
-    with pytest.raises(ExecutorError):
+    with pytest.raises(ExecutorError) as exc:
         make_record(**overrides)
+    assert exc.value.job_id == "fake-1"
 
 
 @pytest.mark.parametrize("field", ["submitted_at", "started_at", "ended_at"])
@@ -457,21 +469,31 @@ def test_resources_are_carried_verbatim_and_snapshotted():
 
 @pytest.mark.parametrize("holder", ["spec", "record"])
 def test_resources_mapping_is_immutable(holder):
-    fake = FakeJobExecutor(
-        outcomes={
-            "job": FakeOutcome(
-                final_state=JobState.SUCCEEDED, polls_until_terminal=0, started=True
-            )
-        },
-        clock=make_clock(),
+    """两侧都以**普通 dict** 直接构造，不经 fake。
+
+    经 fake 拿到的 `JobRecord.resources` 来自 `spec.resources`（已是 proxy），那样断言
+    即便删掉 `JobRecord.__post_init__` 的快照也恒真。
+    """
+    resources = (
+        make_spec("job").resources if holder == "spec" else make_record().resources
     )
-    spec = make_spec("job")
-    record = fake.submit(spec)
-    resources = spec.resources if holder == "spec" else record.resources
 
     assert isinstance(resources, types.MappingProxyType)
     with pytest.raises(TypeError):
         resources["partition"] = "gpu"  # type: ignore[index]
+
+
+def test_record_snapshots_resources_at_construction():
+    """`JobRecord` 自己快照入参映射：不经 fake 直接构造，事后改原 dict 不影响记录。"""
+    mutable: dict[str, str | int] = dict(SITE_RESOURCES)
+    record = make_record(resources=mutable)
+
+    mutable["partition"] = "gpu"
+    mutable["extra"] = "x"
+    del mutable["account"]
+
+    assert dict(record.resources) == SITE_RESOURCES
+    assert isinstance(record.resources, types.MappingProxyType)
 
 
 def test_terminal_record_keeps_submitted_resources():
@@ -550,11 +572,15 @@ def test_records_differing_in_one_field_are_unequal():
 
 @pytest.mark.parametrize("klass", DATACLASSES)
 def test_dataclass_is_frozen_and_kw_only(klass):
+    """直接断言 dataclass 参数本身。
+
+    不用「位置构造抛 `TypeError`」来间接推断 `kw_only`：`JobSpec`/`JobRecord` 的
+    `__post_init__` 会先对哨兵实参 `dict(object())` 抛 `TypeError`，那条断言即便去掉
+    `kw_only=True` 也恒真。
+    """
     params = klass.__dataclass_params__
     assert params.frozen is True
-    args = [object()] * len(dataclasses.fields(klass))
-    with pytest.raises(TypeError):
-        klass(*args)
+    assert params.kw_only is True
 
 
 @pytest.mark.parametrize("klass", DATACLASSES)
