@@ -36,6 +36,11 @@
 
 **D8 基建在 change 外**（grill 用户拍板）：仓库 public、CI（ruff+pytest、Py3.12、openspec validate、stage-pipeline-log 锚）、双骨架已随 commit `3f18de8` 落地，不进本 change 的 spec/tasks。
 
+
+**D9 tracker 快照分次落地（issue #16 捕获半 / #17 补跑半）**：`nwm-snapshot-inventory.md` §1 第 6/7 行（`workers/shud_runtime/runtime.py` → `producer/src/yd_producer/tracker/checkpoint_tracker.py`，`tests/test_shud_runtime.py` → `producer/tests/test_checkpoint_tracker.py`）的抽取集横跨 compute-loop §9.2 捕获与 §9.3 补跑两半，对应任务 9.1 与 9.2、issue #16 与 #17。两半**分两个 PR 落进同一个文件**：#16 落捕获，#17 落补跑。这是 spec `checkpoint-tracker` 的 `快照可追溯` Requirement 所要求的「显式偏离记录」——该 Requirement 的原意是「无法快照时须记录」，此处不是无法快照而是**分次快照**，同样在此显式记录，以免 `落地状态` 列被读成「第 6 行抽取集已搬完」。
+
+配套的取舍，逐条（细则见 tasks.md `### Issue #16 fixture（任务 9.1）` §F）：捕获半按 D4 零默认改写——目标小时取 `Config.checkpoint_hours` 显式入参而非 manifest 的三路 fail-open 解析，`project_name`/`run_dir` 为显式入参而非 pin 的四路 fallback，**不含轮询循环与 `time.sleep`**（观测由调用方驱动，连带消掉 pin 的 `0.01` 秒轮询默认），只接受相对分钟 header（epoch 形式归 #9 重戳与发布路径，本模块对其 fail closed），结构校验复用本仓 `state.parse` 而非 pin 的 `state_ic_structure_complete`（后者属任务 4.2/issue #9），IO 原语全部复用 `store/safe_fs` 而不移植 pin 的 staged-IO 族。因此**捕获半零环境变量读取**，第 6 行 D4 段声明为「合法保留项」的两处 `SLURM_*` 读取（随 `write_manifest` → `_manifest_provenance` → `_task_outcome_attempt_identity`）在 #16 完全不涉及，其去留由 #17 定夺。
+
 ## Sketch seams under test
 
 测试行使的公共边界，从高到低（每 seam 一行理由）：
