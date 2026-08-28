@@ -42,7 +42,13 @@
         38
       ],
       "gateEntries": 2,
-      "closed": []
+      "closed": [
+        {
+          "pr": 38,
+          "outcome": "descoped",
+          "rounds": 5
+        }
+      ]
     }
   }
 }

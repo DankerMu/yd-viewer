@@ -108,7 +108,11 @@ def literal_expected(raw_root: Path, source: str, leads, bundles) -> tuple[Path,
     )
 
 
-def populate(paths, content: bytes = b"GRIB-fixture") -> None:
+# 默认内容含**非 UTF-8 前导字节**：真实 bundle 是 GRIB2 二进制。若 `_is_readable` 退化
+# 成文本模式 `open(path, "r")`，首次 `read(1)` 抛 `UnicodeDecodeError`（`ValueError` 子
+# 类），被 `FS_PRIMITIVE_ERRORS` 吞掉，于是每个真实可读的原件都被记进 `unreadable_files`
+# 而不报错。fixture 若全写 ASCII，这道门零判别力。
+def populate(paths, content: bytes = b"GRIB\xff\x00stub") -> None:
     for path in paths:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
@@ -248,6 +252,30 @@ def test_symlink_expected_paths_count_as_missing(tmp_path, kind):
     assert verdict.complete is False
     assert verdict.missing_files == (victim,)
     assert verdict.unreadable_files == ()
+
+
+def test_symlink_to_regular_file_counts_as_present(tmp_path):
+    """判据是「**跟随** symlink 后仍须是普通文件」，两半都要取证。
+
+    上一个用例只行使了"仍须是普通文件"那一半；这里行使"跟随"那一半：若实现改用
+    `lstat()`，symlink 自身不是普通文件，这个真实存在、真实可读的原件会被误判成缺失。
+    目标文件是 cycle 目录内的一个游离文件，不属预期集（判定期不列目录，故无副作用）。
+    """
+    expected = literal_expected(tmp_path, "gfs", GFS_LEADS, GFS_BUNDLES)
+    populate(expected)
+    victim = expected[1]
+    victim.unlink()
+    target = victim.parent / "actual-payload.grib2"
+    populate((target,))
+    victim.symlink_to(target)
+    assert victim.is_symlink()
+
+    verdict = judge(tmp_path, "gfs", CYCLE, make_config())
+
+    assert verdict.complete is True
+    assert verdict.missing_files == ()
+    assert verdict.unreadable_files == ()
+    assert verdict.expected_files == expected
 
 
 @pytest.mark.skipif(

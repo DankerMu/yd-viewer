@@ -40,7 +40,7 @@ SOURCES: tuple[str, ...] = ("ifs", "gfs")
 #   `_STORAGE_SOURCE_IDS = {"GFS": "gfs", "ERA5": "ERA5", "IFS": "IFS"}`
 # （NWM@8ae9b8f2 packages/common/source_identity.py:5-9）刻意让 GFS 落**小写**、
 # IFS 落**大写**，两个 adapter 的默认 `source_id` 与之一致且 IFS 的 `local_key` 逐字
-# 使用（ifs_adapter.py:181、:621-623），object store 侧不做任何大小写归一。目录段即
+# 使用（ifs_adapter.py:182、:622-624），object store 侧不做任何大小写归一。目录段即
 # `raw/{source_id}/{compact_cycle}/{bundle_filename}`（gfs_adapter.py:615）中的
 # `source_id`。大小写敏感的 Linux NFS 上把 IFS 写成小写会让该源恒判不完整。
 # 本映射与 yd 自己产物侧的小写 `source`（docs/products-contract.md §5）无关。
