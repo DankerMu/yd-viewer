@@ -225,7 +225,7 @@ Surfaces:
 Regression rows:
 - 每个新增快照文件（源与测试） -> 前 5 行内存在一条 `#` 注释行，其内容含 `NWM@8ae9b8f2 <该文件在清单里的原路径>`。**正反向必须共用同一个「什么算溯源头部」的谓词**：注释形式（规格「原路径注释」的字面要求）+ 行预算只作用于正向。守卫自身不得出现第二份口径——round 1（位置维度）与 round 2（形式维度）两次失守都源于正反向各有一套定义
 - `yd_producer`/`producer/tests` 内任一文件带上述谓词命中的溯源注释、却不在清单路径表内 -> 检查测试失败（反向守卫，无行预算，保证后续组落地必须登记）。反向侧刻意锚在注释行而非裸串：裸串会命中守卫文件自身拼出的 `PROVENANCE_MARKER` 常量，逼出第二份手工豁免名单
-- `store/`、`raw/` 全目录 grep `psycopg|DATABASE_URL|scheduler|registry|os.getenv|os.environ` -> 零命中
+- `store/`、`raw/` 全目录跑 Required evidence 里以 `禁区 grep：` 开头的那一条命令 -> 零命中。**本行刻意不复述词表**：先前这里另写了一份 6 词表（缺 `journal`、`reservation`），与 `禁区 grep：` 的 8 词表内容不一致，构成同一禁区面的两份互相矛盾的声明（round-4 修复轮报出）。词表的唯一真源是 `禁区 grep：` 那一行，测试侧由 `_declared_forbidden_surfaces()` 从该行解析、并断言全文恰有一处该锚点。
 - **pin 等价性（`剥离点` 为 `无` 或仅注释改写的四行）**：`producer/src/yd_producer/store/object_path.py`、`store/safe_fs.py`、`producer/tests/test_data_adapter_resolution.py`、`store/object_store.py`，各自 `diff` `git -C <NWM 本地 checkout> show 8ae9b8f29c8b72c574e8cbd95f2994160bd42832:<清单该行原路径>`，忽略新增的溯源头部与 import 路径改写（`packages.common.*`/`workers.data_adapters.*` → `yd_producer.*`）、object_store 行 `剥离点` 点名改写的那条注释，**以及一批纯换行重排（如 `_DIR_FLAGS`）**——该重排面是 round-4 实测补记的，先前的忽略清单漏了它。因此本行钉的是 **AST 全等**（`ast.dump(parse(pin)) == ast.dump(parse(本仓))`，round 4 对 `safe_fs.py` 与 `object_path.py` 实测为 `True`），**不是字节等价**；先前写作「字节等价」不准。抽取/改写式的七行（`:40` source_identity、`:41` manifest、`:42` cycle_hours、`:43` region、`:50` test_safe_fs、`:51` test_object_path、`:52` test_source_identity）不适用本行，其等价证据是实现者的逐文件剥离点符合性说明
 - `normalize_source_id("IFS"/"ifs"/"Ifs")` -> `"ifs"`；`normalize_source_id("ERA5")` -> 抛错（ERA5 条目已删）
 - `ManifestEntry`/`DownloadManifest` 的 `as_dict` → `from_dict` roundtrip -> 字段等价
