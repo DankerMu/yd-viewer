@@ -179,13 +179,13 @@ yd-producer run
 
 输入是外部受控、Git ignored 的 yd 基线模型包，其路径经 `prepare --baseline` 在调用时传入，**不进入 `config.toml` 也不进入 `local.toml`**：`prepare` 是一次性、需当前任务明确授权的人工操作（agent-ops §8.1），把只被它消费一次的路径做成常驻必需字段，等于要求 `init`/`run` 也填一个它们从不读的现场值。流程：
 
-1. 检查 `YD_ROOT/input/models/yd_gfs` 与 `yd_ifs` 均不存在；任一存在即拒绝，不提供覆盖参数；
+1. 检查本次将要写的**全部四个终名**——两个变体目录（路径取自 `config.toml` 的 `variants.gfs`/`variants.ifs`，相对 `yd_root`）与两份 viewer GeoJSON `input/viewer/rivers.geojson`、`input/viewer/boundary.geojson`——均不存在；任一存在即拒绝，不提供覆盖参数。被检查的路径与提交时实际写入的路径必须同源计算；
 2. 在 scratch 中通过薄外壳调用 NWM mapping-builder；
 3. 按 GFS、IFS 各自 canonical grid 生成两份 binding、重写后的 `sp.att` 和 forcing station 索引；
 4. 生成完整运行变体 `yd_gfs`、`yd_ifs`；两者水文参数和率定状态来自同一基线，但网格 binding 不共用；
 5. 从基线 GIS 生成 EPSG:4326 的 `rivers.geojson` 与 `boundary.geojson`；
-6. 将两个变体和两个 GeoJSON 提交到 NFS；
-7. 删除 scratch 中间物。
+6. 把校验通过的产物搬运到 `YD_ROOT` 之内的本次专属 staging 位置（按发布权限新建条目，不把计算节点的 uid/gid/mode 带进 NFS），再逐个 rename 到四个终名——rename 的源与终名必须同一文件系统，故不能直接把 scratch 目录 rename 过去（scratch 在计算节点本地盘、`YD_ROOT` 在 NFS）；
+7. 删除 scratch 中间物与该 staging 位置（无论成败）。
 
 运行根只保留两个运行变体，不长期保留基线包。基线模型包的现场路径和归档方式由实施方管理，不进入 Git；`--baseline` 是必需参数，代码不内置任何默认路径。本项目不额外维护人工填写的模型包总 checksum。
 
