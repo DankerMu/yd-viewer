@@ -72,6 +72,25 @@ LEAD_FIELD = "lead"
 # 否则该过滤在生产上恒为空操作。
 GFS_F000_UNAVAILABLE_VARIABLES: frozenset[str] = frozenset({"apcp", "dswrf"})
 
+# 文件系统原语（`Path.stat()` / `open()`）的**全部**异常面，共两条腿：调用到了系统调用
+# 但失败抛 `OSError`（errno 类），路径本身根本递不进系统调用（含 NUL 字符、不可编码）
+# 抛 `ValueError`。任何原语调用点 MUST 一次性收敛这个常量，MUST NOT 逐个 errno/异常
+# 类型地补——被本模块替换掉的 `Path.is_file()` 内部同样是这两条腿（CPython 3.12
+# pathlib：`except OSError`（经 `_ignore_error` 过滤）与 `except ValueError`），漏掉
+# 任一条就是把它原本吞掉的输入变成从 `judge` 穿出的裸异常。
+FS_PRIMITIVE_ERRORS: tuple[type[Exception], ...] = (OSError, ValueError)
+
+# 上一常量中归入「该路径下不可能有普通文件」而非「有东西但访问不到」的那些：路径某段
+# 不存在（ENOENT）、中途遇到非目录（ENOTDIR）、以及路径无法递给系统调用（NUL/不可
+# 编码，`ValueError`）——第三者与断链 symlink 同类，故与前两者一并归 `missing`，这也
+# 逐字复现了 `Path.is_file()` 对同一输入返回 False 的行为。其余 `OSError` 归
+# `unreadable`。
+FS_MISSING_ERRORS: tuple[type[Exception], ...] = (
+    FileNotFoundError,
+    NotADirectoryError,
+    ValueError,
+)
+
 
 @dataclass(frozen=True, kw_only=True)
 class ScanVerdict:
@@ -234,7 +253,7 @@ def _is_readable(path: Path) -> bool:
     try:
         with open(path, "rb") as handle:
             handle.read(1)
-    except OSError:
+    except FS_PRIMITIVE_ERRORS:
         return False
     return True
 
@@ -255,9 +274,9 @@ def _check(path: Path) -> str:
     """
     try:
         status = path.stat()
-    except (FileNotFoundError, NotADirectoryError):
+    except FS_MISSING_ERRORS:
         return "missing"
-    except OSError:
+    except FS_PRIMITIVE_ERRORS:
         return "unreadable"
     if not stat_module.S_ISREG(status.st_mode):
         # 目录、指向目录的 symlink 与其它非普通文件都算缺失（`is_file()` 语义）；
@@ -361,7 +380,16 @@ def judge(
             f"raw_root 必须是 str 或 os.PathLike，实际 {type(raw_root).__name__}"
         ) from exc
     if not root.is_absolute():
-        root = Path.cwd() / root
+        # `Path.cwd()`（即 `os.getcwd()`）是相对路径提升的唯一汇流处，也是本函数里
+        # 最后一个未收敛的原语：进程 cwd 被删除/不可访问时它抛 `OSError`。相对
+        # `raw_root` 本就是调用方配置面的取值，故归 `ConfigError`。
+        try:
+            root = Path.cwd() / root
+        except FS_PRIMITIVE_ERRORS as exc:
+            raise ConfigError(
+                f"无法把相对 raw_root {os.fspath(raw_root)!r} 提升为绝对路径："
+                f"当前工作目录不可用（{exc}）"
+            ) from exc
 
     source_config: RawSourceConfig = getattr(config.raw, source)
     # 目录段由 `SOURCE_DIR_NAMES` 翻译得到，MUST NOT 直接用入参 `source`：IFS 的

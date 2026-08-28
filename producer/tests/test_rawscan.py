@@ -360,10 +360,16 @@ def test_cycle_hours_outside_domain_rejected(tmp_path):
 
 
 def test_empty_cycle_hours_rejected(tmp_path):
+    """空 `cycle.hours` 必须由**取值域**那道门拒掉，且它排在词表校验之前。
+
+    故意配一个词表外的 `source`：若删掉空列表守卫，`cycle.hour not in ()` 那道请求门
+    会给出同样的 `path == "cycle.hours"`（零判别力）；而在词表外 source 下，删掉守卫
+    后先抛的是 source 词表错误（`path is None`），用例即变红。
+    """
     config = make_config(cycle_hours=())
 
     with pytest.raises(ConfigError) as excinfo:
-        judge(tmp_path, "gfs", CYCLE, config)
+        judge(tmp_path, "ecmwf", CYCLE, config)
 
     assert excinfo.value.path == "cycle.hours"
 
@@ -493,7 +499,11 @@ def test_named_zero_offset_timezone_accepted(tmp_path, label, tzinfo):
         ("unknown_named", "gfs.{member}.f{lead:03d}.grib2", "member"),
         ("auto_positional", "gfs.{}.f{lead:03d}.grib2", ""),
         ("indexed_positional", "gfs.{0}.f{lead:03d}.grib2", "0"),
-        ("attribute_access", "gfs.f{lead.real:03d}.grib2", "lead.real"),
+        # 模式里另含一个裸 `{lead}`：否则 `fields` 只有 `lead.real`，"必须含
+        # `{lead}`"那道门会先拦下它，而两道门的报文都含模式本身与 `lead.real`
+        # 子串，本参数就分不出词表门在不在（削弱词表门后 `(0).real` 正常渲染，
+        # judge 直接返回 verdict，用例变红）。
+        ("attribute_access", "gfs.f{lead:03d}.{lead.real}.grib2", "lead.real"),
         ("broken_syntax", "a{lead", None),
         ("bad_format_spec", "gfs.f{lead:s}.grib2", None),
     ],
@@ -524,7 +534,6 @@ def test_bundle_pattern_vocabulary_enforced(tmp_path, label, pattern, field):
         ("parent_escape", "../{lead:03d}.grib2"),
         ("subdirectory", "sub/{lead:03d}.grib2"),
         ("absolute", "/etc/{lead:03d}.grib2"),
-        ("dotdot_only", ".."),
     ],
 )
 def test_bundle_pattern_must_render_single_filename(tmp_path, label, pattern):
@@ -657,18 +666,27 @@ def test_expected_set_must_be_injective(tmp_path, label, source_kwargs, dotted_p
 
 
 @pytest.mark.parametrize(
-    ("label", "pattern"),
+    ("label", "pattern", "rendered"),
     [
-        # `{lead!r:.0}` 把 lead 转成 str 后截断到 0 位精度，渲染出空串；模式本身含
-        # `{lead}`，故它越过"必须含 {lead}"那道门，专测渲染结果的单文件名约束。
-        ("renders_empty", "{lead!r:.0}"),
-        ("renders_dot", "{lead!r:.0}."),
+        # `{lead!r:.0}` 把 lead 转成 str 后截断到 0 位精度，渲染出空串；三个模式都含
+        # `{lead}`，故都越过"必须含 {lead}"那道门，专测渲染结果的单文件名约束。
+        ("renders_empty", "{lead!r:.0}", ""),
+        ("renders_dot", "{lead!r:.0}.", "."),
+        ("renders_dotdot", "{lead!r:.0}..", ".."),
     ],
 )
-def test_bundle_pattern_rendering_to_empty_or_dot_rejected(tmp_path, label, pattern):
-    """`lead_hours` 取单元素：多 lead 下这两个模式会撞进单射性那道门，本用例就无法
-    证伪渲染结果的单文件名约束（实测：去掉该约束后多 lead 版本仍全绿）。"""
-    assert pattern.format(lead=0) in {"", "."}
+def test_bundle_pattern_rendering_to_degenerate_name_rejected(
+    tmp_path, label, pattern, rendered
+):
+    """`""`/`"."`/`".."` 三个退化取值都必须被单文件名约束拒。
+
+    构造上有两处刻意：模式 MUST 含 `{lead}`（裸 `".."` 会先被"必须含 `{lead}`"那道门
+    拦下，而"抛 `ConfigError` 且 `path` 为 bundles 点分路径"在两道门下同样成立，于是
+    对本约束零判别力）；`lead_hours` MUST 取单元素（多 lead 下这些模式会撞进单射性
+    那道门）。断言里比对渲染结果的 `repr` 也是为此：它把本门的报文与 `{lead}` 门的
+    报文区分开。
+    """
+    assert pattern.format(lead=0) == rendered
     config = make_config(
         gfs=make_source(
             lead_hours=(0,),
@@ -682,6 +700,7 @@ def test_bundle_pattern_rendering_to_empty_or_dot_rejected(tmp_path, label, patt
         judge(tmp_path, "gfs", CYCLE, config)
 
     assert excinfo.value.path == "raw.gfs.bundles"
+    assert repr(rendered) in str(excinfo.value)
 
 
 # --- lead 升序（字面 oracle，不复用助手内的 sorted）--------------------------
@@ -813,6 +832,29 @@ def _reject_case_configs():
                 gfs=make_source(lead_hours=GFS_LEADS, bundles=("sub/{lead:03d}.grib2",))
             ),
         ),
+        (
+            "pattern_renders_dotdot",
+            "gfs",
+            CYCLE,
+            make_config(gfs=make_source(lead_hours=(0,), bundles=("{lead!r:.0}..",))),
+        ),
+        (
+            "colliding_bundles",
+            "gfs",
+            CYCLE,
+            make_config(
+                gfs=make_source(
+                    lead_hours=GFS_LEADS,
+                    bundles=("gfs.f{lead:03d}.grib2", "gfs.f{lead:0>3d}.grib2"),
+                )
+            ),
+        ),
+        (
+            "duplicate_lead_hours",
+            "gfs",
+            CYCLE,
+            make_config(gfs=make_source(lead_hours=(0, 3, 3), bundles=GFS_BUNDLES)),
+        ),
     ]
 
 
@@ -824,32 +866,57 @@ def _reject_case_configs():
 def test_rejections_happen_before_any_filesystem_access(
     tmp_path, monkeypatch, label, source, cycle, config
 ):
-    """哨兵取证：把全部文件系统入口换成必炸的桩。
+    """哨兵取证：把文件系统入口换成必炸的桩，且**桩在 `os` 层**。
 
-    只以"不存在的 `raw_root`"取证不够——实测"先 `rglob` 全树遍历再校验"的变异体在
-    那种断言下全绿，而它同时违反判定顺序与 Resource limits pack 的"MUST NOT 递归
-    遍历"。
+    只以"不存在的 `raw_root`"取证不够——它只杀得掉不吞异常的探针，任何带 `is_dir()`
+    守卫或 `except OSError` 的探针照样存活。
+
+    桩 MUST 落在 `os.stat`/`os.scandir`/`os.listdir` 这三个**汇流处**，MUST NOT 只点
+    名 pathlib 侧的某个方法：`pathlib.Path.stat` 就是 `return os.stat(self, ...)`、
+    `os.walk` 经 `os.scandir`，而点名具体拼法的桩会随实现换原语静默变成死桩（本文件
+    上一版桩 `Path.is_file`，实现改用 `Path.stat()` 后五个探针变异体全部存活）。桩体
+    抛 `AssertionError` 而非 `OSError` 也是刻意的：`os.walk` 与 `except OSError` 的
+    探针吞不掉它。pathlib 侧与 `builtins.open` 的桩保留作纵深。
     """
+    monkeypatch.setattr(os, "stat", _boom)
+    monkeypatch.setattr(os, "scandir", _boom)
+    monkeypatch.setattr(os, "listdir", _boom)
     monkeypatch.setattr(Path, "is_file", _boom)
     monkeypatch.setattr(Path, "iterdir", _boom)
     monkeypatch.setattr(Path, "rglob", _boom)
     monkeypatch.setattr(Path, "glob", _boom)
     monkeypatch.setattr(builtins, "open", _boom)
 
-    with pytest.raises(ConfigError):
-        judge(tmp_path, source, cycle, config if config is not None else make_config())
+    try:
+        with pytest.raises(ConfigError):
+            judge(
+                tmp_path, source, cycle, config if config is not None else make_config()
+            )
+    finally:
+        # 显式在用例体内撤桩：`os.stat` 是全局名，桩若活到 fixture 拆卸期会连 pytest
+        # 自己的 tmp_path 清理一起炸掉，把"用例红了"污染成整场会话的噪声。
+        monkeypatch.undo()
 
 
 def test_happy_path_never_lists_directories(tmp_path, monkeypatch):
-    """预期集严格由 `lead_hours × bundles` 构造：判定期一次目录枚举都不发生。"""
+    """预期集严格由 `lead_hours × bundles` 构造：判定期一次目录枚举都不发生。
+
+    只桩**枚举**原语（`os.scandir`/`os.listdir` 及 pathlib 侧拼法），MUST NOT 桩
+    `os.stat`/`Path.stat`：逐文件 stat 正是 happy path 的规定行为。
+    """
     expected = literal_expected(tmp_path, "gfs", GFS_LEADS, GFS_BUNDLES)
     populate(expected)
+    monkeypatch.setattr(os, "scandir", _boom)
+    monkeypatch.setattr(os, "listdir", _boom)
     monkeypatch.setattr(Path, "iterdir", _boom)
     monkeypatch.setattr(Path, "rglob", _boom)
     monkeypatch.setattr(Path, "glob", _boom)
     monkeypatch.setattr(Path, "walk", _boom)
 
-    verdict = judge(tmp_path, "gfs", CYCLE, make_config())
+    try:
+        verdict = judge(tmp_path, "gfs", CYCLE, make_config())
+    finally:
+        monkeypatch.undo()
 
     assert verdict.expected_files == expected
     assert verdict.complete is True
@@ -899,3 +966,83 @@ def test_unsearchable_cycle_directory_is_unreadable_not_an_exception(tmp_path):
     assert verdict.complete is False
     assert verdict.unreadable_files == expected
     assert verdict.missing_files == ()
+
+
+def test_regular_file_at_cycle_directory_position_is_missing(tmp_path):
+    """`<cycle>` 位置上是普通文件（NWM 半写、人工误放、`raw_root` 配错一层）。
+
+    与上一个用例成对，钉死第 4 段的**两支分类**：`stat` 的 `NotADirectoryError`
+    （ENOTDIR）归 `missing_files`，其余 `OSError` 归 `unreadable_files`。只有 ENOENT
+    与 EACCES 的用例分不出 `NotADirectoryError` 落在哪一支——把它从 missing 支删掉，
+    那两个用例照样全绿。macOS/Linux 对 `stat("<普通文件>/child")` 均抛
+    `NotADirectoryError`，无平台依赖。
+    """
+    expected = literal_expected(tmp_path, "gfs", GFS_LEADS, GFS_BUNDLES)
+    impostor = cycle_dir(tmp_path, "gfs")
+    impostor.parent.mkdir(parents=True)
+    impostor.write_bytes(b"not a directory")
+
+    verdict = judge(tmp_path, "gfs", CYCLE, make_config())
+
+    assert verdict.complete is False
+    assert verdict.missing_files == expected
+    assert verdict.unreadable_files == ()
+
+
+# --- 文件系统原语的异常面全部收敛（judge 对外只抛 ConfigError）---------------
+
+
+def test_nul_in_bundle_pattern_does_not_leak_valueerror(tmp_path):
+    """NUL 走的是文件系统原语的**第二条腿**：`ValueError`，不是 `OSError`。
+
+    `tomllib` 接受 TOML 的 `\\u0000` 转义并产出含 NUL 的 str，装载器只做类型校验，
+    故这是配置能承载的真实输入。含 NUL 的路径递不进系统调用，`Path.stat()`/`open()`
+    抛裸 `ValueError`；被本模块替换掉的 `Path.is_file()` 原本把它吞成 False，漏接即
+    是回归——`judge` 对外只抛 `ConfigError`，"不完整"必须以 verdict 返回。
+    """
+    pattern = "gfs.f{lead:03d}\x00.grib2"
+    config = make_config(
+        gfs=make_source(
+            lead_hours=GFS_LEADS,
+            variables=GFS_VARIABLES,
+            bundles=(pattern,),
+            f000_special=True,
+        )
+    )
+    populate(literal_expected(tmp_path, "gfs", GFS_LEADS, GFS_BUNDLES))
+
+    verdict = judge(tmp_path, "gfs", CYCLE, config)
+
+    assert verdict.complete is False
+    assert verdict.missing_files == verdict.expected_files
+    assert verdict.unreadable_files == ()
+    assert all("\x00" in path.name for path in verdict.expected_files)
+
+
+def test_nul_in_raw_root_does_not_leak_valueerror(tmp_path):
+    """第二条腿的第二个入口：`raw_root` 自身含 NUL。
+
+    这支**根本不经过** `_render`，故只在渲染侧加 NUL 守卫关不掉它；收敛必须落在
+    文件系统原语的调用点上。
+    """
+    verdict = judge(f"{tmp_path}\x00", "gfs", CYCLE, make_config())
+
+    assert verdict.complete is False
+    assert verdict.missing_files == verdict.expected_files
+    assert verdict.unreadable_files == ()
+
+
+def test_unavailable_cwd_is_configerror_not_bare_oserror(tmp_path, monkeypatch):
+    """相对 `raw_root` 的提升点 `Path.cwd()`（即 `os.getcwd()`）同样是原语。
+
+    进程 cwd 被删除后 `os.getcwd()` 抛 `OSError`；不收敛就会以裸异常穿出 `judge`。
+    """
+    doomed = tmp_path / "doomed-cwd"
+    doomed.mkdir()
+    monkeypatch.chdir(doomed)
+    doomed.rmdir()
+
+    with pytest.raises(ConfigError) as excinfo:
+        judge("raw-root", "gfs", CYCLE, make_config())
+
+    assert excinfo.value.path is None
