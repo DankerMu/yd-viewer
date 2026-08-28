@@ -105,7 +105,7 @@ def init(local: LocalConfig, config: Config) -> int:
 
 
 def run(local: LocalConfig, config: Config) -> int:
-    """`run`：状态目录守卫为真实实现；控制器循环归任务 12.1 起的组 12–13。
+    """`run`：状态目录守卫为真实实现；控制器循环归组 12–14，入口体承接者是任务 14.1。
 
     spec「run 永不自动 bootstrap」：`states/` 缺失或为空即报错停止，MUST NOT 调用 init
     逻辑，MUST NOT 自建该目录。
@@ -113,7 +113,7 @@ def run(local: LocalConfig, config: Config) -> int:
     guard = _check_states_dir(Path(local.yd_root) / "states")
     if guard is not None:
         return _fail(guard)
-    return _unimplemented("run", "12.1（run 控制器：前沿发现与锁）")
+    return _unimplemented("run", "14.1（run 主循环集成：`run_once` 骨架）")
 
 
 def _check_states_dir(states: Path) -> str | None:

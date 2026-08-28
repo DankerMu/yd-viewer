@@ -203,3 +203,36 @@ def test_pythonpath_prepends_checkout_without_dropping_inherited(tmp_path, monke
         str(checkout),
         "/inherited/path",
     ]
+
+
+def test_symlinked_interpreter_is_invoked_verbatim_not_resolved(tmp_path):
+    """`nwm.python` 是 symlink 时，被调用的必须是 symlink 本身，而非其解析目标。
+
+    生产里 `nwm.python` 就是 `<checkout>/.venv/bin/python`——一个指向仓外真身的 symlink，
+    而 venv 激活取决于 `pyvenv.cfg` 与**被调用**的那个二进制同目录；调用 `resolve()` 后
+    的目标会丢掉 NWM 的 site-packages，等价于 agent-ops §7.2 明禁的"回退到系统 Python"。
+
+    判别力全在"symlink 名与目标名不同"这一条：上面几条用例的 `argv[0]` 期望值都经
+    `endswith(str(script))` / `Path(...).name == script.name` 行使，在 fixture 里
+    `resolve()` 恰是恒等变换，故把 `check_interpreter` 的 `return configured` 换成
+    `return str(candidate.resolve())` 时全套仍全绿。这里让两个名字不同，只有原样返回
+    才对。
+    """
+    checkout = tmp_path.resolve() / "checkout"
+    checkout.mkdir()
+    record = tmp_path.resolve() / "record-symlink.json"
+    target = write_fake_interpreter(tmp_path.resolve() / "real-python-target", record)
+    venv_bin = tmp_path.resolve() / "nwm-venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    link = venv_bin / "python"
+    link.symlink_to(target)
+    assert link.name != target.name
+    assert link.resolve() == target
+
+    local, config = _load(tmp_path, checkout_root=checkout, python=link)
+    completed = invoke_mapping_builder(local, config, [], CountingRunner())
+
+    assert completed.returncode == 0
+    recorded = json.loads(record.read_text(encoding="utf-8"))
+    assert recorded["argv"][0] == str(link)
+    assert recorded["argv"][0] != str(target)

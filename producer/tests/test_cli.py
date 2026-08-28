@@ -296,7 +296,7 @@ def test_run_with_non_empty_states_reaches_staged_unimplemented(
 
     assert _exit_code(argv, env={}) == 3
 
-    assert "12.1" in capsys.readouterr().err
+    assert "14.1" in capsys.readouterr().err
     assert init_fake.count == 0
 
 
