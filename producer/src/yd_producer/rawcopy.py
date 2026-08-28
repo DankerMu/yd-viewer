@@ -120,6 +120,16 @@ ERROR_KINDS: frozenset[str] = frozenset(
     }
 )
 
+# 准入期收口器（`stage_raw` 的 floor）给未分类异常安的 kind。取 `source-manifest`
+# 而不是新造第十项：九项词表由 tasks.md 任务 3.2 fixture 钉死；而准入段里**入参面**
+# 的形态（source/cycle/config/路径）在任何外部读取之前就已由 `_validate_params`、
+# `_absolute`、`_normalized` 以 `ConfigError` 拦掉，verdict 面由 `verdict-mismatch`
+# 拦掉，故能走到兜底的余下形态以「源 manifest 这份外部 JSON 的值」为主——实测逃逸的
+# 两条（`int(1e400)` 的 `OverflowError`、深嵌套 `json.load` 的 `RecursionError`）都在
+# 该面上。这是一条判断，不是推论：兜底给的是**地板**，各消费点自己的 except 仍在，
+# 落到这里就意味着「没有更准的归类」。
+ADMISSION_FALLBACK_KIND = "source-manifest"
+
 # 复制的分块大小：raw bundle 是几十至数百 MB 的 GRIB2，不整读进内存。
 COPY_CHUNK_BYTES = 1024 * 1024
 
@@ -142,6 +152,24 @@ class RawStagingError(Exception):
             raise ValueError(f"RawStagingError.kind 取值非法：{kind!r}")
         super().__init__(message)
         self.kind = kind
+
+
+def _safe_repr(value: Any) -> str:
+    """`repr()` 的不抛版本，供**异常处理路径**上的消息拼装使用。
+
+    `repr` 本身可以抛：一个 `__repr__` 抛异常的自定义 exception 会让
+    `f"{exc!r}"` 在 handler 内部炸掉，于是「保证不抛」的 `rollback`、以及把异常
+    收敛成 `RawStagingError` 的两个收口器，都会在它们**自己的**兜底逻辑里失守
+    （round-3 verifier 实测：`_Written._remove` 的 `{exc!r}` 让 `rollback` 抛
+    `RuntimeError`）。凡在 handler 内部对**外来对象**取 repr，一律走本函数。
+    """
+    try:
+        return repr(value)
+    except BaseException:  # noqa: BLE001 —— 本函数的存在意义就是吞掉它
+        try:
+            return f"<{type(value).__name__} 对象，repr() 自身抛异常>"
+        except BaseException:  # noqa: BLE001 —— 连类型名都取不到的病态对象
+            return "<无法取 repr 的对象>"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -219,7 +247,11 @@ def _contains_by_identity(outer: Path, inner: Path) -> bool:
     **保留调用方给的非链组件大小写**，于是在大小写不敏感的卷（darwin 默认、部分
     NFS 导出）上 `<b>/NWM-RAW/work` 与 `<b>/nwm-raw` 归一后仍是两条不相交的字符串，
     而它们物理上是同一棵树。inode 身份是唯一对**任何**别名机制（大小写折叠、硬链接
-    目录、将来的卷特性）都成立的判据。
+    目录）都成立的判据——但作用域到**同一挂载实例**为止：`os.path.samestat` 比的是
+    `(st_dev, st_ino)`，而 `st_dev` 标识超级块，同一棵树被挂成两个超级块时两侧
+    `st_dev` 不等、本判据不成立。跨超级块的互含形态不在本函数作用域内（生产拓扑
+    上 `raw_root` 是只读 NFS、`work_dir` 在 scratch，分属两棵树，见 `agent-ops`
+    §4.2/§4.3），MUST NOT 据此在本模块新增挂载实例探测。
 
     走查放在**调用方一侧**（work/raw 两个根互查），MUST NOT 改用 `_reject_symlinks`
     式的目标侧逐段检查：那是 issue #71 的工具，且按设计跳过根本身（生产上 NFS 挂载
@@ -374,6 +406,42 @@ def _reject_symlinks(raw_root: Path, source_path: Path) -> None:
 # --- 2. 源 manifest 承接 ------------------------------------------------------
 
 
+def _reject_lossy_forecast_hours(payload: Mapping[str, Any], path: Path) -> None:
+    """entry 级 `forecast_hour` 的**形态闸门**，在 `from_dict` 之前对**原始**值判。
+
+    必须在 `from_dict` 之前：`ManifestEntry.from_dict`（`raw/manifest.py:197`）对该
+    字段做 `int(value["forecast_hour"])`，`3.9 -> 3`、`"3" -> 3`、`True -> 1`
+    全部**静默有损归一**，之后再看 `entry.forecast_hour` 已经是归一后的 `int`，原始
+    形态不可恢复。而该字段随后被 `_index_source_entries` 当作 `(lead, variable)` 的
+    **键**用，于是一条 `"forecast_hour": 3.9` 的影子 entry 会占住真实 lead 3 的槽位，
+    把自己的 `remote_url` 与六键喂进产出 manifest，且 staging **正常成功**——这是本
+    模块唯一一条「成功返回 + 输出静默错误」的路径（round-3 verifier 实测四种形态）。
+    `tasks.md:349` 把该类型校验明确路由给消费端自建（pin 文件 `raw/manifest.py` 不改），
+    `tasks.md:339` 指明本信封的下游消费就是任务 3.2 = 本模块。
+
+    判据取「`int()` 是否有损」而不是枚举 `float`/`str`/`bool`：严格要求 `int` 且
+    排除 `bool`（`bool` 是 `int` 子类，`int(True) == 1`）。`3.0` 也拒——它同样让
+    「源里写的」与「yd 读到的」不是同一个值，且 pin 侧从不产出浮点 lead。
+    """
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        # 结构面归 `DownloadManifest.from_dict`，本闸门只管形态；缺失/非 list 会在
+        # 下一步以 `源 manifest 的结构不合 NWM DownloadManifest 形态` 报出。
+        return
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, Mapping) or "forecast_hour" not in entry:
+            continue
+        value = entry["forecast_hour"]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise RawStagingError(
+                f"源 manifest {path} 第 {position} 条 entry 的 `forecast_hour` "
+                f"不是整数，实际 {type(value).__name__} {_safe_repr(value)}；"
+                "该字段是 (lead, variable) 的索引键，`int()` 的静默归一会让它占住"
+                "另一个 lead 的槽位",
+                "source-manifest",
+            )
+
+
 def _load_source_manifest(cycle_root: Path) -> DownloadManifest:
     path = cycle_root / SOURCE_MANIFEST_FILENAME
     try:
@@ -392,6 +460,7 @@ def _load_source_manifest(cycle_root: Path) -> DownloadManifest:
             f"源 manifest {path} 的顶层不是对象，实际 {type(payload).__name__}",
             "source-manifest",
         )
+    _reject_lossy_forecast_hours(payload, path)
     try:
         return DownloadManifest.from_dict(dict(payload))
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
@@ -443,8 +512,14 @@ def _index_source_entries(
     `variable` 必须先判形态再当字典键：`ManifestEntry.from_dict` 对该字段**不做**
     任何强制（`forecast_hour` 有 `int(...)`、`metadata` 有 `dict(...)`，`variable`
     原样透传），故一份外部 JSON 里的 `"variable": ["tmp2m"]` 会在建索引时让
-    `dict` 求哈希抛裸 `TypeError`；此处在 `stage_raw` 的 try 块**之前**，三层
-    handler 一条也接不到。见 `_check_accumulation` 的同类说明。
+    `dict` 求哈希抛裸 `TypeError`。
+
+    **本闸门的理由已经不是「否则异常会逃逸」**：`stage_raw` 的准入期收口块（floor）
+    会把整个准入段的任何非词表异常兜成 `RawStagingError`，包括这一条。留着它是因为
+    它给出**更准的 kind 与消息**（哪条 entry、哪个字段、什么类型），而地板只能给一个
+    泛化的 `source-manifest`。地板是**下限**，不是各消费点闸门的替代。
+    （原注释写的「此处在 try 块之前、三层 handler 一条也接不到」在 round-4 之前成立，
+    现已被收口块证伪，故改写——它同时是 round-3 verifier 用来论证 F2 未闭合的那句话。）
     """
     index: dict[tuple[int, str], ManifestEntry] = {}
     for entry in manifest.entries:
@@ -455,7 +530,23 @@ def _index_source_entries(
                 f"`variable` 不是字符串，实际 {type(variable).__name__}",
                 "source-manifest",
             )
-        index[(entry.forecast_hour, variable)] = entry
+        key = (entry.forecast_hour, variable)
+        if key in index:
+            # **injectivity 守卫**：`dict` 赋值天然是「后写覆盖」，于是源 manifest 里
+            # 两条同键 entry 会让后一条静默顶掉前一条，把自己的 `remote_url` 与六键
+            # 喂进产出 manifest，且 staging 正常成功。这与 `forecast_hour` 的形态闸门
+            # 是**两条独立缺陷**（round-3 verifier 实测可分离：纯整数重复键完全不涉及
+            # 归一，一条唯一的 `3.9` entry 完全不涉及重复），任一条单独修都关不掉另
+            # 一条。索引是 (lead, variable) -> entry 的**函数**，源侧不满足单射就
+            # fail closed，MUST NOT 由本模块替源 manifest 挑一条。
+            raise RawStagingError(
+                f"源 manifest {cycle_root / SOURCE_MANIFEST_FILENAME} 有多条 "
+                f"(forecast_hour={entry.forecast_hour}, variable={variable!r}) "
+                "的 entry；(lead, variable) 必须唯一确定一条 entry，"
+                "不得由本模块静默取其一",
+                "source-manifest",
+            )
+        index[key] = entry
     return index
 
 
@@ -523,9 +614,10 @@ def _check_accumulation(metadata: Mapping[str, Any], lead: int, variable: str) -
     if not isinstance(accumulation_type, str):
         # 形态先于取值域：源 manifest 是外部 JSON，`"accumulation_type": ["x"]` 是
         # 合法 JSON、反序列化成 `list`，而下一行的 `x not in frozenset(...)` 要对它
-        # 求哈希，于是抛裸 `TypeError`。本闸门在 `stage_raw` 的 try 块**之前**执行
-        # （`_build_entries` 整段都是），三层 handler 一条也接不到，裸异常直接逃出
-        # 九项闭合词表。同类出口另有 `_index_source_entries` 的 `variable`。
+        # 求哈希，于是抛裸 `TypeError`。裸异常本身已由 `stage_raw` 的准入期收口块
+        # 兜住（round-4），故本闸门的理由是**更准的 kind**：这里报
+        # `accumulation-metadata` 并指名字段，地板只能给泛化的 `source-manifest`。
+        # 同类出口另有 `_index_source_entries` 的 `variable`。
         # §3.1 对该字段无任何类型约束——「pin 不会写 list」是对生成器的观察，不是
         # 对 yd 所读的那份落盘 JSON 的保证。
         raise RawStagingError(
@@ -653,7 +745,9 @@ class _Written:
             # 本轮可能根本没被建出来。它们不是残留，记成失败会让消息反向说谎。
             pass
         except Exception as exc:  # noqa: BLE001 —— 见 `rollback` 的不抛保证
-            failures.append(f"{path}（{exc!r}）")
+            # `_safe_repr` 而不是 `{exc!r}`：`repr` 自身可以抛，那会让本 handler——
+            # 也就是 `rollback`「保证不抛」的兑现处——反过来抛出异常。
+            failures.append(f"{path}（{_safe_repr(exc)}）")
 
     def rollback(self) -> tuple[str, ...]:
         """清理本轮 work 侧写入；**保证不抛**，把失败逐条返回给调用方外抛。
@@ -662,8 +756,16 @@ class _Written:
         运行在**已有异常正在外抛**的上下文中，它自己抛出的任何异常会**替换**那个
         异常——round-2 verifier 实测过一条纯入参路径（NUL 字节的 `work_dir` 让
         `os.rmdir` 抛裸 `ValueError`），裸异常因此顶掉正在构造的 `RawStagingError`
-        并逃出九项闭合词表；三层 handler 一条也拦不住 `rollback` 自己。收口点因此
-        只能在 `rollback` 内部，而不是在某一层 handler 上加一条 `except`。
+        并逃出九项闭合词表；写入期那三层 handler 一条也拦不住 `rollback` 自己
+        （准入期的收口块同样拦不住——`rollback` 只在写入期运行）。收口点因此只能在
+        `rollback` 内部，而不是在某一层 handler 上加一条 `except`。
+
+        「保证不抛」的**作用域**（round-3 verifier 实测过它低一层的洞）：逐条移除走
+        `_remove`，其 `except Exception` 覆盖被调原语抛出的任何非 `BaseException`；
+        失败文案的插值走不抛的 `_safe_repr`，故「被吞的异常自己的 `repr` 抛异常」
+        这一形态也在内。仍在作用域**之外**的只有 `BaseException`（有意：Ctrl-C MUST
+        传播）与本方法自身控制流所用的 stdlib 原语（`sorted`/`len`/`reversed`）——
+        后者的操作数是本模块自己登记的 `Path`，不是外部值。
 
         与之配对的是**不静默**：吞掉失败但不报告，等于把无条件的「不留任何部分
         产物」私自降级成尽力而为，且让 tier-2 的「已清理本轮 work 侧写入」变成假
@@ -866,105 +968,140 @@ def stage_raw(
     说「不跟随」的那条链。序列化排在复制**之前**：见 `_render_manifest`。
 
     失败一律抛 `RawStagingError`（`kind` 取自 `ERROR_KINDS`），形参写错抛 `ConfigError`；
+    这条**无前提**的保证由两段收口共同兑现，判据取**位置**而不是异常类型：准入段整体
+    在一个收口块内（块前无裸语句，见块内注释与 `test_rawcopy.py` 的 AST 探针），落进
+    地板的异常收敛成 `ADMISSION_FALLBACK_KIND`；写入段由三层 handler 覆盖。两段都
+    **不吞 `BaseException`**：`KeyboardInterrupt`/`SystemExit` 原样传播，这是本函数唯一
+    一条外抛非 `{ConfigError, RawStagingError}` 的出口，且是有意为之。
     复制/落盘期的**任何**异常（含裸的非 `RawStagingError`）都会先清掉本轮已写入的
     work 侧路径；清理**本身**失败时不静默——`rollback` 保证不抛（否则它会替换正在
     外抛的失败），失败清单进入外抛异常（tier-2 进消息、tier-1/3 进 `add_note`）。
     `raw_root` 之下**零写入**是本函数的硬约束
     （`docs/compute-loop-design.md` §4.1）。
     """
-    if verdict.complete is not True:
-        raise RawStagingError(
-            "verdict.complete 不为 True，拒绝复制："
-            f"缺 {len(verdict.missing_files)} 件、不可读 "
-            f"{len(verdict.unreadable_files)} 件",
-            "incomplete-verdict",
-        )
-    source_config = _validate_params(source, cycle, config)
-    if len(source_config.bundles) != 1:
-        # 单 bundle 约束：`entries` 是 lead × variables 而 `copied_files` 是
-        # lead × bundles，多 bundle 下「变量落在哪个 bundle」在 config 与 ScanVerdict
-        # 里都无处可查，manifest 侧语义不存在（pin 上 bundle 文件名逐 hour 只产一个：
-        # gfs_adapter.py:1878-1880、ifs_adapter.py:1688-1690）。判据取 `len(bundles)`
-        # 本身，不以「渲染出几个文件名」间接判。放开它需要 config 先长出
-        # variable→bundle 映射（归 issue #29 / #32），本 issue 不发明。
-        raise RawStagingError(
-            f"source {source!r} 声明了 {len(source_config.bundles)} 个 bundle 模式；"
-            "manifest 的 (lead, variable, file) 三元组只在恰好一个模式时有定义",
-            "unsupported-layout",
-        )
-
-    raw_path = _absolute(raw_root, "raw_root")
-    work_path = _absolute(work_dir, "work_dir")
-    # 两个入参互相包含时，「只读 raw_root、只写 work_dir」这条硬约束在本函数内部
-    # 不再可能同时成立：副本、目录与失败回滚的 unlink/rmdir 全都会落进 NWM raw 树
-    # （`docs/compute-loop-design.md` §4.1）。这是「调用写错了」，归 `ConfigError`
-    # 而不是第十项 kind——九项词表由 tasks.md 任务 3.2 fixture 钉死。
+    # 准入期收口（floor）。整个准入段——从 `verdict.complete` 到目标不存在预检——
+    # 都在这个 `try` 之内，**没有任何一条准入语句在它之外**：本函数体的第一条语句就
+    # 是这个 `try`，紧随其后的语句是 `written = _Written()`（写入期起点）。该结构由
+    # `test_rawcopy.py` 的 AST 探针机检，任何新增的准入语句只能落在块内。
     #
-    # 判据是**物理**包含，不是词法包含：`is_relative_to` 只比字符串前缀，round-2
-    # verifier 实测三种别名（大小写别名、`work_dir` 自身是链、`..` 段）都能让副本
-    # 落进 raw 树而闸门放行。`resolve()` 关掉后两种、inode 身份关掉第一种，两者
-    # 缺一不可；两个根互为「外/内」各判一次，相等的情形两向都为真。
-    raw_real = _normalized(raw_path, "raw_root")
-    work_real = _normalized(work_path, "work_dir")
-    if (
-        work_real.is_relative_to(raw_real)
-        or raw_real.is_relative_to(work_real)
-        or _contains_by_identity(raw_real, work_real)
-        or _contains_by_identity(work_real, raw_real)
-    ):
-        raise ConfigError(
-            f"work_dir {work_path} 与 raw_root {raw_path} 互相包含"
-            f"（物理路径 {work_real} 与 {raw_real}）；work 必须是 raw 树之外的独立"
-            "目录，否则「raw_root 之下零写入」不可能成立"
-        )
-    rebuilt = _reconstruct_sources(
-        raw_root=raw_path,
-        source=source,
-        cycle=cycle,
-        source_config=source_config,
-        verdict=verdict,
-    )
-    for _, source_path in rebuilt:
-        _reject_symlinks(raw_path, source_path)
-
-    cycle_root = rebuilt[0][1].parent if rebuilt else raw_path
-    source_manifest = _load_source_manifest(cycle_root)
-    declared_hours = _source_forecast_hours(source_manifest, cycle_root)
-    leads = tuple(lead for lead, _ in rebuilt)
-    uncovered = sorted(set(leads) - declared_hours)
-    if uncovered:
-        raise RawStagingError(
-            "源 manifest 声明的 forecast hours 不覆盖本轮 lead "
-            + "、".join(str(lead) for lead in uncovered)
-            + "；不得以副本存在为由声明该轮齐全",
-            "source-manifest",
-        )
-    entries = _build_entries(
-        verdict=verdict,
-        rebuilt=rebuilt,
-        source=source,
-        cycle=cycle,
-        source_index=_index_source_entries(source_manifest, cycle_root),
-    )
-
-    manifest_payload = _render_manifest(
-        source=source,
-        cycle=cycle,
-        leads=leads,
-        entries=entries,
-        cycle_root=cycle_root,
-    )
-
-    targets = tuple(
-        work_path / Path(_local_key(source, cycle, path.name)) for _, path in rebuilt
-    )
-    manifest_path = work_path / MANIFEST_FILENAME
-    for candidate in (*targets, manifest_path):
-        if os.path.lexists(candidate):
+    # 为什么是收口器而不是「在每个消费点补一条 except」：准入段消费的是**外部 JSON**
+    # 与调用方入参，操作数形态无界，按异常类型枚举天然不完备——round 1 的
+    # `UnicodeEncodeError`、round 2 的裸 `ValueError`/`TypeError`、round 3 的
+    # `OverflowError`（`int(1e400)`）与 `RecursionError`（深嵌套 JSON）是同一个类的
+    # 四批实例，每一轮都靠加 `except` 修掉被点名的那几个。这里改判据：不按异常类型，
+    # 按**位置**——准入段抛出的任何非 `{ConfigError, RawStagingError}` 异常一律落地成
+    # 带 kind 的 `RawStagingError`。
+    #
+    # 各消费点**自己的** except 保留：它们给出比兜底更准的 kind（`copy-failed`/
+    # `verdict-mismatch`/`accumulation-metadata`…），本块是**地板**不是替代。
+    #
+    # `BaseException` 不接：`KeyboardInterrupt`/`SystemExit` MUST 照常传播，把 Ctrl-C
+    # 改写成一次 staging 失败是错的（round-2 已就写入期确立同一条）。
+    # `RecursionError` 被接住时栈已随异常传播完成回退，构造异常消息的这一层是
+    # `stage_raw` 自身的帧，递归余量已恢复，故收口本身不会二次触顶。
+    try:
+        if verdict.complete is not True:
             raise RawStagingError(
-                f"目标 {candidate} 已存在；work 是一次性隔离单元，不覆盖、不续跑",
-                "target-exists",
+                "verdict.complete 不为 True，拒绝复制："
+                f"缺 {len(verdict.missing_files)} 件、不可读 "
+                f"{len(verdict.unreadable_files)} 件",
+                "incomplete-verdict",
             )
+        source_config = _validate_params(source, cycle, config)
+        if len(source_config.bundles) != 1:
+            # 单 bundle 约束：`entries` 是 lead × variables 而 `copied_files` 是
+            # lead × bundles，多 bundle 下「变量落在哪个 bundle」在 config 与 ScanVerdict
+            # 里都无处可查，manifest 侧语义不存在（pin 上 bundle 文件名逐 hour 只产一个：
+            # gfs_adapter.py:1878-1880、ifs_adapter.py:1688-1690）。判据取 `len(bundles)`
+            # 本身，不以「渲染出几个文件名」间接判。放开它需要 config 先长出
+            # variable→bundle 映射（归 issue #29 / #32），本 issue 不发明。
+            raise RawStagingError(
+                f"source {source!r} 声明了 {len(source_config.bundles)} 个 bundle 模式；"
+                "manifest 的 (lead, variable, file) 三元组只在恰好一个模式时有定义",
+                "unsupported-layout",
+            )
+
+        raw_path = _absolute(raw_root, "raw_root")
+        work_path = _absolute(work_dir, "work_dir")
+        # 两个入参互相包含时，「只读 raw_root、只写 work_dir」这条硬约束在本函数内部
+        # 不再可能同时成立：副本、目录与失败回滚的 unlink/rmdir 全都会落进 NWM raw 树
+        # （`docs/compute-loop-design.md` §4.1）。这是「调用写错了」，归 `ConfigError`
+        # 而不是第十项 kind——九项词表由 tasks.md 任务 3.2 fixture 钉死。
+        #
+        # 判据是**物理**包含，不是词法包含：`is_relative_to` 只比字符串前缀，round-2
+        # verifier 实测三种别名（大小写别名、`work_dir` 自身是链、`..` 段）都能让副本
+        # 落进 raw 树而闸门放行。`resolve()` 关掉后两种、inode 身份关掉第一种，两者
+        # 缺一不可；两个根互为「外/内」各判一次，相等的情形两向都为真。
+        raw_real = _normalized(raw_path, "raw_root")
+        work_real = _normalized(work_path, "work_dir")
+        if (
+            work_real.is_relative_to(raw_real)
+            or raw_real.is_relative_to(work_real)
+            or _contains_by_identity(raw_real, work_real)
+            or _contains_by_identity(work_real, raw_real)
+        ):
+            raise ConfigError(
+                f"work_dir {work_path} 与 raw_root {raw_path} 互相包含"
+                f"（物理路径 {work_real} 与 {raw_real}）；work 必须是 raw 树之外的独立"
+                "目录，否则「raw_root 之下零写入」不可能成立"
+            )
+        rebuilt = _reconstruct_sources(
+            raw_root=raw_path,
+            source=source,
+            cycle=cycle,
+            source_config=source_config,
+            verdict=verdict,
+        )
+        for _, source_path in rebuilt:
+            _reject_symlinks(raw_path, source_path)
+
+        cycle_root = rebuilt[0][1].parent if rebuilt else raw_path
+        source_manifest = _load_source_manifest(cycle_root)
+        declared_hours = _source_forecast_hours(source_manifest, cycle_root)
+        leads = tuple(lead for lead, _ in rebuilt)
+        uncovered = sorted(set(leads) - declared_hours)
+        if uncovered:
+            raise RawStagingError(
+                "源 manifest 声明的 forecast hours 不覆盖本轮 lead "
+                + "、".join(str(lead) for lead in uncovered)
+                + "；不得以副本存在为由声明该轮齐全",
+                "source-manifest",
+            )
+        entries = _build_entries(
+            verdict=verdict,
+            rebuilt=rebuilt,
+            source=source,
+            cycle=cycle,
+            source_index=_index_source_entries(source_manifest, cycle_root),
+        )
+
+        manifest_payload = _render_manifest(
+            source=source,
+            cycle=cycle,
+            leads=leads,
+            entries=entries,
+            cycle_root=cycle_root,
+        )
+
+        targets = tuple(
+            work_path / Path(_local_key(source, cycle, path.name))
+            for _, path in rebuilt
+        )
+        manifest_path = work_path / MANIFEST_FILENAME
+        for candidate in (*targets, manifest_path):
+            if os.path.lexists(candidate):
+                raise RawStagingError(
+                    f"目标 {candidate} 已存在；work 是一次性隔离单元，不覆盖、不续跑",
+                    "target-exists",
+                )
+    except (ConfigError, RawStagingError):
+        # 词表内的失败原样外抛：kind、`__cause__` 与调用方的 `is` 身份都必须保留。
+        raise
+    except Exception as exc:  # 收口器，见上方 floor 说明
+        raise RawStagingError(
+            f"准入期出现未预期的异常 {_safe_repr(exc)}；本轮零写入",
+            ADMISSION_FALLBACK_KIND,
+        ) from exc
 
     written = _Written()
     try:
@@ -993,7 +1130,7 @@ def stage_raw(
         # 会让下一次重试被 `lexists` 预检以 `target-exists` 硬拒、楔死整个 cycle。
         cleanup = "已清理本轮 work 侧写入" if not failures else _rollback_note(failures)
         raise RawStagingError(
-            f"复制/落盘期出现未预期的异常 {exc!r}；{cleanup}",
+            f"复制/落盘期出现未预期的异常 {_safe_repr(exc)}；{cleanup}",
             "copy-failed",
         ) from exc
     except BaseException as exc:

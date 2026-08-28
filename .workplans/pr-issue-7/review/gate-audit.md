@@ -8,9 +8,28 @@
 `status = os.lstat(path)`、`SOURCE_DIR_NAMES[source]`、`metadata.get(...)` 这类闸门在
 关键字扫描下不可见（project-profile「Orchestration hazards」实测漏约 10 个）。
 
-原始枚举：函数体内命中 **157** 个节点，按「行 + 语义」归并为下表 **108** 条闸门（原记
-58 条，是 round-1 逐分量重修**之前**的计数，未随文末重修同步——round-2 verifier CONFIRMED）；每条
-落在「表内（有杀手变异体）」或「死腿登记（附不可达/无判别力的理由）」两桶之一，无第三桶。
+原始枚举（**round-4 重新导出，并把匹配规则写死使其可复核**）：脚本
+`mut/count_nodes.py`（随本轮变异实验的 scratch 一并留存，路径见下）逐字规定匹配规则——
+语句/表达式类取 `If`/`IfExp`/`For`/`While`/`ExceptHandler`/`BoolOp`/`Compare`/`Assert`/
+`Subscript`；值传播闸门取 `ast.Call` 且 `func.attr`（方法调用）或 `func.id`（裸名）落在
+`{lstat, open, fdopen, mkdir, unlink, rmdir, lexists, exists, get, isinstance, relative_to,
+render_bundle_filename, zip, load, S_ISLNK, sorted, len}`；只数函数体（含类内方法），跳过
+`ast.arg` 与 `AnnAssign` 的注解子树。实跑结果：head `b11138e` 上 **172** 个节点，
+round-4 修复后的 head 上 **191** 个。
+
+**「157」这个数字无法复现，故不再沿用。** 我按上述规则以及若干条变体规则（方法调用按
+点号全链匹配 / 不数 `Subscript` / 只数 `except` 与 `if`）都试过，没有一组能在
+`b11138e` 上得出 157——原审计只写了「采集哪些节点类型」，没有写死方法调用的匹配方式
+与注解剔除范围，故该数字不可复核。本轮把规则连同脚本一并钉死，代价是数字与旧记录不
+连续；这是有意的：一个不可复核的数字比一个变化的数字更糟。
+
+归并为下表 **103 + 24 = 127** 条闸门。**「无第三桶」这条完整性断言是假的，已作废**：
+round-3 verifier 用三个**存活**变异体（E2/E4/E6）加两处穷举 grep 证明有五条闸门既不在
+表内、也不在死腿登记内。本轮把这五条各自归位（其中 tier-3 的 `add_note` 现已有杀手
+变异体、进表；其余四条是防御腿，进死腿登记并附理由——**MUST NOT 为它们编造覆盖**）。
+本轮不重新推导旧有的 88 条表内行；改动是「补上被证明缺席的行 + 纠正被证明错分的行 +
+登记本轮新增闸门」，因此 88 -> 103、20 -> 24 的增量逐条可核（见下两表的「round-4」标记
+行），而「归并总数 vs 原始节点数」这条映射仍有人工成分，不作完整性断言。
 
 **round-1 修复后重修（PR #65）**：复合闸门按**分量**重新展开（见文末「复合闸门逐分量
 重修」），表内由 38 条细化为 71 条，死腿登记 20 条不变。
@@ -49,6 +68,28 @@ rsync exclude + 仓根 `openspec/`/`docs/`、副本内 `env -u VIRTUAL_ENV uv sy
 A2a/A2b、C3a/C3b/C3d）**全部变红**，逐条见上表「杀手变异体」列；控制变异 M00 在**十九个
 变异体之后**再跑一次，仍是 17 failed / 745 passed / 16 skipped（首尾两次校准一致）。
 
+**round-4 修复轮的变异实验**：私有副本
+`/private/tmp/claude-501/mutate-issue7-pr65-round4-corrective`（同一套 profile 措施：三个
+rsync exclude + 仓根 `openspec/`/`docs/`、副本内 `env -u VIRTUAL_ENV uv sync --frozen`、
+`PYTHONDONTWRITEBYTECODE=1` 且逐变异体清 `__pycache__`、逐变异体断言
+`yd_producer.__file__`/`rawcopy.__file__` 落在副本内并对**已 import** 的模块做
+`inspect.getsource` token 断言、**恢复一律 `cp` 自工作树**（副本无 `.git`，`git checkout`
+是静默 no-op，round-3 有人因此作废过四次运行））。基线 **799 passed / 16 skipped**，
+在 **darwin/APFS（大小写不敏感）卷**上测得。本轮共 **15 个变异体**（1 个控制 + 14 个候选：PROBECAL / G1 / G2 / M3 / M4 / M12 /
+MBUNDLE / MCFGRIB / MCOUNT / MORDER / E1 / E4 / E3 / REPR），全部对**最终源**跑过一遍。
+控制变异 **CTL**（`_local_key` 前缀 `raw/` -> `rawCTLMUT/`）在十四个候选变异体
+**之前与之后**各跑一次，两次都是 **18 failed / 781 passed / 16 skipped**，首尾校准一致，
+故下表的红/绿不是陈旧字节码或 venv 重绑定的产物。这 14 个候选没有一个走大小写条件
+路径，故卷类别不影响本批结论。
+
+**一条本轮才发现的环境陷阱，profile 应吸收**：仓内没有 `.python-version`，
+`producer/pyproject.toml` 只写 `requires-python = ">=3.12"`。工作树的 `.venv` 是既有的
+3.12；而**全新的 scratch 副本**里 `uv sync --frozen` 会选到当时最新的解释器（本次选到
+3.14.2），于是副本与 CI（`.github/workflows/ci.yml` 钉 `python-version: "3.12"`）不同源。
+症状是一条依赖 `json` 递归上限的用例在副本上「莫名其妙」变红（CPython 3.14 起 json 的 C
+扫描器不再按 Python 递归上限计数）。补救：副本内一律
+`uv sync --frozen --python 3.12`。本轮的所有数字都是在 3.12 副本上测得的。
+
 **沿用结论的边界（本轮被改写的函数不沿用）**：round-1 的 71 条表内结论跑在 round-1 源上。
 本轮改写了三处闸门所在的代码块（containment 闸门、tier-1 回滚腿、tier-3 回滚腿），故其
 原变异体 MF3/M23/MF6 在**最终源**上重跑，逐条仍 RED：MF3-r2（整条 containment 闸门失效）
@@ -57,7 +98,7 @@ legacy 行所指的闸门语句在本轮 diff 中**逐字节未变**（`_carried
 `_check_accumulation` 的取值域三闸门、`_reconstruct_sources` 的两处比对、`_render_manifest`
 的字段赋值），结论沿用。
 
-## 表内闸门（88 条，各有杀手变异体，全部实测变红）
+## 表内闸门（103 条，各有杀手变异体，全部实测变红）
 
 | 闸门（行/语义） | 所在函数 | 杀手变异体 | 结果 |
 |---|---|---|---|
@@ -149,8 +190,23 @@ legacy 行所指的闸门语句在本轮 diff 中**逐字节未变**（`_carried
 | `_ensure_dir` 的账本**登记时序**（先记账再 mkdir） | `_ensure_dir` | MF2 把 `written.dirs.extend` 移回 mkdir 之后 + `test_mkdir_failing_midway_leaves_no_directories_behind` | RED |
 | `_ensure_dir` 的 `mkdir` OSError 腿 | `_ensure_dir` | `test_unwritable_work_directory_reports_copy_failed` | RED |
 | `_copy_one` 的分块读写 `if not chunk` | `_copy_one` | M00 控制变异 + 内容逐字节断言 | RED |
+| **round-4** 准入期收口块（floor）：`stage_raw` 体内第一条语句即 `try`，其后紧接写入期起点 | `stage_raw` | PROBECAL（`except Exception` 只重抛不收敛）+ `test_admission_phase_is_structurally_enclosed_by_one_floor` 与 **21 条** AST 派生的参数化逃逸探针（19 条注入点变红；`ConfigError`/`RawStagingError` 两条按 happy-path 不可达登记在 `ADMISSION_UNREACHED_ON_HAPPY_PATH`，故不参与判别） | RED（21 failed：19 条探针 + 结构断言 + 递归形态回归） |
+| **round-4** entry 级 `forecast_hour` 形态闸门（拒 `int()` 有损归一：`3.9`/`3.0`/`"3"`/`True`） | `_reject_lossy_forecast_hours` | G1（不调用该闸门）+ `test_lossy_forecast_hour_shape_is_refused_before_any_write` 四行 | RED（4 failed；**重复键用例不红** -> 与下一行可分离） |
+| **round-4** `(forecast_hour, variable)` 索引的 injectivity 守卫（拒重复键，不后写覆盖） | `_index_source_entries` | G2（守卫短路）+ `test_duplicate_source_entry_key_is_refused` / `..._on_a_lead_this_round_does_not_request...` | RED（2 failed；**形态用例不红** -> 与上一行可分离） |
+| **round-4** `_remove` 的 `{exc!r}` 改走不抛的 `_safe_repr`（`rollback`「保证不抛」在 repr 自身抛异常时也成立） | `_Written._remove` | REPR（改回 `{exc!r}`）+ `test_rollback_does_not_raise_when_the_exception_repr_itself_raises` | RED |
+| **round-4（原第三桶，现进表）** tier-3 的 `if failures: exc.add_note(...)` | `stage_raw` | E4（删掉该分支）+ `test_keyboard_interrupt_with_a_failing_rollback_carries_the_residue_note`（中断复制 **与** 回滚原语失败两处同时注入） | RED（此前 E4 存活） |
+| **round-4（原误记为死腿，现进表）** `rollback` 的目录**逆序**（深者先 `rmdir`） | `_Written.rollback` | E3（`reverse=True` -> `False`）| RED（9 failed，全部是残留 oracle） |
+| **round-4** `_contains_by_identity` 的 `inner` **自身**分量（`inner` 本身是指向 `outer` 的链） | `_contains_by_identity` | E1（收窄成只走 `inner.parents`）+ `test_contains_by_identity_catches_inner_being_a_link_to_outer`（函数级、无特权、与卷的大小写敏感性无关） | RED |
+| **round-4** `os.path.samestat` 判据本身（inode 身份） | `_is_same_dir` | C3a（只留 `resolve()` 比较）+ E1 | RED |
+| **round-4** entry `expected_checksum` 落 `None`（**不承接**源侧取值） | `_build_entries` | M3（改为 `source_entry.expected_checksum`；源侧已偏移成非 `None`） | RED |
+| **round-4** entry `expected_size_bytes` 落 `None`（**不承接**源侧取值） | `_build_entries` | M4（改为 `source_entry.expected_size_bytes`） | RED |
+| **round-4** entry metadata 白名单的「**仅含**」半边 | `_carried_metadata` | M12（`carried = dict(metadata)` 整份照抄；源侧已多一个非承接键） | RED |
+| **round-4** `bundle` **逐字**承接（不按已知三键重建） | `_carried_metadata` | MBUNDLE（按 `layout`/`variables`/`physical_file_count` 重建；源侧多一个不可推导分量） | RED |
+| **round-4** `cfgrib_filter_by_keys` **逐字**承接（不由 `grib_short_name` 现造） | `_carried_metadata` | MCFGRIB（现造单键 Mapping；源侧多一个不可推导分量） | RED |
+| **round-4** entry **集合**由 verdict 定（不照搬源 entry 列表） | `_build_entries` | MCOUNT（把源侧多出的 entry 一并落盘；源侧已多出一个变量与两个 lead） | RED（10 failed） |
+| **round-4** entry **顺序**为 lead 升序 × variables 声明序（不照抄源侧顺序） | `_build_entries` | MORDER（按 `source_index` 的插入序重排；源侧 entry 顺序已整体反转） | RED |
 
-## 死腿登记（20 条，本轮无判别器；逐条附理由）
+## 死腿登记（24 条，本轮无判别器；逐条附理由）
 
 | 闸门 | 所在函数 | 为什么没有判别器 |
 |---|---|---|
@@ -172,8 +228,12 @@ legacy 行所指的闸门语句在本轮 diff 中**逐字节未变**（`_carried
 | `if not source_config.lead_hours` | `_validate_params` | 上游 `judge` 先以 `ConfigError` 拒同一输入；此处是本模块自己的兜底 |
 | `if kind not in ERROR_KINDS` | `RawStagingError.__init__` | 自检式断言：本模块内所有 raise 点都用字面量 kind，越域取值只可能来自将来的改动 |
 | `hours[0]` / `hours[-1]` | `_manifest_metadata` | 与上面空 `lead_hours` 同一前置，非空后恒有定义 |
-| `sorted(...)`（消息拼装、回滚排序、`uncovered`；**不含** `_reconstruct_sources` 的 `sorted(lead_hours)`，那条已在表内） | 多处 | 前两处是展示/顺序，无判定语义；`uncovered` 的判定由 `if uncovered` 承担（表内） |
+| `sorted(...)`（消息拼装与 `uncovered` 的展示排序；**不含** `_reconstruct_sources` 的 `sorted(lead_hours)` 与 `rollback` 的目录逆序，两条均已在表内） | 多处 | 消息拼装是展示、无判定语义；`uncovered` 的判定由 `if uncovered` 承担（表内）。**round-4 更正**：原行按**语句形态**（都是 `sorted`）把三处并成一条，于是把 `rollback` 的深者优先 `rmdir` 这条**活闸门**错记成死腿（E3 变异体实测红 9 条）。归并 MUST 按语义、不按语句形态 |
 | `O_NOFOLLOW`（常量定义与 `os.open(source_path, O_RDONLY \| O_NOFOLLOW)`） | 模块常量 / `_copy_one` | 纵深防御的**第二道闩**（`rawcopy.py:126-128` 自述）：叶子与祖先段的链已由 `_reject_symlinks` 在任何 open 之前逐段 `lstat` 拒绝，单摘该标志不变红（N7 变异体存活于全套件——**round-2 verifier C 实测**，非本轮自跑）。本仓既有范式：`producer/tests/test_safe_fs_refusals.py:19-27` |
+| **round-4（原第三桶）** `except FileNotFoundError: pass`（账本反向多记的祖先段本轮可能根本没建出来） | `_Written._remove` | 无判别力：E2 变异体（删掉该腿、让 FNF 落进 `except Exception`）在全套件下**存活**。它是防御腿而不是缺陷——把「本轮没建过的路径」记成清理失败会让残留消息反向说谎，但今天没有一条用例区分「记进 failures」与「跳过」。补覆盖需要构造「账本里有、磁盘上从未存在」的路径，而这正是 `_ensure_dir` 反向多记的正常形态；**MUST NOT 为它编造覆盖** |
+| **round-4（原第三桶）** `except (OSError, ValueError)` 的 **`OSError`** 分量 | `_normalized` | 无判别力：E6 变异体（收窄成只接 `ValueError`）**存活**。`ValueError` 分量在表内（C3d + NUL 字节用例）；`OSError` 分量需要一条 `resolve()` 抛 `OSError` 的路径（ELOOP/权限），在 tmp 下不可靠复现 |
+| **round-4（原第三桶）** `except (OSError, ValueError): return False` 腿 | `_is_same_dir` | 防御腿：不存在/不可 stat 的段不可能与另一侧同 inode。走到该腿需要 `os.stat` 在两个已 `resolve()` 的根上失败，seam 级不可靠构造。判据本身（`samestat`）已在表内 |
+| **round-4（原第三桶）** `getattr(config.raw, source)` | `_validate_params` | 不可达：同函数上一条闸门已保证 `source in SOURCE_DIR_NAMES`，而 `RawConfig` 恰有这两个属性，故 `AttributeError` 走不到。函数 docstring 把它列为「要挡住的裸异常」之一，此处登记它今天由**前置闸门**而非自身兜底 |
 
 
 ## 复合闸门逐分量重修（PR #65 round 1）

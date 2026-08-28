@@ -663,8 +663,8 @@ def stage_raw(
 | `incomplete-verdict` | `verdict.complete is False` |
 | `unsupported-layout` | `len(bundles) != 1`（见下方单 bundle 约束） |
 | `source-symlink` | 源侧 bundle 路径或其祖先段是 symlink |
-| `source-manifest` | 源 manifest 缺失/不可解析/覆盖不全/缺 `forecast_hours`；**或本轮 manifest 的序列化失败**（承接来的值无法编码成 UTF-8——因果在源侧，且该检查前置到准入期故零写入） |
-| `verdict-mismatch` | 四条触发：① 由形参重新构造的源路径与 `verdict.expected_files` 不一致（含相对 `raw_root` 的处置，见下方复制语义）；② `verdict.expected_variables` 的 lead 集合与由形参重构的 lead 集合**不相等**（单向包含不够，见下方三元组契约）；③ 某个 lead 的变量集不是 `tuple`/`list`（`str` 可迭代，会被逐字符扇出成变量名，静默产出全错的 manifest）；④ 形参与 verdict 的 `raw_root`/`source`/`cycle`/`config` 不同源 |
+| `source-manifest` | **归属规则（不是穷举清单，勿再写触发条数）**：凡因果落在「源 manifest 这份外部 JSON 的内容或形态」上的失败，一律归本 kind。已实现的触发含但不限于：文件缺失/不可解析/`forecast_hours` 缺失或形态错/覆盖不全/顶层非 Mapping/entry `metadata` 非 Mapping 或六键缺一/entry `variable` 非字符串/`forecast_hour` 会被 `int()` 有损归一/`(forecast_hour, variable)` 重复键/本轮 manifest 序列化失败/**准入段兜底地板收敛的任何非词表异常**（`ADMISSION_FALLBACK_KIND`）。本行**有意不写条数**——该计数已在 round 1/2/3 连续三轮失实（每次都是新增闸门未回灌到计数上），改以归属规则表述后不再有可失实的数 |
+| `verdict-mismatch` | **归属规则**：凡因果落在「`verdict` 与本次调用形参不同源」上的失败，一律归本 kind。已实现的触发：① 由形参重新构造的源路径与 `verdict.expected_files` 不一致（含相对 `raw_root` 的处置，见下方复制语义）；② `verdict.expected_variables` 的 lead 集合与由形参重构的 lead 集合**不相等**（单向包含不够，见下方三元组契约）；③ 某个 lead 的变量集不是 `tuple`/`list`（`str` 可迭代，会被逐字符扇出成变量名，静默产出全错的 manifest）。另有一条不可达防御腿（`_reject_symlinks` 的 `relative_to` `ValueError`）登记在 gate-audit 死腿桶。原文列的第 ④ 条「形参与 verdict 不同源」不是独立路径，而是 ①②③ 的因果表述（三处消息里都逐字带着它），已删——round 3 verifier CONFIRMED |
 | `accumulation-metadata` | R4B2 的三条 APCP fail-closed 中任一条不成立 |
 | `source-mutated` | 复制前后源 `lstat` 元组不一致 |
 | `target-exists` | 目标副本路径已存在 |
@@ -719,7 +719,7 @@ pin 在 raw cycle 目录内落盘 `manifest.json`（GFS `_persist_manifest_metad
 - 源路径 containment：每个源 bundle 路径 MUST 由 `raw_root`/`SOURCE_DIR_NAMES[source]`/cycle 紧凑戳/bundle 文件名**重新构造**，并与 `verdict.expected_files` 的对应项逐字相等；MUST NOT 直接信任 `expected_files` 里的路径——形参与 verdict 由不同调用点提供，不一致即 `kind="verdict-mismatch"` 报错（调用序错误）。三条落地约束，缺一即该检查要么误报要么无判别力：
   - **绝对化必须与 `judge` 同法**：`judge` 接受相对 `raw_root` 并以 `Path.cwd()` 提升（`rawscan.py:370-386`，#6 为此钉了一条 Regression row），故 `expected_files` 恒为绝对路径。重新构造 MUST 走同一次提升（相对 `raw_root` 先 `Path.cwd() / root`），否则一个**合法**调用会被本检查误拒。收口方式只有这一种：**必须与 `judge` 同法提升**。曾考虑的等价方案「要求 `raw_root` 绝对、相对即拒绝」已排除——下方 Regression rows 钉了一条「合法的相对 `raw_root` 调用 -> 正常产出」，那正是本检查没有误拒的唯一判别器，拒绝相对路径会让该行不可满足。提升逻辑 MUST 写进实现注释。
   - **bundle 文件名 MUST 复用 `rawscan` 的渲染路径**，MUST NOT 在本模块重抄一份模式校验/渲染规则。理由与 `SOURCE_DIR_NAMES` 同：第二份字面量会让两处对同一模式给出不同结果，而本检查恰恰以「两处相等」为判据——自己抄一份等于让检查比对自己，判别力归零。`rawscan` 的 `_render`/`_validate_pattern` 目前是私有的；实现者 MUST 在**不改变 `rawscan` 既有公开行为**的前提下把渲染面提升为可复用（最小改动：加一个薄公开包装并在 `__all__` 登记），这是本 issue 允许触碰 `rawscan.py` 的**唯一**例外，且 MUST 作为偏离逐条上报。
-  - 该检查 MUST 有自己的 `kind` 与自己的具名用例，MUST NOT 折进 `source-manifest`——后者已有多个触发条件（本轮扩为五条，见上方 kind 表），把它折进去就意味着删掉 containment 检查也不会有任何用例变红（本仓记录在案的「声明必须配判别器」失效模式）。
+  - 该检查 MUST 有自己的 `kind` 与自己的具名用例，MUST NOT 折进 `source-manifest`——后者按归属规则收纳一整族源侧失败（见上方 kind 表），把它折进去就意味着删掉 containment 检查也不会有任何用例变红（本仓记录在案的「声明必须配判别器」失效模式）。
 - 目标目录不存在则创建；目标已存在同名文件 -> 报错停止，MUST NOT 覆盖（work 是一次性隔离单元，同名存在意味着调用序错误）
 - 部分失败（第 k 个文件复制失败）-> 报错，并把本轮已写入的 work 侧路径清理干净（不留半套 raw），MUST NOT 让 `raw-manifest.json` 与实际副本不一致
 - 副本与 manifest MUST 全部落在 `work_dir` 之下；`YD_ROOT` 模拟根内 MUST 不出现任何 raw 副本
@@ -777,6 +777,10 @@ Regression rows:
 
 上方 Regression rows 的**每一行**对应一个具名 pytest 用例，且该用例 MUST 由一个能证伪它的变异体验证过（"有一个用例指向它"不构成覆盖）。另加：
 
+- **承接/自算可区分谓词（round 3 门限的纠正动作，MUST 作为一次穷尽清扫兑现，不是逐条打补丁）**：凡测试对产出 `raw-manifest.json` 断言的**每一个**值，合成源 manifest 里的对应值 MUST 被偏移，使「承接自源」与「由 yd 自算」两种实现产出不同结果；每一处发散 MUST 由一个变红的变异体证明。该谓词在测试侧以一条自检用例落地（对断言面逐项比对源侧值是否发散），新增断言值时 MUST 同步扩充它。
+  - **类边界（有意排除，勿"修"）**：`forecast_hour` 与 `variable` 允许与源侧重合——它们是 `_index_source_entries` 的查找键，偏移它们会破坏查找关系本身而不是判别实现。这两项 MUST 在清扫表里显式标注为排除项并写明理由。
+  - 立此谓词的原因：该失效类在 round 1 找到 1 条腿、round 2 找到 6 条、round 3 又找到 2 条。逐轮清点是搜索，不是闭合；有了可复核的谓词才谈得上闭合条件。
+- **准入段兜底地板**：`stage_raw` 的准入段（形参守卫直到 `target-exists` 预检）MUST 整体位于**函数体第一条语句**的 `try` 内，任何非 `{ConfigError, RawStagingError}` 的异常 MUST 被收敛成 `RawStagingError`，`kind` 取 `ADMISSION_FALLBACK_KIND = "source-manifest"`（因果落在源侧外部 JSON，与该 kind 的归属规则一致；本行即该取值的钉死处）。`BaseException` MUST NOT 被改写。判别器 MUST 是**由地板 try 体的 AST 派生**的参数化逃逸探针（新调用点自动入列），外加一条断言地板确实是 `body[0]`、写入段是 `body[1]` 的结构用例——逐个异常类型加用例不构成该项覆盖，那正是 round 1/2/3 反复失败的枚举模式
 - 源不可变的取证 MUST 是 `os.lstat` 全元组比对（size/mtime_ns/ino/mode），MUST NOT 只比对内容——只比内容抓不到 mtime 被改
 - 三元组完整性 MUST 断言**集合相等**，MUST NOT 断言包含；两个方向各需一个杀手变异体（漏一条 entry / 多一条 entry）
 - 零写入拒绝的取证 MUST 是调用前后对 `work_dir` 做递归快照比对，MUST NOT 只断言 `manifest_path` 不存在
