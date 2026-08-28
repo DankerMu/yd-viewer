@@ -37,6 +37,11 @@
         }
       ]
     },
+    "5": {
+      "ceilingPrs": [],
+      "gateEntries": 2,
+      "closed": []
+    },
     "3": {
       "ceilingPrs": [],
       "gateEntries": 0,
@@ -67,6 +72,19 @@
           "pr": 51,
           "outcome": "merged",
           "rounds": 3
+        }
+      ]
+    },
+    "6": {
+      "ceilingPrs": [
+        38
+      ],
+      "gateEntries": 2,
+      "closed": [
+        {
+          "pr": 38,
+          "outcome": "descoped",
+          "rounds": 5
         }
       ]
     }
