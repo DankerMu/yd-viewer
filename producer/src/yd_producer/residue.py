@@ -86,13 +86,22 @@
    树重复「判定+执行」、乃至重复执行**同一份旧清单**，都是 no-op（零删除、零异常）。
    这是 cron 每小时重入的必需性质。
 9. **裁决 9（#59 崩溃恢复前置）**：本模块的删除集合与任何 Slurm 作业的写入集合按构造
-   不相交（孤儿作业的 `--chdir` 在 scratch `work/` 下，而 work 不在本集合内；NFS 侧的
+   不相交（孤儿作业的 `--chdir` 在 scratch `work/` 下，而 work 不在本集合内；这条
+   `--chdir` 的约束**在代码而不在文档**：`slurm.build_sbatch_command` 逐字发出
+   `"--chdir", str(spec.work_dir)`（`slurm.py:133-140`，由 `tests/test_slurm.py` 钉死），
+   compute-loop 只把 `work/<source>/<cycle>/` 定为一次性隔离单元、不提 `--chdir`；NFS 侧的
    `output/`/`states/` 只由控制器写，控制器写入被 `runlock` 覆盖），故 12.2 不需要在途
    作业存活确认。一旦 #28 把 work 的删除接进重跑路径，两个窗口都恢复可达——完整裁决
    归 #28，本模块 MUST NOT 替它选。
 
-删除顺序固定为「先半成品树、后更晚状态」。该顺序对正确性不重要（前沿只由 `DONE` 推进，
-T 不受任一侧影响，任一步崩溃后下次重入会重新判定并补删），钉死只为让执行序可复现。
+删除顺序固定为「先半成品树、后更晚状态」。**该顺序影响正确性，不是可复现性的装饰**：
+状态那条臂会**确定性**失败——`states/<source>/<cycle>.cfg.ic` 是 symlink 时
+`unlink_no_follow` 每 tick 必抛 `SafeFilesystemError`（裁决 6），这是执行期的**拒绝**而
+不是崩溃，重入不会让它变好。顺序对调，半成品的删除就永远排在这条常驻失败后面，残留树
+永久留在 NFS 上。「下次重入会重新判定并补删」只对**进程猝死**成立（那时清单会被重新算
+出来），对执行期拒绝不成立。前沿只由 `DONE` 推进、T 不受任一侧影响这两条仍然成立，但它
+们撑不起「顺序无关」。本条由
+`tests/test_controller_residue.py::test_half_products_are_removed_before_state_files` 钉死。
 
 探测层的「无法确定」（`ENOENT`/`ENOTDIR` 之外的 `OSError`，即
 `controller.DiscoveryUnreadableError`）收敛成 `ResidueError`：与裁决 7 同向，不可确定

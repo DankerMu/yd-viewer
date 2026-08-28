@@ -1820,7 +1820,7 @@ Project profile: yd-viewer
 7. **清理失败即停该源，MUST NOT 静默继续**。任一删除抛 `SafeFilesystemError` 时本源本次停止（不重跑、不提交），错误 MUST 指名失败的路径。理由与 #22 裁决 9 同向：删了一半就重跑，等于让下一步在一个既非干净也非完整的树上组装。**幂等**：对已清理干净的树重复调用判定+执行是 no-op（清单为空、零删除、零异常），这是 cron 每小时重入的必需性质。
 8. **`cron.lock_path` 非绝对路径 fail closed，闸门位置在 flock 封装的最前**（消费 #32 经 `tasks.md:166` 的路由）。相对路径与 `~` 前缀两种形态都拒（`Path` **不**展开 `~`：`Path("~/x") / "y"` 得到 `'~/x/y'`），报错 MUST 指名 `cron.lock_path`，且 MUST 在**任何文件系统副作用之前**——否则 cron 的工作目录一变，锁文件就落到另一个路径上，两个实例各持各的锁，互斥静默失效，这正是本条要防的危害。**不选**在 `config.py` 装载期强制：`local.toml` 的其余现场路径字段当前都不做绝对性校验，只为本字段在装载期开一个特例会让 `cli-config` spec 的 MUST 范围与实现不一致（`specs/cli-config/spec.md` 的装载 Requirement 未含路径形态约束）；闸放在唯一的消费点更窄且可测。同批已出 `specs/run-controller/spec.md`「并发与锁」的 delta。
 9. **#59 崩溃恢复前置：本 issue 的删除集合与任何 Slurm 作业的写入集合按构造不相交，故 12.2 不需要在途作业存活确认；完整裁决归 #28**。两个窗口逐一点名：
-   - **窗口 1（进程死亡）**：孤儿作业 12345 的 `--chdir` 是 scratch `work/<source>/<T>`（compute-loop §3.3 / §10 步骤 6），它写的全部路径都在 scratch 下。裁决 2 已把 work 排除出本 issue 的删除集合，故「下一 tick 删掉正在被写的 work 目录」这条后果在 12.2 上不可达。NFS 侧的 `output/` 与 `states/` 只由控制器进程写（`spec.md`「NFS 提交顺序与 DONE 语义」的六步全部是控制器动作），而控制器写入被 12.3 的锁覆盖，孤儿的是 Slurm 作业不是控制器。
+   - **窗口 1（进程死亡）**：孤儿作业 12345 的 `--chdir` 是 scratch `work/<source>/<T>`（`--chdir=work_dir` 的绑定在代码侧：`producer/src/yd_producer/slurm.py:133-140`，由 `tasks.md` 的 #11 fixture 与 `producer/tests/test_slurm.py` 逐元素钉住；compute-loop §3.3 / §10 步骤 6 只给出「work 是 scratch 下的一次性隔离单元」这一层，**不含** `--chdir` 字样——round 3 核验更正原引用），它写的全部路径都在 scratch 下。裁决 2 已把 work 排除出本 issue 的删除集合，故「下一 tick 删掉正在被写的 work 目录」这条后果在 12.2 上不可达。NFS 侧的 `output/` 与 `states/` 只由控制器进程写（`spec.md`「NFS 提交顺序与 DONE 语义」的六步全部是控制器动作），而控制器写入被 12.3 的锁覆盖，孤儿的是 Slurm 作业不是控制器。
    - **窗口 2（已提交但未登记）**：同上——没有任何 job ID 存在，但也没有任何 Slurm 作业会写 NFS 侧路径，故对 12.2 的删除集合同样不可达。
    - **仍然成立的危害与其落点**：一旦 #28 把 work 的删除接进重跑路径，两个窗口都恢复可达，且窗口 2 按 #59 的构造性不对称无法用 job ID 覆盖。因此 #59 的两条候选（(a) 存活确认 / (b) 见半成品即停等）与 `spec.md`「未提交残留清理重跑」是否需要 delta，**整体归 #28 裁决**，本 issue MUST NOT 替它选。本 issue 的义务是把边界写死在此并在 #59 上留证。
 10. **不接线 `run` CLI**。`cli.py:116` 的 `run` 仍是 `_unimplemented`，接线归任务 14.1（issue #26/#27）。12.3 交付的是一个可复用的上下文管理器 / 包装函数，MUST NOT 修改 `cli.py` 的子命令行为。
@@ -1829,7 +1829,7 @@ Project profile: yd-viewer
 12. **零新增依赖**：`fcntl`、`os`、`pathlib` 全在 stdlib。本 issue MUST NOT 引入 `filelock` 之类的第三方包。
 
 Must-preserve behavior:
-- `decide_frontier` 与 `controller` 现有导出的行为逐字不变（本 issue 只新增符号）；`producer/tests/test_controller.py` 全套原样通过
+- `decide_frontier` 与 `controller` 现有导出的行为逐字不变（本 issue 只新增符号）；`producer/tests/test_controller_frontier.py` 全套通过（本 PR 只改了其中一处 docstring 措辞 `_done_cycles`→`done_cycles`，无断言变更；`frontier_fixtures.snapshot_tree` 的快照元组增加 `st_mtime_ns` 维度，由零写入证据条目要求）
 - 「前沿只由 `DONE` 推进」——清理动作 MUST NOT 反过来影响 T 的计算：清理前后对同一棵树调用 `decide_frontier`，T 不变（清理后 T 仍是 T，正是「以 T 状态重新组装本轮」在发现层的可证形式）
 - `states/<source>/<T>.cfg.ic` 在任何路径上都不被删除
 - 已带 `DONE` 的 `output/<cycle>/<source>/` 及其 `yd.rivqdown.dat` 在任何路径上都不被删除
@@ -1850,7 +1850,7 @@ Required evidence:
 - **不可见条目不删**：`states/<source>/` 下有 `2026082612.cfg.ic.tmp`、`nine.cfg.ic`、`9999123123.cfg.ic`、`.DS_Store`；`output/` 下有 `stray/`、`.DS_Store` -> 清理后逐个仍在
 - **symlink 策略两侧**：`states/<source>/<T+12>.cfg.ic` 是 symlink -> 停该源并报错指名该路径，链接与其目标都还在；`output/<T>/<source>/` 树内含一个指向 `YD_ROOT` 外的 symlink 条目 -> 该树被删除，链接的**目标**未被删除（unlink link, never traverse）
 - **containment**：`states/<source>/<T+12>.cfg.ic` 是指向 `YD_ROOT` 外普通文件的 symlink 时（上一条）目标存活；另断言判定+执行传入的 `containment_root` 就是 `YD_ROOT`（以越界路径构造的调用被 `safe_fs` 拒绝）
-- **幂等**：同一棵树上连跑两次判定+执行 -> 第二次清单为空、零删除、零异常，树快照与第一次结束时相等
+- **幂等**：同一棵树上连跑两次判定+执行 -> 第二次清单为空、零删除、零异常，树快照与第一次结束时相等；**且 MUST 再执行同一份旧清单对象一次**（不重新判定）-> 同样零删除、零异常。后一步才是变异体 (s) 的判别器（round 3 核验实测：只做前一步时 (s) 存活——重新判定后的空清单让 `execute_residue_plan` 迭代两个空元组，根本走不到 `safe_fs`）
 - **交来的 T 已有 `DONE` 时整个清单为空**（裁决 4 增补）：树含 `DONE(T)`、`output/<T>/<source>/` 半成品、**以及 `states/<T+12>.cfg.ic`**，以直接构造的 `FrontierDecision(cycle=T)` 调用 -> `state_files` 与 `half_product_dirs` **都**为空、零删除；随后 `decide_frontier` 仍返回 T+12 且可跑。既有的同姿态用例只放了半成品而没放 `states/<T+12>`，恰好绕开了这条
 - **`containment_root` 就是 `YD_ROOT`**（两个独立判别器，缺一不可）：其一，`plan_residue` 产出的 `plan.yd_root` 等于 `Path(传入的 YD_ROOT).resolve()`——传入值已是实路径时即等于它本身，经 symlink 到达时等于解析后的实路径（见下一条用例）；把它改成 `root.parent` 会静默放宽容纳域而现有用例全绿；其二，越界的手搓 plan **只带 `state_files`、`half_product_dirs` 为空**时执行仍被拒（现有越界用例走的是半成品那条臂，状态文件那条臂的 `containment_root` 掉了也不会红）
 - **`YD_ROOT` 经 symlink 到达时清理仍成功**（裁决 6 增补）：以 `link -> real` 构造根并把未 resolve 的 `link/yd` 传给 `plan_residue` -> 判定与执行都成功，删除结果与直接用 `real/yd` 一致。这条钉住「判定侧跟随 symlink 而执行侧对 symlink 致命」的不对称

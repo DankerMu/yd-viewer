@@ -636,7 +636,9 @@ def test_half_products_are_removed_before_state_files(tmp_path: pathlib.Path) ->
 
     判别器：`states/<source>/<T+12>.cfg.ic` 是 symlink（`unlink_no_follow` 必抛）且同时
     存在半成品树。两种顺序都抛 `SafeFilesystemError`，但只有钉死的顺序会在抛之前把半成品
-    删掉；顺序对调则半成品每 tick 都原地不动。round 2 实测：对调两个循环后全套仍绿。
+    删掉；顺序对调则半成品每 tick 都原地不动。round 2 实测：**在本用例存在之前**，对调
+    两个循环后全套仍绿——这正是变异 (af) 被登记、本用例被补写的理由。round 3 复现 (af)
+    时，它失败在本用例下面那三条断言上，本用例即是它的判别器。
     """
     root = _yd_root(tmp_path)
     outside = tmp_path.resolve() / "outside"
