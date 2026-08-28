@@ -445,6 +445,32 @@ def test_newline_free_giant_first_line_is_refused_within_bounded_memory(
     assert end_to_end_peak < size // 32, (end_to_end_peak, size)
 
 
+@pytest.mark.parametrize("over_cap", [False, True], ids=["at_cap", "cap_plus_one"])
+def test_header_line_length_boundary_is_exactly_the_cap(
+    tmp_path: pathlib.Path, over_cap: bool
+) -> None:
+    """候选 header 行**恰好** `MAX_HEADER_LINE_BYTES` 仍可读，`cap + 1` 判
+    `STATE_UNREADABLE`。
+
+    fixture 的措辞是「累计**超过** `MAX_HEADER_LINE_BYTES`」，判别力全在这一对上：只有
+    ~30 字节与 64 MiB 两档行长的话，`newline > cap` 改成 `>=` 恒绿。行尾用空格垫到目标
+    长度（`split()` 会丢掉尾随空格），所以接受的那一侧是真的解析出了 header 并走到
+    runnable。`_READ_CHUNK_BYTES` 与上界同为 64 KiB，恰好上界这一档必然跨 chunk 边界，
+    连带把 chunk 末尾那道 `len(pending) > cap` 也钉在等号上。
+    """
+    builder = YdRootBuilder(tmp_path)
+    builder.write_done(D, "ifs")
+    line_bytes = controller.MAX_HEADER_LINE_BYTES + (1 if over_cap else 0)
+    path = builder.write_state_header_padded(T, "ifs", line_bytes=line_bytes)
+    assert path.read_bytes().index(b"\n") == line_bytes  # 首行长度不由被测实现回读
+
+    decision = _decide(builder, "ifs", _all_complete())
+    if over_cap:
+        _assert_stopped(decision, controller.StopReason.STATE_UNREADABLE)
+    else:
+        _assert_runnable(decision, T)
+
+
 def test_long_blank_prefix_before_the_header_is_still_read(
     tmp_path: pathlib.Path,
 ) -> None:

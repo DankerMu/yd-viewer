@@ -266,6 +266,28 @@ class YdRootBuilder:
         self.written_states.setdefault(source, {})[cycle_text] = absolute_minute(cycle)
         return path
 
+    def write_state_header_padded(
+        self, cycle_text: str, source: str, *, line_bytes: int
+    ) -> Path:
+        """写一份 header 行被尾随空格垫到**恰好 `line_bytes`** 字节的合法状态文件。
+
+        垫的是 `str.split()` 会丢掉的尾随空格，所以这条行仍是一条能解析的真 header：
+        上界之内的那一侧要走到 runnable，而不是因为别的理由绿。与 `line_bytes = cap + 1`
+        成对，钉死候选 header 行上界这道闸的边界（上界本身由测试侧传入——本模块 MUST NOT
+        import `yd_producer`）。
+        """
+        path = self._prepare(cycle_text, source)
+        cycle = parse_cycle(cycle_text)
+        head = header_line(absolute_minute_text(cycle))
+        assert len(head.encode("utf-8")) <= line_bytes
+        padded = head + " " * (line_bytes - len(head.encode("utf-8")))
+        payload = padded + "\n" + "\n".join(_BODY_LINES) + "\n"
+        raw = payload.encode("utf-8")
+        assert raw.index(b"\n") == line_bytes
+        path.write_bytes(raw)
+        self.written_states.setdefault(source, {})[cycle_text] = None
+        return path
+
     def write_state_newline_free(
         self, cycle_text: str, source: str, *, size_bytes: int, payload: str
     ) -> Path:
