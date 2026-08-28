@@ -1471,6 +1471,44 @@ producer/tests/test_checkpoint_tracker.py
 - 「非有限 header 分钟即本次观测无结果」的守卫**属 tracker**，实现在 `_header_minute_of` 的单一出口：`header_time` 只提取 token 值，`nan`/`inf` 是合法 float，值域判定是轮询语义而非 header 语义。
 - 本 issue **不**新建 `producer/tests/test_cfg_ic_header.py`（清单 §1「最小测试（cap 5 header）」行仍为 `待落地`，其 `_shift_cfg_ic_time` 重戳用例属 #9 面）。
 
+**Seams under test**（上游声明消费，不重议；**就地声明一处形态差异，不改 design.md**——承 #18/#19 先例）：design.md `Sketch seams under test` 第 5 条写作 `tracker.capture(shud_dir, target_minute) -> CheckpointResult`，本 fixture 落成 `CheckpointTracker(*, run_dir, project_name, checkpoint_hours)` + `capture_available()`。差异有两个来源：目标是**一组**小时（`Config.checkpoint_hours` 是元组）而非单个 `target_minute`；「漏采如实报告」要求跨多次观测**保持状态**（哪些已捕获、观测到过哪些 header），单次纯函数装不下。语义无差异，草图不改。
+
+
+- `CheckpointTracker` 的构造 + `capture_available()` 序列调用（即 issue 正文的「模拟覆写序列」）：以合成 `cfg.ic` 字节按序覆写 `source_path`，逐次调用观测
+- `state.cfg_ic_header_minute_time`（master `state/header_time.py` 的既有面，纯函数；本 issue 只消费，不重测——单元用例归 `producer/tests/test_header_time.py`）
+- `state.parse` 作为副本校验 oracle（既有面，不新测）
+
+**Fixture level: expanded**（override 上游的 `compact`；**本行系补记**——本 fixture 自始按 expanded 作业（完整 risk-pack 表、Review focus 常驻轴、§A–§G9 逐条 Required evidence、§G9 的不变式面清单等同 Invariant Matrix），但一直没把这条分级判定显式写下来，属「偏离必须记录、不得沉默」的漏记，round 3 后补上）。override 理由：改动面正面命中强制 expanded 触发词 `parser`/`format`/`schema`/`field`（header token 布局判定、相对分钟单位、产物文件名形态）与 `path`（全程 no-follow + containment 的文件系统面），并命中 `openspec/project-profile.md` 的 domain 触发词 `cfg.ic`、「状态链 / warm start」、`T+12`、`checkpoint`——与 issue #8/#9/#22 同一条覆写理由链。
+
+**Repair intensity: high**（本模块是 T+12 状态的**唯一来源**，profile 把「断链即整链失效」列为首位风险轴；且它是本仓第一个在 SHUD **就地覆写的同一目录下**读写文件的模块，撕裂读是一等公民。适用 `Invariant Matrix`——本 fixture 以 §G9 不变式面清单落地）。
+
+**Risk packs（selected / not selected 与理由）**：
+
+- Public API / CLI / script entry: selected - `CheckpointTracker` 是 #17 与作业脚本的消费面
+- Config / project setup: selected - `checkpoint_hours` 的权威归属与零默认是核心验收项
+- File IO / path safety / overwrite: **selected** - 本模块读源文件、建目录、原子写副本、失败删副本，且全程在 SHUD 就地覆写的同一目录下；no-follow 与 containment 全部经 `store.safe_fs`
+- Schema / columns / units / field names: selected - header 的「最后一个数值 token 即 minute-time」与相对分钟单位即本模块的 schema，错配直接导致永不命中或冒充命中
+- Auth / permissions / secrets: not selected - 无凭据；产物权限由 `safe_fs` 既有语义决定，本模块不设 mode
+- Concurrency / shared state / ordering: **selected** - 观测的是一个**正在被 SHUD 就地覆写**的文件，撕裂读是本设计的一等公民（校验-删除-重试即为此存在）；tracker 实例内的 `captured`/`observed` 是可变状态，顺序语义（一次性捕获、相邻去重）是契约
+- Resource limits / large input / discovery: selected - 源文件为有界读（`MAX_STATE_IC_BYTES`），无递归发现
+- Legacy compatibility / examples: not selected - 全新模块，仓库内零既有消费者
+- Error handling / rollback / partial outputs: **selected** - 「校验失败即删副本、保持未捕获、可重试」与「漏采如实报告不冒充」都是 fail-closed 判据
+- Release / packaging / dependency compatibility: selected - 只用 stdlib，不得新增依赖
+- Documentation / migration notes: not selected - 无迁移
+- Geospatial / CRS: not selected
+- Time series / forcing / temporal boundaries: **selected** - 相对分钟 ↔ 目标小时的换算、以及「不接受 epoch 形式」是本模块的时间语义分界
+- 状态链 / warm-start 定戳: selected - 捕获产物是 T+12 状态的来源，冒充或漏报直接污染状态链
+- NWM 快照溯源 / DB-free 隔离: **selected** - 本模块是快照件，溯源头与清单行的双向义务、以及零 NWM import / 零数据库连接由既有守卫承担
+
+**Review focus（常驻轴，承 issue #11 三轮硬闸 retro）**：审核方 MUST 逐条核对以下三轴**各自**都有「改坏即变红」的 oracle，缺任一轴即为 finding：
+
+1. **失败路径**：构造期四类拒绝、源文件缺失/空/畸形 header、副本校验失败
+2. **结构属性**：文件名形态、目标目录、`captured` 只读性、`missing_hours` 升序
+3. **捕获阶段的实现级 MUST**（round 1 verifier 的批级结论）：**Required evidence MUST NOT 只沿 spec 的四个 Scenario 反推**——Scenario 只描述**观测层**的输入-结果对，而 §D 把「header 命中 → `captured[h]` 落表」这一段写得最细（回读两项校验**各自**的判别力、异常收敛在捕获段的对偶、有界读、失败即删）。这些只活在 fixture 散文里的实现级 MUST **MUST 逐条过一遍「改坏即变红」的筛子**并落进 Required evidence。round 1 有四条 CONFIRMED 全部落在这一段，且它们不是四次独立疏漏，是同一条枚举流程偏差。
+4. **成功路径的输入归一化**（issue #11 三轮硬闸的直接产物，历史上整轴缺席）：`round()` 的存在（`m=719.6` 命中 `h=12`）、相邻去重（同值连续观测只记一次）、已捕获跳过（第二次同值观测不重写副本）、`f{hour:03d}` 的补零
+
+**Required evidence**（逐条可机检；测试 MUST 覆盖每一条）：
+
 **G1 header 分钟读取（消费面，不重测）**
 
 - 本 issue 对 `cfg_ic_header_minute_time` **不新增单元用例**：它是 master 既有面，用例在 `producer/tests/test_header_time.py`（issue #22 落地）。裁决修订 R1 撤回了原 G1 的七条参数化断言，连同被撤回的移植一起。
