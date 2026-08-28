@@ -1796,18 +1796,21 @@ Project profile: yd-viewer
 1. issue #23 的验收标准原文不含 `cron.lock_path` 绝对路径要求；该条由 #32 的裁决在 `tasks.md:166` 路由至本 issue 任务 12.3。本 fixture 消费该路由并按 fail-closed 落地（裁决 8），同批出 `specs/run-controller/spec.md`「并发与锁」的 delta。
 2. issue #22 fixture 裁决 6 把「无 `DONE` 却有多份状态是否算异常」路由至本 issue；本 fixture 裁决 3 给出判定。
 3. issue #59 把「崩溃恢复前置：凭什么断定同源无在途孤儿作业」路由至 **#23 与 #28** 两份 fixture；本 fixture 只对**本 issue 的删除集合**给出边界裁决（裁决 9），完整裁决（含两条候选的取舍）归 #28，理由见该裁决。
-4. `specs/run-controller/spec.md` 的保留清理 Requirement 把「每个删除目标 MUST 先经 `realpath` 确认位于 yd 自己的根内」写成了跨全部删除点的字面 MUST。本 issue 以 `safe_fs` 的 `containment_root` 满足它（裁决 6）：该机制全程 `O_NOFOLLOW` 逐段锚定，**严于**「先 `realpath` 再比前缀」（后者在解析与使用之间仍有 TOCTOU 窗口），故不出 spec delta；`realpath` 字面实现归 13.3 的保留窗清理。此处记录该字面偏离。
+4. `specs/run-controller/spec.md` 的保留清理 Requirement 把「每个删除目标 MUST 先经 `realpath` 确认位于 yd 自己的根内」写成了跨全部删除点的字面 MUST。本 issue 以 `safe_fs` 的 `containment_root` 满足它（裁决 6）：该机制全程 `O_NOFOLLOW` 逐段锚定，消除了「先 `realpath` 再比前缀」在解析与使用之间的 TOCTOU 窗口，故不出 spec delta；`realpath` 字面实现归 13.3 的保留窗清理。**两者不是包含关系，原措辞「严于」不成立**（round 1 containment 批核验推翻）：`containment_root` 额外要求 root **自身逐段无 symlink**（`safe_fs.py:824-843` 以 `containment_root=None` 从 `/` 重新锚定，逐分量过 `O_NOFOLLOW`），而 `realpath` 语义恰恰允许 root 经 symlink 到达。这条额外前置条件是实打实的约束，故裁决 6 增补：传给 `safe_fs` 的 `containment_root` MUST 是 `Path(yd_root).resolve()`，且该前置条件 MUST 写进 `residue.py` 模块头与 `ResiduePlan.yd_root` 的契约。
+5. **`docs/compute-loop-design.md` §10 把残留清理放在步骤 4、raw 扫描放在步骤 5，本 issue 的实现把清理挪到了 raw 扫描之后**（round 1 docs 批核验 CONFIRMED）。机制：裁决 2 以 `FrontierDecision` 不可跑为清理前置，而 `RAW_INCOMPLETE` 也是一个 `stop_reason`，于是「T 的 raw 未齐」会连带跳过清理——但那一刻 T 其实是**已知**的（`controller.py` 把它写进了 `detail`），裁决 2 原先给的理由「不知道 T 就无从定义更晚」对这一支不成立。后果限于磁盘：残留留在 NFS 上直到 raw 补齐，`products-contract.md` §4.3 使 viewer 不读无 `DONE` 的源目录，前沿只认 `DONE`，故不产生错误产物；且集合逐源有界，不增长。**按 docs 优先，§10 是对的，不修订 §10**；持久解法是让 `RAW_INCOMPLETE` 携带 T（`FrontierDecision` 形态变更），归任务 14.1 的 `run_once` 接线一并裁决。此处记录偏离，不在本 issue 改形态。
 
 **核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
 
 1. **判定与执行严格分离，且判定 MUST 零写入**。产出两个符号：一个纯判定函数返回「本源的残留清单」（更晚状态文件列表 + 半成品 cycle 目录列表 + 保留的 T），一个执行函数按该清单删除。理由不是风格：任务 13.2（`## 13. run-controller（二）` 组首）逐字写着「复用 12.2 判定，仅接入失败/重跑路径」——失败路径要的是**判定**而不是删除动作，融成一个函数即让 13.2 无从复用。判定函数与 `decide_frontier` 同姿态：只 `stat` / 列目录，MUST NOT 创建、修改或删除任何路径，以递归树快照证明。
-2. **残留集合的定义域是 NFS 侧、逐源**，逐字对齐 compute-loop §10 步骤 4 与 `specs/run-controller/spec.md`「未提交残留清理重跑」：
+2. **残留集合的定义域是 NFS 侧、逐源**，对齐 compute-loop §10 步骤 4 与 `specs/run-controller/spec.md`「未提交残留清理重跑」的**删除集合**（步骤**顺序**上的偏离见上方偏离记录第 5 条）：
    - `states/<source>/` 里 cycle **严格晚于** T 的合法状态文件；
    - `output/<T>/<source>/` 存在且其下**无 `DONE`** 时，该 source 目录整棵；
    - **不含** scratch `work/<source>/<T>`（compute-loop §11.3 与 §12 把 work 的删除定为失败收尾与保留清理的动作，归 #26/#28/#13.x），不含 14 天保留窗清理（§12，归 13.3）。
-   输入 T 取 `decide_frontier` 的结论 cycle；`FrontierDecision` 不可跑（带 `stop_reason`）时本源 MUST NOT 进入清理——不知道 T 就无从定义「更晚」。
+   输入 T 取 `decide_frontier` 的结论 cycle；`FrontierDecision` 不可跑（带 `stop_reason`）时本源 MUST NOT 进入清理——`FrontierDecision` 在不可跑时不携带 cycle，调用方拿不到 T 就无从定义「更晚」。`RAW_INCOMPLETE` 因此被连带跳过，属已记录偏离（偏离记录第 5 条），不是本裁决的目的。
+   **`source` 的输入域 MUST 在判定入口 fail closed**（round 1 A3 PLAUSIBLE/DEFER，因后果属数据丢失类而在本轮一并落地）：仅校验 `source == decision.source` 不够——空串会让 `output_root / cycle_id(T) / ""` 塌回 `output/<cycle>/`（`Path("/a/b") / ""` 就是 `/a/b`），删除粒度由本源子目录放大为整个 cycle 目录，连同另一源已带 `DONE` 的正式产物一起消失，且 `safe_fs` 帮不上忙（它看到的条目名是一个合法的 10 位 cycle id）。`source` MUST 非空；越界的 source 名 MUST 报错而不是构造路径。
 3. **全新链同样适用，且 T 仍取最早状态文件名**（结清 #22 裁决 6 路由的张力）：该源无任何 `DONE` 时 T = `states/<source>/` 里最早的合法状态，比它更晚的状态一律是残留。理由：init 只写一份首态（`spec.md`「全新链取首态文件名」），多出来的份只可能来自一次中断的首轮发布；按同一条规则删除后重跑 T，与「无 `DONE` 残留必须可干净重跑」一致。MUST NOT 把「无 `DONE` 却有多份状态」判为异常停源——那会让首轮崩溃永久砖化该源。
 4. **`DONE` 的存在性是每个 `output/<cycle>/<source>/` 的删除前置**，MUST 逐源 stat `DONE` 这个普通文件，MUST NOT 以「目录非空」或「有 `yd.rivqdown.dat`」代替（products-contract §4：`DONE` 是唯一完成标志）。删除的粒度是 `output/<cycle>/<source>/`，**不是** `output/<cycle>/`：另一源可能在同一 cycle 目录下已有 `DONE`。父目录 `output/<T>/` 在删完本源子目录后 MUST 保留（是否删空目录归 13.3 的保留清理）。
+   **`DONE(retained)` 存在时整个清单 MUST 为空，不只是半成品那一半**（round 1 chain-destruction 批 A1 CONFIRMED/FIX_NOW，实测）：该闸只在调用方**交来**一个 T 时可达（`decide_frontier` 自己产出的 T 永远不在 `done_cycles` 里），而交来 T 正是任务 13.2 的复用姿态；只挡半成品、不挡状态文件，会在「publish 已写 `states/<T+12>` 与 `DONE(T)`、其后某步失败」时把刚提交的下一环判为残留删掉，前沿随即永久停在 `STATE_MISSING`。这直接违反本 fixture 的 Must-preserve「清理前后对同一棵树调用 `decide_frontier`，T 不变」。故该判据 MUST 提到 `plan_residue` 一层，两类删除共用。
 5. **不可见条目永不删除**。`decide_frontier` 的 cycle 可见集判据（10 位数字且 `%Y%m%d%H` 可解析且 `cycle+12h` 不溢出；`states/` 侧另需 `.cfg.ic` 后缀）在本 issue **原样复用**，MUST 从 `controller` 导入而非重写一份。方向与 #22 裁决 5 相反但同源：那里「不可解析 ⇒ 不可见 ⇒ 不砖化该源」，这里「不可解析 ⇒ 无法判定是否比 T 晚 ⇒ 不删」。只删除能被正面识别为残留的路径，是本 issue 的 fail-closed 形态。
 6. **删除原语一律走 `store/safe_fs.py`，两类路径策略不同且不对称，理由须写进模块头**：
    - 半成品 `output/<cycle>/<source>/` 用 `remove_tree_allow_symlinks`——该原语的 docstring 逐字说明它就是为「内容按构造不可信的 residue/quarantine 树」而存在，且拒绝 symlink 会「permanently lock the run at the hygiene hook」；本处正是该场景（被杀死的发布尝试留下什么都可能）。
@@ -1848,6 +1851,13 @@ Required evidence:
 - **symlink 策略两侧**：`states/<source>/<T+12>.cfg.ic` 是 symlink -> 停该源并报错指名该路径，链接与其目标都还在；`output/<T>/<source>/` 树内含一个指向 `YD_ROOT` 外的 symlink 条目 -> 该树被删除，链接的**目标**未被删除（unlink link, never traverse）
 - **containment**：`states/<source>/<T+12>.cfg.ic` 是指向 `YD_ROOT` 外普通文件的 symlink 时（上一条）目标存活；另断言判定+执行传入的 `containment_root` 就是 `YD_ROOT`（以越界路径构造的调用被 `safe_fs` 拒绝）
 - **幂等**：同一棵树上连跑两次判定+执行 -> 第二次清单为空、零删除、零异常，树快照与第一次结束时相等
+- **交来的 T 已有 `DONE` 时整个清单为空**（裁决 4 增补）：树含 `DONE(T)`、`output/<T>/<source>/` 半成品、**以及 `states/<T+12>.cfg.ic`**，以直接构造的 `FrontierDecision(cycle=T)` 调用 -> `state_files` 与 `half_product_dirs` **都**为空、零删除；随后 `decide_frontier` 仍返回 T+12 且可跑。既有的同姿态用例只放了半成品而没放 `states/<T+12>`，恰好绕开了这条
+- **`containment_root` 就是 `YD_ROOT`**（两个独立判别器，缺一不可）：其一，`plan_residue` 产出的 `plan.yd_root` 等于传入的 `YD_ROOT`（把它改成 `root.parent` 会静默放宽容纳域而现有用例全绿）；其二，越界的手搓 plan **只带 `state_files`、`half_product_dirs` 为空**时执行仍被拒（现有越界用例走的是半成品那条臂，状态文件那条臂的 `containment_root` 掉了也不会红）
+- **`YD_ROOT` 经 symlink 到达时清理仍成功**（裁决 6 增补）：以 `link -> real` 构造根并把未 resolve 的 `link/yd` 传给 `plan_residue` -> 判定与执行都成功，删除结果与直接用 `real/yd` 一致。这条钉住「判定侧跟随 symlink 而执行侧对 symlink 致命」的不对称
+- **`source` 输入域**（裁决 2 增补）：`source=""` -> 报错，且 `output/<cycle>/` 与另一源的 `DONE` 产物零改动
+- **半成品位置不是目录时不删**（裁决 6 的类型判据）：`output/<T>/<source>` 分别是 symlink、普通文件、FIFO 三种形态 -> 三者都不入清单，执行后条目仍在
+- **判定侧的 fail-closed 收敛**：`chmod 0o000` 掉 `states/<source>/` -> `plan_residue` 抛 `ResidueError`，MUST NOT 返回空清单（空清单会让残留留在树上被下一轮当成正常产物）
+- **锁的竞争/真错分流**：monkeypatch `fcntl.flock` 抛 `PermissionError(EACCES)` -> 异常向外传播，MUST NOT 变成 `acquired=False`，且被包裹的可调用对象零调用
 - **不可跑源不清理**：`FrontierDecision` 带 `stop_reason`（如 `STATE_MISSING`）时该源零删除
 - **全新链**：无任何 `DONE`、`states/` 有 `T`、`T+12` 两份 -> T 取最早、`T+12` 被删（裁决 3）
 - **锁：持有即跳过**：同进程第一个 fd 持锁，第二次进入包装 -> 立即返回跳过结果、被包裹的可调用对象零调用、进程不阻塞（用例带超时）
@@ -1855,7 +1865,7 @@ Required evidence:
 - **锁：释放后可再取**：第一次正常退出后第二次进入 -> 真正执行；锁文件在释放后**仍存在**（不 unlink）
 - **锁：异常路径也释放**：被包裹的可调用对象抛异常 -> 异常向外传播且锁已释放（同棵树第二次进入能拿到锁）
 - **非绝对锁路径**：`"yd.lock"` 与 `"~/yd.lock"` 两种形态 -> 抛错且消息含 `cron.lock_path`；断言 cwd 下与 `Path.home()` 下**都没有**新建锁文件，且被包裹的可调用对象零调用（spec Scenario 逐字要求「不执行发现」；副作用先于闸门是本条要杀的形态）
-- 预登记变异体（(a)–(s) 共 19 条，此处刻意写全数），每条 MUST 被上列用例杀死（跑法见 `openspec/project-profile.md` 的 Mutation-testing hazards，用 `uv run python -m pytest`）：
+- 预登记变异体（(a)–(aa) 共 27 条，此处刻意写全数；(t)–(aa) 由 round 1 核验门追加），每条 MUST 被上列用例杀死（跑法见 `openspec/project-profile.md` 的 Mutation-testing hazards，用 `uv run python -m pytest`）：
   (a) 「更晚」判据 `>` 改 `>=` -> 保留 T 用例变红；
   (b) 逐源过滤去掉（对 `states/` 全域比较）-> 逐源隔离用例变红；
   (c) `DONE` 存在性判据改为「目录非空」-> `DONE` 保护用例变红；
@@ -1874,7 +1884,15 @@ Required evidence:
   (p) 忽略 `FrontierDecision.stop_reason` 照常清理 -> 不可跑源用例变红；
   (q) 全新链的 T 取 `max(states)` 而非 `min(states)` -> 全新链用例变红；
   (r) 空目录不判为半成品（以「目录非空」为半成品判据）-> 空半成品目录用例变红；
-  (s) 删除调用不带 `missing_ok` / 执行前不重新判定 -> 幂等用例第二次抛 `FileNotFoundError` 变红
+  (s) 删除调用不带 `missing_ok` / 执行前不重新判定 -> 幂等用例第二次抛 `FileNotFoundError` 变红；
+  (t) `DONE(retained)` 闸只留在半成品那一半（回到 round 1 前的形态）-> 「交来的 T 已有 `DONE`」用例变红；
+  (u) `plan.yd_root` 由 `root` 改为 `root.parent` -> `containment_root` 判别器之一变红；
+  (v) 状态文件删除调用**单独**去掉 `containment_root` -> `containment_root` 判别器之二变红（半成品那条臂不变，故必须两个判别器都在）；
+  (w) 去掉 `Path(yd_root).resolve()` -> symlink 根用例变红；
+  (x) 去掉 `source` 非空校验 -> `source=""` 用例变红；
+  (y) 去掉半成品的 `S_ISDIR` 类型判据 -> symlink/普通文件/FIFO 三形态用例变红；
+  (z) `plan_residue` 把 `DiscoveryUnreadableError` 吞成空清单而不抛 `ResidueError` -> `chmod 0o000` 用例变红；
+  (aa) `except BlockingIOError` 放宽为 `except OSError` -> `PermissionError` 用例变红（该变异体在 round 1 实测存活，全套 993 绿）
 - `cd producer && uv run pytest` -> 退出码 0
 - `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
 - `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
