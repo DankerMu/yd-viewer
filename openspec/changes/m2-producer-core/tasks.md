@@ -682,13 +682,13 @@ def stage_raw(
 
 #### 落盘布局与 `local_key` 形态（pin 事实转录）
 
-`entry.local_key` 在 pin 上**不是文件系统路径而是 object-store key**，消费端经 `self.object_store.resolve_path(local_key)` 解析（`NWM@8ae9b8f2 workers/canonical_converter/converter.py:1460`）。故本 issue 逐字沿用 pin 的 key 形态并让 object-store 根落在 work 内：
+`entry.local_key` 在 pin 上**不是文件系统路径而是 object-store key**，消费端经 object store 的 `resolve_path(local_key)` 解析（勘察清单 §3.1 记有 `packages/common/object_store.py` 的 `resolve_path`(L273-285) 与 `normalize_object_key`(L44-75) 均不做大小写归一；本仓侧的对应实现是 `store/object_store.py`。原文此处引 `converter.py:1460`，§3.1 无该行，已改锚到 §3.1 实有的事实——issue #7 round 1 复审 verifier CONFIRMED/FIX_NOW）。故本 issue 逐字沿用 pin 的 key 形态并让 object-store 根落在 work 内：
 
 - `local_key = f"raw/{存储身份}/{YYYYMMDDHH}/{bundle 文件名}"`（`gfs_adapter.py:615`）
 - object-store 根 = `work_dir`；于是 `resolve_path` 结果为 `<work_dir>/raw/<存储身份>/<YYYYMMDDHH>/<bundle>`，**位于 `work/raw/` 之下**，满足 spec 的「entry 路径 MUST 只引用 `work/raw/` 临时副本」
 - 存储身份逐源非对称，复用 `rawscan.SOURCE_DIR_NAMES`（`ifs -> "IFS"`、`gfs -> "gfs"`），MUST NOT 另抄一份字面量
 - `remote_url` 沿用源 manifest 对应 entry 的值；源 manifest 不可用时整轮 fail closed，MUST NOT 以 `""` 占位（见 fail-closed 段）
-- `expected_checksum`、`expected_size_bytes`、`manifest_uri` 三者 MUST 落 `None`，逐条理由 MUST 写进实现注释：前两者在 pin 的**构建期**同样是 `None`（下载期才可能有值），yd 复制的是已落盘的字节、无独立 oracle，写进去等于制造一个无人校验的声明；`manifest_uri` 在 pin 上是 object-store URI（`ifs_adapter.py:667` 一带），而 yd 的 manifest 落在 `<work_dir>/raw-manifest.json`、不是 object-store 对象，写 `file://` 路径属发明语义
+- `expected_checksum`、`expected_size_bytes`、`manifest_uri` 三者 MUST 落 `None`，逐条理由 MUST 写进实现注释：前两者在 pin 的**构建期**同样是 `None`（下载期才可能有值），yd 复制的是已落盘的字节、无独立 oracle，写进去等于制造一个无人校验的声明；`manifest_uri` 留空的理由**不依赖任何 pin 事实**（§3.1 未记载该字段，故本仓不就它作 pin 声明；原文的「pin 上是 object-store URI（`ifs_adapter.py:667` 一带）」无 §3.1 支撑，已删——同上 verifier 裁定）：yd 的 manifest 落在 `<work_dir>/raw-manifest.json`，不是 object-store 对象，写一个 `file://` 路径等于发明一个本仓不持有的身份
 
 #### 源 manifest 承接（不发明语义）
 

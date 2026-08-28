@@ -482,8 +482,11 @@ def _check_accumulation(metadata: Mapping[str, Any], lead: int, variable: str) -
 def _local_key(source: str, cycle: datetime, filename: str) -> str:
     """object-store key 形态，**不是**文件系统路径。
 
-    消费端经 `object_store.resolve_path(local_key)` 解析
-    （NWM@8ae9b8f2 workers/canonical_converter/converter.py:1460）；本 issue 让
+    消费端经 object store 的 `resolve_path(local_key)` 解析——勘察清单 §3.1 记有
+    `packages/common/object_store.py` 的 `resolve_path`(L273-285) 与
+    `normalize_object_key`(L44-75)，本仓侧的对应实现是 `store/object_store.py`。
+    （本处原引 `converter.py:1460`；§3.1 无该行，而 §3.1 是本仓唯一可核的 pin 桥，
+    故改锚到它实有的事实——issue #7 round 1 verifier CONFIRMED/FIX_NOW。）本 issue 让
     object-store 根落在 `work_dir`，于是解析结果为
     `<work_dir>/raw/<存储身份>/<YYYYMMDDHH>/<bundle>`，位于 `work/raw/` 之下。
     形态逐字沿用 pin 的 `f"raw/{source_id}/{compact_cycle}/{bundle_filename}"`
@@ -678,9 +681,11 @@ def _render_manifest(
         source_id=SOURCE_DIR_NAMES[source],
         cycle_time=cycle.astimezone(UTC),
         entries=entries,
-        # `manifest_uri` 留 `None`：pin 上它是 object-store URI（ifs_adapter.py:667
-        # 一带），而本轮 manifest 落在 `<work_dir>/raw-manifest.json`、不是 object
-        # store 对象；写个 `file://` 路径属发明语义。
+        # `manifest_uri` 留 `None`。理由**不依赖任何 pin 事实**：§3.1 未记载该字段，
+        # 故本仓不就它作 pin 声明（原注释称「pin 上它是 object-store URI
+        # （ifs_adapter.py:667 一带）」，§3.1 无支撑，已删——同一 verifier 裁定）。
+        # 本轮 manifest 落在 `<work_dir>/raw-manifest.json`，不是 object store 对象，
+        # 写一个 `file://` 路径等于发明一个本仓不持有的身份。
         manifest_uri=None,
         metadata=_manifest_metadata(leads),
     )
