@@ -380,7 +380,14 @@ def _remove_paths(paths: list[Path]) -> list[Path]:
         try:
             path.unlink(missing_ok=True)
         except OSError:
-            residue.append(path)
+            # 只有**确实还躺在盘上**的路径才算残留。`missing_ok=True` 只吞
+            # `FileNotFoundError`：当 `out_dir` 的父级是个普通文件时，`mkdir` 先失败、
+            # 临时文件根本没被创建，而对这类路径 `unlink` 抛的是 `NotADirectoryError`，
+            # 照单收下就会报出「清理未能删除本次产物(两个从不存在的路径)」，把真因
+            # 挤到 `__cause__` 里——归属谎报。用 `lexists` 而非 `exists`，这样真正
+            # 删不掉的悬空符号链接仍会被如实报出。
+            if os.path.lexists(path):
+                residue.append(path)
     return residue
 
 

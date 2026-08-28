@@ -1387,10 +1387,11 @@ def test_write_viewer_geojson_faulty_rivers_writes_nothing(
 def test_write_viewer_geojson_rolls_back_when_second_write_fails(
     adjacent_baseline: SyntheticBaseline, tmp_path
 ) -> None:
-    """第二份落盘失败：已写出的 `rivers.geojson` 必须被回滚，不留半份产物。
+    """第二份提升失败：已提升的 `rivers.geojson` 必须被回滚，不留半份产物。
 
-    失败用真实机制触发——`boundary.geojson` 这个名字被一个目录占住，`write_text`
-    抛 `IsADirectoryError`（`OSError` 子类）；不 monkeypatch 被测函数自身的写出逻辑。
+    失败用真实机制触发——`boundary.geojson` 这个名字被一个目录占住。temp+replace
+    重构后**两次临时写都成功**，失败发生在第二次 `os.replace`（把临时文件改名到被
+    目录占住的终名，`OSError`）；不 monkeypatch 被测函数自身的写出逻辑。
     """
     out_dir = tmp_path / "out"
     occupied = out_dir / "boundary.geojson"
@@ -1514,3 +1515,91 @@ def test_midwrite_limits_actually_bracket_the_two_documents(tmp_path) -> None:
 
     assert 0 < _MIDWRITE_LIMITS["first"] < rivers_size
     assert rivers_size <= _MIDWRITE_LIMITS["second"] < boundary_size
+
+
+def test_write_viewer_geojson_mkdir_failure_reports_no_false_residue(
+    adjacent_baseline: SyntheticBaseline, tmp_path
+) -> None:
+    """`out_dir` 的父级是普通文件：`mkdir` 就失败，临时文件从未被创建。
+
+    此时消息**不得**声称有「未能删除的本次产物」。`Path.unlink(missing_ok=True)`
+    只吞 `FileNotFoundError`，而对「父级不可遍历」的路径抛的是 `NotADirectoryError`，
+    照单收下就会把两个根本不存在的临时路径报成残留，真因被挤进 `__cause__`——
+    操作者拿到的是一条谎报归属的消息。
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("我是一个普通文件，不是目录", encoding="utf-8")
+    out_dir = blocker / "out"
+
+    with pytest.raises(GeometryError) as excinfo:
+        write_viewer_geojson(
+            rivers_shp=adjacent_baseline.rivers_shp,
+            domain_shp=adjacent_baseline.domain_shp,
+            out_dir=out_dir,
+        )
+
+    message = str(excinfo.value)
+    assert str(out_dir) in message
+    assert "未能删除" not in message
+    assert isinstance(excinfo.value.__cause__, OSError)
+    # 什么都没被创建：占位文件仍是原样的普通文件
+    assert blocker.is_file()
+    assert blocker.read_text(encoding="utf-8") == "我是一个普通文件，不是目录"
+
+
+def test_write_viewer_geojson_writes_into_existing_out_dir(
+    adjacent_baseline: SyntheticBaseline, tmp_path
+) -> None:
+    """`out_dir` 已存在时必须照常写入——10.3 的 scratch 目录正是这么调用的。
+
+    同时钉死「只写这两个名字」：目录里原有的无关文件不得被本函数动到。
+    """
+    out_dir = tmp_path / "scratch"
+    out_dir.mkdir()
+    bystander = out_dir / "yd.riv.shp"
+    bystander.write_text("无关文件", encoding="utf-8")
+
+    rivers_out, boundary_out = write_viewer_geojson(
+        rivers_shp=adjacent_baseline.rivers_shp,
+        domain_shp=adjacent_baseline.domain_shp,
+        out_dir=out_dir,
+    )
+
+    assert rivers_out.is_file() and boundary_out.is_file()
+    assert _strict_loads(rivers_out.read_text(encoding="utf-8"))["type"] == (
+        "FeatureCollection"
+    )
+    assert bystander.read_text(encoding="utf-8") == "无关文件"
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "boundary.geojson",
+        "rivers.geojson",
+        "yd.riv.shp",
+    ]
+
+
+def test_write_viewer_geojson_rollback_touches_only_promoted_paths(
+    adjacent_baseline: SyntheticBaseline, tmp_path
+) -> None:
+    """回滚只删**真正提升过**的终名，未提升的终名一律不碰。
+
+    把 `promoted.append(path)` 记在 `os.replace` **之前**，回滚就会去删一个本次从未
+    触碰过的终名——对调用方原有的同名文件就是无声删除。这里用被目录占住的
+    `boundary.geojson` 让第二次提升失败：正确实现的 `promoted` 里只有
+    `rivers.geojson`，回滚干净、消息声明「未留下本次的任何文件」；记账提前的实现会
+    去 unlink 那个目录并失败，消息退化成「清理未能删除本次产物」。
+    """
+    out_dir = tmp_path / "out"
+    occupied = out_dir / "boundary.geojson"
+    occupied.mkdir(parents=True)
+    (occupied / "sentinel.txt").write_text("调用方的东西", encoding="utf-8")
+
+    with pytest.raises(GeometryError) as excinfo:
+        write_viewer_geojson(
+            rivers_shp=adjacent_baseline.rivers_shp,
+            domain_shp=adjacent_baseline.domain_shp,
+            out_dir=out_dir,
+        )
+
+    assert "未能删除" not in str(excinfo.value)
+    assert (occupied / "sentinel.txt").read_text(encoding="utf-8") == "调用方的东西"
+    assert list(out_dir.iterdir()) == [occupied]
