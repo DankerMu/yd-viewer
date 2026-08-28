@@ -38,7 +38,9 @@
       ]
     },
     "6": {
-      "ceilingPrs": [],
+      "ceilingPrs": [
+        38
+      ],
       "gateEntries": 2,
       "closed": []
     }
