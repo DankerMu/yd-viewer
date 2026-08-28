@@ -1362,7 +1362,7 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 - 上一段那条越界理由（避免「哪个 token 是 minute-time」出现双权威）在新事实下**由消费实现得更彻底**：唯一权威是 `header_time.py`，tracker / `state_qc` / `restamp` 三方共用，正是 master 的 `state/__init__.py` docstring 明令的形态。
 - 语义等价已核对：master 的 `cfg_ic_header_minute_time` 与本 PR 撤回的 `cfg_ic.header_minute_time` 移植自**同一 pin 行段**（`:609-639`），`_as_float` 亦同源；对 §G1 的七个 header 输入逐值相同。
 - **非有限值守卫（`nan`/`inf`）仍留在 tracker 一侧**（`_header_minute_of` 的单一出口）：`header_time` 只做 token 提取，不做值域判定；本 issue 的「非有限即本次观测无结果」是 tracker 的轮询语义，不上移。
-- 由此**作废**：round 2 的 cand-16 / cand-18 对清单 §1 `packages/common/state_qc.py` 行的修订义务（该行已由 #9/#22 在 master 侧写全，本 PR 合并时取 master 侧为权威）；清单 §1「最小测试（cap 5 header）」行的配对约束回到 master 侧措辞。
+- 由此**作废**：round 2 的 cand-16 / cand-18 对清单 §1 `packages/common/state_qc.py` 行的修订义务（该行已由 #9/#22 在 master 侧写全，本 PR 合并时取 master 侧为权威）；清单 §1「最小测试（cap 5 header）」行**取 master 侧措辞为底，并补一条重述义务**（commit `c24aea6`：`_read_cfg_ic_header_minute` 的规则在 #16/#22 之后被拆成 `header_time.cfg_ic_header_minute_time` 与 tracker 私有的 `_read_header_minute`/`_header_minute_of`，本仓不存在同名可导入符号，落地该行时 MUST 按实际符号名重述配对约束）。**MUST NOT 把该行"还原"回纯 master 措辞**——那会删掉这条义务（round 3 F2 的失败形态）。
 - **搭车修改**：合并 master 时 `.large-file-guard.json` 增加两条 exclude（`producer/tests/test_cfg_ic.py` 1050 行、`producer/tests/test_state_tools_qc.py` 1129 行），二者是 master 上已有的超限文件（PR #61 走服务端合并，不经本地 PreToolUse 钩子），而钩子按暂存集判定，导致 master 向任何分支的合并都会被自己的守卫挡死。拆分超出本 issue 范围，已开 issue #82 跟踪（issue-scribe 核实时另钉出这是**第三次复发**：`3f7d46e`/`f130883` 已因同一原因豁免过 `test_config.py`/`test_geometry.py`/`test_rawscan.py`，豁免清单单调增长而守卫覆盖面单调缩小）；`maxLines` 不动，无任何断言/测试/CI 被削弱。
 
 
@@ -1409,7 +1409,7 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 - **本模块不含轮询循环、不含 `time.sleep`、不读轮询间隔**。「反复观测」由调用方（作业脚本侧，归后继 issue）重复调用 `capture_available()` 实现；测试即以「按序调用 N 次」重放覆写序列。这是对 pin 的刻意偏离，同时消掉 pin `_state_checkpoint_poll_seconds`(:3952) 的 `0.01` 内置默认。
 - 单次观测的步骤，逐条：
   1. 读 `source_path` 的 header 分钟：文件不存在 / 不是普通文件 / 是符号链接 / 为空 / 非 UTF-8 / 首行不含 minute-time token → **本次观测无结果**，直接返回，MUST NOT 抛错、MUST NOT 记录观测值（SHUD 未启动或正在覆写都会命中这一支）。
-  1b. **非有限的 header 分钟（`nan` / `inf` / `-inf`）MUST 同样判为「本次观测无结果」**，MUST NOT 记进 `observed_header_minutes`。理由是硬的：本仓的 `header_minute_time` 与 pin 一样只做裸 `float()`，而 `float("nan")`/`float("inf")` 都解析成功——这正是 pin 的 `_format_header_minute`(:3634) 把非有限判定放在**第一步**的原因。若让它流下去，`round(nan)` 抛 `ValueError`、`round(inf)` 抛 `OverflowError`，两者都会穿透 `capture_available` 外泄给调用方（违 §A「不外泄」与本步「不抛错」），把一次撕裂读升级成整个 tracker 崩溃；记进观测轨迹同样有害——`nan != nan` 使相邻去重永不生效，轨迹被无限追加。撕裂的 `cfg.ic.update` 首行出现 `nan`/`inf` 是**真实可达**的：SHUD 就地覆写时数值区可能半写。
+  1b. **非有限的 header 分钟（`nan` / `inf` / `-inf`）MUST 同样判为「本次观测无结果」**，MUST NOT 记进 `observed_header_minutes`。理由是硬的：本仓的 `cfg_ic_header_minute_time`（`state/header_time.py`） 与 pin 一样只做裸 `float()`，而 `float("nan")`/`float("inf")` 都解析成功——这正是 pin 的 `_format_header_minute`(:3634) 把非有限判定放在**第一步**的原因。若让它流下去，`round(nan)` 抛 `ValueError`、`round(inf)` 抛 `OverflowError`，两者都会穿透 `capture_available` 外泄给调用方（违 §A「不外泄」与本步「不抛错」），把一次撕裂读升级成整个 tracker 崩溃；记进观测轨迹同样有害——`nan != nan` 使相邻去重永不生效，轨迹被无限追加。撕裂的 `cfg.ic.update` 首行出现 `nan`/`inf` 是**真实可达**的：SHUD 就地覆写时数值区可能半写。
   2. 得到 header 分钟 `m` 时记入 `observed_header_minutes`：**仅当与上一个记录值不同才追加**（pin 同款去重，连续同值不重复记）。这是漏采诊断的唯一现场证据。
   3. 对每个**尚未捕获**的目标小时 `h`：`round(m) == round(h * 60)` 才捕获，否则跳过。
 - **相等判据 MUST 是四舍五入后的精确相等**，MUST NOT 用 `<=`/`>=`/区间/容差。这一条直接对应 spec 的「MUST NOT 以更晚时刻的版本冒充 T+12」：`m=1440` 对 `h=12` MUST NOT 命中。
@@ -1563,6 +1563,15 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 - **任何代码提交** -> 重走 PR body 的行数、用例数、文件清单、零 diff 声明
 - **任何 fixture 修订** -> 重走 PR body 的 `偏离记录` 与 Known limits
 - **任何 DEFER/DISCARD 裁决** -> fixture 与 PR body 的 Known limits **条数与归属必须一致**（cand-17：fixture 八条、body 六条，漏掉的恰是三条带下游义务的）
+- **任何清单 / design / spec 修订** -> **重走 fixture 自身**。（round 3 F2 的可命名设计缺陷：上列四条触发器的目标集只有 PR body 与清单，**定义本清单的这份 fixture 不在任何触发器的目标集里**，于是 `c24aea6` 那次清单修订在纸面上不欠 fixture 任何义务，fixture 成了唯一没被对账的站点。）
+
+**触发器 1 的完备性 oracle（round 3 F1 的可命名设计缺陷，本 issue 起常驻）**：「重走**全部**行」此前只以人工断言存在，走一行和走全部行**在纸面上不可区分**——这正是本节自己那条「完备性声明必须可机检」被违反，只是违反发生在**上一层**（对账清单自身就是一条未加机检的完备性声明）。故触发器 1 的执行 MUST 产出一件**可数的产物**：一张**逐行处置表**（清单 §1 的行号 -> 本次重走结论，结论取 `无需改动` / `已改动（改了什么）` / `作废（作废了谁的什么声明）` 三者之一），落在 PR body 或 `.workplans/pr-<n>/` 下。**该表的行数 MUST 等于清单 §1 的数据行数**，口径写死为
+
+```bash
+awk '/^## 1\./,/^## 2\./' openspec/changes/m2-producer-core/nwm-snapshot-inventory.md | grep -c '^| '
+```
+
+减 2（表头行与分隔行）。issue #16 落地时该值为 **29 - 2 = 27**。行数不等即视为触发器 1 未执行。Phase 7 的终审 brief MUST 核这张表存在且行数相等。
 
 另两条常驻纪律：
 
@@ -1581,7 +1590,10 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 - **不设产物 mode，权限随 umask**（cand-07，CONFIRMED/DISCARD）：命中本 fixture 自己的 rung-1 否定锚点「Auth / permissions：本模块不设 mode」，且 `store/object_store.py` 同形，属仓库级约定而非本 PR 回归。
 - **header 读把整份有界内容 decode + splitlines 只取首行**（cand-05，CONFIRMED/DISCARD）：64 MiB 上界下峰值约 4.7 倍线性放大。`cfg_ic.parse` 在捕获路径上做同样的事、同一个上界，属仓库既有模式；只修轮询侧是化妆。
 - **checksum 取 `copied` 而非 `payload` 在声明域内不可判别**（cand-13，PLAUSIBLE/DISCARD）：原子写 + 私有落点 + 单写者使 `copied == payload` 在每条可达路径上恒成立；真正的部分写会先被 §D 两项校验拦下，走不到 checksum。
+- **相对 `run_dir` 会让实例状态与磁盘状态 fail-open 地错位**（round 3 cand-r3is-01，CONFIRMED/DEFER）：构造期原样存 `Path(run_dir)` 不校验绝对性，而 `safe_fs._expand_path` 对非绝对路径**每次调用**都按当时的 `Path.cwd()` 重新锚定。已实测的失败序列：cwd=A 观测 header 360 → 进程 `chdir` 到 B → 再观测 B 下另一份文件的 720，结果 `missing_hours()` 返回 `()`（声称 A 这一轮的 T+12 已捕获，实际从未捕获），且 `CapturedCheckpoint.path` 是相对路径，换 cwd 即「有记录、无文件」。**与 cand-03 失败方向相反**（那条 fail closed、`missing_hours()` 诚实），故不是重复。归属与 cand-03 **同一条 tracked issue #77**，措辞 MUST 收紧为「`run_dir` MUST 规范：**既绝对、祖先亦无符号链接**」，并注明两者方向相反。本 PR **不加**构造期 `is_absolute()` 守卫：verifier 裁定它超出本 PR 声明的改动面——§B 的构造期拒绝清单是闭合枚举，轴 6 那张刚被 Phase 6.2 独立审计封账的「10 行 = 10 见证」结账表要加第 11 行，须先改 fixture 再动码，而那会重新打开刚关掉的审计。当前不可达于声明域：全仓 `CheckpointTracker` 除模块自身与测试（`tmp_path`，恒绝对）外零调用点，`config.py` 无 `run_dir` 字段，`src/` 内零 `chdir`。
 - **epoch 形式 header 的 M4 具体核验钩子**（cand-19，CONFIRMED/FIX_NOW）：偏离 4「只认相对分钟」的正当性**只**建立在时间线证据上——`docs/compute-loop-design.md` 在本 PR 之前就已声明 `cfg.ic.update` 的 header 是模型相对分钟，且 spec 的收窄早于实现提交 26 分钟。它**不**建立在 pin 的行为上：round 2 直读 pin 控制流确认，`capture_available`(:3717-3736) 把 `_header_minute_matches_checkpoint`(:3963-3974) 的**两支都无条件**用在同一个 `<project>.cfg.ic.update` 上，分支注释只是归因不是守卫；而 yd 自己的初态正是 epoch 定戳的（pin `_shift_cfg_ic_time`(:3653) 在求解前把绝对分钟写进 header），所以「SHUD 把初态的时间基带进 update 文件」是**默认生产拓扑**而非异常。**M4 首次真跑 MUST 核验第一份真实 `cfg.ic.update` 的 header 是相对分钟形式**；若为 epoch 形式则每轮永久漏采（fail closed 且响亮，但总量为零），偏离 4 MUST 重新裁决。此处不接受通用的「真实 SHUD 行为归 M4」一句——它不会被解析成这一项具体检查（同类先例：cand-14 已按此标准给了自己的具体钩子）。
+
+**欠 #17 fixture 的一项显式裁决（round 3 F4，CONFIRMED/P3；本 issue 不替 #17 决定，只把它记成必须先裁的项）**：本 issue 在三处写死「补跑半随 #17 落进**同一个文件**」（本 fixture、design.md D9、清单 §1 cap 6 行），测试模块头的结账表另写「#17 MUST 按同一格式续表」。而 `producer/tests/test_checkpoint_tracker.py` 落地即 **806 行**，`.large-file-guard.json` 的 `maxLines` 为 **1000**、`exclude` 不含该文件，余量 **194 行**。碰撞是被清单自己的闭包清单**强制**的、不是密度估算：cap 6 行把 19 个补跑用例的闭包写死为 8 个 helper 加 13 项模块级常量（pin 上仅 `_FAST_SOLVER_STUB`(L4678)–`_DISTINCTIVE_STAGED_IC`(L5136) 一段就跨约 458 行）并明写「无法手搓等价，必须整体搬运」，实测本文件对 `SOLVER_STUB`/`_write_basins_package`/`install_recovered`/`run_shud`/`recover` 的命中**全为 0**——闭包一行未落，单它就超余量一倍以上，19 个用例本体与续表尚未计入。钩子按暂存集判定，故 #17 的**每一次本地 `git commit`** 都会被 `exit 2` 拒绝。#17 的 fixture MUST 在动码前三选一并写明理由：**(a)** 把测试拆成 `test_checkpoint_tracker.py` + `test_checkpoint_recovery.py` 两个文件，同时修订本 issue 写下的三处「同一个文件」MUST 与清单 cap 6 行；**(b)** 给 `test_checkpoint_tracker.py` 加**第四条** exclude——注意这正是 issue #82 记录在案的「豁免清单单调增长而守卫覆盖面单调缩小」模式的第四次复发，选它必须在 #82 里同步登记；**(c)** 拆分被搬运的闭包（把 13 项常量与 8 个 helper 落进独立 fixture 模块），只在本文件留用例。**MUST NOT 默认走 (b)**。
 
 **Non-goals（本 issue 明示不做）**：漏采补跑（#17）、轮询循环与作业脚本接线、`state_checkpoints.json` 落盘、绝对 T+12 定戳（#9 重戳 + #13.1 发布）、river 行数等结构检查（#9）、work manifest 契约（组 8）、真实 SHUD 行为（M4）。
 

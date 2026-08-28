@@ -43,6 +43,8 @@
 
 **D9 补记（2026-08-28，越界撤回）**：#16 起初还在 `state/cfg_ic.py` 新增了 `header_minute_time` 与 `_header_minute_index` 两个 pin 移植（理由是避免「哪个 token 是 minute-time」出现双权威），属对 issue "PR Boundary: tracker 模块与测试" 的刻意越界。评审期间 issue #22（任务 12.1）在 master 落了 `state/header_time.py`，含同一 pin 行段的同两个符号，落点更宽更正。#16 据此**撤回全部越界改动**，改为消费 `yd_producer.state.cfg_ic_header_minute_time`：越界归零，双权威顾虑由单一权威模块彻底解决。裁决细则见 tasks.md `### Issue #16 fixture` 的「落点裁决修订 R1」。
 
+**D9 补记 2（欠 #17 的文件体量裁决）**：本条写下的「两半分两个 PR 落进**同一个文件**」在 #17 落地时会与项目级 `large-file-guard`（`maxLines: 1000`）对撞——`producer/tests/test_checkpoint_tracker.py` 落地即 806 行，而 cap 6 行强制随搬的闭包（8 helper + 13 项模块级常量，pin 上约 458 行）单独就超出 194 行余量。#17 的 fixture MUST 在动码前于「拆文件并修订本条 MUST / 加第四条 exclude（issue #82 模式的第四次复发，须同步登记）/ 拆分闭包进独立 fixture 模块」三者中显式择一，MUST NOT 默认走第二条。逐条依据见 tasks.md `### Issue #16 fixture` 的「欠 #17 fixture 的一项显式裁决」。
+
 ## Sketch seams under test
 
 测试行使的公共边界，从高到低（每 seam 一行理由）：
