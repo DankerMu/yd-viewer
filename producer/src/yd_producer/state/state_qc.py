@@ -1,12 +1,19 @@
 # NWM@8ae9b8f2 packages/common/state_qc.py
-"""SHUD `cfg.ic` 状态变量 QC：结构检查（任务 4.2）、负残差归零（任务 4.4）与 header 判定基座。
+"""SHUD `cfg.ic` 状态变量 QC：结构检查（任务 4.2）与负残差归零（任务 4.4）。
 
 溯源：`NWM@8ae9b8f2 packages/common/state_qc.py`。判定语义与数值常量整体移植自该 pin，
 逐函数带 `NWM@8ae9b8f2 packages/common/state_qc.py` 注释。
 
 **格式根单一权威**：分段识别与有界读**一律从 `yd_producer.state.cfg_ic` 导入**
-（`parse` / `MAX_STATE_IC_BYTES` / `_as_float` 等），本模块 MUST NOT 再移植一份——那会造成
+（`parse` / `MAX_STATE_IC_BYTES` / `Section` 等；`_as_float` 的最后一个用户是下段那五个 header
+符号，随它们一并移出本模块），本模块 MUST NOT 再移植一份——那会造成
 pin 分段逻辑的双权威副本（`nwm-snapshot-inventory.md` §1 中 `packages/common/state_qc.py` 行的禁令）。
+
+**header 判定基座同理不在本模块**：`cfg_ic_header_minute_index` / `cfg_ic_header_minute_time` /
+`cfg_ic_header_shape` / `CfgIcHeaderShape` / `_VALID_CFG_IC_HEADER_TOKEN_COUNTS` 这五个 pin 符号
+由 `yd_producer.state.header_time` 承担（issue #22 任务 12.1 先行落地，溯源义务随符号走），本模块
+**一律 import**、MUST NOT 再移植一份（同一条禁令）；此处的四个公开名只是转出，供既有调用方沿用。
+判定语义的用例与溯源断言在 `tests/test_header_time.py`。
 
 **列语义的两层定位方式不同，不得互相污染**（pin 模块 docstring `:24-25` 明写
 "Column semantics are applied by position"）：
@@ -102,8 +109,13 @@ from yd_producer.state.cfg_ic import (
     MAX_STATE_IC_BYTES,
     CfgIcDocument,
     Section,
-    _as_float,
     parse,
+)
+from yd_producer.state.header_time import (
+    CfgIcHeaderShape,
+    cfg_ic_header_minute_index,
+    cfg_ic_header_minute_time,
+    cfg_ic_header_shape,
 )
 
 __all__ = [
@@ -184,140 +196,6 @@ _NEGATIVE_ZERO_TOLERANCE = 1.0e-2
 # :func:`run_state_variable_qc`.
 MAX_UNSAT_MEAN_CORRECTION_M = 2.0e-4
 MAX_RIVER_MEAN_CORRECTION_M = 2.0e-3
-
-# NWM@8ae9b8f2 packages/common/state_qc.py:642-646（逐字移植）
-# The only two ``.cfg.ic`` header layouts SHUD's ``Model_Data::read_ic`` and this
-# project's writers ever produce: the native 3-token
-# ``<mesh> <mesh-state-columns> <minute-time>`` and the compatibility 4-token
-# ``<mesh> <river> <lake> <minute-time>``. Anything else is a malformed delivery.
-_VALID_CFG_IC_HEADER_TOKEN_COUNTS = (3, 4)
-
-
-# --- header 判定基座（任务 4.3 重戳的输入，pin 同文件） ---
-
-
-def cfg_ic_header_minute_index(header_tokens: Sequence[str]) -> int | None:
-    """Return the position of the SHUD IC header minute-time token, or None.
-
-    Shares the "LAST numeric token is the minute-time" rule with ``_header_counts``
-    so every consumer (state QC, runtime header read, runtime time shift) interprets
-    native 3-token ``<mesh> <mesh-state-columns> <minute-time>`` and compatibility
-    4-token ``<mesh> <river> <lake> <minute-time>`` headers consistently. Returns
-    the index into ``header_tokens`` of that trailing numeric token. None when there
-    are fewer than two numeric tokens (no count + minute-time pair) or none at all.
-    """
-    # NWM@8ae9b8f2 packages/common/state_qc.py:609-627（逐字移植）
-    numeric_indices = [
-        index
-        for index, token in enumerate(header_tokens)
-        if _as_float(token) is not None
-    ]
-    if len(numeric_indices) < 2:
-        # Need at least one count token plus the trailing minute-time.
-        return None
-    return numeric_indices[-1]
-
-
-def cfg_ic_header_minute_time(header_tokens: Sequence[str]) -> float | None:
-    """Return the SHUD IC header minute-time value, or None.
-
-    Uses :func:`cfg_ic_header_minute_index` so the minute-time is read from the
-    LAST numeric token regardless of whether a lake count is present.
-    """
-    # NWM@8ae9b8f2 packages/common/state_qc.py:629-639（逐字移植）
-    index = cfg_ic_header_minute_index(header_tokens)
-    if index is None:
-        return None
-    return _as_float(header_tokens[index])
-
-
-@dataclass(frozen=True)
-class CfgIcHeaderShape:
-    """Verdict of the shared ``.cfg.ic`` header content-shape check.
-
-    ``mesh_count`` is the integer value of the FIRST numeric token (the mesh
-    element count in both accepted layouts), or None when that token is absent
-    or not an integer. ``reason`` is None exactly when ``valid`` is True.
-    """
-
-    # NWM@8ae9b8f2 packages/common/state_qc.py:649-662（逐字移植）
-    numeric_token_count: int
-    mesh_count: int | None
-    valid: bool
-    reason: str | None
-
-
-def cfg_ic_header_shape(
-    header_tokens: Sequence[str],
-    *,
-    expected_mesh_count: int | None = None,
-) -> CfgIcHeaderShape:
-    """Validate the content shape of a SHUD ``.cfg.ic`` header line.
-
-    This is the SINGLE source of the header-shape rule. It is pure: the caller
-    reads the header line (bounded) and passes the already-split tokens,
-    mirroring this module's existing ``expected_*_count`` convention of taking
-    model metadata from the caller.
-
-    A header is valid when it carries exactly three or four numeric tokens
-    (:data:`_VALID_CFG_IC_HEADER_TOKEN_COUNTS`) -- and, when
-    ``expected_mesh_count`` is supplied, when its leading numeric token is an
-    integer equal to that count. Two numeric tokens (the ``23106\\t6`` shape from
-    issue #1197) is exactly the case the gates must refuse: the "LAST numeric
-    token is the minute-time" rule would overwrite the column count with an
-    epoch-minute value.
-
-    Note this is deliberately STRICTER than the runtime injector, which shifts
-    any header with three or more numeric tokens: the gates refuse unknown
-    (>= 5 token) layouts fail-closed, while the injector keeps its existing
-    behaviour there rather than silently flipping on an unknown live layout.
-
-    "Numeric" uses the same ``_as_float`` rule as
-    :func:`cfg_ic_header_minute_index`, so there is one definition of what
-    counts as a token across read, shift and validation.
-    """
-    # NWM@8ae9b8f2 packages/common/state_qc.py:664-727（逐字移植）
-    numeric_values = [
-        value
-        for value in (_as_float(token) for token in header_tokens)
-        if value is not None
-    ]
-    numeric_token_count = len(numeric_values)
-    mesh_value = numeric_values[0] if numeric_values else None
-    mesh_count = (
-        int(mesh_value)
-        if mesh_value is not None and float(mesh_value).is_integer()
-        else None
-    )
-
-    if numeric_token_count not in _VALID_CFG_IC_HEADER_TOKEN_COUNTS:
-        return CfgIcHeaderShape(
-            numeric_token_count=numeric_token_count,
-            mesh_count=mesh_count,
-            valid=False,
-            reason=(
-                f"IC header carries {numeric_token_count} numeric token(s); "
-                f"expected 3 (<mesh> <mesh-state-columns> <minute-time>) "
-                f"or 4 (<mesh> <river> <lake> <minute-time>)"
-            ),
-        )
-    if expected_mesh_count is not None and mesh_count != expected_mesh_count:
-        return CfgIcHeaderShape(
-            numeric_token_count=numeric_token_count,
-            mesh_count=mesh_count,
-            valid=False,
-            reason=(
-                f"IC header mesh count {mesh_count} does not match the expected "
-                f"mesh element count {expected_mesh_count} "
-                f"({numeric_token_count} numeric token(s) in the header)"
-            ),
-        )
-    return CfgIcHeaderShape(
-        numeric_token_count=numeric_token_count,
-        mesh_count=mesh_count,
-        valid=True,
-        reason=None,
-    )
 
 
 # --- 行内 token 的字节级 splice（偏离 2 的执行点；pin 无对应面） ---

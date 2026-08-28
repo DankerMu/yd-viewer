@@ -28,14 +28,10 @@ from cfg_ic_fixtures import (
     river_row,
 )
 
-from yd_producer.state import cfg_ic, state_qc
+from yd_producer.state import cfg_ic, header_time, state_qc
 
 #: 从 NWM pin `state_qc.py` 移植的符号全集：每一个都必须自带**自己的**溯源注释。
 PORTED_SYMBOLS = (
-    "cfg_ic_header_minute_index",
-    "cfg_ic_header_minute_time",
-    "CfgIcHeaderShape",
-    "cfg_ic_header_shape",
     "StateQCResult",
     "_row_counts",
     "_check_row_counts",
@@ -44,6 +40,16 @@ PORTED_SYMBOLS = (
     "state_ic_structure_complete",
     "StateResidualNormalization",
     "normalize_negative_residuals",
+)
+
+#: 同一条禁令的另一面（`tasks.md:811`）：header 判定的这五个 pin 符号归 `header_time`，
+#: `state_qc` / `restamp` 一律 import。它们的语义用例与溯源断言在 `tests/test_header_time.py`。
+HEADER_TIME_SYMBOLS = (
+    "cfg_ic_header_minute_index",
+    "cfg_ic_header_minute_time",
+    "cfg_ic_header_shape",
+    "CfgIcHeaderShape",
+    "_VALID_CFG_IC_HEADER_TOKEN_COUNTS",
 )
 
 #: `nwm-snapshot-inventory.md` §1 中 `packages/common/state_qc.py` 行的双权威副本禁令：这八个 MUST 从 `cfg_ic` **导入**。
@@ -1026,8 +1032,10 @@ def test_module_imports_the_cfg_ic_base_symbols_instead_of_re_porting_them() -> 
     """`nwm-snapshot-inventory.md` §1 中 `packages/common/state_qc.py` 行的双权威副本禁令。"""
     names = source_probe.definition_names(source_probe.read_source(state_qc.__file__))
     assert names.isdisjoint(CFG_IC_BASE_SYMBOLS), names & set(CFG_IC_BASE_SYMBOLS)
-    assert state_qc._as_float is cfg_ic._as_float
     assert state_qc.parse is cfg_ic.parse
+    # `_as_float` 的同一性断言随 header 判定面移到 `test_header_time.py`
+    # （`test_as_float_is_reused_from_cfg_ic_not_redefined`）：本模块最后一个用户是那五个
+    # header 符号，它们已归 `header_time`，故此处只保留「不得再定义一份」的名字集断言。
 
 
 def test_module_has_no_nwm_runtime_import_and_no_db_symbols() -> None:
@@ -1076,7 +1084,6 @@ def test_pin_numeric_constants_are_preserved_verbatim() -> None:
     )
     assert state_qc._RIVER_STATE_COLUMNS == ("river_stage",)
     assert state_qc._LAKE_STATE_COLUMNS == ("lake_stage",)
-    assert state_qc._VALID_CFG_IC_HEADER_TOKEN_COUNTS == (3, 4)
 
 
 def test_module_documents_the_deliberate_deviations() -> None:
@@ -1101,44 +1108,22 @@ def test_module_documents_the_deliberate_deviations() -> None:
     assert "_check_water_balance" in head
 
 
-# --- header 判定基座的语义（4.3 的输入） ---
+def test_module_imports_the_header_symbols_instead_of_re_porting_them() -> None:
+    """`tasks.md:811` 的双权威副本禁令：五个 header 判定符号归 `header_time`。
 
-
-def test_header_minute_index_and_time_read_the_last_numeric_token() -> None:
-    assert state_qc.cfg_ic_header_minute_index(["3", "6", "27000000.000000"]) == 2
-    assert state_qc.cfg_ic_header_minute_index(["3", "4", "0", "27000000.0"]) == 3
-    assert state_qc.cfg_ic_header_minute_index(["6"]) is None
-    assert state_qc.cfg_ic_header_minute_index([]) is None
-    assert (
-        state_qc.cfg_ic_header_minute_time(["3", "6", "27000000.000000"]) == 27000000.0
-    )
-    assert state_qc.cfg_ic_header_minute_time(["6"]) is None
-
-
-@pytest.mark.parametrize(
-    ("tokens", "valid"),
-    [
-        (["3", "6", "27000000.0"], True),
-        (["3", "4", "0", "27000000.0"], True),
-        (["23106", "6"], False),
-        (["3", "6", "0", "0.0", "5"], False),
-        ([], False),
-    ],
-)
-def test_header_shape_accepts_only_three_or_four_numeric_tokens(
-    tokens: list[str], valid: bool
-) -> None:
-    shape = state_qc.cfg_ic_header_shape(tokens)
-    assert shape.valid is valid
-    assert (shape.reason is None) is valid
-
-
-def test_header_shape_checks_the_expected_mesh_count_when_supplied() -> None:
-    ok = state_qc.cfg_ic_header_shape(["3", "6", "27000000.0"], expected_mesh_count=3)
-    assert ok.valid is True
-    assert ok.mesh_count == 3
-
-    bad = state_qc.cfg_ic_header_shape(["3", "6", "27000000.0"], expected_mesh_count=4)
-    assert bad.valid is False
-    assert bad.reason is not None
-    assert "does not match the expected" in bad.reason
+    定义名字集不相交只说明「本模块没有定义」；**同一性**才排除「另抄一份到别处再转出」，
+    故两条都断。
+    """
+    names = source_probe.definition_names(source_probe.read_source(state_qc.__file__))
+    assert names.isdisjoint(HEADER_TIME_SYMBOLS), names & set(HEADER_TIME_SYMBOLS)
+    assert state_qc.cfg_ic_header_minute_index is header_time.cfg_ic_header_minute_index
+    assert state_qc.cfg_ic_header_minute_time is header_time.cfg_ic_header_minute_time
+    assert state_qc.cfg_ic_header_shape is header_time.cfg_ic_header_shape
+    assert state_qc.CfgIcHeaderShape is header_time.CfgIcHeaderShape
+    # 公共面不变：这四个名字仍从本模块转出（`__init__` 之外的既有调用方沿用）。
+    assert {
+        "cfg_ic_header_minute_index",
+        "cfg_ic_header_minute_time",
+        "cfg_ic_header_shape",
+        "CfgIcHeaderShape",
+    } <= set(state_qc.__all__)

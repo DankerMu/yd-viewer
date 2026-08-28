@@ -23,7 +23,7 @@ from cfg_ic_fixtures import (
     river_row,
 )
 
-from yd_producer.state import cfg_ic, restamp
+from yd_producer.state import cfg_ic, header_time, restamp
 
 #: init 首态语义的目标 T；epoch 秒 1767355200 为手算值（1970-01-01 起 20456 天 + 12h）。
 TARGET_T = datetime(2026, 1, 2, 12, 0, tzinfo=UTC)
@@ -32,6 +32,16 @@ TARGET_T_EPOCH_SECONDS = 1767355200
 TARGET_T_PLUS_12 = TARGET_T + timedelta(hours=12)
 EXPECTED_MINUTE_T = "29455920.000000"
 EXPECTED_MINUTE_T_PLUS_12 = "29456640.000000"
+
+#: header 判定的五个 pin 符号归 `header_time`（`tasks.md:811`）：本模块 MUST import，
+#: 模块级定义名字集不得含它们。
+HEADER_TIME_SYMBOLS = (
+    "cfg_ic_header_minute_index",
+    "cfg_ic_header_minute_time",
+    "cfg_ic_header_shape",
+    "CfgIcHeaderShape",
+    "_VALID_CFG_IC_HEADER_TOKEN_COUNTS",
+)
 
 #: 从 NWM pin `state_cli.py` 移植的符号全集：每一个都必须自带**自己的**溯源注释。
 PORTED_SYMBOLS = ("_ensure_utc", "restamp_to_absolute_time")
@@ -492,3 +502,11 @@ def test_module_documents_the_deliberate_deviations() -> None:
     assert "< 30 s" not in head
     # 偏离 5：错误契约替换（pin 的 `StateManagerError` -> 本仓 `ValueError`）。
     assert "StateManagerError" in head
+
+
+def test_module_imports_the_header_symbols_instead_of_re_porting_them() -> None:
+    """`tasks.md:811` 的双权威副本禁令：header 判定基座归 `header_time`，本模块只 import。"""
+    names = source_probe.definition_names(source_probe.read_source(restamp.__file__))
+    assert names.isdisjoint(HEADER_TIME_SYMBOLS), names & set(HEADER_TIME_SYMBOLS)
+    assert restamp.cfg_ic_header_minute_index is header_time.cfg_ic_header_minute_index
+    assert restamp.cfg_ic_header_shape is header_time.cfg_ic_header_shape

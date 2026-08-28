@@ -3,8 +3,10 @@
 
 溯源：`NWM@8ae9b8f2 packages/common/state_cli.py`。语义移植自 pin 的
 `_normalized_checkpoint_ic_file`(:256) 的 header 覆写段与 `_ensure_utc`(:1186)，
-header 判定基座（`cfg_ic_header_shape` / `cfg_ic_header_minute_index`）在
-`yd_producer.state.state_qc`（pin 同文件 `state_qc.py`），本模块导入之。
+header 判定基座（`cfg_ic_header_shape` / `cfg_ic_header_minute_index`，pin 同文件 `state_qc.py`）
+的**唯一权威**是 `yd_producer.state.header_time`（issue #22 任务 12.1 先行落地），本模块导入之，
+MUST NOT 再移植一份；行内 splice 辅助（`line_body` / `replace_tokens`）仍从
+`yd_producer.state.state_qc` 导入。
 
 **唯一重戳入口**：`restamp_to_absolute_time(doc, target)`。compute-loop §9.2 的两条定戳
 路径——init 首态（率定末态重戳到 T）与发布前 checkpoint 定戳（重戳到 T+12）——只差 `target`
@@ -82,9 +84,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from yd_producer.state.cfg_ic import CfgIcDocument
-from yd_producer.state.state_qc import (
+from yd_producer.state.header_time import (
     cfg_ic_header_minute_index,
     cfg_ic_header_shape,
+)
+from yd_producer.state.state_qc import (
     line_body,
     replace_tokens,
 )
