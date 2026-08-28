@@ -209,13 +209,109 @@ Minimal mergeable slice: 分段解析与 roundtrip（4.1）——格式层独立
 
 ## 5. 执行器抽象：JobExecutor 协议与 fake
 
-- [ ] 5.1 定义 `JobExecutor` 协议（submit/poll、job ID/partition/终态/起止时间语义）与进程内 fake（成功/失败/超时可编排），接口契约测试
+- [x] 5.1 定义 `JobExecutor` 协议（submit/poll、job ID/partition/终态/起止时间语义）与进程内 fake（成功/失败/超时可编排），接口契约测试
 - [ ] 5.2 实现 Slurm 生产执行器（`sbatch`/`sacct` 封装，参数全部装配自 `local.toml`、零内置默认）；本阶段不做行为测试（M4 oracle），本地判据 = 参数装配纯函数检查 + 协议一致性
 
 依赖：组 1（Slurm 字段结构）
 §13.1 归属：控制器（支撑）
 Suggested fixture level: compact - 进程内接口契约与参数装配测试，无文件 fixture
 Minimal mergeable slice: 协议与 fake（5.1）——接口层独立合并保绿，生产执行器为后继
+
+Fixture level: expanded
+Project profile: yd-viewer
+Repair intensity: medium
+Upstream suggested level: compact（override: 命中核心强制 expanded 触发词 `public API` 与 `schema`/`field` —— 协议是控制器 #26–#28 与 Slurm 生产执行器 #11 共用的公共契约，`JobRecord` 的字段名/类型/时区语义即下游运行报告与 receipt 的 schema；组 1（#2）在「无既有消费者但为跨 issue 共享契约」这一同构情形下已 override 为 expanded，本组保持 compact 与该先例冲突。产物集无需新增文件：design.md D3 与 specs/run-controller delta 均已存在；repair intensity = medium，不要求 Invariant Matrix）
+Change surface:
+- 新增 `producer/src/yd_producer/executor.py`：`JobState`、`JobSpec`、`JobRecord`、`JobExecutor` 协议、`ExecutorError`、进程内 `FakeJobExecutor`、`FakeOutcome`、确定性 `StepClock`
+- 新增 `producer/tests/test_executor.py`
+- 不改动 `config.py` / `geometry.py` / `pyproject.toml`
+
+Must preserve:
+- `yd_producer.config`、`yd_producer.geometry` 的行为与既有测试全绿
+- producer 依赖面不变：本 issue 只用 stdlib（`dataclasses`/`enum`/`datetime`/`typing`/`pathlib`），`uv sync --frozen` 无 drift
+
+Must add/change（协议语义逐条钉死，实现方消费不重议）:
+
+- `JobState` 枚举：`PENDING`、`RUNNING`、`SUCCEEDED`、`FAILED`、`TIMEOUT`；`is_terminal` 属性对后三者为真。`TIMEOUT` MUST 与 `FAILED` 分立——walltime 超时在 `sacct` 是独立终态，运维据此判断"加 walltime"还是"查作业本身"，合并即销毁该判据（issue 验收标准的"三态"即 SUCCEEDED/FAILED/TIMEOUT）。
+- `JobSpec`：frozen、`kw_only`、**全字段无默认值**的 dataclass，字段为 `name: str`、`work_dir: Path`、`command: tuple[str, ...]`、`log_path: Path`、`resources: Mapping[str, str | int]`。
+- `resources` MUST 是不透明映射，协议层 MUST NOT 出现 `partition`/`account`/`cpus`/`memory`/`walltime` 任何固定字段或字段清单——键集的唯一权威是 `Config.slurm.required_fields`（组 1 fixture 已钉死），协议里再写一遍即第二权威。
+- `JobExecutor`：`typing.Protocol` 且 `@runtime_checkable`，两个方法 `submit(spec: JobSpec) -> JobRecord` 与 `poll(job_id: str) -> JobRecord`。
+- `JobRecord`：frozen、`kw_only`、**全字段无默认值**的 dataclass，字段为 `job_id: str`、`name: str`、`state: JobState`、`resources: Mapping[str, str | int]`、`submitted_at: datetime`、`started_at: datetime | None`、`ended_at: datetime | None`。
+- job 身份四元组的承载方式：job ID = `job_id`；partition = `resources["partition"]`（记录携带**提交时的整份 resources**，调用方按 `required_fields` 的键取值，故 partition 可入运行报告而协议不写死键名）；终态 = `state`；起止时间 = `started_at`/`ended_at`。
+- 时间语义：全部 `datetime` MUST tz-aware 且 UTC 偏移为 0；naive datetime 进入即抛 `ExecutorError`。理由：receipt 与 cycle 绝对时间比较，naive 值会静默错位而非报错。
+- 记录不变式（MUST，逐条有测试）：非终态 `ended_at is None`；终态 `ended_at is not None`；`started_at is not None` 时 `submitted_at <= started_at`；`started_at` 与 `ended_at` 均非 None 时 `started_at <= ended_at`（两条分列而非串成三元比较——`RUNNING` 记录的 `ended_at` 为 None，串写会在 datetime 与 None 之间比较抛 `TypeError`）；`ended_at` 非 None 时 `submitted_at <= ended_at`（**无条件**，不以 `started_at` 为闸——两条 `started_at` 锚定的比较在未起跑终态上都不生效，那正是 fixture 允许 `started_at is None` 的那条路径，缺这条则负墙钟时长可构造并直达运行报告；`started_at` 存在时它由上下两条推出，故无条件添加安全）；`started_at is None` 的终态只允许 `FAILED`/`TIMEOUT`（作业未启动即终止）。
+- 打戳时机（确定性可断言，MUST）：`submit` 取一次时钟写 `submitted_at`；使 `started_at` 由 None 变为非 None 的推进各取一次时钟；使记录进入终态的推进各取一次时钟；不改变状态的 `poll` MUST NOT 取时钟。因此 `polls_until_terminal=0` 且 `started=True` 时，单次 `poll` 内两次推进各取一次时钟，得到 `started_at < ended_at`（严格递增，非同一时刻）；`started=False` 的终态只取终态那一次。
+- `job_id` 分配（MUST）：`submit` 为每次**成功**提交分配唯一、确定性、不复用的 `job_id`（按提交序单调生成即可）。`JobSpec.name` 是 fake 的编排键，`job_id` 是 `poll` 的索引键，二者不等同：同一 `name` 允许重复提交（控制器重试路径），每次 MUST 得到不同 `job_id`，且各自的记录互不串台。
+- `resources` 提交时快照（MUST）：`JobSpec` 与 `JobRecord` 在构造时把入参 `resources` **复制**为不可变映射（`MappingProxyType(dict(...))` 一类），调用方事后修改原 dict MUST NOT 影响已构造对象。注意：不可变映射不可哈希，故这两个 dataclass 的实例 `hash()` 会抛 `TypeError` —— 本 issue 明确不提供哈希语义（需要作 dict 键时用 `job_id`），但相等性（`__eq__`）必须可用。这条是承 issue #31 记录的事实，不是重新裁决。
+- `poll` 语义：未知 `job_id` MUST 抛 `ExecutorError`（不返回 `None`、不静默造记录）；已达终态的 job 再次 `poll` MUST 返回同一记录且 MUST NOT 迁回非终态。
+- `ExecutorError`：本模块唯一公开异常，MUST 暴露结构化属性 `job_id: str | None`（涉及具体作业的失败必须置为该 id）。测试断言以该属性为准，MUST NOT 仅用子串探测（承组 1 `ConfigError.path` 先例）。
+- `FakeJobExecutor(outcomes: Mapping[str, FakeOutcome], clock: Callable[[], datetime])`：编排按 `JobSpec.name` 索引；**未被编排的 name MUST 抛 `ExecutorError`**（零内置默认，禁止"默认成功"）；`clock` 必填且无默认，禁止读挂钟——模块提供 `StepClock(start: datetime, step: timedelta)` 供注入，每次调用推进固定步长。
+- `FakeOutcome`：frozen、`kw_only`、无默认值，字段为 `final_state: JobState`、`polls_until_terminal: int`、`started: bool`。`final_state` 非终态 MUST 抛 `ExecutorError`；`polls_until_terminal < 0` MUST 抛 `ExecutorError`；`started is False` 且 `final_state is SUCCEEDED` MUST 抛 `ExecutorError`。语义：前 `polls_until_terminal` 次 `poll` 返回 `RUNNING`（`started` 为假时返回 `PENDING`），其后返回终态。
+- 在途观测：`FakeJobExecutor` MUST 暴露 `submissions: tuple[JobRecord, ...]`（提交序，用于断言"逐轮串行"）、`inflight() -> tuple[str, ...]`（当前非终态 job id）、`max_inflight: int`（历史峰值）。这三项直接服务 `specs/run-controller/spec.md` 的"每源至多一个作业"Scenario，是 fake 的对外契约而非测试内部细节。
+
+Seams under test:
+- `FakeJobExecutor.submit/poll`（进程内、注入 `StepClock`）——协议契约唯一可行使的公共边界（design.md「Sketch seams under test」的支撑层；控制器端到端归组 14）
+- `JobState.is_terminal`、`JobSpec`/`JobRecord`/`FakeOutcome` 的 dataclass 结构（以 `dataclasses.fields()` 断言零默认值）
+
+Risk packs considered (core):
+- Public API / CLI / script entry: selected - 协议是控制器（#26–#28）与 Slurm 生产执行器（#11）共用的公共契约，方法签名与记录字段即接口
+- Config / project setup: not selected - 本 issue 不读 TOML；资源参数以不透明映射入参，装配自 `local.toml` 归 #11
+- File IO / path safety / overwrite: not selected - `work_dir`/`log_path` 只作为值传递，进程内 fake 不打开、不创建、不删除任何文件
+- Schema / columns / units / field names: selected - `JobRecord` 字段名/类型/时区语义即下游运行报告与 receipt 的 schema，错配传导至 #11、#24、#26
+- Auth / permissions / secrets: not selected - 无凭据、无权限判定；`resources` 为 partition/account 一类调度参数
+- Concurrency / shared state / ordering: selected - submit→poll 的状态推进顺序与"在途 ≤1"观测由 fake 承载；实现进程内单线程、无共享状态、无真实并发
+- Resource limits / large input / discovery: not selected - 无发现逻辑、无大输入；轮询次数由 `polls_until_terminal` 有界编排
+- Legacy compatibility / examples: not selected - 首次引入 executor 模块，仓库内零既有消费者
+- Error handling / rollback / partial outputs: selected - fail-closed 是核心验收项：未编排 name、未知 job_id、非法 `FakeOutcome`、naive datetime 全部收敛到 `ExecutorError`，不返回半成品记录
+- Release / packaging / dependency compatibility: selected - 只用 stdlib，不得新增依赖，`uv sync --frozen` 无 drift
+- Documentation / migration notes: not selected - 无迁移；协议语义由本 fixture 块钉死，下游 issue 直接读
+
+Domain packs (from active profile):
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: selected - 起止时间的 tz-aware UTC 约束与 `submitted_at <= started_at <= ended_at` 序关系在此定型
+- 状态链 / warm-start 定戳: not selected - 本 issue 不读写 `cfg.ic`
+- NWM 快照溯源 / DB-free 隔离: not selected - 全新代码，非快照，无 NWM import
+
+Required evidence（每条 input -> expected output）:
+- `FakeJobExecutor` 实例 -> `isinstance(fake, JobExecutor)` 为真（`runtime_checkable` 只校验方法存在，故另有一条按签名逐参数比对 `JobExecutor.submit/poll` 与 fake 同名方法的 `inspect.signature` 一致性的用例）
+- 编排 `FakeOutcome(final_state=SUCCEEDED, polls_until_terminal=2, started=True)` -> `submit` 返回 `state is PENDING` 且 `started_at is None`、`ended_at is None`；第 1、2 次 `poll` 返回 `RUNNING`；第 3 次返回 `SUCCEEDED` 且 `started_at`/`ended_at` 均非 None
+- 同上但 `final_state=FAILED` / `final_state=TIMEOUT` -> 三态各自可达且 `state` 精确等于编排值（`TIMEOUT` MUST NOT 被折叠成 `FAILED`）
+- `started=True` 的在途记录 -> 首次返回 `RUNNING` 的记录 `started_at is not None` 且 `ended_at is None`；其后不改变状态的 `poll` 返回的 `started_at` 与该值精确相等（未再取时钟）
+- `polls_until_terminal=0` 且 `started=True` -> 首次 `poll` 即返回终态，且 `started_at < ended_at`（两次推进各取一次 `StepClock`，按 `start`/`step` 断言精确值）
+- `FakeOutcome(final_state=FAILED, started=False, polls_until_terminal=1)` -> 轮询期间 `state is PENDING`，终态记录 `started_at is None`、`ended_at is not None`
+- 终态后再 `poll` 两次 -> 三次返回值相等（记录幂等），`state.is_terminal` 恒真
+- `poll("nosuch")` -> 抛 `ExecutorError` 且 `exc.job_id == "nosuch"`
+- 提交未编排的 `JobSpec.name` -> 抛 `ExecutorError`，`exc.job_id is None`，且 `fake.submissions` 长度不变（失败提交不入账）
+- `FakeOutcome(final_state=RUNNING, ...)`、`polls_until_terminal=-1`、`started=False` 且 `final_state=SUCCEEDED` -> 三者各抛 `ExecutorError`
+- `StepClock(start=naive_datetime, ...)` 或以 naive `start` 构造 -> 抛 `ExecutorError`；由 `StepClock` 产出的每个记录时间戳断言 `tzinfo is not None and utcoffset() == timedelta(0)`
+- **构造点强制（直接构造 `JobRecord`，不经 fake 路径——fake 的正常路径永远产生不出这些组合，只测 fake 等于该 MUST 无证据）**，每条 -> 抛 `ExecutorError`：① 非终态 `state` 且 `ended_at` 非 None；② 终态 `state` 且 `ended_at is None`；③ `started_at < submitted_at`；④ `started_at`/`ended_at` 均非 None 且 `ended_at < started_at`；⑤ `state=SUCCEEDED` 且 `started_at is None`；⑥ `submitted_at`/`started_at`/`ended_at` 任一为 naive `datetime`（与 `StepClock` 那条不重复：naive 拒绝是**记录层**的 MUST，时钟层只是其一个入口）
+- 时间序关系：任一终态记录 -> `submitted_at <= started_at <= ended_at`（`started_at` 非 None 时），且两次提交的 `submitted_at` 严格递增（`StepClock` 确定性可断言精确值，不得用"约等于现在"）
+- `resources={"partition": "cpu", "account": "a", "cpus": 8, "memory": "32G", "walltime": "04:00:00"}` 提交 -> `record.resources` 与入参逐键相等，`record.resources["partition"] == "cpu"`（partition 可入运行报告）；提交后修改该入参 dict（增删改任一键）-> `spec.resources` 与 `record.resources` 均不变
+- 同一 `JobSpec.name` 连续提交两次（编排允许）-> 两次 `job_id` 不同，分别 `poll` 各自独立推进，互不影响；`fake.submissions` 含两条记录
+- `hash(record)` -> 抛 `TypeError`（不可变映射不可哈希，本 issue 不提供哈希语义）；两个字段逐项相同的 `JobRecord` -> `==` 为真
+- 源码机检：`producer/src/yd_producer/executor.py` 文本中 MUST NOT 出现 `partition`/`account`/`cpus`/`memory`/`walltime` 任一字面量（第二权威守卫；测试直接读该文件断言）
+- 零默认值断言：`JobSpec`/`JobRecord`/`FakeOutcome` 的每个 `dataclasses.fields()` 项，`default` 与 `default_factory` 均为 `MISSING`；且三者均为 `frozen=True, kw_only=True`（`kw_only` 堵位置构造，承组 1 先例）
+- 两源交替提交（`ifs-T`、`gfs-T`）并各自跑到终态 -> `fake.max_inflight == 2`；单源逐轮串行（`ifs-T` 跑完再提 `ifs-T+12`）-> 过程中 `len(fake.inflight()) <= 1`，`fake.submissions` 的 name 序等于提交序
+- 全部失败路径以 `pytest.raises(ExecutorError)` 表达，MUST NOT 用 `pytest.raises(Exception)`
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check .` 与 `uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 退出码 0
+
+Non-goals:
+- Slurm 生产执行器（`sbatch`/`sacct` 封装、`local.toml` 参数装配）——任务 5.2，issue #11
+- 控制器对本协议的消费（前沿、双源并行、失败隔离、flock）——组 12–14，issue #22–#28
+- 真实作业提交/查询行为与 `sacct` 状态码映射 —— M4 oracle（design.md D3）
+- 作业取消 / watchdog —— compute-loop §10 明确不做
+- `resources` 键集与取值的语义校验（partition 是否存在、walltime 格式）—— 归 #11 的参数装配与 #2 装载器，协议层只做不透明透传
+- 日志文件的实际写入与合并（`logs/<source>/<T>.log`）—— 归发布器 #24；本 issue 只传递 `log_path` 值
+
+Review focus:
+- `resources` 是否真的不透明：源码内是否出现任何 Slurm 字段名字面量或固定字段清单（双权威即实现缺陷）
+- 记录不变式是否在**构造点**强制（非终态带 `ended_at`、终态缺 `ended_at`、naive datetime 是否都不可构造），而非仅靠 fake 的调用路径碰巧不产生
+- 三态是否真正可区分：`TIMEOUT` 是否在任何路径上被折叠为 `FAILED`
+- 是否存在任何隐式默认：`clock` 是否可省、未编排 name 是否落到"默认成功"、dataclass 是否带默认值
+- 失败路径是否全部收敛到 `ExecutorError`，且 `job_id` 属性可机检定位
+- 时间断言是否用注入时钟的确定性精确值，而非挂钟近似
 
 ## 6. forcing-chain（二）：科学计算依赖引入
 
