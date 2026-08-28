@@ -84,13 +84,30 @@ def test_normalize_object_key_rejects_parent_traversal(key: str) -> None:
         normalize_object_key(key)
 
 
-def test_resolve_path_rejects_absolute_path_key(tmp_path: Path) -> None:
+def test_resolve_path_rejects_key_with_unrecognized_prefix(tmp_path: Path) -> None:
     # 绝对路径在 normalize_object_key 处只被 strip("/")，真正的拒绝闸门是
     # resolve_path -> validate_object_path 的前缀白名单。
     store = LocalObjectStore(root=tmp_path)
 
     with pytest.raises(ValueError, match="Unrecognized object path prefix"):
         store.resolve_path("/etc/passwd")
+
+
+def test_resolve_path_accepts_absolute_key_with_allowlisted_prefix(
+    tmp_path: Path,
+) -> None:
+    """对照面：绝对性本身不是拒绝理由，前缀才是。
+
+    与上一个用例配对钉死闸门语义——`/etc/passwd` 被拒是因为 `etc` 不在白名单，
+    而不是因为它以 `/` 开头；前缀合法的绝对键会被 strip 成相对键并落在 root 之下。
+    """
+    store = LocalObjectStore(root=tmp_path)
+
+    resolved = store.resolve_path("/raw/gfs/2026050700/a.grib2")
+
+    assert resolved == tmp_path / "raw/gfs/2026050700/a.grib2"
+    assert resolved.is_relative_to(tmp_path)
+    assert resolved.relative_to(tmp_path) == Path("raw/gfs/2026050700/a.grib2")
 
 
 def test_resolve_path_rejects_traversal_key(tmp_path: Path) -> None:

@@ -229,7 +229,7 @@ Regression rows:
 - **pin 等价性（`剥离点` 为 `无` 或仅注释改写的四行）**：`producer/src/yd_producer/store/object_path.py`、`store/safe_fs.py`、`producer/tests/test_data_adapter_resolution.py`、`store/object_store.py`，各自 `diff` `git -C <NWM 本地 checkout> show 8ae9b8f29c8b72c574e8cbd95f2994160bd42832:<清单该行原路径>`，忽略新增的溯源头部与 import 路径改写（`packages.common.*`/`workers.data_adapters.*` → `yd_producer.*`）、以及 object_store 行 `剥离点` 点名改写的那条注释 -> 无其他差异。抽取/改写式的七行（`:40` source_identity、`:41` manifest、`:42` cycle_hours、`:43` region、`:50` test_safe_fs、`:51` test_object_path、`:52` test_source_identity）不适用本行，其等价证据是实现者的逐文件剥离点符合性说明
 - `normalize_source_id("IFS"/"ifs"/"Ifs")` -> `"ifs"`；`normalize_source_id("ERA5")` -> 抛错（ERA5 条目已删）
 - `ManifestEntry`/`DownloadManifest` 的 `as_dict` → `from_dict` roundtrip -> 字段等价
-- `DownloadManifest.from_dict` / `ManifestEntry.from_dict` 收到缺必需字段或类型错的 dict -> 稳定抛错，不返回半成品对象
+- **`from_dict` 的拒绝面只覆盖「缺字段」与「两个强制转换字段」，不做类型校验**（探针实测，勿写成笼统的类型拒绝）：缺必需字段 -> 稳定 `KeyError`（`ManifestEntry` 缺 `remote_url`、`DownloadManifest` 缺 `source_id`），不返回半成品对象；`forecast_hour` 走 `int()`、`cycle_time` 走 `parse_cycle_time`，畸形值 -> `ValueError`。**其余字段类型错一律不拒**——`from_dict({"remote_url": 123, "local_key": ["not","a","str"], "expected_size_bytes": "abc", ...})` 实测**正常返回**一个字段类型全错的 `ManifestEntry`。这是 pin 语义（`raw/manifest.py:192,222`），本 PR 不改；具名用例 `test_manifest.py:196,220` 探的正是那两个强制转换字段，勿把它们读成通用类型闸门。组 3/7 若需要类型校验须自建
 - `cycle_id_for(<已知 source_id + cycle datetime>)` -> pin 语义的已知 cycle id 字面量（清单 §4 风险 3 点名的新写覆盖）
 - `GeoBBox` 无 bbox 入参 -> fail closed（清单 §4 风险 14：四个 `DEFAULT_BBOX_*` 已删，禁止发明缺省）
 - `env_cycle_hours_utc` 显式入参传 `None` -> 仍走 `normalize_cycle_hours_utc(default, field_name=...)`，零 `os.getenv`
@@ -277,7 +277,7 @@ Required evidence（每条 input -> expected output）:
 - `cd producer && uv sync --frozen` -> 退出码 0（本 PR 不新增依赖）
 - `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
 - 禁区 grep：`grep -rnE 'psycopg|DATABASE_URL|scheduler|registry|journal|reservation|os\.getenv|os\.environ' producer/src/yd_producer/store producer/src/yd_producer/raw` -> 零命中（该断言同时以测试形式固化，不只是人工命令）
-- 溯源头部检查（2.3）：对清单 §1 路径表内每个已存在的目标路径 -> 该文件前 5 行内含字面量 `NWM@8ae9b8f2 <对应原路径>`；表内路径尚未落地的行跳过（后续组落地即自动纳入）
+- 溯源头部检查（2.3）：对清单 §1 路径表内每个已存在的目标路径 -> 该文件前 5 行内存在一条 **`#` 注释行**，其内容含字面量 `NWM@8ae9b8f2 <对应原路径>`（与 Regression row `:226`、规格 Scenario 共用同一谓词；写在 docstring 或字符串里不算数——此处刻意不留第二份更弱的口径）
 - 溯源反向守卫（2.3）：扫描根即 `producer/`（与规格字面相等），按「相对路径分量以 `.` 开头即跳过」的规则排除 `.venv`/`.pytest_cache` 等（规则而非具名名单，不引入第二份名单）；其下带溯源注释谓词命中的文件集合 -> 必须是清单 §1 路径表的子集，多一个即失败。实测 2786 个 `.py` → 跳点开头目录后 26 个 → 带标记 11 个
 - 上方 Regression rows 的每一行 -> 对应一个具名 pytest 用例（用例名与断言的期望值须来自 pin 源码或独立 oracle，不得从实现回读）
 
@@ -290,6 +290,7 @@ Non-goals:
 - 不改动 pin 上被保留符号的语义以"顺手改好"——语义等价是本 PR 的验收项；改进意见记为 follow-up issue
 - **不把反向扫描面扩到 `producer/` 之外**（如仓库根、`viewer/`）——本 PR 的守卫只对快照落地面负责，跨面扫描属组 13 的仓库级检查；此边界经 round 1/2 三名 reviewer 复核接受，记录在此以免后续轮次重开庭（PR #40 偏离记录 F2）
 - **不认 docstring / 字符串形式的溯源标记**：正反两向共用注释谓词后，`"""NWM@8ae9b8f2 ..."""` 这类写法**不算**溯源头部，因而一个未登记、仅带 docstring 标记的散落文件不承担登记义务、也不被守卫接触。这是「单一谓词 + 反向必须保持注释锚」的必然推论——反向若放宽成裸串，守卫会命中自身拼出的 `PROVENANCE_MARKER` 常量，逼出一份手工豁免名单。该语义由具名用例 `test_forward_guard_rejects_docstring_form_markers` 钉死，非疏漏
+- **已知限度：完全失去竖线的表体行不可达**。§1 的游离行检查抓的是「含 `|` 却不以 `|` 起头」；一行若把**所有**竖线都丢掉就退化成散文，除非冻结一份路径名单否则无法机械发现。影响面不对称：该行若标 `本 issue 落地` 且文件在盘上带头部，反向守卫仍会因「未登记」报错；若标 `待落地` 则静默。不冻结名单是刻意取舍——名单正是本守卫要消灭的东西。留给组 13 的仓库级检查，或清单结构化（如 §1 转 YAML）时一并解决
 
 Review focus:
 - 逐行核对清单 §1 的 11 个 in-scope 行的 `剥离点` 列是否被逐条执行，尤其 `:40` 的 `_STORAGE_SOURCE_IDS` 字面量改写与 `:52` 的 10 处下游断言同步、`:43` 的四个 `DEFAULT_BBOX_*` 与 `_env_float` 删除、`:42` 的 `os.getenv` 删除

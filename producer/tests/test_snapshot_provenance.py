@@ -1,7 +1,7 @@
 """任务 2.3：快照溯源头部检查（双向）与快照面的 DB-free 隔离检查。
 
 数据源是 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md` 的 §1 快照清单
-表本身（`| 能力项 | NWM 原路径 | 目标路径 | 剥离点 | 备注 |`），在测试时解析，**不**在
+表本身（`| 能力项 | NWM 原路径 | 目标路径 | 剥离点 | 落地状态 | 备注 |`），在测试时解析，**不**在
 本文件里转录一份 Python 副本——转录副本会与清单漂移，且会要求后续任务组手工维护第二份
 名单。正向断言对表内每个已落地的目标路径生效，反向守卫强制后续组落地的快照文件必须先
 登记进清单表。
@@ -18,7 +18,12 @@
    `test_forward_guard_rejects_docstring_form_markers` 钉死这个形式维度。
 3. 反向扫描根 = 规格声明的 `producer/` 整棵树，只跳过点开头的目录（`.venv` 等）：
    扫描根写成两个子目录时，执行集与声明集只是「眼下恰好相等」。
-4. §1 表体的每一行都必须解析成功：畸形行是硬失败，不再静默跳过。
+4. §1 表体的每一行都必须解析成功：畸形行是硬失败，不再静默跳过。表体行的判定按
+   `lstrip()` 后是否以 `|` 起头——缩进一格是合法 CommonMark、渲染完全相同，若按列 0
+   判定，缩进行会连同它的溯源义务一起悄悄离开表体集，而 `len(rows) == len(body)`
+   完整性检查会真空通过。§1 区段内任何「含 `|` 却不构成表行」的行都是硬失败。
+5. 「哪些目标必须已落地」由清单 §1 的 `落地状态` 列驱动，不由文件系统派生：期望集
+   一旦派生自磁盘，删文件时期望与实际同步收缩，删除就完全静默。
 """
 
 from __future__ import annotations
@@ -44,6 +49,12 @@ PROVENANCE_MARKER = f"NWM@{PIN_SHORT}"
 #: 溯源头必须落在文件的前几行（清单前言的固定格式 + fixture 的证据口径「前 5 行内」）。
 #: 只约束正向断言；反向守卫按 grep 语义扫整文件。
 HEADER_LINE_BUDGET = 5
+
+#: §1 `落地状态` 列的取值全集。这不是第二份名单——名单仍只有清单表本身，这里只是它
+#: 那一列的**词汇表**；写不进这两个值的单元格是畸形行（拼错一个字就静默解除义务）。
+STATUS_LANDED = "本 issue 落地"
+STATUS_PENDING = "待落地"
+INVENTORY_STATUSES = (STATUS_LANDED, STATUS_PENDING)
 
 #: 反向守卫的扫描根：规格写的是「`producer/` 内」，这里就写 `producer/`，让执行集
 #: 与声明集自证相等，而不是靠「眼下恰好没有第三个子目录」。
@@ -78,64 +89,96 @@ _MARKER_COMMENT = re.compile(r"^[ \t]*#.*NWM@")
 # --- §1 表解析 ---------------------------------------------------------------
 
 
-def _inventory_body_lines() -> list[str]:
-    """返回 §1 表的表体行（去掉表头与分隔行），不做单元格数量过滤。
+def _inventory_body_lines(text: str | None = None) -> tuple[list[str], list[str]]:
+    """返回 §1 表的 (表体行, 游离行)；表体不做单元格数量过滤。
 
     只取 `## 1.` 与下一个 `## ` 之间的区段：§2 的能力项对照表也含反引号包裹的路径，
     整文件扫描会把它们一并吃进来。表体行的**条数**是下面解析完整性检查的基准，所以
     这一步刻意不丢弃任何行。
+
+    表行判定按 `lstrip()`：Markdown 允许表行带前导空格，渲染完全相同。按列 0 判定时，
+    把某一行缩进一格就能让它连同其正向溯源义务静默离开表体集，而 `len(rows) ==
+    len(body)` 依旧成立（两侧同步收缩）——这正是本次复核抓到的 P2。
+
+    「游离行」= 区段内含 `|`、却不以 `|` 起头的行。表体判定放宽后，一行要想逃出表体
+    集只剩「彻底不像表行」这一条路，而那条路会被游离行列表接住；调用方按 `malformed`
+    的同一套路把它断成硬失败，因此表体的条数不再能被单行改动悄悄压低。
     """
 
-    text = INVENTORY.read_text(encoding="utf-8")
+    if text is None:
+        text = INVENTORY.read_text(encoding="utf-8")
     section = re.search(r"^## 1\..*?(?=^## )", text, flags=re.MULTILINE | re.DOTALL)
-    assert section is not None, f"{INVENTORY} 里找不到 §1 快照清单区段"
+    assert section is not None, "找不到 §1 快照清单区段"
 
     body: list[str] = []
+    stray: list[str] = []
     for line in section.group(0).splitlines():
-        if not line.startswith("|"):
+        stripped = line.strip()
+        if "|" not in stripped:
             continue
-        first_cell = line.strip().strip("|").split("|")[0].strip()
+        if not stripped.startswith("|"):
+            stray.append(stripped[:100])
+            continue
+        first_cell = stripped.strip("|").split("|")[0].strip()
         if first_cell == "能力项" or set(first_cell) <= {"-", ":"}:
             continue
-        body.append(line)
-    return body
+        body.append(stripped)
+    return body, stray
 
 
 def _parse_inventory_rows(
     body_lines: Iterable[str],
-) -> tuple[list[tuple[str, str]], list[str]]:
-    """把表体行解析成 (目标路径, NWM 原路径) 对；解析不了的行进 `malformed`。
+) -> tuple[list[tuple[str, str, str]], list[str]]:
+    """把表体行解析成 (目标路径, NWM 原路径, 落地状态)；解析不了的行进 `malformed`。
 
     畸形行**不能**静默跳过：清单里塞进一条单元格数不对的行（例如 `剥离点` 里出现未
     转义的 `|`），会让该行的目标路径连同它的正向溯源断言一起消失，守卫全绿而覆盖变窄。
+
+    `落地状态` 单元格必须**严格**等于 `INVENTORY_STATUSES` 之一：写错一个字（或留空）
+    若被当成「非 `本 issue 落地`」放过，等于把该行的落地义务静默解除——与畸形行同类。
     """
 
-    rows: list[tuple[str, str]] = []
+    rows: list[tuple[str, str, str]] = []
     malformed: list[str] = []
     for line in body_lines:
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) != 5:
-            malformed.append(f"单元格数为 {len(cells)}（应为 5）: {line[:100]}")
+        if len(cells) != 6:
+            malformed.append(f"单元格数为 {len(cells)}（应为 6）: {line[:100]}")
             continue
         source_match = _BACKTICKED.search(cells[1])
         target_match = _BACKTICKED.search(cells[2])
+        status = cells[4]
         if source_match is None:
             malformed.append(f"缺少反引号包裹的 NWM 原路径: {line[:100]}")
             continue
         if target_match is None:
             malformed.append(f"缺少反引号包裹的目标路径: {line[:100]}")
             continue
+        if status not in INVENTORY_STATUSES:
+            malformed.append(
+                f"落地状态应为 {list(INVENTORY_STATUSES)} 之一，实为 {status!r}: "
+                f"{line[:100]}"
+            )
+            continue
         target = target_match.group(1)
         if not target.startswith("producer/"):
             malformed.append(f"目标路径应落在 producer/ 下: {target}")
             continue
-        rows.append((target, source_match.group(1)))
+        rows.append((target, source_match.group(1), status))
     return rows, malformed
 
 
-INVENTORY_BODY_LINES = _inventory_body_lines()
+INVENTORY_BODY_LINES, STRAY_TABLE_LINES = _inventory_body_lines()
 INVENTORY_ROWS, MALFORMED_ROWS = _parse_inventory_rows(INVENTORY_BODY_LINES)
-INVENTORY_TARGETS = {target: source for target, source in INVENTORY_ROWS}
+INVENTORY_TARGETS = {target: source for target, source, _ in INVENTORY_ROWS}
+
+#: 守卫的**期望落地集**：清单里自报 `本 issue 落地` 的行。期望集必须来自清单而不是
+#: 文件系统——文件系统派生的期望集会随文件被删而同步收缩，删除完全静默（P1）。
+PINNED_TARGETS = {
+    target: source
+    for target, source, status in INVENTORY_ROWS
+    if status == STATUS_LANDED
+}
 
 
 # --- 扫描集派生 --------------------------------------------------------------
@@ -253,12 +296,20 @@ def _files_with_marker(repo_root: Path, roots: Iterable[Path]) -> list[Path]:
 def test_inventory_table_parses_every_body_row() -> None:
     # 解析器一旦静默返回空集合或丢行，正向断言会真空通过、反向守卫会全量误报。
     assert not MALFORMED_ROWS, f"§1 表体存在无法解析的行：{MALFORMED_ROWS}"
+    # 含 `|` 却不构成表行的行：某一行被改得「不像表行」就会带着自己的溯源义务离开
+    # 表体集，而下一条 `len(rows) == len(body)` 会真空成立（两侧同步收缩）。
+    assert not STRAY_TABLE_LINES, (
+        f"§1 区段存在含 `|` 却不以 `|` 起头的游离行：{STRAY_TABLE_LINES}"
+    )
     assert len(INVENTORY_ROWS) == len(INVENTORY_BODY_LINES), (
         f"§1 表体 {len(INVENTORY_BODY_LINES)} 行只解析出 {len(INVENTORY_ROWS)} 行"
     )
-    assert len(INVENTORY_BODY_LINES) >= 11, "§1 区段没被解析到（表体行过少）"
+    # 非空性从数据派生，不写计数地板：地板要么随后续行落地而失去咬合力，要么在最后
+    # 一组落地、`待落地` 清空时误报。`本 issue 落地` 集非空 + 下面的具名锚点足以钉死
+    # 「§1 根本没被解析到」。
+    assert PINNED_TARGETS, "§1 没有任何标记「本 issue 落地」的行（区段没被解析到）"
     assert len(INVENTORY_TARGETS) == len(INVENTORY_ROWS), "§1 出现重复目标路径"
-    assert "producer/src/yd_producer/store/safe_fs.py" in INVENTORY_TARGETS
+    assert "producer/src/yd_producer/store/safe_fs.py" in PINNED_TARGETS
 
 
 def test_malformed_body_rows_are_reported_instead_of_silently_dropped() -> None:
@@ -266,34 +317,116 @@ def test_malformed_body_rows_are_reported_instead_of_silently_dropped() -> None:
     # 该行曾被静默丢弃，连同它的正向溯源断言一起消失。
     good = (
         "| 3 object-store | `packages/common/safe_fs.py` "
-        "| `producer/src/yd_producer/store/safe_fs.py` | `无` | 整文件快照 |"
+        "| `producer/src/yd_producer/store/safe_fs.py` | `无` | 本 issue 落地 "
+        "| 整文件快照 |"
     )
     poisoned = (
         "| 9 新能力 | `packages/common/widget.py` "
-        "| `producer/src/yd_producer/widget/widget.py` | 改写 `f(x: str | None)` | 备注 |"
+        "| `producer/src/yd_producer/widget/widget.py` | 改写 `f(x: str | None)` "
+        "| 待落地 | 备注 |"
+    )
+    bad_status = (
+        "| 9 新能力 | `packages/common/widget.py` "
+        "| `producer/src/yd_producer/widget/widget.py` | `无` | 本issue落地 | 备注 |"
     )
 
-    rows, malformed = _parse_inventory_rows([good, poisoned])
+    rows, malformed = _parse_inventory_rows([good, poisoned, bad_status])
 
-    assert len(rows) == 1
-    assert len(malformed) == 1, "畸形行必须被报告"
-    assert "单元格数为 6" in malformed[0]
+    assert rows == [
+        (
+            "producer/src/yd_producer/store/safe_fs.py",
+            "packages/common/safe_fs.py",
+            STATUS_LANDED,
+        )
+    ]
+    assert len(malformed) == 2, "畸形行必须被报告"
+    assert "单元格数为 7" in malformed[0]
+    # 状态列写错一个字不得被当成「非落地」放过——那等于静默解除该行的落地义务。
+    assert "落地状态应为" in malformed[1] and "本issue落地" in malformed[1]
+
+
+def test_indented_body_rows_stay_in_the_body_set() -> None:
+    # 回归（P2）：前导空格是合法 CommonMark、渲染相同；按列 0 判定时，把某一行缩进
+    # 一格就能让它连同其正向溯源义务静默离开表体集，守卫仍全绿。
+    section = (
+        "## 1. 快照清单\n\n"
+        "| 能力项 | NWM 原路径 | 目标路径 | 剥离点 | 落地状态 | 备注 |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        " | 1 x | `workers/x.py` | `producer/src/yd_producer/x/x.py` | `无` "
+        "| 待落地 | 备注 |\n\n"
+        "## 2. 下一节\n"
+    )
+
+    body, stray = _inventory_body_lines(section)
+    rows, malformed = _parse_inventory_rows(body)
+
+    assert not stray
+    assert not malformed
+    assert [target for target, _, _ in rows] == ["producer/src/yd_producer/x/x.py"]
+
+
+def test_rows_that_stop_looking_like_table_rows_are_reported_as_stray() -> None:
+    # 表体判定放宽后，一行要逃出表体集只剩「彻底不像表行」这条路；它必须留下信号，
+    # 否则 `len(rows) == len(body)` 会随两侧同步收缩而真空通过。
+    section = (
+        "## 1. 快照清单\n\n"
+        "| 能力项 | NWM 原路径 | 目标路径 | 剥离点 | 落地状态 | 备注 |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "1 x | `workers/x.py` | `producer/src/yd_producer/x/x.py` | `无` "
+        "| 待落地 | 备注 |\n\n"
+        "## 2. 下一节\n"
+    )
+
+    body, stray = _inventory_body_lines(section)
+
+    assert body == []
+    assert len(stray) == 1 and "workers/x.py" in stray[0]
+
+
+def test_pinned_targets_come_from_the_status_column_not_the_filesystem() -> None:
+    # P1 的机制断言：期望落地集派生自 `落地状态` 列。若它派生自文件系统，删掉一个
+    # 已钉住的快照文件时期望与实际同步收缩，删除完全静默。
+    section = (
+        "## 1. 快照清单\n\n"
+        "| 能力项 | NWM 原路径 | 目标路径 | 剥离点 | 落地状态 | 备注 |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| 1 x | `workers/x.py` | `producer/src/yd_producer/x/x.py` | `无` "
+        "| 本 issue 落地 | 备注 |\n"
+        "| 2 y | `workers/y.py` | `producer/src/yd_producer/y/y.py` | `无` "
+        "| 待落地 | 备注 |\n\n"
+        "## 2. 下一节\n"
+    )
+
+    body, _ = _inventory_body_lines(section)
+    rows, _ = _parse_inventory_rows(body)
+
+    pinned = [target for target, _, status in rows if status == STATUS_LANDED]
+    # 两行的目标路径在磁盘上都不存在，期望集却只含标了「本 issue 落地」的那一行。
+    assert pinned == ["producer/src/yd_producer/x/x.py"]
+    assert not (REPO_ROOT / pinned[0]).exists()
 
 
 # --- 正向：表内已落地的目标路径必须带对应溯源头 -------------------------------
 
 
 @pytest.mark.parametrize(
-    ("target", "source"),
+    ("target", "source", "status"),
     INVENTORY_ROWS,
-    ids=[target for target, _ in INVENTORY_ROWS],
+    ids=[target for target, _, _ in INVENTORY_ROWS],
 )
 def test_landed_snapshot_files_carry_their_provenance_header(
-    target: str, source: str
+    target: str, source: str, status: str
 ) -> None:
     path = REPO_ROOT / target
     if not path.exists():
-        pytest.skip(f"{target} 尚未落地（归后续任务组）")
+        # 「该不该存在」由清单的 `落地状态` 列裁决，不由文件系统自证：期望集若派生自
+        # 磁盘，删掉一个已钉住的快照文件时正向断言会静默退化成 skip（P1：删两个已钉
+        # 住目标后全套零失败，只有 skip 计数从 16 变 18）。
+        assert status != STATUS_LANDED, (
+            f"{target} 在 §1 里标记为「{STATUS_LANDED}」，但磁盘上不存在；"
+            "已钉住的快照文件不得被删除，落地状态也不得先于文件翻转"
+        )
+        pytest.skip(f"{target} 尚未落地（归后续任务组，落地状态为「{status}」）")
 
     assert _provenance_header_lines(path, source), (
         f"{target} 的前 {HEADER_LINE_BUDGET} 行缺少溯源头**注释**行 "
@@ -305,13 +438,23 @@ def test_landed_snapshot_files_carry_their_provenance_header(
 def test_landed_targets_are_exactly_the_files_that_carry_a_provenance_header() -> None:
     """已落地的登记目标集 == 带溯源头的文件集。
 
-    取代原先两处写死的 `>= 11` 计数地板：地板随后续 16 行落地即失去咬合力，而且它是
-    计数、不是逐文件守卫。这条等式两侧都从数据派生（清单 × 文件系统），不随任务组
-    推进而失效，且比地板强——它同时钉死「登记且已落地 ⇒ 有头部」与「有头部 ⇒ 已登记」。
+    与被它取代的 `>= 11` 计数地板是**两个不可比的维度**，不是「等价或更强」：
 
-    代价（明写）：整批快照文件被误删时两侧同步收缩，等式仍成立，不再有地板兜底；
-    因此保留一条具名锚点目标，其角色与 `test_inventory_table_parses_every_body_row`
-    里的同名锚点一致——防的是「检查本身失效」而不是「数量退步」。
+    - 本条更强的那一维是**耦合**：它逐文件同时钉死「登记且已落地 ⇒ 有头部」与
+      「有头部 ⇒ 已登记」，地板只数数。
+    - 本条更弱的那一维是**存活**：等式两侧都派生自文件系统，删掉任意一批快照文件时
+      两侧同步收缩，等式仍成立。原先声称「具名锚点兜住了这一维」是错的——锚点只兜住
+      `safe_fs.py` 自己被删；删除任何不含它的子集完全静默（Phase 6.2 审计 P1：删掉
+      `test_safe_fs.py` + `test_source_identity.py` 后全套零失败，正向断言静默退化成
+      skip）。
+
+    存活这一维现由 `test_landed_snapshot_files_carry_their_provenance_header` 承担：
+    期望集来自清单 §1 的 `落地状态` 列（`STATUS_LANDED`），与文件系统无关，删任一钉住
+    目标即红，且随后续任务组翻转自己那几行自动扩面、不会腐烂。本条只保留耦合那一维。
+
+    下面的具名锚点因此只剩「检查本身失效」的角色（与
+    `test_inventory_table_parses_every_body_row` 里的同名锚点一致），不再被当作删除
+    检测手段。
     """
 
     landed = {path.resolve() for path in _landed_targets(REPO_ROOT, INVENTORY_TARGETS)}
