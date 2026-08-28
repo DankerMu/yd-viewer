@@ -304,13 +304,187 @@ Minimal mergeable slice: 勘察清单（2.1）——纯文档产物独立合并�
 
 ## 3. raw-scan：完整性扫描与临时 manifest
 
-- [ ] 3.1 实现 IFS/GFS 完整性规则判定（00/12 限定、0–168h、变量/bundle 模式、GFS f000 特例、逐文件检查）
+- [x] 3.1 实现 IFS/GFS 完整性规则判定（00/12 限定、0–168h、变量/bundle 模式、GFS f000 特例、逐文件检查）
 - [ ] 3.2 实现 raw 只读复制到 `work/raw/`（源不可变断言）与临时 `raw-manifest.json` 生成（entry 只引用副本）
 
 依赖：组 1（规则来自 config）、组 2（manifest 结构）
 §13.1 归属：raw 扫描
 Suggested fixture level: compact - tmp 目录树按文件模式生成空壳文件即可覆盖判定与复制
 Minimal mergeable slice: 完整性判定纯函数（3.1）——不含复制与 manifest，可独立合并保绿
+
+### Issue #6 fixture（任务 3.1）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：改动面命中强制 expanded 触发词 `path`/`reader`/`field` 与 "external data discovery"，且判定结果是整条日常链的准入闸门；profile 的 domain expanded-trigger `cycle`/`raw manifest` 同样命中）
+Repair intensity: medium
+Project profile: yd-viewer
+
+Change surface:
+- 新增 `producer/src/yd_producer/rawscan.py`。design.md "Sketch seams under test" 第 2 条原写作 `raw_scan.scan(raw_root, source, cycle) -> Manifest | Incomplete`，与本 fixture 有三处分歧（模块/函数名、缺 `config` 形参、返回 `Manifest`）；按 CLAUDE.md「文档优先」，**design.md 该行已于本轮同步修订为 `rawscan.judge(raw_root, source, cycle, config) -> ScanVerdict`**，分歧已消除，实现者以 design.md 与本块的一致签名为准
+- 新增 `producer/tests/test_rawscan.py`
+- 不触碰 `config.py`、CLI 入口与任何其它模块
+
+Must preserve:
+- `producer/pyproject.toml` 的 `dependencies = []`（本 issue 只用 stdlib）
+- 现有 `tests/test_config.py`、`tests/test_geometry.py`、`tests/test_smoke.py` 继续通过
+- `yd_producer.config` 的公开面（`Config` 树与 `ConfigError`）不变——本 issue 复用其 `ConfigError` 作为配置类失败的异常类型，不新造第二个配置异常
+
+Seam 与返回形态（本 fixture 钉死）:
+
+```python
+def judge(raw_root, source, cycle, config) -> ScanVerdict
+# raw_root: str | os.PathLike[str]（NWM raw 根，其下为 <存储身份>/<YYYYMMDDHH>/；
+#           存储身份逐源非对称，见下方「raw 布局与文件名」）
+# source:   "ifs" | "gfs"（其它取值 fail closed）
+# cycle:    datetime，MUST tz-aware 且为 UTC，且 minute/second/microsecond MUST 均为 0
+#           （目录名取 UTC 紧凑戳 YYYYMMDDHH，非整点值若放行会被静默截断成另一个 cycle）
+#           naive、非 UTC、或带非零分/秒/微秒即 fail closed
+# config:   yd_producer.config.Config
+```
+
+`ScanVerdict`（frozen dataclass）字段：
+
+- `complete: bool` —— 当且仅当 `missing_files` 与 `unreadable_files` 均为空
+- `expected_files: tuple[Path, ...]` —— 预期文件全集，按 lead 升序、组内按 `bundles` 声明序，绝对路径
+- `missing_files: tuple[Path, ...]` —— 不存在的预期文件（`expected_files` 的子序列，保序）
+- `unreadable_files: tuple[Path, ...]` —— 存在但不可读的预期文件（同上保序）
+- `expected_variables: dict[int, tuple[str, ...]]` —— 每个预期 lead 的预期变量集（供 3.2 的 manifest 逐变量扇出消费）
+
+raw 布局与文件名（NWM pin 事实转录，勘察清单 §3.1 桥）:
+
+- 目录布局 `<raw_root>/<存储身份>/<YYYYMMDDHH>/<bundle 文件名>`，`YYYYMMDDHH` 为 cycle 的 UTC 紧凑戳（`NWM@8ae9b8f2 workers/data_adapters/base.py format_cycle_time`），目录段取 `raw/{source_id}/{compact_cycle}/{bundle_filename}`（`gfs_adapter.py:615`）中的 `source_id`。
+- **目录段逐源非对称，MUST NOT 一律小写**（round 1 审核 cand-03，verifier CONFIRMED/FIX_NOW）：pin 的存储身份表 `_STORAGE_SOURCE_IDS = {"GFS": "gfs", "ERA5": "ERA5", "IFS": "IFS"}`（`NWM@8ae9b8f2 packages/common/source_identity.py:5-9`）刻意让 GFS 落**小写** `gfs`、IFS 落**大写** `IFS`，两个 adapter 的默认 `source_id` 与之一致且 IFS 的 `local_key` 逐字使用（`ifs_adapter.py:182`、`:622-624`），object store 侧不做任何大小写归一。故 yd 侧 MUST 以显式映射 `{"ifs": "IFS", "gfs": "gfs"}`（带 pin 溯源注释）把**入参 source**（同时也是 `config.raw` 的属性名，恒小写）翻译成**目录段**，二者 MUST NOT 硬绑同一字面量。本条与 yd 自己产物侧的小写 `source`（`docs/products-contract.md` §5）无关，勿混用。`nwm-snapshot-inventory.md` §3.1 已同步补入该事实行与勘误
+- `raw_root` 是否已指向对象存储的 `raw/` 前缀属现场值，归 `local.toml`（#29/#20），本 issue 不推断
+- 预期文件集 = `lead_hours × bundles`（tasks.md 组 1 已逐字钉死该公式），无变量维度：pin 上一个 forecast hour 只落**一个**物理 bundle 文件、内含该小时全部变量（`gfs_adapter.py:611-636` 的 `layout="per_forecast_hour"`）
+- `bundles` 元素是 `str.format` 文件名模式，占位符词表**恰好两个具名字段**：`{cycle_hour}`（int，cycle 的 UTC 小时）与 `{lead}`（int）；允许格式说明符，故 pin 的真实形态可表达为 `"gfs.t{cycle_hour:02d}z.pgrb2.0p25.f{lead:03d}.bundle.grib2"`（`gfs_adapter.py:1878-1880`）与 `"ifs.t{cycle_hour:02d}z.f{lead:03d}.bundle.grib2"`（`ifs_adapter.py:1688-1690`）。出现词表外的具名字段、位置字段（`{}`/`{0}`）或语法损坏的模式，一律 fail closed 并在错误中点名该模式与该字段——不得静默留下未替换的 `{...}` 去 stat 一个必然不存在的路径
+- **每个模式 MUST 含 `{lead}`，且渲染出的预期文件集 MUST 单射**（round 1 审核 cand-01，verifier CONFIRMED/FIX_NOW）：只做占位符白名单不足以守住「预期文件集 = `lead_hours × bundles`」——漏写 `{lead}` 的模式（如把 `.f{lead:03d}` 写丢）会让全部 lead 渲染成同一路径，`expected_files` 基数虚高而判定域只剩一个点，57 个 lead 里只要 1 个文件落盘即判整轮完整。这与本 fixture 拒空列表是同一病理的两扇门（一扇让预期集为空、一扇让它塌缩），故一并 fail closed：模式的顶层具名字段集合内没有 `lead` 即 `ConfigError`。注意 `string.Formatter().parse` 不暴露嵌套格式说明符内的字段，故 `"f{cycle_hour:0{lead}d}"` 这类只把 `lead` 写在 spec 里的模式会被拒——方向 fail-closed，属有意为之，须在代码注释写明。漏写 `{cycle_hour}` 无害（cycle 目录已隔离），不必拒。等价地，`expected_files` MUST 无重复项——这条同时覆盖「两个 bundle 模式渲染同名」与「`lead_hours` 含重复值」（cand-05 的错位触发门，见 Non-goals）
+- 渲染结果 MUST 是单个文件名：含路径分隔符或 `..` 段即 fail closed（`config.toml` 虽为版本化文件，但渲染路径逃出 `<raw_root>/<存储身份>/<cycle>/` 就使"只读 NWM 原件"的边界失效）
+
+GFS f000 特例（`RawSourceConfig.f000_special`）:
+
+- `f000_special = true` 时，lead 0 的预期变量集 = `variables` 去掉 f000 不可用变量集 `{"apcp", "dswrf"}`；该集合为 pin 事实转录（`NWM@8ae9b8f2 workers/data_adapters/gfs_adapter.py:107 GFS_F000_UNAVAILABLE_VARIABLES`，pin 注释：累积/平均量在 f000 分析时刻无定义，cloud `.idx` 与 NOMADS 均无此记录），MUST 以带该溯源注释的模块级常量表达，MUST NOT 按 `source == "gfs"` 分支——特例由 config 的布尔开关驱动，不由源名驱动
+- lead 0 的 **bundle 文件仍属预期**：pin 的 `_effective_forecast_hours`(`gfs_adapter.py:1624`) 是恒等映射，f000 为瞬时场保留在 manifest 内。所谓"不误报缺失"指的是不要求 f000 提供累积量，而不是不要求 f000 文件
+- `f000_special = false` 时各 lead 变量集恒为 `variables`；lead 0 不在 `lead_hours` 时该规则不产生任何效果
+- 退化情形（`variables` 去除后为空）镜像 pin 行为：文件仍属预期，该 lead 变量集为空元组，不报错——yd 侧不发明 pin 上没有的语义
+
+判定顺序（MUST 逐段短路，配置类与请求类失败一律发生在任何文件系统访问之前）:
+
+1. 配置取值域校验（归属见 tasks.md 组 1 Non-goals 的"不做值域校验"条，该条把这两项逐条路由到本任务 3.1）：`cycle.hours` 非空且 ⊆ `{0, 12}`；**`raw.ifs` 与 `raw.gfs` 两个源**的 `lead_hours`/`variables`/`bundles` 均非空。两个源都查而不是只查被请求的那个源——这一段不依赖 `source` 合法，故可排在词表校验之前，双重非法输入（词表外 `source` + 空列表）下的行为因此是确定的。违反即抛 `ConfigError` 且 `path` 为完整点分路径（如 `raw.gfs.bundles`）。空集必须拒绝的理由：预期文件集为空会让"所有预期文件存在才算完整"恒真，把缺口判成完整
+2. 请求校验：`source` ∈ `{"ifs", "gfs"}`（`path=None`）；`cycle` tz-aware、UTC、分/秒/微秒为 0（`path=None`）；`cycle.hour` ∈ `config.cycle.hours`（`path="cycle.hours"`）。违反即抛 `ConfigError`
+3. 模式校验与渲染（占位符词表、单文件名约束）
+4. 逐文件检查：对每个预期文件判「存在且为普通文件」（语义同 `Path.is_file()`：跟随 symlink 后仍须是普通文件），**且该检查 MUST 自行 stat 并显式分类，MUST NOT 直接依赖 `Path.is_file()`**（round 1 审核 cand-02 verifier CONFIRMED/FIX_NOW，取证方法经修复轮实测再修订）——`Path.is_file()` 吞掉哪些 errno **随 CPython 版本变**：3.12 只吞 ENOENT/ENOTDIR/EBADF/ELOOP 而 EACCES/EIO/ESTALE 上抛，3.13+ 起吞掉全部 `OSError`。生产 raw 根正是 NFS 上由 NWM 以另一 uid 写入、cycle 目录常缺 x 位的形态，依赖它会让同一个输入在 3.12 上以裸 `PermissionError` 逃出 `judge`（违反本 fixture「不完整不是异常」），在 3.13+ 上被静默记成「缺失」（`unreadable_files` 分支不可达）——两种都错，且 CI 钉 3.12、开发机可能更新，差异不会被本地测试暴露。故显式区分：`FileNotFoundError`/`NotADirectoryError` 归 `missing_files`，其余 `OSError` 与非普通文件之外的访问失败归 `unreadable_files`，收敛策略与 `open` 一致。再判可读（以 `os.access(..., os.R_OK)` 之外的实际 `open(..., "rb")` 读一个字节为准——`os.access` 在部分挂载/权限模型下与真实 `open` 不一致）。MUST NOT 以目录 mtime、末 lead 存在或任何动态推断替代逐文件检查（spec raw-scan 的 MUST NOT）
+
+Selected risk packs:
+
+- Public API / CLI / script entry: not selected - 纯函数模块，不接 CLI，不注册入口点（接入归组 11/12 控制器）
+- Config / project setup: selected - 判定规则全部取自 `Config`，本 issue 新增两项 fail-closed 取值域校验
+- File IO / path safety / overwrite: selected（只读面）- 只 stat/open 读 NWM 原件，零写零删；渲染文件名的越界约束是本 pack 的落点
+- Schema / columns / units / field names: selected - lead 与变量集语义（含 f000 变量集）是 3.2 manifest 扇出的输入契约
+- Auth / permissions / secrets: not selected - 无凭据；权限只作为"存在但不可读"的负例出现
+- Concurrency / shared state / ordering: not selected - 无状态纯函数；raw 目录在扫描期被 NWM downloader 并发写入导致的 TOCTOU 归 3.2 的复制面与控制器
+- Resource limits / large input / discovery: selected - 检查规模有界（`len(lead_hours) × len(bundles)`，0–168h/3h 上界 57 个 lead），MUST NOT 递归遍历 `raw_root` 或列目录后过滤
+- Legacy compatibility / examples: not selected - 全新模块，无既有消费者
+- Error handling / rollback / partial outputs: selected - fail-closed 分支即本 issue 主体行为；不完整不是异常，MUST 以 `ScanVerdict` 返回并列出缺失清单
+- Release / packaging / dependency compatibility: selected - 只用 stdlib，`uv sync --frozen` 无 drift
+- Documentation / migration notes: not selected - 无对外文档变更
+
+Domain packs (from active profile):
+
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: selected - cycle 00/12 限定、lead 全集、f000 时刻语义全在本 issue 定型
+- 状态链 / warm-start 定戳: not selected - 不读写状态
+- NWM 快照溯源 / DB-free 隔离: selected - f000 变量集与文件名/布局均为 pin 事实转录，须带 `NWM@8ae9b8f2 <原路径>` 溯源注释；MUST NOT 运行时 import NWM 或连接任何数据库
+
+Required evidence（每条 input -> expected output；`cd producer && uv run pytest`）:
+
+- 全部预期文件存在（两源各一例）-> `complete is True`，`expected_files` 等于 `lead_hours × bundles` 的完整有序清单，`missing_files`/`unreadable_files` 为空（spec Scenario "全部预期文件存在"）
+- 删掉一个**中间** lead 的文件 -> `complete is False`，`missing_files` 恰为该文件（spec Scenario "缺失单个文件"）
+- 只保留最末 lead 的文件 -> `complete is False`，`missing_files` 为其余全部预期文件（spec Scenario "仅有末 lead 文件不算完整"）
+- `f000_special = true` 且 f000 文件存在 -> f000 文件出现在 `expected_files`、不出现在 `missing_files`；`expected_variables[0]` 等于 `variables` 去掉 `apcp`/`dswrf`，其余 lead 的变量集等于 `variables`（spec Scenario "GFS f000 特例"）
+- 同一 fixture 把 `f000_special` 改为 `false` -> `expected_variables[0]` 等于 `variables`（对照组，证明该开关有判别力，非恒等实现）
+- `f000_special = true` 但删掉 f000 文件 -> `complete is False` 且 f000 文件在 `missing_files`（证明特例不是"放行 f000"）
+- `f000_special = true` 且 `variables` 恰为 `["apcp", "dswrf"]` -> f000 文件仍属预期，`expected_variables[0] == ()`，不抛异常（退化情形镜像 pin）
+- 请求 06Z cycle -> 抛 `ConfigError`，且 `raw_root` 指向**不存在的目录**时同样抛该异常（证明拒绝发生在任何文件系统访问之前，spec Scenario "非 00/12 cycle 被拒绝"）
+- `cycle.hours = [0, 6, 12]` -> 抛 `ConfigError` 且 `path == "cycle.hours"`（值域校验，tasks.md 组 1 路由本任务）
+- **参数化：** `raw.<source>.lead_hours`/`variables`/`bundles` 各置空列表 -> 每份都抛 `ConfigError` 且 `path` 为对应完整点分路径（同上路由）
+- naive `datetime`（无 tzinfo）与非 UTC tzinfo -> 均抛 `ConfigError`
+- `source = "ecmwf"`（词表外）-> 抛 `ConfigError`
+- bundle 模式含词表外具名字段（`{member}`）、位置字段（`{}`）、语法损坏（`"a{lead"`）-> 各抛 `ConfigError`，消息含该模式与该字段名
+- bundle 模式渲染出路径分隔符或 `..`（`"../{lead:03d}.grib2"`、`"sub/{lead:03d}.grib2"`）-> 抛 `ConfigError`
+- 预期路径存在但是**目录**而非文件 -> 计入 `missing_files`（`is_file()` 语义），不误判为完整
+- 预期文件存在但不可读（`chmod 0o000`）-> `complete is False` 且该文件在 `unreadable_files`、不在 `missing_files`；用例以 `os.geteuid() != 0` 为 skipif 条件（root 下 DAC 权限位不生效）
+- `<raw_root>/<source>/<YYYYMMDDHH>` 目录整体不存在（合法 00Z 请求）-> **不抛异常**，`complete is False` 且 `missing_files == expected_files`（主消费方 11.1 的 7 天扫描窗绝大多数请求正是打在不存在的 cycle 目录上；"不完整"不是错误）
+- 预期路径是**指向目录的 symlink** / **断链 symlink** -> 两者均计入 `missing_files`（`is_file()` 跟随 symlink 后须仍是普通文件）
+- `cycle` 带非零 minute（如 `00:37Z`）-> 抛 `ConfigError`（不得静默截断成 `YYYYMMDD00`）
+- 零副作用断言：对完整 fixture 跑一次 `judge`，断言 `raw_root` 子树的文件清单、内容与 mtime 前后不变（spec raw-scan "raw 只读"的判定侧半条）
+- MUST NOT 动态推断的机检（一）：判定期不列目录——以 fixture 在 `<cycle>` 目录内额外放置若干**不属预期集**的文件（如 `f999`、`manifest.json`）断言它们既不出现在 `expected_files` 也不影响 `complete`
+
+Required evidence（round 1 审核后追加；上表的取证方法被变异体证伪或未覆盖的部分）:
+
+- **取证方法修订（cand-06 -> r2-cand-01，两轮）**：哨兵 MUST 桩在 **`os` 层**，MUST NOT 只桩 `pathlib` 名字。理由是两轮实测的教训：round 1 版本逐字点名 `pathlib.Path.is_file`/`iterdir`/`rglob` + `builtins.open`，而同轮的 cand-02 修复把实现的文件系统入口换成了 `Path.stat()`——`Path.is_file` 成为死桩，round 2 的五个变异体（`os.walk`/`os.scandir`/`os.listdir`/`os.stat`/带 `except OSError` 的 `Path.stat`，均带 `is_dir()` 守卫或吞异常，插在第 1 段之前）**全部存活**。这条取证一旦以"某个具体名字"表达，就会随实现换原语而静默失效。
+  正确形态：monkeypatch **`os.stat`、`os.scandir`、`os.listdir`** 三个为抛 `AssertionError` 的桩（verifier 实测：只加这三桩，干净实现全绿而上述五个变异体全部变红）。**不必单独桩 `Path.stat`**——3.12 与 3.14 的 `pathlib.Path.stat` 都是 `return os.stat(self, ...)`，`os.walk` 亦经 `os.scandir`，`os` 层是全部 pathlib 拼法的汇流处，这正是"桩不变量而非桩例子"的落点。`builtins.open` 与 `Path.iterdir`/`rglob`/`glob` 可一并保留作纵深。
+  两个用例的桩集不同，MUST 分开写：**拒绝路径**哨兵（非法 `cycle.hours`、空列表、词表外 `source`、naive/非整点 cycle、坏模式）桩上述三者 -> 仍抛 `ConfigError`；**happy path** 哨兵只桩 `os.scandir`/`os.listdir`（与 `Path.iterdir`/`rglob`/`glob`）-> 判定照常完成，**MUST NOT** 桩 `os.stat`/`Path.stat`——逐文件 stat 是 happy path 的规定行为。
+  仅以"不存在的 `raw_root`"断言不足以取证：它只杀得掉**不吞异常**的探针，任何带守卫或 `except OSError` 的探针照样存活
+- **以真实 `open` 而非 `os.access` 判可读的机检（cand-08）**：在 chmod 不可读用例内 `monkeypatch.setattr(os, "access", ...)` 使其被调用即 fail -> 判定照常完成。理由：`chmod 0o000` 在普通 DAC 下两种实现结论一致，对该 MUST 零判别力（实测 `_is_readable` 换成 `os.access` 后 47 例全绿）
+- **cycle 目录不可搜索（cand-02 的负例）**：完整 fixture 后对 `<cycle>` 目录 `chmod 0o000`（`skipif(os.geteuid() == 0)`，`finally` 恢复）-> **不抛裸 `OSError`**，全部预期文件落入 `unreadable_files`，`complete is False`
+- **cycle 路径位置上是普通文件（r2-cand-04，ENOTDIR）**：把 `<cycle>` 目录的位置写成一个普通文件（NWM 半写、人工误放，或 `raw_root` 配错一层）-> `complete is False`，`missing_files == expected_files`，`unreadable_files == ()`。这条与上一条成对，钉死判定顺序第 4 段的**两支分类**：`FileNotFoundError`/`NotADirectoryError` 归 `missing_files`，其余 `OSError` 归 `unreadable_files`；只有 ENOENT 与 EACCES 的用例分不出 `NotADirectoryError` 在哪一支（实测把它从 missing 支删掉，80 例全绿）。macOS/Linux 对 `stat("<普通文件>/child")` 均抛 `NotADirectoryError`，无平台依赖、无需 skipif
+- **裸 `ValueError` 不得外泄（r2-cand-02）**：`bundles` 模式或 `raw_root` 含 NUL 字符（TOML 的 `\u0000` 转义可承载，`tomllib` 接受、装载器只做类型校验）-> **不外泄裸 `ValueError`**。两个入口都要有用例：`raw_root` 那支根本不经过模式校验，故只在渲染侧加守卫关不掉它
+- **模式缺 `{lead}`（cand-01）**：`bundles` 内任一模式不含 `{lead}` -> 抛 `ConfigError` 且 `path` 为该源 bundles 的点分路径、消息点名该模式；另断言合法路径下 `len(set(expected_files)) == len(expected_files)`
+- **预期集单射性的两个兄弟触发门（cand-01/cand-05）**：`bundles` 含两个渲染同名的模式、`lead_hours` 含重复值 -> 各自抛 `ConfigError` 且 `path` 为对应点分路径
+- **lead 升序有判别力（cand-07）**：`lead_hours = (6, 0, 3)` -> `expected_files` 等于按 `(0, 3, 6)` **字面**构造的清单；构造该期望值时 MUST NOT 复用测试助手内部的 `sorted`，否则 oracle 与被测实现共享同一排序行为而恒真（实测去掉实现侧排序后 47 例全绿）
+- **IFS 目录段为大写 `IFS`（cand-03）**：对 `source="ifs"` 断言 `expected_files` 的目录段逐字为 `IFS`；对 `source="gfs"` 断言为 `gfs`。fixture 树 MUST 用与实现**不同来源**的字面量构造（直接写死 `IFS`/`gfs`，不得复用实现导出的映射），否则两侧同步漂移而恒真；另注意 macOS 文件系统大小写不敏感，该用例的判别力来自路径**字面比对**而非文件是否存在
+- **相对 `raw_root`（偏离 13）**：`monkeypatch.chdir(tmp_path)` 后以相对 `raw_root` 调用 -> `expected_files` 全为绝对路径且等于 `tmp_path` 下的字面清单
+- **非 PathLike `raw_root`（偏离 9）**：`judge(123, ...)` -> 抛 `ConfigError` 且 `path is None`（不得外泄裸 `TypeError`）
+- **渲染出 `""`、`"."` 或 `".."`（偏离 5 / r2-cand-03）**：三者与分隔符同样被拒。**三个取值都 MUST 用含 `{lead}` 且渲染结果逐字为该值的模式来构造，并配 `lead_hours` 单元素**——否则用例会被更早的门吸收而零判别力：不含 `{lead}` 的模式（如裸 `".."`）先被 `{lead}` 必需门拦下、报文是"不含 `{lead}`"，而"断言抛 `ConfigError` 且 `path` 为 bundles 点分路径"在两个门下同样成立，于是该参数分不出单文件名约束在不在。多 lead 则会被单射门吸收。这是本 issue 记录在案的**第三处门重叠**（另两处：不含任何占位符的模式被单射门吸收；`""`/`"."` 曾被单射门吸收后由单元素 `lead_hours` 解开）
+- **UTC 判据为零偏移量而非 tzinfo 身份（cand-04）**：以 `zoneinfo.ZoneInfo("UTC")` 或 `timezone(timedelta(0), name="Z")` 构造 cycle -> 判定正常返回。MUST NOT 用 `timezone(timedelta(0))`：CPython 对无名零偏移返回 `timezone.utc` 单例，该取值对本条零判别力（实测判据换成 `tzinfo is UTC` 后 47 例全绿）
+- **非 datetime 的 `cycle`（round 3 r3-cand-03；与上方"非 PathLike `raw_root`"成对）**：`judge(root, "gfs", cycle, config)` 传 `date`/`str`/`int`/`None` -> 各抛 `ConfigError` 且 `path is None`（不得外泄裸 `AttributeError`）。理由：主消费方 3.2/11.1 传 `date` 而非 `datetime`、或从别处拿到字符串戳，是这条链上最常见的传参错；实测把该守卫变异成 `if False:` 时 87 例全绿，而变异体下 `date(2026,3,4)` 会在 `cycle.utcoffset()` 抛裸 `AttributeError`，直接违反 Invariant A
+- **词表门与 `_render` 异常漏斗 MUST 可分离（round 3 r3-cand-01）**：上方"bundle 模式含词表外具名字段/位置字段"那行的三个取值，仅断言"抛 `ConfigError` 且消息含字段名"时零判别力——删掉整个词表校验循环后它们仍全绿，因为落进 `_render` 的 `KeyError`/`IndexError` 兜底产出同 `path`、同含模式名与字段名的报文。用例 MUST 另断言 `excinfo.value.__cause__` 不是 `KeyError`/`IndexError`（词表门直接 `raise`、无 `__cause__`）**且**报文含 `_validate_pattern` 独有措辞。位置字段 `{}` 的 `field` 为空串，故守卫 MUST 写 `if field is not None:` 而非 `if field:`，否则该参数被静默跳过
+- **哨兵桩 MUST 对宽捕获探针有判别力（round 3 r3-cand-02）**：桩体抛 `AssertionError` 只杀得掉不吞异常与 `except OSError` 的探针；`except Exception:` / 裸 `except:` 探针全部存活（实测 `os.walk`/`os.stat`/`os.listdir` 四个宽捕获变异体均 87 全绿，而同形态的 `except OSError` 对照组变红 20–21 例）。正确形态：桩体先把被调原语名 append 进模块级列表再抛 `AssertionError`（保留纵深），并在拒绝路径 `monkeypatch.undo()` 之后、happy path `judge` 返回之后断言该列表为空。**MUST NOT** 改用 `BaseException` 子类——裸 `except:` 同样吞得掉。`os.access` 那条兄弟取证（cand-08）换用同一记录式桩即顺带闭合
+- **嵌套 format_spec 绕过词表门后的渲染失败（round 4 r4-cand-01）**：`string.Formatter().parse` 不暴露嵌套格式说明符内的字段（实现注释已载明），故 `gfs.f{lead:{member}}.grib2` 一类模式的内层字段对词表门不可见、`{lead}` 门放行，直到 `_render` 才由 `str.format` 抛出。四个内层形态 `{member}` / `{0}` / `{lead[0]}` / `{lead.nosuch}` 分别触发 `KeyError`/`IndexError`/`TypeError`/`AttributeError`，MUST 各有一条用例断言 `judge` 抛 `ConfigError` 且 `path == "raw.<源>.bundles"`。**MUST NOT 断言 `__cause__` 的异常类型**——日后若在 `_validate_pattern` 补 format_spec 门，该异常将由词表门直接 raise 而无 `__cause__`，钉 cause 会让用例二次重写。这四腿是 Invariant A 在该输入类上唯一的承重结构：把 `_render` 的 except 元组缩成 `(ValueError,)` 时 92 例全绿，而变异体下 `judge` 漏出裸 `KeyError`
+- **请求门判据 MUST 是 `config.cycle.hours` 而非常量域（round 4 r4-cand-02）**：`cycle.hours` 取 `{0, 12}` 真子集是设计内合法取值（运维用 `cycle.hours = [0]` 表达"本环境只跑 00Z"）。上方"请求 06Z cycle"那行用默认 `(0, 12)` 配置，06Z 在两个判据下同样被拒，对本条零判别力。MUST 另有一条用例：`cycle_hours=(0,)` + 12Z 请求 -> 抛 `ConfigError` 且 `path == "cycle.hours"`（实测判据换成 `CYCLE_HOURS_DOMAIN` 时 92 例全绿）
+- **12Z 的 happy path（round 4 r4-cand-03）**：全部产出 verdict 的用例都跑 00Z 时，把 cycle 小时带进路径的两道门（`{cycle_hour}` 的实参、cycle 目录戳）与常量 `0` 不可区分。MUST 有一条 12Z 完整用例，其预期清单以**字面量**构造（目录段逐字 `2026030412`、文件名逐字含 `t12z`），断言 `expected_files` 相等且 `complete is True`；MUST NOT 复用测试助手里的 cycle 戳常量。一条用例同时杀死两道门（实测两个变异体各 1 failed，此前均 92 全绿）
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check .` 与 `uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
+
+Pattern escalation（round 2 后补入；两个 failure class 连续两轮复发，repair intensity medium 的升级门已触发）:
+
+```text
+Pattern escalation: yes
+Failure class A: contract —— judge 的异常收敛面
+Invariant A: `judge` 对外只抛 `ConfigError`；任何文件系统原语的**全部**异常面 MUST 被显式收敛成 verdict 数据或 `ConfigError`，MUST NOT 逐个 errno/异常类型地补。
+Trigger A: round 1 cand-02（`Path.is_file()` 的 `OSError` 未收敛）-> round 2 r2-cand-02（重写后的 `_check` 丢掉 `Path.is_file()` 原本吞的 `ValueError`）。同一处代码、同一条不变量、连续两轮。
+
+Failure class B: test-evidence —— 取证方法钉的是"例子"而不是"不变量"
+Invariant B: 每条证据行 MUST 表达被测**性质**，且其构造 MUST 与被测实现的具体原语/拼法解耦；用例 MUST 由一个能证伪该性质的变异体验证过。
+Invariant B 的验收判据（round 4 再收紧）：门的枚举 MUST 是**机械枚举**——用 grep 把 `rawscan.py` 全部 `if`/`elif`/`except`/布尔合取项/排序去重调用连同行号抽出，逐行与审计表对账；任何一行落在"表内"与"死腿登记"两桶之外即阻塞，MUST NOT 以"这不算门"的判断跳过。审计表 MUST 作为交付物落盘（`.workplans/pr-<N>/review/`），commit message 里的聚合数不算数。理由：round 4 的实现者自报 54 门 49 杀，reviewer 用三个存活变异体证伪了其中至少三道门，其中两道根本不在任何一桶里——判断式枚举漏门时没有失败信号。
+Invariant B 的验收判据（round 3 换轨）：审计对象 MUST 是"**逐守卫是否存在杀手变异体**"，MUST NOT 是"逐个已有用例是否有判别力"——后者扫不出"该有而根本没写的用例"（r3-cand-03 即此类）。`judge` 的每一道门（含类型守卫、值域门、模式门、分类分支）MUST 各有一个能杀死它的变异体；不可达的防御腿（如三个调用点均不可达的 `ValueError`）MUST 在报告里显式登记为死腿，不得默认为已闭合。
+Trigger B: round 1 cand-06/07/08（哨兵桩具体名字、oracle 复用实现的 sorted、chmod 用例对 open-vs-access 零判别力）-> round 2 r2-cand-01/03/04（哨兵变死桩、`..` 参数被 `{lead}` 门吸收、ENOTDIR 分支无用例）。 -> round 3 r3-cand-01/02/03（词表门 3 个参数零判别力、哨兵对宽捕获探针零判别力、`isinstance(cycle, datetime)` 守卫零覆盖）。 -> round 4 r4-cand-01/02/03/04（死腿 D1 登记事实错误——`_render` 四腿全部可达、`cycle.hours` 请求门无杀手且未登记、12Z 从未走 happy path、54 门审计表未落盘）。**连续三轮复发，三轮形态各异（桩错函数 -> 桩错边界层 -> 门根本没有对应用例），已触发 three-round hard gate；retro shape = depth，corrective action = 上述审计对象换轨**（见 `.workplans/pr-38/review/review-failure-retro.md`）。
+```
+
+Non-goals:
+
+- raw 只读复制到 `work/raw/` 与临时 `raw-manifest.json` 生成（任务 3.2，后继 issue）——本 issue 只产出判定结果，不产生 manifest 结构、不写任何文件
+- 打开 GRIB 文件校验其内部变量/记录：M2 无真实数据，内容与数值正确性归 M4 receipt；本 issue 的"可读"只到能读出一个字节为止
+- `lead_hours` 覆盖 0–168h 且与 `forecast_days * 24` 一致的校验：tasks.md 组 1 Non-goals 已把该项路由到 **issue #32**，本 issue 不做（`lead_hours` 是否覆盖 0–168h 属 config 取值正确性，与"逐文件判定"正交）
+- 版本化 `producer/config.toml` 生产实例与其真实 `variables`/`bundles`/`lead_hours` 取值：归 **issue #29**；本 issue 全部用例使用内联 TOML 合成值，`{"apcp", "dswrf"}` 仅以模块常量出现、不预设 `variables` 必须包含它们
+- cycle 发现/枚举（"最近 7 天窗内最早完整 cycle"）：归 init-bootstrap（任务 11.1）；本 issue 只判定**给定**的一个 source/cycle
+- 扫描期与 NWM downloader 并发写入的 TOCTOU：判定结果的时效性由调用方（控制器）承担，归 3.2/组 12
+- **`ScanVerdict` 不提供 `(lead, variable, file)` 三元组**（round 1 审核 cand-05，verifier CONFIRMED/DEFER，决定性测试 T2）：3.2 的 manifest 逐变量扇出需要该键关系，但其消费方尚不存在，且 `ScanVerdict` 的五字段形态由本 fixture 逐字钉死；键关系属 3.2 定义自身 seam 时该确立的契约，归 **3.2**。本 issue 只消除该缺口今天可观察的那一半——`expected_files` 的重复项，已由上方单射性要求（cand-01）一并封死
+- **raw 清单（manifest）侧的一切要求归 3.2**：`nwm-snapshot-inventory.md` §3.1 原文一律写作"任务 3.1"，其中逐变量扇出、`metadata` 六键契约、`cfgrib_filter_by_keys`/`grib_short_name`、`idx_selector` 单数键落盘、manifest 级 `forecast_hours` 承接，以及该节末"APCP 累积元数据的 fail-closed 要求（R4B2）"两条，**全部属清单写入面，归 3.2**；该文件已于本轮补入同义的「任务号勘误」段。本 issue 只返回 `ScanVerdict`，不产生任何 manifest 结构，也不读写 GRIB `.idx`
+
+Handoff（本 issue 无法自证、必须由下游 issue 关闭的绑定）:
+
+- **归 #29（生产 `config.toml` 实例）**：本 issue 的 f000 不可用变量集以模块常量 `{"apcp", "dswrf"}` 转录自 pin，而 `variables` 取值由 #29 确立——两者命名词表若不一致，f000 规则在生产上退化为恒等空操作，且本 issue 的全部合成用例照常全绿（合成值不预设包含它们）。#29 MUST 断言该模块常量的成员名 ⊆ `raw.gfs.variables` 的词表，否则该开关不可能生效。此绑定已逐字记入 `nwm-snapshot-inventory.md` §3.1 的 f000 行
+
+Review focus:
+
+- f000 规则是否真的有判别力（`f000_special` 两个取值必须产生不同的 `expected_variables[0]`），以及是否误把特例实现成"f000 文件可缺失"
+- 拒绝路径是否真的在文件系统访问之前短路——以不存在的 `raw_root` 断言，而非只看代码顺序
+- 是否出现按 `source == "gfs"` 的硬分支，或把 `{"apcp","dswrf"}` 之外的 pin 事实（变量全集、lead 步长、horizon）也硬写进代码——那些属 config 取值，归 #29
+- 空列表/取值域校验的 `ConfigError.path` 是否为完整点分路径，断言是否用 `excinfo.value.path ==` 而非子串探测（组 1 已裁定子串探测无判别力）
+- 是否引入 stdlib 之外的依赖，或运行时 import NWM
+- 预期文件集是否严格由 `lead_hours × bundles` 构造，而非列目录后过滤
 
 ## 4. state-tools：cfg.ic 工具链
 

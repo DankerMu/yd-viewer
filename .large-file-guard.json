@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "maxLines": 1000,
+  "exclude": [
+    "openspec/changes/m2-producer-core/tasks.md",
+    "producer/tests/test_config.py",
+    "producer/tests/test_geometry.py",
+    "producer/tests/test_rawscan.py"
+  ]
+}
