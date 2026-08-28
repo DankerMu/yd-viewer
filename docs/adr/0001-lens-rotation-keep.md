@@ -152,3 +152,50 @@ core=44、rotated=45**（上次 10 个 PR、32 / 35）。本次 PR 贡献 **core
 审计脚本读的是 `catches`，于是 36 条命中一条都没进归因——归因数字与上次一字不差，正是这样
 被发现的。日志里 issue #5 / PR #40 那一行（第 10 行，11 条命中）至今仍用 `findings`，对审计
 不可见；`evidence_check.py --loop-log-entry` 也不校验键名，两处都放行了。
+
+### 2026-08-28：issue #23 / PR #84 合并后
+
+`loop_log_audit.py` 第五次报出同一条 DECIDABLE。新归因：**12 个多轮合并 PR，
+core=44、rotated=57**（上次 11 个 PR、44 / 45）。本次 PR 贡献 **core +0、rotated +12**
+——后续轮次的命中**全部**来自换进来的 lens，是四次复议里最极端的一次。
+
+**决策不变：keep。** 复议条件逐条核对，均未触发：
+
+- 「rotated 命中里连续两个 PR 全为 P3」：不成立。本 PR 的 rotated 命中含三条 major
+  （round 2 的 `input-domain-gate` 被两个独立 lens 各抓一次、`cross-module-invariant-unpinned`）。
+- 「已闭合项被重报超过该轮 finding 总数一半」：零重报。round 2/3 的每份 brief 都带闭合清单
+  与「空报告是有效结论」的反噪音脚手架。
+
+**本次的形状与前四次都不同，是本 ADR 至今最值得记的一条。**
+
+本 PR 的主导失败类不是实现缺陷，而是 **fixture-text-accuracy：编排者写进 binding fixture
+的断言本身不成立**，七条。样本：自称「逐字对齐 compute-loop §10 步骤 4」而实现把清理挪到了
+raw 扫描之后；`containment_root`「严于」`realpath` 的论证方向反了，**改正之后又反了一次**；
+两条 Required evidence 在 `resolve()` 落地后互相矛盾；幂等证据条目漏掉了变异体 (s) 的真正
+判别器（照该条目字面写测试，(s) 会存活——核验者实测）；引用了一个不存在的测试文件；
+`--chdir` 的出处根本不存在。
+
+这一类**固定阵容在结构上抓不到**，理由与 PR #62 记录的那条同源但更尖锐：写下断言的人刚刚
+才校对过它，再让同一视角复查一遍，得到的是同一个判断。#62 的形式是「编排者为修一处不实断言
+而引入另一处」；本 PR 的形式是「编排者为修一条论证方向错误的记录，写出了第二条方向同样错误的
+记录」——同一处文本、连续两轮、同一种错法。这不是注意力问题，无法靠更仔细解决。
+
+本轮的对冲是**显式派一个 lens 去审编排者自己的 fixture 修订**（round 2 的
+`spec-compliance-fixture-audit`、round 3 的 `fixture-self-audit`），七条里五条由它们抓，
+另两条由 Phase 7 的 `final-head-confirmation` 抓——全部来自「任务就是不信任编排者输出」的视角。
+因此本次对 keep 的支持不止是「换进来的抓得多」，而是：**有一类缺陷只有当某个 lens 的任务被
+明确定义为「审计编排者的产出」时才可能被抓到**，它比「换个人看」更强，是「换个立场看」。
+
+记两条不利/存疑的观察，不作为推翻依据但应进入下次复议：
+
+1. 归因口径把 `spec-compliance-fixture-audit` 判为 rotated，而它其实是 round 1
+   `spec-compliance` 的任务变体（审对象由「代码 vs spec」换成「编排者的文本 vs 现实」）。
+   按名字比对的口径会把「同一 lens 换任务」记成轮换。core +0 这个数字因此偏乐观，
+   真实的轮换增益小于 12。若日后要更细的归因，应按**任务定义**而非 lens 名比对。
+2. **机械检查缺位**：`openspec validate --strict` 只校验 fixture 的结构，不校验其中的断言
+   是否属实；`evidence_check.py` 也不校验。fixture 正确性目前完全依赖「记得派这个 lens」，
+   属流程记忆而非工具保证。这与 PR #62 记下的「记账类缺陷靠流程改动而非阵容改动闭合」是同一
+   方向：**轮换对判断类缺陷有效，对记账类缺陷无效**，而 fixture-text-accuracy 横跨两者
+   ——它的内容是判断，它的失效模式是记账。
+
+状态仍为**默认 keep、待人工确认**。
