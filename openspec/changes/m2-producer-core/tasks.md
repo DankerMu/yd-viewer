@@ -1296,7 +1296,7 @@ Minimal mergeable slice: atomic - 单一编排函数，拒绝守卫/扫描窗/�
 
 ## 12. run-controller（一）：前沿发现与锁
 
-- [ ] 12.1 实现严格前沿纯函数：`DONE`/状态文件集合 → 每源待跑 T 或停止原因（全新链、D+12h、状态缺失、时间头不对应 T、raw 缺口、缺轮阻塞）
+- [x] 12.1 实现严格前沿纯函数：`DONE`/状态文件集合 → 每源待跑 T 或停止原因（全新链、D+12h、状态缺失、时间头不对应 T、raw 缺口、缺轮阻塞）
 - [ ] 12.2 实现未提交残留识别与清理重跑判定（保留 T 状态、删更晚状态与半成品）
 - [ ] 12.3 实现非阻塞 flock 封装（持有即跳过、覆盖全生命周期），进程内测试跳过语义
 
@@ -1304,6 +1304,179 @@ Minimal mergeable slice: atomic - 单一编排函数，拒绝守卫/扫描窗/�
 §13.1 归属：控制器（前沿/flock 幂等/raw 缺口）
 Suggested fixture level: compact - tmp 目录树表达 DONE/状态组合即可
 Minimal mergeable slice: 前沿确定纯函数（12.1）——判定逻辑独立合并保绿，残留清理与锁为后继
+
+### Issue #22 fixture（任务 12.1）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：正面命中 `openspec/project-profile.md` 的 domain expanded-triggers `DONE`、`cycle`、前沿/frontier、状态链/warm start——profile 触发词按 `issue-risk-contract.md` 与核心触发词同为强制；另本 issue 需落一个共享 helper 根 `state/header_time.py`）
+Repair intensity: high（本函数是 profile 首位风险轴「断链即整链失效」的**唯一执行点**：它决定每源用哪一份状态起跑；且本 issue 落 `state/header_time.py` 这一共享 helper 根，由 #9 的重戳与结构检查复用。适用 `Invariant Matrix`）
+Project profile: yd-viewer
+
+**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #22 的依赖只列 #2/#8，但验收标准里的「时间头不对应绝对 T 即停」需要 header 时间语义符号（`cfg_ic_header_minute_index` / `cfg_ic_header_shape`），而 `nwm-snapshot-inventory.md:44` 把它们归在 #9（任务 4.3）。缺失的 seam 本 issue 自行补齐（见下方裁决 1），并按核心规则「needed-but-missing seam is a reported deviation」记录在此。
+
+**核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
+
+1. **读侧 header 时间原语落地在本 issue，不注入 fake**。把 pin 的 `cfg_ic_header_minute_index`(`state_qc.py:609`)、`cfg_ic_header_minute_time`(`:629`)、`cfg_ic_header_shape`(`:664`)、`CfgIcHeaderShape`(`:650`) 与其闭包常量 `_VALID_CFG_IC_HEADER_TOKEN_COUNTS`(`:646`) 移植到**新文件** `producer/src/yd_producer/state/header_time.py`，`_as_float` **MUST 从 `state.cfg_ic` 导入**（pin 的 docstring 逐字声明这三个符号与 `_header_counts` 共享「最后一个数值 token 即 minute-time」规则，两份定义即双权威）。这是 `nwm-snapshot-inventory.md:44` 行的**第二次部分落地**（第一次是 #8 的格式层），该行的落地状态注记随本 PR 更新。#9 MUST 从 `header_time` 导入这五个符号，MUST NOT 再移植一份。
+   - **不选注入式 seam** 的理由：若把「header 时间是否对应 T」做成调用方传入的 callable，验收 Scenario「时间头不对应 T 即停」退化为「fake 说停就停」的永真式，spec 的 MUST 没有任何用例把守。
+   - 不落 `state/state_qc.py`、不动 `state/cfg_ic.py`：后者的 fixture 带逐函数溯源窗口断言与已审的变异套件，改它等于重开 #8 的审核面。
+2. **MUST NOT 移植 `_valid_time_from_header_minute`**（`state_cli.py:359`，归 #9）。该函数**刻意接受相对分钟**（`0 <= m <= horizon` 时按 `cycle_time + m` 解释）——对 checkpoint 重戳是对的，对前沿闸门是**错的**：compute-loop §8 与 `specs/run-controller/spec.md` 的判据逐字是「以绝对时间判定」，宽容读法会让一份未重戳的残留 header（如 `720.000000`）在 T=cycle+12h 时被判为「对应 T」而放行，正是断链的入口。本 issue 的判据是自有的绝对时间比较（裁决 3），并把该**刻意不移植**写进模块头。
+3. **绝对时间判据钉死**：header shape 有效 → 取 minute token → **先过 `math.isfinite` 闸**（`_as_float` 逐字移植自 pin，`nan`/`inf`/`-inf` 都会被 `float()` 接受并计入数值 token，随后 `round()` 会抛 `ValueError`/`OverflowError`）→ `round(observed_minute) == round(T.timestamp() / 60)` 才算对应 T，否则停。非有限值一律 `HEADER_TIME_MISMATCH`，MUST NOT 以异常逃逸。四舍五入到整分钟是因为 header 的 minute token 是浮点文本（pin 写入侧是 `valid_time.timestamp()/60`，形如 `27000000.000000`）；cycle 间距 12h，±30s 容差不产生歧义。shape 无效（数值 token 数不是 3 或 4）一律停，MUST NOT 退化为「取最后一个数值 token」的宽松读法。
+4. **只读 header 行，MUST NOT 全量解析文件体**。结构检查（缺段、行数不符、数值区损坏）是任务 4.2 / #9 的面；本函数对 T 状态只做「存在、可读、header 时间对应 T」三判。读取 MUST 走**只读首行的有界读**：先用已取得的 `st_size` 判超界（`> MAX_STATE_IC_BYTES` 即 `STATE_UNREADABLE`），再分块读到首个非空行为止，累计读入 MUST NOT 超过 `MAX_STATE_IC_BYTES + 1` 字节。MUST NOT「先 `read(MAX+1)` 再 `decode` 再 `splitlines()`」——那样 64 MiB 上界会放大成数百 MiB 常驻（round 1 验证闸门 batch resource-limits cand-04 CONFIRMED/FIX_NOW：实测 63 MiB 短行文件 traced peak 297 MiB / `ru_maxrss` 537 MiB，16 MiB 纯换行文件 traced peak 168 MiB ≈ 10.5x），正好架空 `MAX_STATE_IC_BYTES` 自述的 OOM 保护意图。**候选行本身也 MUST 有界**（round 2 batch resource-and-coverage-2 cand-12 CONFIRMED/FIX_NOW）：字节预算只约束「读了多少」，不约束「首行有多长」——首个 `MAX+1` 字节里没有 `\n` 时（64 MiB 无换行文本，或截断/预分配出来的**全 NUL** 文件——NUL 是合法 UTF-8 且不是 `str.strip()` 的空白，整个文件成为一个巨大的 header 行），`pending`、`bytes(pending)`、`decode()`、`split()` 各自实体化一份文件大小的对象，实测端到端 traced peak 576 MiB / `ru_maxrss` 681 MiB。故新增规则：首个非空行累计超过 `MAX_HEADER_LINE_BYTES`（模块常量，取 64 KiB——原生 header 只有 3–4 个 token，两个数量级余量）仍未遇到 `\n` 时，MUST 立即判 `STATE_UNREADABLE` 并停止读取，MUST NOT 继续累积；跳过前导空行时已丢弃的空白不计入候选行长度。注意这条**改变了可观测行为**：全 NUL 的 64 MiB 状态由 `HEADER_TIME_MISMATCH` 变为 `STATE_UNREADABLE`——两者都停源，方向一致。状态文件的可读性判定 MUST **跟随** symlink（与 `state/cfg_ic.py` 的 `_read_bytes_limited` 调用点注释逐字保留的「刻意不走 no-follow 安全读」同一理由：macOS `/tmp` 本身是 symlink，测试树会被误拒）；只有目录、socket/FIFO、断链 symlink、不可读、非 UTF-8、超界归 `STATE_UNREADABLE`。no-follow 的越界拒绝属删除/发布面，归 #24/#25。
+5. **cycle 可见集判据（`states/` 与 `output/` 对称适用）**：条目名为 10 位数字**且**可被 `%Y%m%d%H` 解析（小时不限 00/12——形态与可解析性是唯一的门），`states/<source>/` 侧另需固定后缀 `.cfg.ic`。不满足者对前沿**不可见**，MUST NOT 因此报错停源，也 MUST NOT 抛 `ValueError`。两侧对称是必需的：`output/` 下同样会有 stray 文件、#25 保留窗口清理中断留下的半删目录与 `.DS_Store`。**可见集另加一道可表示性门**：解析出的 cycle MUST 满足 `cycle + 12h` 在 `datetime` 值域内，否则同样判为不可见——`9999123123` 是 10 位数字且 `%Y%m%d%H` 可解析，`datetime(9999,12,31,23) + 12h` 抛 `OverflowError`（round 1 batch error-classification cand-03 CONFIRMED/FIX_NOW，实测逃逸出 `decide_frontier`）。选可见性门而非新增停止原因，是为了保住闭合词表：这类条目在语义上就是「不是合法 cycle」。理由：`specs/run-controller/spec.md:75` 的发布把临时文件 rename 在 `states/<source>/` **目录内**完成，临时名的形态由 #24 定；若前沿对不可解析文件名 fail-closed，一次崩溃的发布会把该源**永久砖化**，与「无 `DONE` 残留必须可干净重跑」直接冲突。残留的**清理**归 #23。
+6. **全新链取最早状态文件名**（`spec.md` 的 MUST 逐字：「待跑 T 为 init 写入的最早状态文件名」）。compute-loop §10 另有一句「全新链只允许存在 init 写入的最早状态」，读作前沿侧的 fail-closed 会与 spec 的 MUST 冲突；本 fixture 按 spec 取最早，不把「无 DONE 却有多份状态」判为异常（那是 #23 残留面的判定）。该张力记录在此，路由至 #23 fixture，不在本 PR 处理。
+7. **前沿只由 DONE 集合推进**：存在比 T 更晚的状态文件时，待跑 T **仍是** D+12h，MUST NOT 因更晚状态而前进。这一条同时是「崩溃残留恢复」在前沿层的边界证据（清理动作归 #23）。
+9. **枚举/探测失败 MUST 与「不存在」分流，且 MUST NOT fail-open**（round 1 batch error-classification cand-01/cand-02 双 CONFIRMED/FIX_NOW，实测：`chmod 0o000 output/<最新 cycle>` 让前沿**倒退**到已 `DONE` 的 cycle 且仍判可跑；`chmod 0o000 states/<source>` 让 `PermissionError` 直接逃出 `decide_frontier`）。统一规则：
+   - **只有** `FileNotFoundError` / `NotADirectoryError`（路径确实不存在）才等价于「空集合」；
+   - 其余任何 `OSError`（`EACCES`/`EPERM`/`EIO`/`ESTALE`/`ELOOP`…）MUST 判为**无法确定**，停该源并返回新增的第六个停止原因 `DISCOVERY_UNREADABLE`（词表由 5 项扩为 6 项，本轮起为新的闭合词表）；
+   - 该规则适用于**每一处**文件系统探测：`output/` 与 `states/<source>/` 的列目录、`DONE` 的普通文件判定、状态文件的存在性/symlink 探测（MUST NOT 用裸 `Path.exists()`/`is_symlink()`——`pathlib` 只吞 `ENOENT/ENOTDIR/EBADF/ELOOP/EINVAL`，`EACCES`/`EIO` 会穿透）；
+   - 状态文件**本身**不可读仍归 `STATE_UNREADABLE`（其 docstring 已含「权限拒绝」）；`DISCOVERY_UNREADABLE` 专指**集合无法枚举/条目无法判定**这一层；
+   - fail-open 的方向性理由：`states/` 侧判空是 fail-closed（`NO_INITIAL_STATE`），`output/` 侧判空却让链看起来是全新链，把前沿**倒退**到已发布 cycle——products-contract §4.4「重复运行看到 `DONE` 时不覆盖正式产物」的发布侧守卫归 #24 尚未落地，本函数当前是唯一闸门。
+10. **注入的 `raw_complete` 的可接受输入域 MUST 写进 docstring**（round 1 batch integration-contract cand-06 CONFIRMED/FIX_NOW）：本函数返回的 T 可能带任意可解析的 cycle 小时（裁决 5 刻意如此），而生产实现 `rawscan.judge` 只对 `config.cycle.hours` 全域（实测 18Z 目标使其在任何文件系统访问之前抛 `ConfigError`，异常穿透 `decide_frontier`）。本 issue owed 的是**声明的前置条件**而非守卫；接线与守卫归 #26，并在组 14 记录该约束。
+8. **raw 完整性以注入方式消费**：前沿函数接收「给定 cycle 是否 raw 完整」的可调用判定（`Callable[[datetime], bool]`），不在本 issue 内组装 `Config` 与 raw 目录树。理由：`rawscan.judge` 已由 #6 落地并自带完整用例，前沿层要证明的是**「raw 不完整 → 停在 T、前沿不前进、MUST NOT 跳轮」**这一条控制流。多轮追赶的**顺序执行**归 #26/#27。
+
+Change surface:
+- 新增 `producer/src/yd_producer/state/header_time.py`：移植的 header 时间原语（逐函数带 `NWM@8ae9b8f2 packages/common/state_qc.py:<行>` 溯源头）
+- 新增 `producer/src/yd_producer/controller.py`：严格前沿纯函数与停止原因词表
+- 新增 `producer/tests/test_header_time.py`、`producer/tests/test_controller_frontier.py` 与 tmp 目录树 fixture 构造器
+- 更新 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md:44` 的落地状态注记（第二次部分落地：读侧 header 时间原语）
+
+Must preserve:
+- 移植的五个符号与 pin 逐字一致（含「最后一个数值 token 即 minute-time」与 3/4 token shape 门）；任何偏离 MUST 在模块头注明
+- stdlib-only、零运行时 NWM import、零数据库/scheduler 依赖；不新增依赖、`producer/uv.lock` 不变
+- 零写入：本 issue 的两个模块 MUST NOT 创建/修改/删除任何路径（残留清理归 #23、发布归 #24）
+- `state/cfg_ic.py` 与 `producer/tests/test_cfg_ic.py` MUST NOT 被修改（#8 已审面）
+
+Must add/change:
+- `state/header_time.py`：`cfg_ic_header_minute_index(tokens) -> int | None`、`cfg_ic_header_minute_time(tokens) -> float | None`、`cfg_ic_header_shape(tokens, *, expected_mesh_count=None) -> CfgIcHeaderShape`，加 `CfgIcHeaderShape` 与 `_VALID_CFG_IC_HEADER_TOKEN_COUNTS`（共五个符号）；`_as_float` 从 `cfg_ic` 导入
+- `controller.py`：
+  - `StopReason` 枚举，**闭合词表**且逐项可区分：`NO_INITIAL_STATE`（无 DONE 且无任何合法状态文件）、`STATE_MISSING`（T 的状态文件不存在）、`STATE_UNREADABLE`（存在但不可读/非普通文件/非 UTF-8/超界）、`HEADER_TIME_MISMATCH`（header shape 无效、minute token 非有限、或时间不对应绝对 T）、`RAW_INCOMPLETE`（T 的 raw 未齐）
+  - `FrontierDecision`（frozen dataclass）：`source`、`cycle: datetime | None`（可跑时为待跑 T，停止时 `None`）、`stop_reason: StopReason | None`、`detail: str`（含具体路径/观测值，供运行报告与日志）；`cycle` 与 `stop_reason` **恰有一个**非 `None`
+  - `decide_frontier(*, yd_root: Path, source: str, raw_complete: Callable[[datetime], bool]) -> FrontierDecision`：`DONE` 集合来自 `output/<cycle_id>/<source>/DONE`（普通文件），状态集合来自 `states/<source>/<cycle_id>.cfg.ic`
+  - 判定顺序固定（compute-loop §10 逐条）：DONE 定 D → T=D+12h（无 DONE 则取最早状态名）→ 状态存在/可读/header 时间 → raw 完整性
+  - 时间一律 UTC aware；`cycle_id` 解析用 `datetime.strptime(..., "%Y%m%d%H").replace(tzinfo=UTC)`，解析失败即「不可见」（裁决 5），MUST NOT 让 `ValueError` 逃逸——「10 位数字」与「可解析」不等价（`2026023100`、`9999999999` 都是 10 位数字却非法）
+
+Seams under test:
+- `controller.decide_frontier(...)`：tmp 目录树（`output/`、`states/`）+ 注入的 `raw_complete` → `FrontierDecision`，无写入
+- `state.header_time.*`：纯 token 序列 → 判定，无 IO
+
+Selected risk packs（项目特有检查）:
+- Schema / columns / units / field names: header shape 门（3/4 数值 token）与 minute token 语义即契约
+- File IO / path safety / overwrite: 只读、有界读、非普通文件/不可读被分类为 `STATE_UNREADABLE`；零写入是可断言的负面证据
+- Error handling / rollback / partial outputs: 每类停止都有专属 `StopReason`，MUST NOT 以异常逃逸；`OSError` 不外泄
+- Resource limits / large input / discovery: 目录枚举只认裁决 5 的可见集（10 位数字且可解析）；状态文件读取有界
+- Legacy compatibility / examples: 3-token native 与 4-token 兼容 header 都要判；相对分钟 header 明确判为不对应 T
+
+Risk packs considered (core):
+- Public API / CLI / script entry: not selected - 不接入 CLI（`run` 入口体归 #26）
+- Config / project setup: not selected - 不读 `config.toml`/`local.toml`；raw 判定经注入
+- File IO / path safety / overwrite: selected - 见上
+- Schema / columns / units / field names: selected - 见上
+- Auth / permissions / secrets: not selected - 无凭据面；权限相关只体现为不可读分类
+- Concurrency / shared state / ordering: not selected - 纯判定函数无共享状态；flock 归 #23、双源并行归 #28
+- Resource limits / large input / discovery: selected - 见上
+- Legacy compatibility / examples: selected - 见上
+- Error handling / rollback / partial outputs: selected - 见上
+- Release / packaging / dependency compatibility: not selected - 不新增依赖，lock 不变
+- Documentation / migration notes: not selected - 无迁移；溯源由模块头注释与清单行注记承载
+
+Domain packs (from active profile):
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: **selected** - cycle 00/12、D+12h 推进、绝对分钟时间头
+- 状态链 / warm-start 定戳一致性: **selected** - 本函数即该风险轴的执行点
+- NWM 快照溯源与 DB-free 隔离: **selected** - 五个移植符号须带溯源头；断言零 NWM import、零 DB 符号
+
+Invariant Matrix
+Governing invariant: 每源的待跑 cycle 只由该源自己的 `DONE` 集合推进（无 DONE 取最早首态，否则 D+12h）；目标 T 的状态缺失/不可读/时间头非绝对 T 或 T 的 raw 未齐时一律停该源，MUST NOT 取更旧状态、跳轮、冷启动或互借另一源状态。
+Source-of-truth identity/contract: `output/<YYYYMMDDHH>/<source>/DONE`（完成判据）与 `states/<source>/<YYYYMMDDHH>.cfg.ic` 的**文件名 cycle** 与**header 绝对分钟时间**必须同时对应同一个 T
+Surfaces:
+- Producers: none - 本 issue 零写入；`DONE`/状态的产出面归 #21（init）与 #24（发布）
+- Validators/preflight: `controller.decide_frontier`、`state/header_time.py` 的 shape 门
+- Storage/cache/query: 只读 `<YD_ROOT>/output/**/DONE` 与 `<YD_ROOT>/states/<source>/*.cfg.ic`
+- Public routes/entrypoints: none - 不接入 CLI，入口经 #26 的 `run_once`
+- Frontend/downstream consumers: #23（残留清理复用同一前沿结论）、#26/#27（run_once 与多轮追赶）、#28（双源并行）
+- Failure paths/rollback/stale state: 每类停止走 `StopReason` 返回值而非异常；无写入故无回滚；崩溃残留（更晚状态/半成品目录）MUST NOT 改变前沿结论
+- Evidence/audit/readiness: `FrontierDecision.detail` 是运行报告里该源停止原因的载体
+Regression rows:
+- 某源 `output/2026082600/<source>/DONE` 存在且 `states/<source>/2026082612.cfg.ic` header 对应绝对 2026-08-26T12Z、raw 齐 -> 待跑 T=2026082612
+- 同上但 header 是相对分钟 `720.000000` -> `HEADER_TIME_MISMATCH`，MUST NOT 被解释为 cycle+720min
+- 同上但 `states/<source>/` 另有更晚的 `2026082700.cfg.ic`（崩溃残留） -> 待跑 T 仍为 2026082612
+- 同上但 T 状态缺失、只有更旧的 `2026082600.cfg.ic` -> `STATE_MISSING`，MUST NOT 回退到旧状态
+- 另一源目录完全为空 / 停止 -> 本源结论不受影响（逐源独立，两源交叉断言）
+- `states/<source>/` 内有发布残留临时名（如 `.2026082612.cfg.ic.tmp` 与一个子目录） -> 不影响任何结论，不抛错
+- `output/` 存在但不可枚举（EACCES/EIO/ESTALE 类） -> `DISCOVERY_UNREADABLE`，**MUST NOT** 判为全新链或让前沿倒退到已 `DONE` 的 cycle
+- `output/` / `states/<source>/` 不存在 -> 仍分别是全新链 / `NO_INITIAL_STATE`（「不存在」与「不可读」严格分流）
+- 任一探测点遇到 `EACCES`/`EIO`/`OverflowError` -> 一律收敛为停止原因，MUST NOT 逃出 `decide_frontier`
+- 64 MiB 无换行（含全 NUL）的状态文件 -> `STATE_UNREADABLE`，常驻内存与 `MAX_HEADER_LINE_BYTES` 同量级
+- 一源的 `output/<cycle>/<source>/` 不可读、另一源正常 -> 前者 `DISCOVERY_UNREADABLE`、后者结论不受影响
+- `states/ifs/<T>.cfg.ic` 缺失而 `states/gfs/<T>.cfg.ic` 存在且 header 正确 -> ifs `STATE_MISSING`，MUST NOT 互借 gfs 的同名状态
+- `output/<cycle>/<source>/DONE` 是目录或断链 symlink -> 该 cycle 不计入 DONE 集合，不抛错
+
+Required evidence（每条 input -> expected output）:
+- **全新链**：无任何 `DONE`，`states/ifs/` 只有 `2026082000.cfg.ic`（header 对应绝对 2026-08-20T00Z）、raw 齐 -> `cycle == 2026-08-20T00:00Z`，`stop_reason is None`（spec Scenario「全新链取首态文件名」）
+- **全新链多份状态**：无 `DONE`，状态有 `2026082000` 与 `2026082012` -> 取**最早** `2026082000`（裁决 6）
+- **无 DONE 且无任何合法状态文件**（空目录 / 目录不存在 / 只有非法名） -> `NO_INITIAL_STATE`，不抛异常
+- **前沿推进**：最新 `DONE` 为 `2026082600` -> T=`2026082612`（spec Scenario「前沿推进 D+12h」）
+- **最新 DONE 取最大而非最后写入**：`DONE` 集合为 `{2026082600, 2026082512, 2026082700}` 且 mtime 逆序 -> D=`2026082700`，T=`2026082712`（钉死「取最大 cycle」而非「取 mtime 最新」）
+- **DONE 逐源独立**：`output/2026082600/gfs/DONE` 存在而 `ifs/` 无 -> 对 `ifs` 该 cycle 不计入其 DONE 集合（两源在同一棵树上交叉断言）
+- **状态缺失即停 + 不互借另一源**：`states/ifs/` 只有更旧的 `2026082600.cfg.ic`（T=`2026082612` 缺失），而 `states/gfs/2026082612.cfg.ic` **存在且 header 正确** -> ifs `STATE_MISSING`（MUST NOT 借 gfs 的同名状态、MUST NOT 回退旧状态），gfs 在同一棵树上同次得到正常结论（spec Scenario「精确状态缺失即停该源」+ MUST NOT「互借另一源状态」）
+- **时间头不对应 T 即停**（spec Scenario）：逐条各一用例 -> 全部 `HEADER_TIME_MISMATCH`
+  - header 绝对分钟对应 T-12h（拿旧状态改名冒充）
+  - header 是相对分钟 `0.000000` 与 `720.000000`（裁决 2 的承重条：**移植了 `_valid_time_from_header_minute` 的实现必须在这两条上变红**）
+  - header 只有 2 个数值 token（`23106\t6`，pin issue #1197 形态）-> shape 无效
+  - header 有 5 个数值 token -> shape 无效（fail-closed，MUST NOT 取最后一个 token 蒙混）
+  - header 行非数值/为空 -> 无效
+  - header 为 `23106\t6\tnan` / `23106\t6\tinf` / `23106\t6\t-inf`（三个数值 token，shape 判 valid）-> `HEADER_TIME_MISMATCH`，MUST NOT 外泄 `ValueError`/`OverflowError`
+- **时间头对应 T 的正例覆盖两种布局**：3-token native（`<mesh> <mesh-state-columns> <minute>`）与 4-token 兼容（`<mesh> <river> <lake> <minute>`）各一 -> 均放行
+- **不可读分类**：状态文件为目录 / socket 或 FIFO / **断链 symlink** / `chmod 0o000`（非 root 时；root 下 `pytest.skip` 并说明）/ 非 UTF-8 字节 / 超字节上界 -> 均 `STATE_UNREADABLE`，MUST NOT 外泄 `OSError`/`UnicodeDecodeError`，MUST NOT 无界读入
+- **symlink 跟随的正例**：状态文件是**指向合法状态文件的 symlink**（header 对应 T） -> **放行**（可跑），钉死裁决 4 的跟随语义
+- **raw 缺口不提交**：T 的 `raw_complete` 返回 False -> `RAW_INCOMPLETE`，`cycle is None`（spec Scenario「raw 未齐不提交」）
+- **缺轮阻塞不跳轮**：`raw_complete` 对 T 为 False、对 T+12h/T+24h 为 True -> 结论仍是**停在 T**，返回值中 MUST NOT 出现 T+12h/T+24h（spec「MUST NOT 自动跳过 cycle」的判别条）
+- **判定顺序**：T 状态缺失**且** raw 也未齐 -> `STATE_MISSING`（状态判据先于 raw，compute-loop §10 顺序），且此时 `raw_complete` **MUST NOT 被调用**（用记录型 fake 断言调用次数为 0）
+- **崩溃残留不改变前沿**：树中同时有 `states/<source>/<T+12>.cfg.ic` 与只含 DAT 无 `DONE` 的 `output/<T>/<source>/` -> 待跑 T 不变；本函数不删除任何路径（跑前跑后对整棵树做**递归快照比对**，证明零写入；快照维度 MUST 钉死为「相对路径 + 条目类型 + `st_mode` + size + 内容摘要」，否则等长原地改写在比对下不可见）
+- **非法条目不砖化，两侧对称**（裁决 5）：`states/<source>/` 内共存临时名文件、子目录、点文件、`2026023100.cfg.ic`（10 位但非法日期）、`9999999999.cfg.ic`；`output/` 下共存 stray 文件、`.tmp-2026082600/` 半删目录与非 10 位目录 -> 结论与干净树逐字段一致，不抛错
+- **`DONE` 必须是普通文件**：某 cycle 的 `DONE` 是**目录**、另一 cycle 的 `DONE` 是**断链 symlink** -> 两者均不计入 DONE 集合（若无其他 DONE 则走全新链/`NO_INITIAL_STATE` 分支），不抛错
+- **header_time 单元级**：`cfg_ic_header_minute_index` / `_minute_time` / `cfg_ic_header_shape` 对 2/3/4/5 数值 token、含非数值 token、`expected_mesh_count` 匹配与不匹配 -> 与 pin 逐条一致；断言 `_as_float` 来自 `cfg_ic`（`header_time._as_float is cfg_ic._as_float`），防重复移植
+- **溯源与隔离断言**：`state/header_time.py` 与 `controller.py` 含/不含相应标记——五个移植符号（三个函数 + `CfgIcHeaderShape` + `_VALID_CFG_IC_HEADER_TOKEN_COUNTS`）**逐符号**带 `NWM@8ae9b8f2 packages/common/state_qc.py:<行>`（取窗按函数边界，不用定长窗口，见 #8 的实测教训）；两模块源码内无 NWM import、无数据库符号
+- **预登记必须被杀死的变异体**（按 `openspec/project-profile.md` 的 "Mutation-testing hazards" 执行：`rsync --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache'` 到含 `issue-22` 唯一标识的 scratch 目录、副本内 `rm -rf .venv && uv sync`、先断言 `yd_producer.__file__` 落在副本内、每个变异体之间 `PYTHONDONTWRITEBYTECODE=1` 并清 `__pycache__`、另跑一个必然变红的控制变异校准）：
+  - (a) 绝对时间判据放宽为「接受相对分钟」（即移回 pin 的 `_valid_time_from_header_minute` 语义）-> 相对分钟用例必须变红
+  - (b) `D+12h` 改为 `D+24h` 或改为「取最晚状态文件名」-> 前沿推进用例与崩溃残留用例必须变红
+  - (c) 状态缺失时回退到更旧状态 -> `STATE_MISSING` 用例必须变红
+  - (d) raw 未齐时前进到下一个 raw 齐的 cycle -> 缺轮阻塞用例必须变红
+  - (e) shape 门去掉（3/4 token 限制放开）-> 2-token 与 5-token 用例必须变红
+  - (f) 去掉 `math.isfinite` 闸 -> `nan`/`inf` 用例必须变红（异常逃逸）
+  - (g) 状态路径查找回退到兄弟源目录 -> 「不互借另一源」用例必须变红
+  - (h) `DONE` 判定由 `is_file()` 改为 `exists()` -> 「DONE 是目录/断链 symlink」用例必须变红
+- **枚举失败不 fail-open**（裁决 9）：`output/` 整体不可枚举 -> `DISCOVERY_UNREADABLE`，`cycle is None`，**MUST NOT** 走全新链分支；`output/<最新 DONE cycle>/` 单个目录不可读（其余 cycle 正常）-> 同样 `DISCOVERY_UNREADABLE`，MUST NOT 退回更旧的 `DONE` 让前沿倒退；`states/<source>/` 不可枚举 -> `DISCOVERY_UNREADABLE` 而非 `NO_INITIAL_STATE`（三条均带非 root 跳过守卫）
+- **「不存在」仍是空集合**：`output/` 目录不存在、`states/<source>/` 目录不存在 -> 分别仍为全新链 / `NO_INITIAL_STATE`（钉死 errno 分流没有把「不存在」一起判成不可读）
+- **状态存在性探测不得让 `OSError` 穿透**（裁决 9）：`chmod 0o000 states/<source>`（父目录不可读，非 root）-> 返回停止原因并在 detail 指名，MUST NOT 抛 `PermissionError`。现有的「文件 `chmod 0o000`」用例对这条**没有判别力**（`stat()` 仍成功，失败落在已被 guard 的读取处）
+- **可表示性门**（裁决 5 增补）：`output/9999123123/<source>/DONE`（10 位、可解析、+12h 溢出）-> 该条目不可见，结论与不含它的树逐字段一致，MUST NOT 抛 `OverflowError`；`states/<source>/9999123123.cfg.ic` 同理
+- **首行有界读不放大内存**（裁决 4 增补）：构造接近上界但合法的状态文件（如 16 MiB 纯换行 + 末尾 header 行），在 `tracemalloc` 下断言 `_read_header_line` 的 traced peak 与文件大小同量级（不得达到其数倍）；恰好上界/超一字节的既有分类行为不变
+- **无换行的巨大首行被截断拒绝**（裁决 4 二次增补）：64 MiB 无 `\n` 的状态文件（可打印字节与**全 NUL** 两种载荷各一）-> `STATE_UNREADABLE`，且 `tracemalloc` traced peak MUST 与 `MAX_HEADER_LINE_BYTES` 同量级（远小于文件大小）；同时断言合法的长空行前缀（首行位于数 MB 空行之后）仍能被正确读出
+- **候选行上界的边界方向**（裁决 4 二次增补的边界行；Phase 6.2 不变量审计报出的覆盖缺口——把 `newline > MAX_HEADER_LINE_BYTES` 改成 `>=` 能在当时的 584 条用例里存活）：首行长度**恰好** `MAX_HEADER_LINE_BYTES` 的合法状态 -> 正常可跑（不得因上界而拒绝）；`MAX_HEADER_LINE_BYTES + 1` -> `STATE_UNREADABLE`。上界常量 MUST 由测试从 `controller` 导入，不得在用例里写死 65536；接受侧 MUST 走到真实可跑结论（padding 用 `str.split()` 会丢弃的尾随空格），不得因无关原因而通过
+- **新停止原因同样逐源隔离**（裁决 9 的遗漏行，round 2 cand-14 CONFIRMED/FIX_NOW 的覆盖缺口）：同一棵树上 `output/<cycle>/gfs/` 不可读而 `ifs/` 正常 -> gfs `DISCOVERY_UNREADABLE`、ifs 得到正常可跑结论（现有四条 discovery 用例全是单源，既有的逐源行只覆盖「缺失」与 `STATE_MISSING`）
+- **`raw_complete` 输入域声明**（裁决 10）：`decide_frontier` 的 docstring 含「返回的 T 可能带任意可解析 cycle 小时，`raw_complete` MUST 对该域全域（或由调用方把 `ConfigError` 收敛为停源）」，并以一条源码断言钉住
+- **溯源行号与偏离清单准确**：`header_time.py` 的 `cfg_ic_header_minute_time` 溯源窗口为 `:629-639`（不得越进 `_VALID_CFG_IC_HEADER_TOKEN_COUNTS` 的注释块）；模块头「刻意偏离」清单 MUST 覆盖**全部** ruff 格式化差异（含 `mesh_count` 三元折行、`r` 前缀、docstring 后空行删除），不得再写不成立的「此处即全集」
+- 预登记变异体追加九条并同样 KILLED（round 1 复核后四条 (i)–(l)；round 2 三条：fixture 新登记的 (m)/(n) 与重跑时自选的反向配重 (m2)，baseline 584；Phase 6.2 审计两条 (o)/(o2)，baseline 586；此处刻意写全数而不写「四条」——该计数曾随两次追加而失准）：(i) `except OSError` 恢复为一律判空 -> 枚举失败三条必须变红；(j) 状态存在性探测改回裸 `Path.exists()` -> 父目录不可读用例必须变红；(k) 去掉可表示性门 -> `9999123123` 用例必须变红；(l) 首行有界读改回 `read(MAX+1)+splitlines()` -> 内存用例必须变红；(m) 去掉 `MAX_HEADER_LINE_BYTES` 截断（候选行无上界）-> 无换行巨大首行用例必须变红；(n) `_done_cycles` 改为枚举 `output/<cycle>/` 目录项而非逐源 stat `DONE` -> 逐源隔离用例必须变红；(m2) 上界改为计入**累计已读字节**（被跳过的空行也计数）-> 长空行前缀用例必须变红（该条是上一条的反向配重：只防放大而不防过严，会让合法的长空行前缀被误拒）；(o) 换行处的上界比较 `newline > 上界` 改 `>=` -> 恰好上界用例必须变红；(o2) 块尾的 `len(pending) > 上界` 改 `>=` -> 同一条用例必须变红（(o)/(o2) 由 Phase 6.2 审计追加；因 `_READ_CHUNK_BYTES == MAX_HEADER_LINE_BYTES`，恰好上界的首行必然跨块，一条用例同时钉住两处判定）
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+
+Non-goals:
+- 残留清理与 flock（任务 12.2/12.3，issue #23）：本 issue 只证明残留**不改变前沿结论**，不删除任何路径
+- 发布顺序、`DONE` 写入、旧状态清理（任务 13.x，issue #24/#25）
+- `run_once` 编排、多轮追赶的顺序执行、双源并行与失败隔离（issue #26/#27/#28）
+- 重戳、结构检查、负残差（任务 4.2–4.4，issue #9）：本 issue 只落**读侧** header 时间原语，且明确不移植 `_valid_time_from_header_minute`
+- 与真实 `rawscan.judge` 的接线（`Config` 装配）：归 #26；本 issue 以注入判定证明控制流
+- 真实 NFS/Slurm 行为、数值正确性：归 M4
+
+Review focus:
+- 绝对时间判据是否真的**只**接受绝对分钟——任何在 `0 <= m <= horizon` 上按相对分钟解释的分支都是缺陷（正例恒绿，只在相对分钟用例上变红）
+- 前沿是否真由 `DONE` 集合推进而非由状态文件名的最大值推进（崩溃残留用例是唯一判别条）
+- 是否越界落地了 #23 的清理动作、#24 的发布动作或 #9 的结构检查符号（含"顺手先放着"的死代码）；零写入是否有递归树快照证据
+- `states/` 与 `output/` 的可见集是否严格按裁决 5（10 位数字**且** `%Y%m%d%H` 可解析）判定，非法条目是否真的不砖化该源
+- 停止原因是否逐类可区分且不以异常逃逸；`OSError`/`UnicodeDecodeError` 是否被吞成分类结果
+- 移植三符号是否与 pin 逐字一致、逐函数带溯源注释、`_as_float` 是否复用 `cfg_ic` 而非重复定义
 
 ## 13. run-controller（二）：发布、失败与清理
 
@@ -1326,3 +1499,5 @@ Minimal mergeable slice: 发布器（13.1）——发布顺序与契约检查对
 §13.1 归属：控制器/发布（逐 task 标注场景）
 Suggested fixture level: expanded - 多轮端到端目录树与可编排 fake executor
 Minimal mergeable slice: 单源单轮骨架（14.1）——一条端到端路径独立合并保绿，追赶与双源为后继
+
+**14.1 接线约束（由 issue #22 / PR #62 round 1 验证闸门传下，batch integration-contract cand-06 CONFIRMED）**：`controller.decide_frontier` 返回的待跑 T 可能带**任意可解析的 cycle 小时**（issue #22 fixture 裁决 5 刻意如此：对不可解析文件名 fail-closed 会让一次崩溃的发布永久砖化该源），而 `rawscan.judge` 只对 `config.cycle.hours` 全域——实测一个 stray 的 `states/<source>/2026081918.cfg.ic` 会让 18Z 目标进入 `judge`，在任何文件系统访问之前抛 `ConfigError` 并**穿透** `decide_frontier`，把「停一个源」放大成「整个 tick 崩」。14.1 MUST 二选一并配用例：(a) 接线前把目标限制到 `config.cycle.hours`，或 (b) 把注入的 `raw_complete` 包一层，把 `ConfigError` 收敛为该源的停止原因。
