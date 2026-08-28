@@ -171,6 +171,34 @@ def test_dirty_document_keeps_every_unchanged_byte_and_the_header_layout() -> No
     assert rendered.count(b"\r\n") == payload.count(b"\r\n")
 
 
+def test_tab_delimited_header_keeps_its_tabs_byte_for_byte() -> None:
+    """成功重戳路径上必须有一份 **Tab 分隔的 header**，否则本模块的字节 oracle 是盲的。
+
+    `_dirty_payload()` 与 `_clean_doc()` 的 header 分隔都是空格，文件里唯一
+    `header_delimiter="\t"` 的用例红在 shape 闸门上、根本到不了 `replace_tokens`。于是
+    把本模块自带的 `_token_spans` 里的 `char.isspace()` 换成 `char == " "` 的变异体在全套
+    下存活：Tab 不再被当分隔符，token 数从 3 塌成 1，而没有任何用例喂过 Tab header。
+    （`test_state_tools_qc.py` 的同名双胞胎不存在这个洞——它的脏矩阵本就带 Tab。）
+
+    生产侧本就正确：`'3\t6\t27000000.000000  \r\n'` 重戳成
+    `'3\t6\t29455920.000000  \r\n'`，Tab 与行尾空格逐字节留存。本用例只是补上那双眼睛。
+    """
+    payload = build_cfg_ic_rows(
+        mesh_rows=[mesh_row(index) for index in (1, 2, 3)],
+        river_rows=[river_row(1), river_row(2)],
+        header_delimiter="\t",
+        header_trailing_spaces="  ",
+        eol="\r\n",
+    ).payload
+    # 构造自检：header 确实是 Tab 分隔（`header_delimiter` 被悄悄忽略时本行变红）。
+    assert payload.split(b"\r\n")[0] == b"3\t6\t" + DEFAULT_MINUTE.encode() + b"  "
+
+    result = restamp.restamp_to_absolute_time(cfg_ic.parse(payload), TARGET_T)
+
+    assert result.lines[result.header_index] == f"3\t6\t{EXPECTED_MINUTE_T}  \r\n"
+    _assert_only_header_changed(payload, result, expected_minute=EXPECTED_MINUTE_T)
+
+
 def _dirty_payload_with_minute(minute: str) -> bytes:
     """与 `_dirty_payload()` 同一张脏矩阵，只把 header 的 minute token 换成给定文本。"""
     return build_cfg_ic_rows(

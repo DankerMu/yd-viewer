@@ -6,7 +6,7 @@
 
 **格式根单一权威**：分段识别与有界读**一律从 `yd_producer.state.cfg_ic` 导入**
 （`parse` / `MAX_STATE_IC_BYTES` / `_as_float` 等），本模块 MUST NOT 再移植一份——那会造成
-pin 分段逻辑的双权威副本（`nwm-snapshot-inventory.md:44` 的禁令）。
+pin 分段逻辑的双权威副本（`nwm-snapshot-inventory.md` §1 中 `packages/common/state_qc.py` 行的禁令）。
 
 **列语义的两层定位方式不同，不得互相污染**（pin 模块 docstring `:24-25` 明写
 "Column semantics are applied by position"）：
@@ -49,10 +49,13 @@ pin 分段逻辑的双权威副本（`nwm-snapshot-inventory.md:44` 的禁令）
    返回 pin 形状的 `StateResidualNormalization`，`accepted` 字段保留以对齐 pin 的证据形状。
 5. **段缺席无条件判失败：与 pin 在同一输入上判定反转。** pin 的 `_check_row_counts`
    （pin `state_qc.py:791-798`）对每个 `expected is None` 逐类跳过，`_check_block_range`
-   对空 list（`river_rows == []`）返回 `None`，于是「mesh 与 river 列头齐全但**没有**
-   river 段、且 `expected_*` 全为 `None`」这份负载在 pin 上得 `passed=True` /
+   对空 list（`river_rows == []`）返回 `None`，于是「mesh 段完整而 river **列头整段缺席**
+   （连列头都没有）、且 `expected_*` 全为 `None`」这份负载在 pin 上得 `passed=True` /
    `structure_complete=True`，在本模块上得 `passed=False` / `False`（round-2 verifier 把
-   pin 模块拷出**直接执行**，在同一份字节负载上取到这组对照）。同一输入上的判定反转是
+   pin 模块拷出**直接执行**，在同一份字节负载上取到这组对照）。**反转的触发条件是列头
+   缺席，不是行数为零**：river 列头在场而其下零行时，该段对本模块而言「存在」，走
+   `_check_row_counts` 的行数消息、而该门对 `expected is None` 跳过，两侧同为
+   `passed=True`，不构成反转，MUST NOT 拿这种负载做本条的用例。同一输入上的判定反转是
    偏离，不是扩展；扩展的只是**报错措辞**（点名段名而非行数消息，见下）。依据：spec
    state-tools 的第一条 Requirement 独立要求 `cfg.ic`「至少包含 mesh 状态段与 river
    `Stage` 段」，且「缺 river 段被拒」Scenario 不带任何前置条件，故 `doc.river is None`
@@ -712,9 +715,12 @@ def normalize_negative_residuals(doc: CfgIcDocument) -> StateResidualNormalizati
     comment on the caps for the population data and the recorded trade.
 
     改动集 = **仅真正含负值的数据行**，且改动行内只有负值 token 的字节变化（偏离 1/2）；
-    超阈值抛 :class:`StateResidualRejected` 且**不产出修正后文档**（偏离 4）。
+    非有限值在**任何投影之前**即被拒（偏离 3，pin 的残差函数没有这道门）；超阈值抛
+    :class:`StateResidualRejected` 且**不产出修正后文档**（偏离 4）。
     """
-    # NWM@8ae9b8f2 packages/common/state_qc.py:154-313（判定语义与证据形状逐字移植）
+    # NWM@8ae9b8f2 packages/common/state_qc.py:154-313（投影语义、阈值判定与证据形状移植；
+    # 下一行的 `_require_finite` 是 pin 残差函数**没有**的前置闸门（模块头偏离 3），且 pin
+    # 在超阈值时返回 `_rejected(...)` 而本模块抛异常（偏离 4），故不是逐字移植）
     _require_finite(doc)
 
     mesh_columns = _section_column_names(doc, doc.mesh)

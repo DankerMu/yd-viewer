@@ -15,6 +15,7 @@ oracle 纪律：`evidence()` 的每一个计数与域均都**逐值手算**断�
 from __future__ import annotations
 
 import math
+import re
 
 import pytest
 import source_probe
@@ -45,7 +46,7 @@ PORTED_SYMBOLS = (
     "normalize_negative_residuals",
 )
 
-#: `nwm-snapshot-inventory.md:44` 的双权威副本禁令：这八个 MUST 从 `cfg_ic` **导入**。
+#: `nwm-snapshot-inventory.md` §1 中 `packages/common/state_qc.py` 行的双权威副本禁令：这八个 MUST 从 `cfg_ic` **导入**。
 CFG_IC_BASE_SYMBOLS = (
     "_looks_like_column_header",
     "_section_from_column_header",
@@ -708,6 +709,105 @@ def test_one_large_negative_stage_is_accepted_when_the_domain_mean_stays_under_t
     assert evidence["normalized_value_count"] == 1
 
 
+def _descending_residual_rows(
+    *, mesh_count: int
+) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
+    """幅度**降序**的负残差矩阵：每一列的**最大**幅值都落在该列的**第一**条命中行。
+
+    降序是本 fixture 的全部判别力来源。既有 fixture 的负值恰好都按升序出现，于是把
+    `max(累加值, correction)` 换成 `= correction`（last-wins）的变异体在全套下存活——
+    升序下 last-wins 与 max 的结果**恒等**。降序布局把两者分开：`max_correction_m`
+    0.5 vs 1e-09、`max_unsat_correction_m` 0.01 vs 1e-06、`max_river_correction_m`
+    0.0005 vs 1e-09。
+
+    规模按域均门算过（分母是 mesh 行数 / river 行数）：unsat 修正和 = 1e-2 + 1e-6，
+    `mesh_count=100` 时域均 1.0001e-4 <= 2.0e-4 -> **接受**；`mesh_count=10` 时域均
+    1.0001e-3 > 2.0e-4 -> 同一张矩阵走**拒绝**路径（两条路径共用一份累加器，`_reject`
+    的证据必须一并钉住）。river 修正和 = 5e-4 + 1e-9，除以 river 行数 10 得 5.00001e-5
+    <= 2.0e-3，两种规模下都在门内。
+
+    三条超阈值负值钉在 **canopy**（非域均列；`over_tolerance_clamp_count` 的累加与列
+    无关，pin `:246-247`），故它们只抬 clamp 计数、不进任何域均。unsat 的 -1e-2
+    **恰等于** `_NEGATIVE_ZERO_TOLERANCE`（严格 `>`），不计入 clamp。
+    """
+    assert mesh_count >= 3, mesh_count
+    mesh_rows = [
+        mesh_row(1, canopy="-0.5", unsat="-1e-2"),
+        mesh_row(2, canopy="-0.4", unsat="-1e-6"),
+        mesh_row(3, canopy="-0.3"),
+        *_plain_mesh(mesh_count)[3:],
+    ]
+    river_rows = [
+        river_row(1, "-5e-4"),
+        river_row(2, "-1e-9"),
+        *_plain_river(10)[2:],
+    ]
+    return mesh_rows, river_rows
+
+
+def test_evidence_maxima_are_running_maxima_and_the_clamp_count_accumulates() -> None:
+    """接受路径上四个证据字段的降序判别器（`max_*` 三条 + `over_tolerance_clamp_count`）。"""
+    mesh_rows, river_rows = _descending_residual_rows(mesh_count=100)
+
+    result = state_qc.normalize_negative_residuals(
+        cfg_ic.parse(_payload(mesh_rows=mesh_rows, river_rows=river_rows))
+    )
+    evidence = result.evidence()
+
+    assert result.accepted is True
+    assert evidence["mesh_row_count"] == 100
+    assert evidence["river_row_count"] == 10
+    # 逐值手算：七格负值 = 三行 canopy + 前两行 unsat + river 两行 stage。
+    assert evidence["normalized_value_count"] == 7
+    assert evidence["normalized_unsat_row_count"] == 2
+    assert evidence["normalized_river_row_count"] == 2
+    # 三条 max_*：取该列的**首**格（最大）而非**末**格（最小）。
+    assert evidence["max_correction_m"] == 0.5
+    assert evidence["max_unsat_correction_m"] == 0.01
+    assert evidence["max_river_correction_m"] == 0.0005
+    # last-wins 变异体会给出的那三个值，逐个否掉（写死否定值，读者不必回推变异体）。
+    assert evidence["max_correction_m"] != 1e-9
+    assert evidence["max_unsat_correction_m"] != 1e-6
+    assert evidence["max_river_correction_m"] != 1e-9
+    # 计数是**累加**：三条 canopy 超阈值（0.5 / 0.4 / 0.3）；unsat 的 1e-2 恰等于阈值，
+    # 严格 `>` 不计。`over_tolerance_clamps = 1` 的变异体在此变红——既有断言全是
+    # `== 0` / `== 1`，对「累加换成赋值」是盲的。
+    assert evidence["over_tolerance_clamp_count"] == 3
+    # 域均手算：(1e-2 + 1e-6) / 100、(5e-4 + 1e-9) / 10。
+    assert evidence["mean_unsat_correction_m"] == pytest.approx(1.0001e-4, rel=1e-12)
+    assert evidence["mean_river_correction_m"] == pytest.approx(5.00001e-5, rel=1e-12)
+
+
+def test_rejected_evidence_carries_the_same_maxima_and_clamp_count() -> None:
+    """`_reject` 与成功路径闭包在**同一组**累加器上，拒绝证据里的四个字段同样要钉住。
+
+    `test_rejection_carries_the_full_evidence_and_produces_no_document` 只断
+    `accepted` / `policy` / `reason`，对 `max_*` 与 clamp 计数一条断言都没有。
+    """
+    mesh_rows, river_rows = _descending_residual_rows(mesh_count=10)
+    payload = _payload(mesh_rows=mesh_rows, river_rows=river_rows)
+    doc = cfg_ic.parse(payload)
+
+    with pytest.raises(state_qc.StateResidualRejected) as excinfo:
+        state_qc.normalize_negative_residuals(doc)
+
+    evidence = excinfo.value.evidence
+    assert evidence["accepted"] is False
+    # 手算：unsat 域均 (1e-2 + 1e-6) / 10 = 1.0001e-3 > 2.0e-4；river 域均仍在门内。
+    assert evidence["reason"] == (
+        "unsat negative-residual domain-mean correction is 0.001000100 m, "
+        "above 0.000200000 m"
+    )
+    assert evidence["mean_unsat_correction_m"] == pytest.approx(1.0001e-3, rel=1e-12)
+    assert evidence["mean_river_correction_m"] == pytest.approx(5.00001e-5, rel=1e-12)
+    assert evidence["max_correction_m"] == 0.5
+    assert evidence["max_unsat_correction_m"] == 0.01
+    assert evidence["max_river_correction_m"] == 0.0005
+    assert evidence["over_tolerance_clamp_count"] == 3
+    # 不产出修正后状态。
+    assert cfg_ic.render(doc) == payload
+
+
 @pytest.mark.parametrize(
     ("token", "expected_clamps"),
     [("-9e-3", 0), ("-1.1e-2", 1)],
@@ -882,29 +982,48 @@ def test_ported_symbols_carry_their_own_provenance_comment() -> None:
         ), symbol
 
 
-def test_the_two_qc_entry_points_do_not_claim_a_bare_verbatim_port() -> None:
-    """偏离 5 的注释面：这两个函数的判定路径含非 pin 闸门，溯源注释不得单挂「逐字移植」。
+#: 判定路径含 pin 无对应物的闸门的符号 -> 其溯源注释 MUST 点名的（闸门, 偏离序号）。
+#: 三个符号而不是两个：`normalize_negative_residuals` 的 `_require_finite` 同样是非 pin
+#: 闸门（pin 的残差函数没有 finiteness 门，且超阈值时返回 `_rejected(...)` 而非抛异常）。
+NON_PIN_GATE_SYMBOLS = {
+    "run_state_variable_qc": ("_check_missing_sections", "偏离 5"),
+    "state_ic_structure_complete": ("_check_missing_sections", "偏离 5"),
+    "normalize_negative_residuals": ("_require_finite", "偏离 3"),
+}
 
-    `_check_missing_sections` 是 pin 无对应面的闸门（模块头偏离 5），它在
-    `expected_*` 全为 `None` 的负载上与 pin 判定反转；注释若仍写「逐字移植」，读者会按
-    「与 pin 同判」去用这两个入口。
+#: 「逐字移植」的**认领**形态：否定式（`故不是逐字移植`）不算认领，故排除紧邻的「不是」。
+#: 只禁字面 `（逐字移植）` 是不够的——被抓到的实际措辞是
+#: `（判定语义与证据形状逐字移植）`，它绕开了那条字面断言。
+_VERBATIM_PORT_CLAIM = re.compile(r"(?<!不是)逐字移植")
+
+
+def test_the_qc_symbols_with_non_pin_gates_do_not_claim_a_verbatim_port() -> None:
+    """偏离 3/5 的注释面：判定路径含非 pin 闸门的函数，溯源注释不得认领「逐字移植」。
+
+    `_check_missing_sections`（模块头偏离 5）在 `expected_*` 全为 `None` 的负载上与 pin
+    判定反转；`_require_finite`（偏离 3）在 pin 的残差函数里根本不存在。注释若认领
+    「逐字移植」，读者会按「与 pin 同判」去用这三个入口。
     """
     source = source_probe.read_source(state_qc.__file__)
     segments = source_probe.definition_segments(source)
-    for symbol in ("run_state_variable_qc", "state_ic_structure_complete"):
+    # 构造自检：正/否两向都要被这条正则分开，否则本用例对措辞变异体没有判别力。
+    assert _VERBATIM_PORT_CLAIM.search("（判定语义与证据形状逐字移植）")
+    assert _VERBATIM_PORT_CLAIM.search("（逐字移植）")
+    assert not _VERBATIM_PORT_CLAIM.search("故不是逐字移植）")
+    for symbol, (gate, deviation) in NON_PIN_GATE_SYMBOLS.items():
         comments = "\n".join(
             line.strip()
             for line in segments[symbol].splitlines()
             if line.strip().startswith("#")
         )
         assert "NWM@8ae9b8f2 packages/common/state_qc.py" in comments, symbol
-        assert "（逐字移植）" not in comments, symbol
-        assert "_check_missing_sections" in comments, symbol
-        assert "偏离 5" in comments, symbol
+        assert not _VERBATIM_PORT_CLAIM.search(comments), symbol
+        assert gate in comments, symbol
+        assert deviation in comments, symbol
 
 
 def test_module_imports_the_cfg_ic_base_symbols_instead_of_re_porting_them() -> None:
-    """`nwm-snapshot-inventory.md:44` 的双权威副本禁令。"""
+    """`nwm-snapshot-inventory.md` §1 中 `packages/common/state_qc.py` 行的双权威副本禁令。"""
     names = source_probe.definition_names(source_probe.read_source(state_qc.__file__))
     assert names.isdisjoint(CFG_IC_BASE_SYMBOLS), names & set(CFG_IC_BASE_SYMBOLS)
     assert state_qc._as_float is cfg_ic._as_float

@@ -53,12 +53,17 @@ header 判定基座（`cfg_ic_header_shape` / `cfg_ic_header_minute_index`）在
    条子分支在本 seam 上无对应物，登记它等于登记一条不存在的差异。
 5. **错误契约替换：形状拒绝抛 `ValueError`，不抛 pin 的 `StateManagerError`。** pin
    （`state_cli.py:284-287`）在 header 形状不合法时抛 `StateManagerError`；本模块抛
-   `ValueError`（`restamp.py` 内唯一的拒绝点），消息前缀
-   `STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID` 与「拒绝、**不产出任何文档**」的决定
-   逐字保留，改的只有异常类型。`StateManagerError` 属 NWM 的异常层，本模块零 NWM 运行时
+   `ValueError`——它是本模块唯一**可达**的拒绝点：另一处 `raise ValueError`（minute-index
+   为 `None`）带同一前缀，但在偏离 1 的闸门次序下恒不可达，已按偏离 1 登记为内部不变量
+   自检。消息**前缀** `STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID` 与「拒绝、
+   **不产出任何文档**」的决定逐字保留；**措辞本身不逐字**：pin
+   （`state_cli.py:285-287`）发 `…checkpoint IC {checkpoint.ic_file} header is not…`，
+   带 IC 文件路径，而本 seam 是 doc→doc（偏离 3 不读不写文件、手上没有路径），故本模块
+   的消息丢掉了该路径。`StateManagerError` 属 NWM 的异常层，本模块零 NWM 运行时
    import，故该类型在本仓不存在；即便如此，替换仍按 #8 确立的家族惯例**记进模块头**——
    `state/cfg_ic.py` 把 `OSError`→`ValueError` 记作它的偏离 3、`state/state_qc.py` 也登记
-   了自己的同类改动，只记在 `nwm-snapshot-inventory.md:49` 的「剥离点」列属家族内不对称。
+   了自己的同类改动，只记在 `nwm-snapshot-inventory.md` §1 中
+   `packages/common/state_cli.py` 行的「剥离点」列属家族内不对称。
 
 `_ensure_utc` 的 pin 语义（`state_cli.py:1186-1189`）逐字保留：**naive datetime 视为 UTC**，
 aware 转 UTC。**不得**改成拒绝 naive——那是无 pin 对应物的收窄。

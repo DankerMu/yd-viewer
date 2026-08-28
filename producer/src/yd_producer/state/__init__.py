@@ -5,7 +5,7 @@
 - `restamp`（任务 4.3）：把状态时间头重戳到目标 cycle 的绝对时间。
 
 `state_qc` / `restamp` MUST 复用 `cfg_ic` 里的分段识别辅助与有界读，不得再移植一份
-NWM pin 的分段逻辑（`nwm-snapshot-inventory.md:44` 的双权威副本禁令）。
+NWM pin 的分段逻辑（`nwm-snapshot-inventory.md` §1 中 `packages/common/state_qc.py` 行的双权威副本禁令）。
 本包不写任何文件：改写返回新的 `CfgIcDocument`，落盘归 #21 init 首态与 #24 发布器。
 """
 

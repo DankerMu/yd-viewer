@@ -820,6 +820,52 @@ def test_db_free_scan_stays_in_step_with_tokenize_row_numbers(tmp_path: Path) ->
     ]
 
 
+def test_db_free_scan_still_sees_code_that_precedes_a_trailing_comment(
+    tmp_path: Path,
+) -> None:
+    """行尾注释的涂白 MUST 从**注释自己的起始列**开始，不能从第 0 列开始。
+
+    `_blank_prose` 的 `begin = start_col if row == start_row else 0` 换成 `begin = 0`
+    的变异体在全套下存活：既有用例里的注释全都**独占一行**（起始列的差别在那里不可
+    观测）。而带行尾注释的代码行在坏实现下会被整行抹掉——本例的两行 pristine 报三条
+    命中，`begin = 0` 下报零条。那是 fail-**OPEN**，正违 `_code_lines` 写死的
+    「守卫宁可误报，不可漏报」。
+
+    断言落在 `begin` 这一半上：兄弟的 `finish` 钳位改坏后行为近乎等价，对着它写的用例
+    钉不住承重的这一半。
+    """
+    source = (
+        "import os\n"
+        'URL = os.getenv("DATABASE_URL")  # 说明：这里读环境变量\n'
+        'Q = "psycopg"  # tail\n'
+    )
+    # 构造自检：正常路径确实**只**抹掉注释、保留其左侧的可执行字节（不走 fail-closed
+    # 回退，也不是整行原样保留）。
+    code_lines = _code_lines(source)
+    assert code_lines[1].startswith('URL = os.getenv("DATABASE_URL")')
+    assert "环境变量" not in code_lines[1]
+    assert code_lines[2].startswith('Q = "psycopg"')
+
+    targets = {
+        "producer/src/yd_producer/store/safe_fs.py": "packages/common/safe_fs.py"
+    }
+    _fake_repo(
+        tmp_path,
+        {
+            "producer/src/yd_producer/store/safe_fs.py": "x = 1\n",
+            "producer/src/yd_producer/store/inline.py": source,
+        },
+    )
+
+    hits = _forbidden_hits(tmp_path, _scan_files(tmp_path, targets))
+
+    assert hits == [
+        "producer/src/yd_producer/store/inline.py:2: DATABASE_URL",
+        "producer/src/yd_producer/store/inline.py:2: os.getenv",
+        "producer/src/yd_producer/store/inline.py:3: psycopg",
+    ]
+
+
 def test_db_free_scan_falls_back_to_raw_lines_when_the_source_cannot_be_tokenized(
     tmp_path: Path,
 ) -> None:
