@@ -31,6 +31,7 @@ VALID_CONFIG: dict[str, Any] = {
     "output_interval_minutes": 60,
     "checkpoint_hours": [12],
     "reach_count": 3988,
+    "nwm_mapping_builder_module": "workers.mapping_builder.cli",
     "cycle": {"hours": [0, 12]},
     "variants": {"gfs": "input/models/yd_gfs", "ifs": "input/models/yd_ifs"},
     "raw": {
@@ -81,6 +82,9 @@ SPEC_PINNED_TOP_LEVEL_KEYS = (
     "output_interval_minutes",
     "checkpoint_hours",
     "reach_count",
+    # spec cli-config「config.toml 装载与校验」Requirement 已用反引号把该 key 钉在顶层，
+    # 与上面四个同判据（issue #3 fixture 记录下来的决定，非默认）。
+    "nwm_mapping_builder_module",
 )
 
 # --- 第二本账：从 fixture 手工转录的必需 key 全集 ----------------------------
@@ -110,6 +114,8 @@ PINNED_CONFIG_KEYS = (
     "output_interval_minutes",
     "checkpoint_hours",
     "reach_count",
+    # issue #3 fixture 的 TOML key schema 在 `reach_count` 之后加入本键（#32 三步之第 1 步）
+    "nwm_mapping_builder_module",
     # tasks.md:49-50 [cycle]
     "cycle",
     "cycle.hours",
@@ -436,6 +442,7 @@ def test_load_config_returns_all_fields(tmp_path):
     assert config.output_interval_minutes == 60
     assert config.checkpoint_hours == (12,)
     assert config.reach_count == 3988
+    assert config.nwm_mapping_builder_module == "workers.mapping_builder.cli"
     assert config.cycle.hours == (0, 12)
     assert config.variants.gfs == "input/models/yd_gfs"
     assert config.variants.ifs == "input/models/yd_ifs"
@@ -448,6 +455,24 @@ def test_load_config_returns_all_fields(tmp_path):
     assert config.raw.gfs.bundles == ("fixture-gfs-{lead}.grib2",)
     assert config.raw.gfs.f000_special is True
     assert config.slurm.required_fields == SLURM_REQUIRED_FIELDS
+
+
+def test_mapping_builder_module_follows_fixture_value(tmp_path):
+    """module 名取自 `config.toml`，而非装载器里的常量。
+
+    `test_load_config_returns_all_fields` 的那条 round-trip 断言拦不住这一类：期望值就是
+    fixture 里的唯一取值，一个"照常 `_require_str` 校验、结果丢掉、存回字面量"的实现
+    （缺 key 仍报错、类型错仍报错，两本账都杀不掉）照样绿。判别力只能来自第二个值。
+
+    刻意写字面量而不从 `cli_fixtures` 导入：本文件的 fixture 与那份**刻意不共用**（见
+    `cli_fixtures` 模块头），共用即两本账共享同一个盲区。
+    """
+    data = _with(VALID_CONFIG, "nwm_mapping_builder_module", "other.builder.entry")
+
+    config = _loaded_config(tmp_path, data)
+
+    assert VALID_CONFIG["nwm_mapping_builder_module"] != "other.builder.entry"
+    assert config.nwm_mapping_builder_module == "other.builder.entry"
 
 
 def test_raw_sources_carry_independent_lead_hours(tmp_path):

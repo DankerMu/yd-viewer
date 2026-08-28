@@ -28,13 +28,18 @@
 
 from __future__ import annotations
 
+import json
+import os
 import struct
+import uuid
 from pathlib import Path
 
 import shapefile
 from pyproj import CRS, Transformer
+from shapely.geometry import mapping
 from shapely.geometry import shape as shapely_shape
 from shapely.geometry.base import BaseGeometry
+from shapely.ops import orient, unary_union
 from shapely.ops import transform as shapely_transform
 
 #: viewer 契约要求的输出坐标系（products-contract §6）
@@ -228,3 +233,221 @@ def read_shapefile(shp_path: str | Path) -> tuple[CRS, list[Feature]]:
         ) from exc
 
     return crs, list(zip(records, geometries, strict=True))
+
+
+#: viewer 只消费 `reach_id`（products-contract §6），其余 DBF 字段一律不透传
+REACH_ID_FIELD = "Index"
+
+
+def _geojson_text(obj: dict, describe: str) -> str:
+    """序列化并同时充当有限性守卫，非有限坐标 -> `GeometryError` 点名 `describe`。
+
+    `json.dumps` 默认把 `inf`/`nan` 写成裸 `Infinity`/`NaN`：RFC 8259 不承认它们，
+    Python 的 `json.loads` 非标准地接受，浏览器的 `JSON.parse` 拒绝——一个投影域外
+    顶点会让 viewer 整层图空白。`allow_nan=False` 让它在**落盘前**就地抛错。
+
+    非有限坐标不是假想输入：`reproject_geometry` 走 pyproj 默认的 `errcheck=False`，
+    投影反算有效域之外的顶点被静默映射为 `inf` 而不抛异常（pyproj 3.7.2 实测）。
+    """
+    try:
+        return json.dumps(obj, ensure_ascii=False, allow_nan=False)
+    except ValueError as exc:
+        raise GeometryError(f"GeoJSON 含非有限坐标: {describe}") from exc
+
+
+def _coerce_reach_id(value: object, shp_file: Path, position: int) -> int:
+    """DBF `Index` 值 -> `reach_id`，只接受 `int`。
+
+    pyshp 自己会把格式良好的 `N` 型字段解析成 `int`；到这里还是 `str` 说明 pyshp
+    解析失败（字段是 `C` 型文本或数字位被写坏），是 `float` 说明字段带小数位——
+    两者都是「基线与契约不符」，fail closed。刻意不做 `int(value)` 兜底：`int(1.9)`
+    会把一个错的 `reach_id` 静默截断成一个**存在但错误**的河段编号。
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise GeometryError(
+            f"shapefile 的 {REACH_ID_FIELD} 字段值不是整数({value!r})，"
+            f"第 {position} 条记录: {shp_file}"
+        )
+    return value
+
+
+def _reach_ids(records: list[dict], shp_file: Path) -> list[int]:
+    """按 DBF 记录顺序取出 `reach_id`，缺失/非整数/重复一律 fail closed。
+
+    重复必须拒绝：viewer 按 `reach_id` 定位 DAT 的流量列，两条河段同号会让整列
+    数据静默错位到错误的河段上——画得出来、但画的是别的河的流量。
+    """
+    reach_ids: list[int] = []
+    first_position: dict[int, int] = {}
+    for position, record in enumerate(records, start=1):
+        if REACH_ID_FIELD not in record:
+            raise GeometryError(
+                f"shapefile 属性表缺少 {REACH_ID_FIELD} 字段，"
+                f"第 {position} 条记录: {shp_file}"
+            )
+        reach_id = _coerce_reach_id(record[REACH_ID_FIELD], shp_file, position)
+        if reach_id in first_position:
+            raise GeometryError(
+                f"shapefile 的 {REACH_ID_FIELD} 值 {reach_id} 重复"
+                f"（第 {first_position[reach_id]} 条与第 {position} 条记录）: {shp_file}"
+            )
+        first_position[reach_id] = position
+        reach_ids.append(reach_id)
+    return reach_ids
+
+
+def build_rivers_geojson(shp_path: str | Path) -> dict:
+    """基线河网 shapefile -> EPSG:4326 的 GeoJSON `FeatureCollection`。
+
+    要素数与顺序严格等同 DBF 记录（确定性输出）；`properties` **只含** `reach_id`，
+    取自 DBF `Index`。0 要素的合法图层返回 0 要素的 `FeatureCollection`，不报错——
+    「要素数是否符合 `reach_count`」属 prepare 编排（任务 10.3），不在这里发明约束。
+    """
+    shp_file = Path(shp_path)
+    crs, features = read_shapefile(shp_file)
+    reach_ids = _reach_ids([record for record, _ in features], shp_file)
+    transformer = to_wgs84_transformer(crs)
+
+    geojson_features = []
+    for reach_id, (_, geom) in zip(reach_ids, features, strict=True):
+        feature = {
+            "type": "Feature",
+            "properties": {"reach_id": reach_id},
+            "geometry": mapping(reproject_geometry(geom, transformer)),
+        }
+        # 逐要素守卫，使非有限坐标的失败归属点到具体 reach_id 而不是整份文档。
+        _geojson_text(feature, f"reach_id={reach_id} 的河段要素: {shp_file}")
+        geojson_features.append(feature)
+    return {"type": "FeatureCollection", "features": geojson_features}
+
+
+def build_boundary_geojson(shp_path: str | Path) -> dict:
+    """domain 单元面图层 -> 恰含 1 个合并边界要素的 `FeatureCollection`。
+
+    合并顺序钉死为「先在基线源投影 CRS 内 `unary_union`，再对合并结果整体重投影」：
+    源 CRS 是等积 Albers，共享边在该平面内严格重合；若先转经纬度再合并，共享边在角度
+    空间不再逐点重合，会在溶解处留下缝隙与线状伪影。
+
+    `properties` 为空对象——边界没有 `reach_id` 语义，viewer 只把它当流域轮廓画。
+    """
+    shp_file = Path(shp_path)
+    crs, features = read_shapefile(shp_file)
+    if not features:
+        raise GeometryError(f"domain 图层没有任何单元，无法合并出边界: {shp_file}")
+
+    # GEOS 会对自相交/拓扑非法的环抛 `shapely.errors.GEOSException`
+    # （`TopologyException: side location conflict ...`）。`read_shapefile` 上游不做
+    # OGC 有效性检查，这类图层经公共 API 完全可达，不转换就会让一个不含任何路径的
+    # 原生异常逃出本模块的「单一公开异常」契约。
+    try:
+        merged = unary_union([geom for _, geom in features])
+    except Exception as exc:
+        raise GeometryError(
+            f"domain 单元合并失败（几何自相交或拓扑非法）: {shp_file}"
+        ) from exc
+    if merged.geom_type not in ("Polygon", "MultiPolygon"):
+        raise GeometryError(
+            f"domain 单元合并结果不是面几何({merged.geom_type}): {shp_file}"
+        )
+    reprojected = reproject_geometry(merged, to_wgs84_transformer(crs))
+    # 环向矫正前先做有限性守卫：`orient` 靠环的有符号面积定向，坐标含 inf 时面积为
+    # nan，比较结果无意义且不报错。
+    describe = f"合并边界要素: {shp_file}"
+    _geojson_text(mapping(reprojected), describe)
+    # RFC 7946 要求外环逆时针、内环顺时针；shapefile 约定与之相反，且 `unary_union`
+    # 实测输出为顺时针外环——这一步是必须显式做的转换，不是 no-op。
+    feature = {
+        "type": "Feature",
+        "properties": {},
+        "geometry": mapping(orient(reprojected, sign=1.0)),
+    }
+    _geojson_text(feature, describe)
+    return {"type": "FeatureCollection", "features": [feature]}
+
+
+def _remove_paths(paths: list[Path]) -> list[Path]:
+    """删除给定路径，返回**未能删除**的那些。
+
+    只接受**本次调用自己写出的**路径：临时文件，以及已 `os.replace` 到终名的本次产物。
+    终名上若原本存在调用方的同名文件，它在 `os.replace` 时就已被本次产物取代，这里
+    删掉的是本次产物、不做恢复（覆盖语义见 `write_viewer_geojson` 的文档）。
+
+    返回残留而不是吞掉删除异常，是为了让「清理也失败」这条罕见路径同样可被点名，
+    而不是退化成 best-effort。
+    """
+    residue: list[Path] = []
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            # 只有**确实还躺在盘上**的路径才算残留。`missing_ok=True` 只吞
+            # `FileNotFoundError`：当 `out_dir` 的父级是个普通文件时，`mkdir` 先失败、
+            # 临时文件根本没被创建，而对这类路径 `unlink` 抛的是 `NotADirectoryError`，
+            # 照单收下就会报出「清理未能删除本次产物(两个从不存在的路径)」，把真因
+            # 挤到 `__cause__` 里——归属谎报。用 `lexists` 而非 `exists`，这样真正
+            # 删不掉的悬空符号链接仍会被如实报出。
+            if os.path.lexists(path):
+                residue.append(path)
+    return residue
+
+
+def write_viewer_geojson(
+    *, rivers_shp: str | Path, domain_shp: str | Path, out_dir: str | Path
+) -> tuple[Path, Path]:
+    """把两份 viewer GeoJSON 写入 `out_dir`，返回 `(rivers 路径, boundary 路径)`。
+
+    **无部分产物**，三段都要成立（下游 prepare 会把 scratch 目录整体提交，半份或
+    截断的产物会被当成完整产物发布出去）：
+
+    * 构建段：两份文档全部构建并序列化成字符串**成功之后**才开始落盘；
+    * 落盘段：每份先写到 `out_dir` 内**本次调用专属**的临时名，两份都写完之后才
+      `os.replace` 到终名。写入**中途**失败（ENOSPC/EFBIG 等）只会截断临时文件，
+      终名上永远不会出现半份内容——这正是「记账后删」的朴素回滚做不到的：
+      `write_text` 以 `w` 模式先截断再写，中途失败留下的是一个已存在的坏文件。
+    * 收尾段：任何一步失败都删掉本次创建的临时文件与已提升到终名的文件，使 `out_dir`
+      内不留本次的任何产物；删除自身失败时把残留路径写进消息一并报出，原始异常仍挂在
+      `__cause__` 上——不掩盖，也不留「可能残留」的模糊语义。
+
+    覆盖语义（诚实声明，不做做不到的承诺）：终名上若已存在调用方的同名文件，`os.replace`
+    会原子地替换它，且**不会**在后续回滚中被恢复——回滚只保证「本次产物不残留」，不保证
+    「调用方原文件不丢」。拒绝覆盖检查属 prepare 编排（任务 10.3），本函数不做。
+
+    `out_dir` 由调用方给出并按需创建；本函数不解析 `YD_ROOT`、不做拒绝覆盖检查、
+    不做提交与 scratch 清理——均属 prepare 编排（任务 10.3）。
+    """
+    rivers_text = _geojson_text(build_rivers_geojson(rivers_shp), str(rivers_shp))
+    boundary_text = _geojson_text(build_boundary_geojson(domain_shp), str(domain_shp))
+
+    target = Path(out_dir)
+    rivers_out = target / "rivers.geojson"
+    boundary_out = target / "boundary.geojson"
+    # 本次调用专属后缀：同一 `out_dir` 上的并发/重复调用不会互相覆盖临时文件。
+    token = f".{os.getpid()}-{uuid.uuid4().hex}.tmp"
+    plan = [(rivers_out, rivers_text), (boundary_out, boundary_text)]
+    temps = [path.with_name(path.name + token) for path, _ in plan]
+    promoted: list[Path] = []
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        for (_, text), tmp in zip(plan, temps, strict=True):
+            tmp.write_text(text, encoding="utf-8")
+        for (path, _), tmp in zip(plan, temps, strict=True):
+            os.replace(tmp, path)
+            promoted.append(path)
+    except OSError as exc:
+        residue = _remove_paths(promoted + temps)
+        if residue:
+            raise GeometryError(
+                f"viewer GeoJSON 写出失败且清理未能删除本次产物"
+                f"({'、'.join(str(path) for path in residue)}): {target}"
+            ) from exc
+        raise GeometryError(
+            f"viewer GeoJSON 写出失败，out_dir 内未留下本次的任何文件: {target}"
+        ) from exc
+
+    stray = _remove_paths(temps)
+    if stray:
+        raise GeometryError(
+            f"viewer GeoJSON 已写出但临时文件未能清理"
+            f"({'、'.join(str(path) for path in stray)}): {target}"
+        )
+    return rivers_out, boundary_out

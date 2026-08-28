@@ -16,7 +16,7 @@
 - **THEN** 以非零退出码报错，不执行任何业务逻辑
 
 ### Requirement: config.toml 装载与校验
-装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构；任何必需字段缺失或类型错误 MUST fail closed。
+装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构、NWM mapping-builder module 点分名 `nwm_mapping_builder_module`（版本化快照事实，非现场值）；任何必需字段缺失或类型错误 MUST fail closed。
 
 #### Scenario: 完整配置装载成功
 - **WHEN** 载入包含全部必需字段的 `config.toml`
@@ -53,7 +53,7 @@
 
 #### Scenario: 以精确解释器调用
 - **WHEN** 解释器路径指向可执行文件（测试用假解释器脚本）
-- **THEN** 薄外壳以该路径调用配置的 mapping-builder module，调用命令中不出现其它解释器，module 解析上下文（cwd/`PYTHONPATH`）来自 `local.toml` 的 NWM checkout 字段
+- **THEN** 薄外壳以该路径调用 `config.toml` 的 `nwm_mapping_builder_module` 所指 module，调用命令中不出现其它解释器，module 解析上下文（cwd/`PYTHONPATH`）来自 `local.toml` 的 NWM checkout 字段
 
 ### Requirement: 拒绝 NWM 数据库环境
 producer 任一入口启动时检测到 `DATABASE_URL` 环境变量 MUST 视为配置错误并拒绝执行（agent-ops §2.2）。

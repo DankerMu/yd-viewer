@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "maxLines": 1000,
+  "exclude": [
+    "openspec/changes/*/tasks.md",
+    "producer/tests/test_*.py"
+  ]
+}
