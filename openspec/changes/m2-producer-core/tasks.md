@@ -1687,11 +1687,13 @@ Required evidence（每条 input -> expected output）:
 - staging 位置不在 `input/viewer/` 之内（断言 staging 的实际路径），且成功后该位置已不存在
 - **同文件系统判别性证据**：成功路径下断言每次 rename 的源与终名 `os.stat().st_dev` 相等，且源位于 `yd_root` 之内——把 staging 放回 scratch 的实现在这条上必红（生产 `EXDEV`，本地两根同盘时不会自己暴露）
 - **提交中途失败**：注入令首次终名 rename 失败的探针 -> `PrepareError`（`SafeFilesystemError` MUST NOT 逃逸；它是 `RuntimeError` 子类，`except OSError` 兜不住）；`YD_ROOT` 的**条目集合**与执行前相同（本次为提交新建的父目录与 staging 均已回滚）；scratch 已清
-- 不注入 builder（走生产绑定）-> `BuilderUnavailableError`，消息指名归属任务号；注入的 `runner`/`subprocess` 探针调用次数 **0**（在起子进程之前就停）；`YD_ROOT` 无写入；`scratch_root` 无残留
+- 不注入 builder（走生产绑定）-> `BuilderUnavailableError`，消息指名归属（承接它的任务号，或在无编号任务时指名承接阶段）；注入的 `runner`/`subprocess` 探针调用次数 **0**（在起子进程之前就停）；`YD_ROOT` 无写入；`scratch_root` 无残留
 - `main(["prepare", ...])` 走生产 builder 绑定 -> 退出码 **`3`**；同一组参数下由 `PrepareError` 拒绝（如 reach 数不符）-> 退出码 **`1`**（两码可区分是断言点）
 - `main(["prepare", "--config", ..., "--local", ...])` 缺 `--baseline` -> `SystemExit(2)`；注入的配置装载 fake 与 `run_prepare` fake 调用次数均为 0
 - `main(["prepare", ..., "--baseline", <path>])` 且注入成功的 `run_prepare` fake -> 退出码 0，fake 收到的 `baseline_root` 是 `Path.resolve()` 后的绝对路径
 - `main(["prepare", ...])` 且注入抛 `PrepareError` 的 fake -> 退出码 `1`，stderr 含该消息
+- **清理证据必须到达运维（round-2 verified，cand-r2-A1/A2）**：`main(["prepare", ...])` 走生产绑定且两个删除原语均注入失败 -> 退出码仍 `3`，stderr **同时**含 `BuilderUnavailableError` 消息与注入的清理失败文本，且不含 `Traceback`（`str(exc)` 不含 `__notes__`，只断退出码的用例对本条恒绿）；注入返回带非空 `cleanup_warnings` 报告的 `run_prepare` fake -> 退出码 `0` 且 stderr 含每条告警
+- **异常类边界必须被钉死（round-2 verified，cand-r2-B1）**：三条判别性用例——(a) 回滚的**最后**一个清理步骤抛 `KeyboardInterrupt` -> 该 `KeyboardInterrupt` 上抛（`except BaseException` 变异体在此必红）；(b) 清理步骤内 `prepare.os.close` 抛裸 `OSError` -> 其余步骤仍执行、上抛的仍是原始 `PrepareError`、该 `OSError` 进 `__notes__`（`except PrepareError` 变异体在此必红；注意经 `rmtree_no_follow` 注入的 `OSError` 被 `_wrap_fs` 翻译，杀不掉该变异体）；(c) builder 抛 `KeyboardInterrupt` -> 回滚完成后原样上抛（回滚边界收窄为 `except Exception` 的变异体在此必红）。全套注入面此前只有 `SafeFilesystemError`，它被 `_wrap_fs` 翻译成 `PrepareError`，令三种异常类选择塌缩到同一条路径
 - `main(["init", ...])` / `main(["run", ...])` 带 `--baseline` -> `SystemExit(2)`（该参数只属 prepare）
 - `build_parser()` 的 `prepare` 子 parser 必需参数集合恰为 `{--config, --local, --baseline}`；`init`/`run` 恰为 `{--config, --local}`
 - `DATABASE_URL` 存在时 `["prepare", ..., "--baseline", ...]` -> 退出码 `1`，stderr 指名该变量且**不含其值**，`run_prepare` fake 调用次数 0（既有守卫不因新参数而位移）
