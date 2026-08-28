@@ -176,7 +176,7 @@ Review focus:
 
 ## 2. forcing-chain（一）：NWM 快照勘察与基础结构
 
-- [ ] 2.1 只读勘察 NWM@`8ae9b8f2`，产出精确快照文件清单（模块 → 原路径 → 目标路径，含 tracker 与补跑），落为 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md`
+- [x] 2.1 只读勘察 NWM@`8ae9b8f2`，产出精确快照文件清单（模块 → 原路径 → 目标路径，含 tracker 与补跑），落为 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md`；表格列固定 `| 能力项 | NWM 原路径 | 目标路径 | 剥离点 | 备注 |`，一行一个文件、路径反引号包裹；凡原模块触及 DB/scheduler/registry/journal/reservation 的行，`剥离点` 必须点名具体 import、符号或分支（供 2.2 逐文件消费），无耦合写 `无`，禁止“已剥离 DB 分支”一类无点名的笼统措辞
 - [ ] 2.2 快照 object-store/path 基础函数与 IFS/GFS source、raw manifest 数据结构，含其最小测试；剥离 DB/scheduler 分支
 - [ ] 2.3 增加溯源头部检查测试：所有快照模块（含后续组落地的 converter/forcing/tracker）头部含 `NWM@8ae9b8f2 <原路径>`
 
@@ -251,7 +251,7 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 - [ ] 9.1 快照并适配 `cfg.ic.update` 轮询捕获（命中 720 分钟复制 + 分段格式校验；产物保持相对时间头），以模拟覆写序列测试正常/漏采/副本损坏三态
 - [ ] 9.2 快照并适配漏采补跑（同一 Slurm 作业内、同初态同 forcing、END=0.5、末态采纳；注入假 SHUD 调用测试；补跑失败传导整轮失败；控制器提交计数不变）
 
-依赖：组 4（分段校验）、组 8（运行目录形态）
+依赖：组 2（勘察清单定原路径）、组 4（分段校验）、组 8（运行目录形态）
 §13.1 归属：tracker
 Suggested fixture level: compact - 模拟覆写序列与假 SHUD 调用即可确定性重放竞态
 Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保绿
