@@ -260,11 +260,29 @@ def _reconstruct_sources(
             "raw_root/source/cycle/config 必须与产生该 verdict 的调用逐字相同",
             "verdict-mismatch",
         )
-    for lead, _ in rebuilt:
-        if verdict.expected_variables.get(lead) is None:
+    # lead 轴取**集合相等**而不是「重构的每个 lead 都在 verdict 里」：后者只判一个方向，
+    # 一个多出 lead 的 verdict 会照样通过，而 manifest 的 forecast_hours 由 `rebuilt`
+    # 推导，于是产出的小时表比 verdict 声明的少——tasks.md:677「相等（不是包含）」与
+    # :708 的三键相等同时被证伪。spec `raw-scan` :58 的 MUST 无「verdict 来自 judge」
+    # 的前提，故 judge 恒不产生多余键这一事实不能用来免除本闸门。
+    rebuilt_leads = {lead for lead, _ in rebuilt}
+    declared_leads = set(verdict.expected_variables)
+    if declared_leads != rebuilt_leads:
+        raise RawStagingError(
+            "verdict.expected_variables 的 lead 集合与由形参重构的 lead 集合不等"
+            f"（verdict 多出 {sorted(declared_leads - rebuilt_leads)}、"
+            f"缺 {sorted(rebuilt_leads - declared_leads)}）；verdict 与形参配置不同源",
+            "verdict-mismatch",
+        )
+    for lead in rebuilt_leads:
+        # 集合相等只判键，不判值。值面必须自己判形态：`None` 会在 `_build_entries`
+        # 里漏一个裸 `TypeError`（不可迭代），而一个 `str` 更糟——它可迭代，会被逐
+        # 字符当成变量名扇出，静默产出一份变量名全错的 manifest。
+        variables = verdict.expected_variables[lead]
+        if not isinstance(variables, tuple | list):
             raise RawStagingError(
-                f"verdict.expected_variables 缺 lead {lead} 的变量集；"
-                "verdict 与形参配置不同源",
+                f"verdict.expected_variables 的 lead {lead} 的变量集不是 tuple/list，"
+                f"实际 {type(variables).__name__}；verdict 与形参配置不同源",
                 "verdict-mismatch",
             )
     return rebuilt
@@ -562,13 +580,16 @@ def _ensure_dir(directory: Path, written: _Written) -> None:
         if probe.parent == probe:
             break
         probe = probe.parent
+    # 账本**先于**效果登记：`mkdir(parents=True)` 是多步的，中途失败（ENOSPC/EDQUOT/
+    # 并发 rmdir）会留下已建的祖先段，而失败路径不回到这里，账本就永远收不到它们。
+    # 反向多记是安全的：`rollback` 对没建成的路径 `rmdir` 只会吞掉 OSError。
+    written.dirs.extend(missing)
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise RawStagingError(
             f"无法创建目标目录 {directory}：{exc}", "copy-failed"
         ) from exc
-    written.dirs.extend(missing)
 
 
 def _copy_one(source_path: Path, target: Path, written: _Written) -> None:
@@ -633,15 +654,26 @@ def _manifest_metadata(leads: tuple[int, ...]) -> dict[str, Any]:
     }
 
 
-def _write_manifest(
+def _render_manifest(
     *,
-    manifest_path: Path,
     source: str,
     cycle: datetime,
     leads: tuple[int, ...],
     entries: tuple[ManifestEntry, ...],
-    written: _Written,
-) -> None:
+    cycle_root: Path,
+) -> bytes:
+    """把本轮 manifest 序列化成**字节**，在任何写入之前完成。
+
+    序列化必须整体前置到准入期：`entries` 与 `leads` 在复制开始前就已完全确定，而
+    序列化本身可能失败——源 manifest 是外部 JSON，`json.load` 会接受转义的孤代理
+    （`\\ud800`），`json.dumps(ensure_ascii=False)` 也照样吐出它，直到写 UTF-8 流时
+    才抛 `UnicodeEncodeError`（是 `ValueError`，不是 `OSError`）。留在写入期就意味着
+    「副本全落地 + 一个 0 字节 manifest」这种半套产物。这里先 `encode("utf-8")` 把它
+    变成准入期的 `source-manifest` 拒绝，零写入。
+
+    `ensure_ascii=False` MUST 保留：改成 `True` 会把孤代理转义成 `\\ud800` 六字符、
+    编码顺利通过，等于把一个不可编码的值偷渡进产出 manifest。
+    """
     manifest = DownloadManifest(
         source_id=SOURCE_DIR_NAMES[source],
         cycle_time=cycle.astimezone(UTC),
@@ -652,7 +684,24 @@ def _write_manifest(
         manifest_uri=None,
         metadata=_manifest_metadata(leads),
     )
-    payload = json.dumps(manifest.as_dict(), ensure_ascii=False, indent=2)
+    try:
+        return json.dumps(manifest.as_dict(), ensure_ascii=False, indent=2).encode(
+            "utf-8"
+        )
+    except (UnicodeEncodeError, TypeError, ValueError) as exc:
+        raise RawStagingError(
+            f"源 manifest {cycle_root / SOURCE_MANIFEST_FILENAME} 承接来的值无法序列化"
+            f"成 UTF-8 的本轮 manifest：{exc!r}",
+            "source-manifest",
+        ) from exc
+
+
+def _write_manifest(
+    *,
+    manifest_path: Path,
+    payload: bytes,
+    written: _Written,
+) -> None:
     try:
         fd = os.open(manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     except FileExistsError as exc:
@@ -666,7 +715,7 @@ def _write_manifest(
         ) from exc
     written.files.append(manifest_path)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
     except OSError as exc:
         raise RawStagingError(
@@ -688,13 +737,15 @@ def stage_raw(
     """把 `verdict.expected_files` 只读复制进 `work_dir`，并生成本轮 raw manifest。
 
     顺序逐段短路，且**任何写入之前**全部准入检查已过：完整性 → 形参守卫 → 单 bundle
-    约束 → 源路径重构与 containment（纯路径运算）→ 源侧 symlink 拒绝 → 源 manifest
-    承接与覆盖检查 → R4B2 → 目标不存在预检 → 复制 → 落 manifest。symlink 拒绝排在
-    读源 manifest **之前**：读源 manifest 会穿过 cycle 目录段，若该段是 symlink 而先
-    读了它，就等于跟随了 spec 说「不跟随」的那条链。
+    约束 → `raw_root`/`work_dir` 不相互包含 → 源路径重构与 containment（纯路径运算）
+    → 源侧 symlink 拒绝 → 源 manifest 承接与覆盖检查 → R4B2 → **本轮 manifest 序列化**
+    → 目标不存在预检 → 复制 → 落 manifest。symlink 拒绝排在读源 manifest **之前**：
+    读源 manifest 会穿过 cycle 目录段，若该段是 symlink 而先读了它，就等于跟随了 spec
+    说「不跟随」的那条链。序列化排在复制**之前**：见 `_render_manifest`。
 
-    失败一律抛 `RawStagingError`（`kind` 取自 `ERROR_KINDS`）；复制期失败会清掉本轮
-    已写入的 work 侧路径。`raw_root` 之下**零写入**是本函数的硬约束
+    失败一律抛 `RawStagingError`（`kind` 取自 `ERROR_KINDS`），形参写错抛 `ConfigError`；
+    复制/落盘期的**任何**异常（含裸的非 `RawStagingError`）都会先清掉本轮已写入的
+    work 侧路径。`raw_root` 之下**零写入**是本函数的硬约束
     （`docs/compute-loop-design.md` §4.1）。
     """
     if verdict.complete is not True:
@@ -720,6 +771,16 @@ def stage_raw(
 
     raw_path = _absolute(raw_root, "raw_root")
     work_path = _absolute(work_dir, "work_dir")
+    if work_path.is_relative_to(raw_path) or raw_path.is_relative_to(work_path):
+        # 两个入参互相包含时，「只读 raw_root、只写 work_dir」这条硬约束在本函数内部
+        # 不再可能同时成立：副本、目录与失败回滚的 unlink/rmdir 全都会落进 NWM raw 树
+        # （`docs/compute-loop-design.md` §4.1）。这是「调用写错了」，归 `ConfigError`
+        # 而不是第十项 kind——九项词表由 tasks.md 任务 3.2 fixture 钉死。
+        # `is_relative_to` 是纯词法判定，两向各判一次，相等的情形两向都为真。
+        raise ConfigError(
+            f"work_dir {work_path} 与 raw_root {raw_path} 互相包含；"
+            "work 必须是 raw 树之外的独立目录，否则「raw_root 之下零写入」不可能成立"
+        )
     rebuilt = _reconstruct_sources(
         raw_root=raw_path,
         source=source,
@@ -750,6 +811,14 @@ def stage_raw(
         source_index=_index_source_entries(source_manifest),
     )
 
+    manifest_payload = _render_manifest(
+        source=source,
+        cycle=cycle,
+        leads=leads,
+        entries=entries,
+        cycle_root=cycle_root,
+    )
+
     targets = tuple(
         work_path / Path(_local_key(source, cycle, path.name)) for _, path in rebuilt
     )
@@ -768,13 +837,27 @@ def stage_raw(
             _copy_one(source_path, target, written)
         _write_manifest(
             manifest_path=manifest_path,
-            source=source,
-            cycle=cycle,
-            leads=leads,
-            entries=entries,
+            payload=manifest_payload,
             written=written,
         )
     except RawStagingError:
+        written.rollback()
+        raise
+    except Exception as exc:
+        # 清理触发器 MUST NOT 窄于它要维护的不变量：只接 `RawStagingError` 时，写入块
+        # 里任何别的异常（NUL 字节路径让 `mkdir` 抛裸 `ValueError`、序列化面的
+        # `UnicodeEncodeError`、被 monkeypatch 的原语抛出的任意异常）都会绕过回滚**并**
+        # 逃出九项闭合词表。此支同时收口两侧：先回滚，再把它收敛成 `copy-failed`。
+        written.rollback()
+        raise RawStagingError(
+            f"复制/落盘期出现未预期的异常 {exc!r}；已清理本轮 work 侧写入",
+            "copy-failed",
+        ) from exc
+    except BaseException:
+        # `KeyboardInterrupt`/`SystemExit` MUST NOT 被改写成 `RawStagingError`——那会
+        # 让 Ctrl-C 看起来像一次 staging 失败。但清理照做：不留半套副本这条不变量与
+        # 异常类型无关。这是本函数唯一一条外抛非 `{ConfigError, RawStagingError}` 的
+        # 出口，且是有意为之。
         written.rollback()
         raise
     return StagedRaw(manifest_path=manifest_path, copied_files=targets, entries=entries)

@@ -15,7 +15,7 @@ import errno
 import json
 import os
 import stat
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +132,14 @@ def local_key(source: str, lead: int) -> str:
     return f"raw/{DIR_SEGMENTS[source]}/{CYCLE_DIR}/{bundle_name(source, lead)}"
 
 
+# 源 manifest 里 `local_key` 的**故意发散**前缀。yd 产出的 key 形态与 pin 逐字相同，
+# 于是在一份合规的源 manifest 上「自己算」与「照抄源」两种实现取值恰好重合——用重合
+# 的取值喂输入，断言就无法区分二者，成为自证式 fixture。源 manifest 是外部 JSON、
+# 没有任何东西强制这种重合，故这里把输入侧偏移一个前缀：照抄源的实现会产出
+# `nwm-bucket/raw/...`（`resolve_path` 后指向不存在的路径），自己算的实现不受影响。
+SOURCE_LOCAL_KEY_PREFIX = "nwm-bucket/"
+
+
 def selector_for(variable: str, lead: int) -> dict[str, Any]:
     """合成的 `IdxSelection.as_metadata()` 四键（NWM@8ae9b8f2 :248-258）。"""
     return {
@@ -147,7 +155,7 @@ def entry_payload(source: str, lead: int, variable: str) -> dict[str, Any]:
     remote = f"https://example.invalid/{DIR_SEGMENTS[source]}/{CYCLE_DIR}/"
     return {
         "remote_url": remote + bundle_name(source, lead),
-        "local_key": local_key(source, lead),
+        "local_key": SOURCE_LOCAL_KEY_PREFIX + local_key(source, lead),
         "variable": variable,
         "forecast_hour": lead,
         "expected_checksum": None,
@@ -315,17 +323,22 @@ def test_full_cycle_copies_files_and_manifest_triples_match(tmp_path: Path) -> N
     # 三元组完整性：集合**相等**（不是包含），两个方向都由本断言承担。
     expected_pairs = {(lead, var) for lead in LEADS for var in GFS_VARIABLES}
     assert {(e.forecast_hour, e.variable) for e in result.entries} == expected_pairs
-    # 同一 (lead, bundle) 的全部变量 entry 共享同一个 local_key。
+    # 同一 (lead, bundle) 的全部变量 entry 共享同一个 local_key，且该 key 由 yd
+    # **自己算**：源 manifest 的同名字段带 `nwm-bucket/` 前缀，照抄源就会取到它。
     for lead in LEADS:
         keys = {e.local_key for e in result.entries if e.forecast_hour == lead}
         assert keys == {local_key("gfs", lead)}
+        assert keys != {entry_payload("gfs", lead, "tmp2m")["local_key"]}
     # entry 顺序：lead 升序 × variables 声明序。
     assert [(e.forecast_hour, e.variable) for e in result.entries] == [
         (lead, var) for lead in LEADS for var in GFS_VARIABLES
     ]
 
-    # `local_key` 是 object-store key，经 resolve_path 落在 work/raw/ 之下。
+    # `local_key` 是 object-store key，**每一条**经 resolve_path 都落在 work/raw/ 之下
+    # 且指向已存在的副本。在发散前缀的 fixture 下这条断言才有判别力：照抄源 key 的
+    # 实现会解析到 `<work>/nwm-bucket/raw/...`，既不在 work/raw 之下也不存在。
     store = LocalObjectStore(root=work_dir)
+    assert len(result.entries) == len(LEADS) * len(GFS_VARIABLES)
     for entry in result.entries:
         resolved = store.resolve_path(entry.local_key)
         assert resolved.is_file()
@@ -831,7 +844,14 @@ def test_no_bare_stdlib_exception_escapes_for_each_failure_shape(
         ("GFS", CYCLE),
         ("era5", CYCLE),
         ("gfs", datetime(2026, 3, 4, 0)),  # noqa: DTZ001 naive 是被测输入
+        # 整点闸门是 (minute, second, microsecond) 三元组：逐分量各一行，一个只动
+        # minute 的输入不足以为三分量的闸门背书。
         ("gfs", datetime(2026, 3, 4, 0, 30, tzinfo=UTC)),
+        ("gfs", datetime(2026, 3, 4, 0, 0, 30, tzinfo=UTC)),
+        ("gfs", datetime(2026, 3, 4, 0, 0, 0, 30, tzinfo=UTC)),
+        # tz 闸门是 `utcoffset() != timedelta(0)`：naive（上面那行，utcoffset 为
+        # None）与「aware 但非 UTC」是两条不同的腿。
+        ("gfs", datetime(2026, 3, 4, 0, tzinfo=timezone(timedelta(hours=8)))),
     ],
 )
 def test_malformed_call_parameters_raise_config_error(
@@ -954,4 +974,404 @@ def test_bundle_pattern_validation_is_reused_from_rawscan(tmp_path: Path) -> Non
     with pytest.raises(ConfigError) as excinfo:
         stage_raw(verdict, raw_root, work_dir, "gfs", CYCLE, config)
     assert excinfo.value.path == "raw.gfs.bundles"
+    assert snapshot(work_dir) == {}
+
+
+# --- Row：复制期的**任何**异常都清理，且不外泄九项词表之外 --------------------
+
+
+def test_bare_exception_inside_the_write_block_still_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写入块里抛出的非 `RawStagingError` 也必须触发回滚并收敛成九项之一。
+
+    只接 `RawStagingError` 的清理触发器窄于它要维护的不变量：写入块里任何别的异常
+    （裸 `ValueError`、`UnicodeEncodeError`、被替换的原语抛出的任意异常）都会绕过
+    `written.rollback()` **并**逃出闭合词表。注入点选在第三个目标的 `os.open`，此时
+    前两份副本与两级目录都已落盘，故存活的残留是可见的。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    doomed = work_dir / "raw" / "gfs" / CYCLE_DIR / bundle_name("gfs", 6)
+    real_open = os.open
+    landed: list[str] = []
+
+    def hooked_open(path, flags, *args, **kwargs):
+        if str(path) == str(doomed):
+            # 刻意不是 OSError：`_copy_one` 的 except OSError 腿接不到它。
+            raise RuntimeError("注入的非 OSError 故障")
+        fd = real_open(path, flags, *args, **kwargs)
+        landed.append(str(path))
+        return fd
+
+    monkeypatch.setattr(os, "open", hooked_open)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    monkeypatch.undo()
+    # 注入点确实在「已有副本落盘之后」触发，残留是可构造的。
+    assert len([p for p in landed if p.startswith(str(work_dir))]) == 2
+    expect_kind(excinfo, "copy-failed")
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert snapshot(work_dir) == {}
+
+
+def test_keyboard_interrupt_mid_copy_still_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`KeyboardInterrupt` 照样清理，但**不**被改写成 `RawStagingError`。
+
+    「不留半套副本」与异常类型无关，故 `BaseException` 也要触发回滚；而把 Ctrl-C
+    改写成一次 staging 失败会让操作者看到一个假的 `copy-failed`，故这一支原样外抛
+    ——它是本函数唯一有意保留的、九项词表之外的出口。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    doomed = work_dir / "raw" / "gfs" / CYCLE_DIR / bundle_name("gfs", 6)
+    real_open = os.open
+
+    def hooked_open(path, flags, *args, **kwargs):
+        if str(path) == str(doomed):
+            raise KeyboardInterrupt
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", hooked_open)
+    with pytest.raises(KeyboardInterrupt):
+        staged(raw_root, work_dir)
+    monkeypatch.undo()
+    assert snapshot(work_dir) == {}
+
+
+def test_non_utf8_encodable_carried_value_is_refused_before_any_write(
+    tmp_path: Path,
+) -> None:
+    """承接来的值不可 UTF-8 编码 -> 准入期 `source-manifest`，零写入。
+
+    源 manifest 是外部 JSON：`json.load` 接受转义的孤代理 `\\ud800` 并还原成真正的
+    孤代理 str，`json.dumps(ensure_ascii=False)` 也照样吐出它，直到写 UTF-8 流才抛
+    `UnicodeEncodeError`。若序列化留在复制之后，结果是「三份副本 + 一个 0 字节
+    raw-manifest.json」——半套产物，且下一次重试会被 `lexists` 预检卡死。
+    """
+    payload = source_manifest_payload("gfs")
+    payload["entries"][0]["metadata"]["grib_short_name"] = "2t\ud800"
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    on_disk = (cycle_dir(raw_root, "gfs") / SOURCE_MANIFEST_NAME).read_text(
+        encoding="utf-8"
+    )
+    # 源文件本身是纯 ASCII（孤代理以 6 字符转义存在），不依赖任何非法落盘字节。
+    assert on_disk.isascii() and "\\ud800" in on_disk
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert not isinstance(excinfo.value, ValueError)
+    assert snapshot(work_dir) == {}
+
+
+def test_mkdir_failing_midway_leaves_no_directories_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`mkdir(parents=True)` 建到一半失败 -> 已建的祖先段也必须被回滚掉。
+
+    注入方式是**数成功的创建次数**：`Path.mkdir(parents=True)` 先试叶子、拿
+    `FileNotFoundError` 再回溯建父目录，用「第 n 次调用即失败」会打在还没创建任何
+    目录的探测腿上，抓不到本用例要抓的中途失败。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    real_mkdir = os.mkdir
+    created: list[str] = []
+
+    def hooked_mkdir(path, *args, **kwargs):
+        if len(created) >= 2:
+            raise OSError(errno.EDQUOT, "Disk quota exceeded", str(path))
+        real_mkdir(path, *args, **kwargs)
+        created.append(str(path))
+
+    monkeypatch.setattr(os, "mkdir", hooked_mkdir)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    monkeypatch.undo()
+    # 前提取证：确实先成功建了两级目录，才轮到第三级失败。
+    assert created == [
+        str(work_dir / "raw"),
+        str(work_dir / "raw" / "gfs"),
+    ]
+    expect_kind(excinfo, "copy-failed")
+    assert snapshot(work_dir) == {}
+
+
+# --- Row：raw_root 与 work_dir 必须不相互包含 --------------------------------
+
+
+def test_work_dir_under_raw_root_is_a_config_error(tmp_path: Path) -> None:
+    """work 落在 raw 树内 -> `ConfigError`，raw 树逐字节不变。
+
+    否则副本、目录与失败回滚的 unlink/rmdir 全都发生在 NWM raw 树里
+    （`docs/compute-loop-design.md` §4.1 的硬约束）。归 `ConfigError`（「调用写错了」）
+    而不是第十项 kind：九项词表由 fixture 钉死。
+    """
+    raw_root, _work_dir = build_tree(tmp_path)
+    before = snapshot(raw_root)
+    config = make_config()
+    verdict = judge(raw_root, "gfs", CYCLE, config)
+    with pytest.raises(ConfigError):
+        stage_raw(verdict, raw_root, raw_root / "yd-work", "gfs", CYCLE, config)
+    assert snapshot(raw_root) == before
+
+
+def test_raw_root_under_work_dir_is_a_config_error(tmp_path: Path) -> None:
+    """反向包含（raw 在 work 之下）同样拒绝——两个析取分支各自可判。"""
+    raw_root, _work_dir = build_tree(tmp_path)
+    before = snapshot(raw_root)
+    config = make_config()
+    verdict = judge(raw_root, "gfs", CYCLE, config)
+    with pytest.raises(ConfigError):
+        stage_raw(verdict, raw_root, tmp_path, "gfs", CYCLE, config)
+    assert snapshot(raw_root) == before
+
+
+def test_disjoint_sibling_roots_still_stage_normally(tmp_path: Path) -> None:
+    """不相交的兄弟目录 MUST NOT 被上面那道闸门误拒（前缀相同也不算包含）。"""
+    raw_root, _work_dir = build_tree(tmp_path)
+    sibling = tmp_path / "nwm-raw-work"  # 与 raw_root 同前缀但不在其下
+    sibling.mkdir()
+    result = staged(raw_root, sibling)
+    assert len(result.copied_files) == len(LEADS)
+
+
+# --- Row：verdict 多出一个 lead（集合相等的另一个方向）----------------------
+
+
+def test_verdict_with_an_extra_lead_is_rejected(tmp_path: Path) -> None:
+    """`expected_variables` 多出一个 lead 也是不同源。
+
+    少一个 lead 的方向由 `test_verdict_missing_a_lead_variable_set_is_rejected` 钉住；
+    本用例钉另一个方向：多出的 lead 会让产出 manifest 的
+    `forecast_hours == requested_forecast_hours == sorted(expected_variables)` 三键
+    相等（tasks.md:677/:708）静默失真——`forecast_hours` 由重构的 lead 推导，比
+    verdict 声明的少。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    verdict = _handmade_verdict(raw_root, "gfs", LEADS, GFS_VARIABLES)
+    broken = type(verdict)(
+        complete=True,
+        expected_files=verdict.expected_files,
+        missing_files=(),
+        unreadable_files=(),
+        expected_variables={
+            **{lead: GFS_VARIABLES for lead in LEADS},
+            99: GFS_VARIABLES,
+        },
+    )
+    with pytest.raises(RawStagingError) as excinfo:
+        stage_raw(broken, raw_root, work_dir, "gfs", CYCLE, make_config())
+    expect_kind(excinfo, "verdict-mismatch")
+    assert snapshot(work_dir) == {}
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        None,  # 不可迭代：留着会漏一个裸 TypeError
+        5,  # 同上
+        "tmp2m",  # 可迭代但更糟：逐字符扇出，静默产出变量名全错的 manifest
+    ],
+)
+def test_verdict_lead_with_a_malformed_variable_set_is_rejected(
+    tmp_path: Path, bad_value: Any
+) -> None:
+    """键集相等但值的形态不对：集合相等判不了值，仍需逐个判值面形态。"""
+    raw_root, work_dir = build_tree(tmp_path)
+    verdict = _handmade_verdict(raw_root, "gfs", LEADS, GFS_VARIABLES)
+    broken = type(verdict)(
+        complete=True,
+        expected_files=verdict.expected_files,
+        missing_files=(),
+        unreadable_files=(),
+        expected_variables={0: GFS_VARIABLES, 3: bad_value, 6: GFS_VARIABLES},
+    )
+    with pytest.raises(RawStagingError) as excinfo:
+        stage_raw(broken, raw_root, work_dir, "gfs", CYCLE, make_config())
+    expect_kind(excinfo, "verdict-mismatch")
+    assert snapshot(work_dir) == {}
+
+
+# --- Row：`_identity` 四元组的逐分量判别器 -----------------------------------
+
+
+def _mutate_source_during_copy(
+    monkeypatch: pytest.MonkeyPatch, victim: Path, victim_copy: Path, mutate
+) -> dict[str, bool]:
+    """在第 k 份副本已落盘、复制后那次 `lstat` 之前改动源文件。
+
+    注入点选在 `os.lstat`：被测的是「复制前后元组比对」本身，不绕过任何闸门。
+    """
+    real_lstat = os.lstat
+    state = {"done": False}
+
+    def hooked_lstat(path, *args, **kwargs):
+        if (
+            not state["done"]
+            and str(path) == str(victim)
+            and os.path.exists(victim_copy)
+        ):
+            state["done"] = True
+            mutate(real_lstat(victim))
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", hooked_lstat)
+    return state
+
+
+def _expect_source_mutated(raw_root: Path, work_dir: Path, state: dict[str, bool]):
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    assert state["done"] is True
+    expect_kind(excinfo, "source-mutated")
+    assert snapshot(work_dir) == {}
+
+
+def test_source_replaced_by_an_equal_stat_file_is_caught_by_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """整体替换：size/mtime_ns/mode 全部还原，只有 `st_ino` 变——`ino` 分量的判别器。
+
+    这正是 `_identity` docstring 自称能抓的「同内容不同 inode 的整体替换」；没有本
+    用例时把 `st_ino` 从元组里删掉，整套仍然全绿。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    victim = cycle_dir(raw_root, "gfs") / bundle_name("gfs", 3)
+    victim_copy = work_dir / "raw" / "gfs" / CYCLE_DIR / bundle_name("gfs", 3)
+    replacement = tmp_path / "replacement.grib2"
+
+    def swap(before: os.stat_result) -> None:
+        replacement.write_bytes(victim.read_bytes())  # 等长、等内容
+        os.replace(replacement, victim)  # 换 inode
+        os.chmod(victim, stat.S_IMODE(before.st_mode))
+        os.utime(victim, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.stat(victim)
+        # 前提取证：确实只有 ino 变了，别的分量都还原了。
+        assert after.st_ino != before.st_ino
+        assert (after.st_size, after.st_mtime_ns, after.st_mode) == (
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_mode,
+        )
+
+    state = _mutate_source_during_copy(monkeypatch, victim, victim_copy, swap)
+    _expect_source_mutated(raw_root, work_dir, state)
+
+
+def test_source_chmodded_during_copy_is_caught_by_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只改权限位：size/mtime_ns/ino 全不变——`mode` 分量的判别器。"""
+    raw_root, work_dir = build_tree(tmp_path)
+    victim = cycle_dir(raw_root, "gfs") / bundle_name("gfs", 3)
+    victim_copy = work_dir / "raw" / "gfs" / CYCLE_DIR / bundle_name("gfs", 3)
+
+    def chmod(before: os.stat_result) -> None:
+        os.chmod(victim, stat.S_IMODE(before.st_mode) ^ stat.S_IWUSR)
+        after = os.stat(victim)
+        assert after.st_mode != before.st_mode
+        assert (after.st_size, after.st_mtime_ns, after.st_ino) == (
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ino,
+        )
+
+    state = _mutate_source_during_copy(monkeypatch, victim, victim_copy, chmod)
+    _expect_source_mutated(raw_root, work_dir, state)
+
+
+def test_source_appended_during_copy_is_caught_by_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只改长度：mtime_ns 还原、ino/mode 不变——`size` 分量的判别器。"""
+    raw_root, work_dir = build_tree(tmp_path)
+    victim = cycle_dir(raw_root, "gfs") / bundle_name("gfs", 3)
+    victim_copy = work_dir / "raw" / "gfs" / CYCLE_DIR / bundle_name("gfs", 3)
+
+    def append(before: os.stat_result) -> None:
+        with open(victim, "ab") as handle:
+            handle.write(b"\x00")
+        os.utime(victim, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.stat(victim)
+        assert after.st_size != before.st_size
+        assert (after.st_mtime_ns, after.st_ino, after.st_mode) == (
+            before.st_mtime_ns,
+            before.st_ino,
+            before.st_mode,
+        )
+
+    state = _mutate_source_during_copy(monkeypatch, victim, victim_copy, append)
+    _expect_source_mutated(raw_root, work_dir, state)
+
+
+# --- Row：forecast_hours 逐项类型闸门的逐分量判别器 --------------------------
+
+
+def test_bool_forecast_hours_entry_fails_closed(tmp_path: Path) -> None:
+    """`True` 是 `int` 的子类：`isinstance(value, bool)` 这条析取分支的判别器。
+
+    取值必须是**超集** `[0, 3, 6, True]`：`True` 会静默变成 `1`，若写成
+    `[0, 3, True]` 则覆盖检查会先因缺 lead 6 而拒绝，本闸门照样无判别力。
+    """
+    payload = source_manifest_payload("gfs")
+    payload["metadata"]["forecast_hours"] = [0, 3, 6, True]
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert snapshot(work_dir) == {}
+
+
+def test_numeric_string_forecast_hours_are_accepted(tmp_path: Path) -> None:
+    """`int | str` 联合的 `str` 分量：数字字符串是**合法**取值，MUST NOT 被拒。"""
+    payload = source_manifest_payload("gfs")
+    payload["metadata"]["forecast_hours"] = [0, 3, "6"]
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    result = staged(raw_root, work_dir)
+    assert len(result.copied_files) == len(LEADS)
+
+
+# --- Row：源 manifest 结构异常的逐分支收敛（多类型 except 元组的逐分量判别器）--
+
+
+def test_non_utf8_source_manifest_bytes_fail_closed(tmp_path: Path) -> None:
+    """源 manifest 不是合法 UTF-8 -> `UnicodeDecodeError` 收敛成 `source-manifest`。
+
+    字节要挑**任何编码下都非法**的：以 `\xff\xfe` 开头会被 `json.detect_encoding`
+    当成 UTF-16 BOM 解码成功，于是走的是 `JSONDecodeError` 腿而不是本用例要钉的
+    解码腿（实测：那种输入下「只留 JSONDecodeError」的变异体存活）。
+    """
+    raw_root, work_dir = build_tree(tmp_path)
+    (cycle_dir(raw_root, "gfs") / SOURCE_MANIFEST_NAME).write_bytes(
+        b'{"source_id": "\xff\xfe\xfdgfs"}'
+    )
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert snapshot(work_dir) == {}
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "leaked"),
+    [
+        # `DownloadManifest.from_dict` 对同一份坏 manifest 会抛四种不同的裸异常，
+        # 每种是 except 元组里的一个**独立分量**：少写一个就有一种直接外泄。
+        ("cycle_time", "nope", ValueError),  # datetime.fromisoformat
+        ("entries", 5, TypeError),  # 不可迭代
+        ("cycle_time", 5, AttributeError),  # int 没有 .strip
+    ],
+)
+def test_structurally_broken_source_manifest_never_leaks_a_bare_exception(
+    tmp_path: Path, key: str, value: Any, leaked: type[Exception]
+) -> None:
+    payload = source_manifest_payload("gfs")
+    payload[key] = value
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    # 前提取证：这份输入确实会让底层原语抛出被点名的那个裸异常。
+    with pytest.raises(leaked):
+        DownloadManifest.from_dict(dict(payload))
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert not isinstance(excinfo.value, leaked)
     assert snapshot(work_dir) == {}
