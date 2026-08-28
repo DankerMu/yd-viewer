@@ -1,11 +1,35 @@
 {
   "issues": {
+    "2": {
+      "ceilingPrs": [
+        30
+      ],
+      "gateEntries": 2,
+      "closed": [
+        {
+          "pr": 30,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
+    },
     "4": {
       "ceilingPrs": [
         34
       ],
       "gateEntries": 2,
       "closed": []
+    },
+    "18": {
+      "ceilingPrs": [],
+      "gateEntries": 2,
+      "closed": [
+        {
+          "pr": 35,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
     }
   }
 }

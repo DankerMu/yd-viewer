@@ -1,0 +1,230 @@
+"""基线 GIS 几何工具：`.prj` 装载、到 EPSG:4326 的重投影、最小只读 shapefile 读取。
+
+设计纪律：
+
+* **fail closed**：`.prj` 缺失/为空/编码非 UTF-8/不可解析，或 `.shp`/`.shx`/`.dbf`
+  缺失/损坏，一律抛 `GeometryError`；不回退任何默认 CRS，不返回半成品几何。
+* **失败归属**：每条 `GeometryError` 的消息点名该失败**责任范围内**的文件路径——
+  责任可判到单个文件时只点名那一个，不可判时点名**全部候选**（宁可多报一个路径，
+  也不冤枉一个完好文件，更不能漏掉真正损坏的那个）；与文件无关的失败（CRS 不可
+  转换、几何重投影失败）不点名任何文件，改为点名出错的 CRS / 几何类型。
+* **单一公开异常**：本模块对外只有 `GeometryError`；pyproj 的 `CRSError`、pyshp 的
+  `ShapefileException`、以及 `UnicodeDecodeError` 等原生异常一律转换，不外泄。
+* **路径绑定**：`read_shapefile` 打开的每个文件都属于调用方点名的那一组 shapefile。
+  旁文件只替换调用方路径的**最后一个** `.shp` 后缀得到（`yd.riv.shp` -> `yd.riv.shx`，
+  而不是 `yd.shx`）；调用方给的 `.shp` 自身只做校验，绝不二次推导。后缀必须是**小写**
+  `.shp`：早先的旁文件推导一律拼小写后缀，若同时接受 `RIVERS.SHP`，在大小写敏感
+  文件系统（CI ubuntu、node-22）上就会去找根本不存在的 `RIVERS.shx`；同目录若并存
+  一组小写 `rivers.*`，还会退化成跨组配对（几何来自 `RIVERS.SHP`、属性/CRS 来自
+  `rivers.dbf`/`rivers.prj`）。大小写不敏感文件系统上构造不出这种误配（同名仅大小写
+  不同的两组文件无法共存），但拒绝发生在**字符串**层、任何 `is_file()` 之前，因此
+  非小写后缀一律 fail closed 由调用方改名，行为与文件系统大小写敏感性无关。
+* **轴序**：到 EPSG:4326 的 transformer 必须 `always_xy=True`，输出为 (lon, lat)。
+  pyproj 默认按 CRS 权威轴序返回 (lat, lon)，而 GeoJSON 要求 (lon, lat)。
+
+依赖面刻意最小（pyshp + pyproj + shapely），不引入 GDAL/geopandas/Fiona
+（design.md D5、products-contract §6）。
+"""
+
+from __future__ import annotations
+
+import struct
+from pathlib import Path
+
+import shapefile
+from pyproj import CRS, Transformer
+from shapely.geometry import shape as shapely_shape
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform as shapely_transform
+
+#: viewer 契约要求的输出坐标系（products-contract §6）
+WGS84 = "EPSG:4326"
+
+#: 一个 shapefile 组必需的三个文件
+REQUIRED_SUFFIXES = (".shp", ".shx", ".dbf")
+
+Feature = tuple[dict, BaseGeometry]
+
+
+class GeometryError(Exception):
+    """几何工具的唯一公开异常类型。"""
+
+
+def _sidecar(shp_path: Path, suffix: str) -> Path:
+    """把 `shp_path` 的**最后一个**后缀换成 `suffix`，得到同组旁文件路径。
+
+    不能用 `path.with_suffix("")` 取「基名」再 `with_suffix(suffix)`：对
+    `yd.riv.shp` 这类带点基名，前者得到 `yd.riv`、后者再把 `.riv` 也换掉，
+    最终指向另一组 shapefile（`yd.*`）——静默读到错误图层。
+    """
+    return shp_path.with_name(shp_path.name[: -len(shp_path.suffix)] + suffix)
+
+
+#: `.shx` 固定 100 字节头；其后是定长 8 字节索引记录（offset + length，各 4 字节）
+_SHX_HEADER_BYTES = 100
+_SHX_RECORD_BYTES = 8
+
+
+def _check_shx_structure(shx_file: Path) -> None:
+    """结构化先验 `.shx`，使索引损坏/截断的报错点名 `.shx` 而不是完好的 `.shp`。
+
+    只用 stdlib 读头部，不碰 pyshp 内部属性：早先的实现靠 `Reader.shx_reader.offsets`
+    触发 pyshp 内部的 `assert len(offsets_) == self.numShapes`，在 `python -O` 下断言
+    被剥除，截断的 `.shx` 会一路读成 0 条记录，最终报成「几何数与属性记录数不一致」并
+    点名**完好的** `.shp`——归属错误。
+
+    校验三条（ESRI Shapefile 白皮书）：文件不短于 100 字节头；头后剩余字节是 8 的整数倍；
+    头部 24-28 字节的大端 int32「文件长度（16-bit 字数）」与实际大小一致。
+    """
+    try:
+        actual_size = shx_file.stat().st_size
+        with shx_file.open("rb") as handle:
+            header = handle.read(28)
+    except OSError as exc:
+        raise GeometryError(f"shapefile 索引读取失败: {shx_file}") from exc
+
+    if actual_size < _SHX_HEADER_BYTES or len(header) < 28:
+        raise GeometryError(
+            f"shapefile 索引文件短于 {_SHX_HEADER_BYTES} 字节头({actual_size}): {shx_file}"
+        )
+    if (actual_size - _SHX_HEADER_BYTES) % _SHX_RECORD_BYTES:
+        raise GeometryError(
+            f"shapefile 索引记录区({actual_size - _SHX_HEADER_BYTES} 字节)"
+            f"不是 {_SHX_RECORD_BYTES} 字节的整数倍: {shx_file}"
+        )
+    declared_size = struct.unpack(">i", header[24:28])[0] * 2
+    if declared_size != actual_size:
+        raise GeometryError(
+            f"shapefile 索引头声明长度({declared_size} 字节)与实际大小"
+            f"({actual_size} 字节)不一致: {shx_file}"
+        )
+
+
+def load_prj_crs(prj_path: str | Path) -> CRS:
+    """读取 shapefile 的 `.prj` 旁文件 WKT 并构造 `pyproj.CRS`。
+
+    文件缺失、为空、非 UTF-8 编码、WKT 不可解析一律抛 `GeometryError`
+    （消息含路径），不回退到任何默认 CRS——现场投影参数不得在代码中猜测。
+
+    以 `utf-8-sig` 解码：ArcGIS 写出的 `.prj` 常带 UTF-8 BOM，纯 `utf-8` 会把
+    BOM 留在 WKT 头部使解析失败；而 cp1252/GBK 等非 UTF-8 编码仍会解码失败并
+    转成 `GeometryError`（`UnicodeDecodeError` 是 `ValueError`，不被 `OSError`
+    捕获，不转换就会外泄成调用方接不住的原生异常）。
+    """
+    path = Path(prj_path)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise GeometryError(f"无法读取投影旁文件: {path}") from exc
+    try:
+        wkt = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise GeometryError(f"投影旁文件不是 UTF-8 编码: {path}") from exc
+    if not wkt.strip():
+        raise GeometryError(f"投影旁文件为空: {path}")
+    try:
+        return CRS.from_wkt(wkt)
+    except Exception as exc:
+        raise GeometryError(f"投影旁文件 WKT 不可解析: {path}") from exc
+
+
+def to_wgs84_transformer(src_crs: CRS) -> Transformer:
+    """构造 `src_crs` -> EPSG:4326 的 transformer，输出坐标为 (lon, lat)。
+
+    `always_xy=True` 是硬要求：缺失时 pyproj 会按 EPSG:4326 的权威轴序返回
+    (lat, lon)，与 GeoJSON 相反且不会报错，属静默错误。
+    """
+    try:
+        return Transformer.from_crs(src_crs, WGS84, always_xy=True)
+    except Exception as exc:
+        raise GeometryError(f"无法构造到 {WGS84} 的坐标转换: {src_crs}") from exc
+
+
+def reproject_geometry(geom: BaseGeometry, transformer: Transformer) -> BaseGeometry:
+    """把 shapely 几何整体重投影，几何类型与部件/环结构保持不变。
+
+    `shapely.ops.transform` 对 Multi* 的每个部件与面的每个内环逐一施加变换，
+    不存在「只转外环/首部件」的分支。
+    """
+    try:
+        return shapely_transform(transformer.transform, geom)
+    except Exception as exc:
+        raise GeometryError(f"几何重投影失败: {geom.geom_type}") from exc
+
+
+def read_shapefile(shp_path: str | Path) -> tuple[CRS, list[Feature]]:
+    """读取一组 shapefile，返回 `(crs, [(record_dict, geometry), ...])`。
+
+    只做「几何 + DBF 记录 -> 内存对象」，不解释字段语义：`reach_id` 等字段语义、
+    以及「要素数是否符合业务预期」属 prepare-variants 的 GeoJSON 生成任务。
+    这里唯一的数量检查是**组完整性**守卫——几何数与属性记录数必须一一对应，
+    否则这一组文件互不匹配，配对结果无意义，必须 fail closed（见下方注释）。
+
+    `shp_path` 必须以**小写** `.shp` 结尾，否则抛 `GeometryError` 并点名该路径
+    （见模块文档 路径绑定）；`.shx`/`.dbf`/`.prj` 只替换该最后一个后缀得到，
+    调用方给的 `.shp` 自身只做存在性校验，不二次推导。
+    """
+    shp_file = Path(shp_path)
+    if shp_file.suffix != ".shp":
+        if shp_file.suffix.lower() == ".shp":
+            raise GeometryError(f"shapefile 路径后缀必须是小写 .shp: {shp_file}")
+        raise GeometryError(f"shapefile 路径必须以 .shp 结尾: {shp_file}")
+
+    shx_file = _sidecar(shp_file, ".shx")
+    dbf_file = _sidecar(shp_file, ".dbf")
+    prj_file = _sidecar(shp_file, ".prj")
+    group = {".shp": shp_file, ".shx": shx_file, ".dbf": dbf_file}
+    for suffix in REQUIRED_SUFFIXES:
+        if not group[suffix].is_file():
+            raise GeometryError(f"shapefile 缺少必需文件: {group[suffix]}")
+
+    crs = load_prj_crs(prj_file)
+
+    _check_shx_structure(shx_file)
+    # 几何与属性表分开打开，使 .dbf 损坏时的报错不会误伤 .shp/.shx。
+    # 几何读取同时消费 .shp 负载与 .shx 索引：结构先验放行后仍失败的输入
+    # （如记录区被改写但大小/对齐/声明长度俱合法的 .shx），无法把责任判给其中
+    # 某一个文件，故消息同时点名两者——宁可多报一个路径，也不冤枉一个完好文件。
+    try:
+        with shapefile.Reader(shp=str(shp_file), shx=str(shx_file)) as reader:
+            shapes = reader.shapes()
+    except Exception as exc:
+        raise GeometryError(
+            f"shapefile 几何读取失败（.shp 负载或 .shx 索引损坏）: {shp_file} 或 {shx_file}"
+        ) from exc
+    try:
+        with shapefile.Reader(dbf=str(dbf_file)) as reader:
+            records = [record.as_dict() for record in reader.records()]
+    except Exception as exc:
+        raise GeometryError(f"shapefile 属性表读取失败: {dbf_file}") from exc
+
+    # 组完整性守卫。几何数由 .shp 负载与 .shx 索引共同决定（pyshp 按索引记录条数取
+    # 几何），记录数由 .dbf 头部决定；三者任一被改坏都可能只表现为数量不等而各自读取
+    # 无误——例如 .dbf 头部记录数被改写、.shx 被截断后又把头部声明长度改自洽、或是一份
+    # 陈旧/错配的兄弟 .dbf。责任无法判给其中某一个，故与上面的几何读取失败同规则：
+    # 点名全部候选，宁可多报一个路径，也不冤枉一个完好文件、更不漏掉真正损坏的那个。
+    # 该分支不可删：删掉后末尾的 zip(..., strict=True) 会抛裸 ValueError，冲破本模块
+    # 「单一公开异常」契约。两个数量本身保留在消息里，是最直接的诊断线索。
+    if len(shapes) != len(records):
+        raise GeometryError(
+            f"shapefile 几何数({len(shapes)})与属性记录数({len(records)})不一致，"
+            f"该组文件互不匹配: {shp_file} 或 {shx_file} 或 {dbf_file}"
+        )
+
+    # 与几何读取失败同规则地点名 `.shp` 与 `.shx` 两者，不点名 `.dbf`。
+    # 这里手上只有一个 `Shape` 对象，判不出它来自哪个文件的损坏：合法的 ESRI NULL
+    # 记录（shapeType 0，`.shp` 负载一侧）与「`.shx` 记录长度被改坏后在完好 `.shp`
+    # 字节上错位读出的 NULL」到达此处完全同形——pyshp 在 shapes() 路径上只按 `.shx`
+    # 的长度字段顺序推进（偏移字段不读），长度改大若干字就会让后续记录落到零字节上，
+    # 而大小/对齐/头部声明长度俱不变，结构先验与数量守卫都判不出来。责任不可判即
+    # 点名全部候选。`.dbf` 不在候选内：它已被独立打开读出记录且数量守卫已放行，
+    # 对几何解码不负任何责任，点名它就是冤枉一个已知完好的文件。
+    try:
+        geometries = [shapely_shape(shp.__geo_interface__) for shp in shapes]
+    except Exception as exc:
+        raise GeometryError(
+            f"shapefile 几何不可解析（.shp 负载或 .shx 索引损坏）: "
+            f"{shp_file} 或 {shx_file}"
+        ) from exc
+
+    return crs, list(zip(records, geometries, strict=True))
