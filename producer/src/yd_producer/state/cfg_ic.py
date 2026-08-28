@@ -13,16 +13,25 @@ bytes，**绝不由数值重新格式化**。数值视图 `Section.rows` 是只�
 
 行归属是**全覆盖划分**：每一行恰好一个 `LineRole`，无「未归属」行。
 
-对 pin 的**刻意偏离**（三条）：
+对 pin 的**刻意偏离**（五条，此处即全集）：
 
 1. **mesh 段超出 header 声明 `mesh_count` 的多余数据行抛 `ValueError`**。pin 的
-   `_parse_sectioned_rows`(:528-531) 用 `if len(mesh_rows) < mesh_count` 静默丢弃多余
-   mesh 行；格式保真根不得静默丢状态行。
+   `_parse_sectioned_rows`(:531-534，其中 `:532-533` 是 `if len(mesh_rows) < mesh_count:`
+   与 `mesh_rows.append(row)` 这一对) 静默丢弃多余 mesh 行；格式保真根不得静默丢状态行。
 2. **任何分段列头之前出现的数值行抛 `ValueError`**。pin 的分段走查在 `section is None`
    时让该行穿过所有分支被静默丢弃；同 1 的理由，且全覆盖划分不允许存在无归属的行。
 3. **文件不存在/是目录/不可读的 `OSError` 统一封装为 `ValueError`**。pin 的
    `_read_bytes_limited`(:563-571) 直接抛 `OSError`，由调用方 `except (OSError, ValueError)`
    兜住；本模块收敛为单一异常类型，调用方无需知道两种。仓库级错误封装另属结构检查层。
+4. **分段体内没有 mesh 列头时抛 `ValueError`**。pin 无此检查（它只按 `section` 归行，
+   mesh 段缺席就返回空 mesh 列表）；本模块的 `Section.column_header_index` 是非可选字段，
+   没有 mesh 列头就构造不出 `CfgIcDocument.mesh`，故 fail-closed。可达面很窄：只有
+   `declared_mesh_count == 0` 且首个列头不是 mesh 段时才走到这里（否则先被偏离 1/2 或
+   「截断 body」拦下）。
+5. **`max_bytes` 为负时在任何读取之前抛 `ValueError`**。pin 的读取路径是
+   `handle.read(max_bytes + 1)`：`max_bytes == -2` 会退化为 `read(-1)`，把**整个文件**
+   读进内存，随后 `len(data) > max_bytes` 照样抛错——于是这次无界读长得和一次正常拒绝
+   一模一样，OOM 保护静默失效。`max_bytes` 在本模块是公开可注入参数，故先验后读。
 
 对 pin 的**模型扩展**（非偏离，pin 无行模型）：空行单独归 `LineRole.BLANK`。pin 在分段前
 先丢空行，本模块必须保留它们才能字节等价，又不能把它们计入任何段的数据行（会污染 #9 继承
@@ -123,7 +132,11 @@ def parse(
     `source` 为 `Path`/`str` 时按**文件路径**读入（有界读，最多 `max_bytes + 1` 字节）；
     为 `bytes` 时按**文件内容**直接解析。任何结构性不可用一律抛 `ValueError`（不外泄
     `OSError` / `UnicodeDecodeError`），且失败时不返回部分文档。
+
+    `max_bytes` 为负时**在任何读取之前**抛 `ValueError`（见模块头偏离 5）。
     """
+    if max_bytes < 0:
+        raise ValueError(f"max_bytes must be non-negative, got {max_bytes}")
     if isinstance(source, bytes):
         data = source
     else:
@@ -220,10 +233,11 @@ def parse(
             roles[line_index] = LineRole.DATA
             continue
         if section == "river":
-            # NWM@8ae9b8f2 packages/common/state_qc.py:534-538（逐字保留的语义说明）
-            # Native SHUD inserts ``<lake-count> <lake-state-columns>`` between the final
-            # river row and the lake column header.  It is section metadata, not an
-            # additional river state.
+            # NWM@8ae9b8f2 packages/common/state_qc.py:536-539（逐字保留的语义说明）
+            # Native SHUD inserts ``<lake-count> <lake-state-columns>`` between
+            # the final river row and the lake column header.  It is section
+            # metadata, not an additional river state.  QHH is the first
+            # production basin with this layout (``1 2`` + ``Index LakeStage``).
             next_text = body[position + 1][1] if position + 1 < len(body) else None
             preamble = _native_lake_section_preamble(
                 text,
@@ -254,6 +268,8 @@ def parse(
             f"have lake={len(lake_rows)}; section declares lake={declared_lake_count}"
         )
     if "mesh" not in column_header_indices:
+        # 刻意偏离 pin：pin 无此检查（见模块头偏离 4）。`Section.column_header_index`
+        # 非可选，没有 mesh 列头就构造不出 `doc.mesh`。
         raise ValueError("sectioned IC body has no mesh column header")
 
     unassigned = [index for index, role in enumerate(roles) if role is None]

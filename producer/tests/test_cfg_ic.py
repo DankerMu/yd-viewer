@@ -6,11 +6,17 @@ oracle 纪律：结构索引期望值一律来自 `cfg_ic_fixtures` 的**构造�
 判别力纪律：`render(parse(b)) == b` 对逐字模型是平凡真，单靠它证明不了任何东西。真正的
 承重条是（1）脏输入矩阵——canonical 化的 writer 只在这里变红；（2）结构索引与逐行角色
 oracle——段归属偏移一行、preamble 计入 river 只在这里变红。
+
+包络纪律：合成生成器的发射包络 MUST 覆盖解析器接受域，否则包络外的正确行为分支没有任何
+用例把守。三条已实测过的缺口在此各有专用用例：Tab 分隔（真实生产文件的分隔符）、文件首
+部空行（钉死「header 行 = 首个非空行」）、`lake_count=0`（lake 段存在但为空）。
 """
 
 from __future__ import annotations
 
+import ast
 import inspect
+import math
 import os
 import pathlib
 import stat
@@ -28,9 +34,30 @@ from yd_producer.state import cfg_ic
 
 MESH_SIZES = (3, 7)
 
+#: 从 NWM pin 移植的辅助全集：每一个都必须自带溯源注释。
+PORTED_HELPERS = (
+    "_read_bytes_limited",
+    "_header_counts",
+    "_numeric_row",
+    "_looks_like_column_header",
+    "_section_from_column_header",
+    "_native_lake_section_preamble",
+    "_as_float",
+)
+
 
 def _roles(doc: cfg_ic.CfgIcDocument) -> tuple[str, ...]:
     return tuple(role.value for role in doc.roles)
+
+
+def _function_source_segments(source: str) -> dict[str, str]:
+    """按 `ast` 的函数边界切出每个顶层函数**自己的**源码段（含其内部注释）。"""
+    tree = ast.parse(source)
+    return {
+        node.name: ast.get_source_segment(source, node) or ""
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
 
 
 # --- roundtrip：干净输入 ---
@@ -110,6 +137,13 @@ def test_river_row_count_is_not_constrained_by_header_second_token() -> None:
 
 DIRTY_CASES = {
     "crlf": {"eol": "\r\n"},
+    "tabs": {"delimiter": "\t"},
+    "tabs_crlf_trailing_spaces": {
+        "delimiter": "\t",
+        "eol": "\r\n",
+        "trailing_spaces": True,
+    },
+    "leading_blank_lines": {"leading_blank_lines": 2},
     "trailing_spaces": {"trailing_spaces": True},
     "blank_lines": {"blank_lines": True},
     "mixed_notation": {"mixed_notation": True},
@@ -142,17 +176,23 @@ def test_mixed_notation_tokens_survive_verbatim() -> None:
     assert rendered == text
 
 
+@pytest.mark.parametrize("delimiter", [" ", "\t"])
 @pytest.mark.parametrize("mesh_count", MESH_SIZES)
-def test_combined_dirty_input_keeps_full_section_index(mesh_count: int) -> None:
+def test_combined_dirty_input_keeps_full_section_index(
+    mesh_count: int, delimiter: str
+) -> None:
     """脏输入不得降级为「只保字节、不分段」：叠加脏例必须跑完整段索引 oracle。"""
     built = build_cfg_ic(
         mesh_count=mesh_count,
         river_count=3,
         lake_count=2,
+        delimiter=delimiter,
         eol="\r\n",
         trailing_spaces=True,
         blank_lines=True,
     )
+    # 发射包络自检：分隔符轴不得是哑参数（否则 Tab 分支的用例全是空转）。
+    assert (b"\t" in built.payload) is (delimiter == "\t")
     doc = cfg_ic.parse(built.payload)
 
     assert cfg_ic.render(doc) == built.payload
@@ -174,6 +214,102 @@ def test_combined_dirty_input_keeps_full_section_index(mesh_count: int) -> None:
     assert blank_indices.isdisjoint(doc.mesh.data_line_indices)
     assert blank_indices.isdisjoint(doc.river.data_line_indices)
     assert blank_indices.isdisjoint(doc.lake.data_line_indices)
+
+
+# --- 发射包络：解析器接受什么，生成器就必须能发什么 ---
+
+
+@pytest.mark.parametrize("mesh_count", MESH_SIZES)
+def test_tab_delimited_native_layout_roundtrips_and_indexes(mesh_count: int) -> None:
+    """真实 native `cfg.ic` 是 Tab 分隔（NWM pin 的 `_write_native_ic` 逐字为证）。
+
+    空格分隔的合成文件对「render 把 `\\t` 归一为单个空格」的实现全绿，而那种实现会逐字节
+    损坏每一个生产文件。故 Tab 轴必须既跑字节等价、也跑完整段索引 oracle。
+    """
+    river_count = mesh_count - 1
+    built = build_cfg_ic(
+        mesh_count=mesh_count,
+        river_count=river_count,
+        lake_count=2,
+        delimiter="\t",
+    )
+    # 载荷里真的有 Tab，且没有被生成器悄悄换成空格。
+    assert b"\t" in built.payload
+    assert b"Index\tLakeStage" in built.payload
+    assert built.payload.startswith(f"{mesh_count}\t6\t".encode())
+
+    doc = cfg_ic.parse(built.payload)
+
+    rendered = cfg_ic.render(doc)
+    assert rendered == built.payload
+    assert rendered.count(b"\t") == built.payload.count(b"\t")
+    assert doc.header_index == built.header_index
+    assert doc.mesh.column_header_index == built.mesh_column_header_index
+    assert doc.mesh.data_line_indices == built.mesh_data_indices
+    assert doc.river is not None
+    assert doc.river.data_line_indices == built.river_data_indices
+    assert doc.lake is not None
+    assert doc.lake.data_line_indices == built.lake_data_indices
+    assert doc.lake_preamble_index == built.lake_preamble_index
+    assert _roles(doc) == built.roles
+
+
+@pytest.mark.parametrize("leading", [1, 2])
+def test_header_is_the_first_non_blank_line(leading: int) -> None:
+    """「header 行 = 首个非空行」：文件首部的空行不得被当成 header。
+
+    `leading == 2` 时第二条是纯空白行（`"   "`），一并覆盖 whitespace-only 首行。
+    """
+    built = build_cfg_ic(
+        mesh_count=3,
+        river_count=2,
+        lake_count=1,
+        leading_blank_lines=leading,
+    )
+    assert built.header_index == leading
+    assert built.lines[0].strip() == ""
+
+    doc = cfg_ic.parse(built.payload)
+
+    assert doc.header_index == leading
+    assert doc.roles[0] is cfg_ic.LineRole.BLANK
+    assert all(role is cfg_ic.LineRole.BLANK for role in doc.roles[:leading])
+    assert doc.roles[leading] is cfg_ic.LineRole.HEADER
+    assert doc.declared_mesh_count == 3
+    assert doc.mesh.data_line_indices == built.mesh_data_indices
+    assert _roles(doc) == built.roles
+    assert cfg_ic.render(doc) == built.payload
+
+
+def test_empty_lake_section_is_distinguishable_from_absent_lake() -> None:
+    """`lake_count=0`：lake 段存在但为空，在接受域内（pin 只拒 `lake_count < 0`）。
+
+    #9 的结构检查依赖「lake 缺席（`doc.lake is None`）」与「lake 段空」可区分。
+    river_count 必须 >= 1：preamble 识别只在 river 分支里做，没有 river 段时 `0 2` 行会
+    被当成 mesh 数据行（多余 mesh 行 -> 报错），那是另一条语义。
+    """
+    built = build_cfg_ic(mesh_count=3, river_count=2, lake_count=0)
+    assert built.lake_data_indices == ()
+    assert built.lake_preamble_index is not None
+
+    doc = cfg_ic.parse(built.payload)
+
+    assert doc.lake is not None
+    assert doc.lake.row_count == 0
+    assert doc.lake.rows == ()
+    assert doc.lake.span is None
+    assert doc.lake.data_line_indices == ()
+    assert doc.lake.column_header_index == built.lake_column_header_index
+    assert doc.declared_lake_count == 0
+    assert doc.lake_preamble_index == built.lake_preamble_index
+    assert _roles(doc) == built.roles
+    assert cfg_ic.render(doc) == built.payload
+
+    # 与「lake 段整体缺席」对照：那时 lake 相关字段全为 None。
+    absent = cfg_ic.parse(build_cfg_ic(mesh_count=3, river_count=2).payload)
+    assert absent.lake is None
+    assert absent.declared_lake_count is None
+    assert absent.lake_preamble_index is None
 
 
 # --- 全覆盖划分 ---
@@ -208,13 +344,33 @@ def test_every_line_has_exactly_one_role(mesh_count: int) -> None:
 
 
 def test_numeric_view_is_derived_not_the_render_source() -> None:
+    """逐值断言（不是只断形状）+ 真的调一次 `render`。
+
+    期望值手算自 `cfg_ic_fixtures` 的记法池 `("0.100000", "1e-3", "-0.0", "2.5E+01",
+    "0.000000")`：mesh 每行 = 元素号 + 5 个循环取值，river 每行 = 元素号 + 1 个取值
+    （river 首行取池中第 15 个 == 第 0 个）。只断 `len()`/`isinstance(float)` 的版本对
+    「三处 `append` 全换成全零元组」的实现全绿，而 #9 的负残差处理正消费这个视图。
+    """
     built = build_cfg_ic(mesh_count=3, river_count=2, mixed_notation=True)
     doc = cfg_ic.parse(built.payload)
-    assert len(doc.mesh.rows) == 3
-    assert all(len(row) == 6 for row in doc.mesh.rows)
+
+    assert doc.mesh.rows == (
+        (1.0, 0.1, 0.001, -0.0, 25.0, 0.0),
+        (2.0, 0.1, 0.001, -0.0, 25.0, 0.0),
+        (3.0, 0.1, 0.001, -0.0, 25.0, 0.0),
+    )
     assert doc.river is not None
-    assert len(doc.river.rows) == 2
+    assert doc.river.rows == ((1.0, 0.1), (2.0, 0.001))
+    # `-0.0 == 0.0` 为真：元组相等断不出负零，符号位另断。
+    assert all(math.copysign(1.0, row[3]) == -1.0 for row in doc.mesh.rows)
     assert all(isinstance(value, float) for row in doc.mesh.rows for value in row)
+
+    # 数值视图是派生物，不是回写来源：原始记法在 render 后仍逐字存活。
+    rendered = cfg_ic.render(doc)
+    assert rendered == built.payload
+    text = rendered.decode("utf-8")
+    assert "2.5E+01" in text and "1e-3" in text and "-0.0" in text
+    assert "25.0 " not in text
 
 
 # --- fail-closed：解析级 ---
@@ -377,6 +533,43 @@ def test_bound_is_enforced_before_unbounded_read(tmp_path: pathlib.Path) -> None
         cfg_ic.parse(target, max_bytes=64)
 
 
+@pytest.mark.parametrize("max_bytes", [-1, -2, -100])
+def test_negative_bound_is_rejected_before_any_read(
+    tmp_path: pathlib.Path, max_bytes: int
+) -> None:
+    """`max_bytes` 为负 -> 抛 `ValueError`，且在任何读取**之前**。
+
+    没有前置校验时 `handle.read(max_bytes + 1)` 在 `max_bytes == -2` 会退化成
+    `read(-1)`，把整个文件读进内存，随后 `len(data) > max_bytes` 照样抛错——那次无界读
+    长得和一次正常拒绝一模一样。顺序证明：对一个**根本不存在**的路径传负上界，若校验在读
+    之后，拿到的会是「无法读取」的封装错误而不是这条。
+    """
+    built = build_cfg_ic(mesh_count=3, river_count=2)
+    target = built.write(tmp_path / "bound.cfg.ic")
+
+    with pytest.raises(ValueError, match="max_bytes must be non-negative"):
+        cfg_ic.parse(target, max_bytes=max_bytes)
+
+    absent = tmp_path / "absent.cfg.ic"
+    with pytest.raises(ValueError, match="max_bytes must be non-negative") as excinfo:
+        cfg_ic.parse(absent, max_bytes=max_bytes)
+    assert "无法读取" not in str(excinfo.value)
+
+    # bytes 入口同样先验后用（同一条前置校验，不分来源）。
+    with pytest.raises(ValueError, match="max_bytes must be non-negative"):
+        cfg_ic.parse(built.payload, max_bytes=max_bytes)
+
+
+def test_zero_bound_is_a_valid_bound_and_rejects_via_the_normal_path(
+    tmp_path: pathlib.Path,
+) -> None:
+    """上界 0 是合法输入（非负），走的是正常的超限拒绝路径。"""
+    built = build_cfg_ic(mesh_count=3, river_count=2)
+    target = built.write(tmp_path / "bound.cfg.ic")
+    with pytest.raises(ValueError, match="exceeds size limit of 0 bytes"):
+        cfg_ic.parse(target, max_bytes=0)
+
+
 def test_default_bound_matches_the_nwm_pin_constant() -> None:
     assert cfg_ic.MAX_STATE_IC_BYTES == 64 * 1024 * 1024
     default = inspect.signature(cfg_ic.parse).parameters["max_bytes"].default
@@ -399,18 +592,23 @@ def test_module_carries_nwm_provenance_and_stays_db_free() -> None:
         "sbatch",
     ):
         assert forbidden not in source
-    # 移植辅助逐函数带溯源头。
-    for helper in (
-        "_read_bytes_limited",
-        "_header_counts",
-        "_numeric_row",
-        "_looks_like_column_header",
-        "_section_from_column_header",
-        "_native_lake_section_preamble",
-    ):
-        marker = source.index(f"def {helper}(")
-        body = source[marker : marker + 1200]
-        assert "NWM@8ae9b8f2 packages/common/state_qc.py" in body, helper
+    # 移植辅助逐函数带溯源头。窗口 MUST 按**函数边界**取（`ast` 的源码段），不能用定长
+    # 切片：定长窗口会越进下一个函数，于是一个辅助可以被**邻居的**溯源注释满足，删掉它
+    # 自己那行注释也照样绿。
+    segments = _function_source_segments(source)
+    for helper in PORTED_HELPERS:
+        assert helper in segments, helper
+        assert "NWM@8ae9b8f2 packages/common/state_qc.py" in segments[helper], helper
+
+
+def test_provenance_windows_do_not_leak_into_neighbour_functions() -> None:
+    """取窗自身的守卫：每个辅助的窗口里恰好只有自己那一条溯源标记。"""
+    source = pathlib.Path(cfg_ic.__file__).read_text(encoding="utf-8")
+    segments = _function_source_segments(source)
+    for helper in PORTED_HELPERS:
+        assert (
+            segments[helper].count("NWM@8ae9b8f2 packages/common/state_qc.py") == 1
+        ), helper
 
 
 def test_module_documents_the_deliberate_deviations() -> None:
@@ -419,6 +617,14 @@ def test_module_documents_the_deliberate_deviations() -> None:
     assert "刻意偏离" in head
     assert "OSError" in head and "ValueError" in head
     assert "mesh" in head
+    # 偏离清单自称是全集，所以每一条 pin 无对应物的 fail-closed 都必须在清单里点名。
+    assert "五条" in head
+    assert "mesh 列头" in head
+    assert "max_bytes" in head
+    assert head.count("\n1. ") == 1
+    for ordinal in ("\n2. ", "\n3. ", "\n4. ", "\n5. "):
+        assert head.count(ordinal) == 1, ordinal
+    assert "\n6. " not in head
 
 
 # --- 移植辅助的判定语义（与 pin 逐字一致） ---
