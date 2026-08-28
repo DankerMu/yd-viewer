@@ -27,6 +27,12 @@ def module_docstring_block(source: str) -> str:
 
     仍返回**前缀**而非 docstring 单体：调用方按 `source[len(block):]` 取模块体做「体内
     不得出现某某字样」的断言，前缀性质是那条断言的前提。
+
+    行切分按 `"\\n"` 而不是 `str.splitlines(keepends=True)`：后者还会在 `\\x0c` / `\\x85`
+    / `\\u2028` 等字符上断行，而 `ast` 的 `end_lineno` 只按 `\\n` 计，两者一旦错位切片就
+    会**少**切（方向 fail-closed：`head` 变短、`body` 变长，断言只会更严），但仍是错的。
+    末尾换行按**源码里是否真有**那一个 `\\n` 补，不能无条件 `+ "\\n"`——docstring 恰好
+    结束于 EOF 且文件无末尾换行时，无条件补会让返回值不再是 `source` 的前缀。
     """
 
     tree = ast.parse(source)
@@ -37,7 +43,9 @@ def module_docstring_block(source: str) -> str:
     )
     assert isinstance(node.value.value, str), "模块的第一条语句不是字符串字面量"
     assert node.end_lineno is not None
-    return "".join(source.splitlines(keepends=True)[: node.end_lineno])
+    parts = source.split("\n")
+    block = "\n".join(parts[: node.end_lineno])
+    return block + "\n" if len(parts) > node.end_lineno else block
 
 
 def definition_segments(source: str) -> dict[str, str]:

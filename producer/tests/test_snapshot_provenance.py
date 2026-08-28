@@ -57,6 +57,7 @@ from snapshot_provenance_fixtures import (
     SCANNED_ROOTS,
     STATUS_LANDED,
     STRAY_TABLE_LINES,
+    _code_lines,
     _declared_forbidden_surfaces,
     _files_with_marker,
     _forbidden_hits,
@@ -773,6 +774,85 @@ def test_db_free_scan_ignores_inert_prose_but_not_real_code(tmp_path: Path) -> N
     assert hits == [
         "producer/src/yd_producer/store/real.py:3: DATABASE_URL",
         "producer/src/yd_producer/store/real.py:3: os.getenv",
+    ]
+
+
+def test_db_free_scan_stays_in_step_with_tokenize_row_numbers(tmp_path: Path) -> None:
+    """`_code_lines` 的行数组与 tokenize 的行号必须同源，否则守卫会**漏报**。
+
+    `str.splitlines()` 还在 `\\x0c`（换页）等字符上断行，`tokenize`（经 `io.StringIO`，
+    `newline="\\n"`）不会。两套行号一旦错位，`_blank_prose` 就按 tokenize 给的行号去
+    splitlines 的数组里涂白，把**真执行代码**当 docstring 抹掉——本例里 docstring 在
+    第 4 行，错位 1 行后被抹掉的正是第 3 行的 `os.getenv("DATABASE_URL")`。
+
+    断言必须落在**命中**上，不能只断 `len(_code_lines(src))`：`splitlines()` 对它自己
+    那套行定义是自洽的，行数断言在坏实现上恒绿。
+    """
+    source = (
+        "\x0c\n"
+        "def helper() -> str:\n"
+        '    url = os.getenv("DATABASE_URL")\n'
+        '    """note: DB-free, honest"""\n'
+        "    return url\n"
+    )
+    # 构造自检：这段源码确实能正常 tokenize（不走 fail-closed 回退），且两套行模型确实
+    # 不一致——否则这条用例对错位变异体没有判别力。
+    assert len(source.splitlines()) != len(source.split("\n")) - 1
+    assert _code_lines(source)[2].strip() == 'url = os.getenv("DATABASE_URL")'
+
+    targets = {
+        "producer/src/yd_producer/store/safe_fs.py": "packages/common/safe_fs.py"
+    }
+    _fake_repo(
+        tmp_path,
+        {
+            "producer/src/yd_producer/store/safe_fs.py": "x = 1\n",
+            "producer/src/yd_producer/store/formfeed.py": source,
+        },
+    )
+
+    hits = _forbidden_hits(tmp_path, _scan_files(tmp_path, targets))
+
+    # 行号 3 = 解释器的行号（`\x0c` 只占第 1 行的一个字符，不另起一行）。
+    assert hits == [
+        "producer/src/yd_producer/store/formfeed.py:3: DATABASE_URL",
+        "producer/src/yd_producer/store/formfeed.py:3: os.getenv",
+    ]
+
+
+def test_db_free_scan_falls_back_to_raw_lines_when_the_source_cannot_be_tokenized(
+    tmp_path: Path,
+) -> None:
+    """`_code_lines` 的 fail-closed 承诺（「宁可误报，不可漏报」）本身要有用例。
+
+    把 `except (TokenError, SyntaxError)` 分支改成 `return []` 的变异体在 round 2 前
+    全套 777 条全绿——没有任何用例喂过不可 tokenize 的源。
+    """
+    source = (
+        'BROKEN = "unterminated\n'
+        "# 注释里的 psycopg 在正常路径上会被涂白\n"
+        'URL = os.getenv("DATABASE_URL")\n'
+    )
+    # 构造自检：确实走了回退——正常路径会把第 2 行的注释涂白，回退则逐字保留裸行。
+    assert _code_lines(source) == source.split("\n")
+
+    targets = {
+        "producer/src/yd_producer/store/safe_fs.py": "packages/common/safe_fs.py"
+    }
+    _fake_repo(
+        tmp_path,
+        {
+            "producer/src/yd_producer/store/safe_fs.py": "x = 1\n",
+            "producer/src/yd_producer/store/unparseable.py": source,
+        },
+    )
+
+    hits = _forbidden_hits(tmp_path, _scan_files(tmp_path, targets))
+
+    assert hits == [
+        "producer/src/yd_producer/store/unparseable.py:2: psycopg",
+        "producer/src/yd_producer/store/unparseable.py:3: DATABASE_URL",
+        "producer/src/yd_producer/store/unparseable.py:3: os.getenv",
     ]
 
 

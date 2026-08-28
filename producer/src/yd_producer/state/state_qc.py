@@ -17,7 +17,7 @@ pin 分段逻辑的双权威副本（`nwm-snapshot-inventory.md:44` 的禁令）
   语义），MUST NOT 写死索引 4。列名就地重切 `doc.lines[section.column_header_index]`，
   不给 `cfg_ic.Section` 加字段。
 
-对 pin 的**刻意偏离**（四条，此处即全集）：
+对 pin 的**刻意偏离**（五条，此处即全集）：
 
 1. **序列化法则：改写一律经 `CfgIcDocument.with_replaced_lines`，只重新序列化被刻意改动的
    那几行**。pin 的 `normalize_state_negative_residuals`(:154) 以 `content.splitlines()`
@@ -47,19 +47,32 @@ pin 分段逻辑的双权威副本（`nwm-snapshot-inventory.md:44` 的禁令）
    `StateResidualNormalization.evidence()` 的**完整**字典（含 `accepted=False` 与 `reason`），
    故 receipt 侧证据零丢失，而「不产出修正后状态」由「不返回文档」结构性保证。成功路径仍
    返回 pin 形状的 `StateResidualNormalization`，`accepted` 字段保留以对齐 pin 的证据形状。
+5. **段缺席无条件判失败：与 pin 在同一输入上判定反转。** pin 的 `_check_row_counts`
+   （pin `state_qc.py:791-798`）对每个 `expected is None` 逐类跳过，`_check_block_range`
+   对空 list（`river_rows == []`）返回 `None`，于是「mesh 与 river 列头齐全但**没有**
+   river 段、且 `expected_*` 全为 `None`」这份负载在 pin 上得 `passed=True` /
+   `structure_complete=True`，在本模块上得 `passed=False` / `False`（round-2 verifier 把
+   pin 模块拷出**直接执行**，在同一份字节负载上取到这组对照）。同一输入上的判定反转是
+   偏离，不是扩展；扩展的只是**报错措辞**（点名段名而非行数消息，见下）。依据：spec
+   state-tools 的第一条 Requirement 独立要求 `cfg.ic`「至少包含 mesh 状态段与 river
+   `Stage` 段」，且「缺 river 段被拒」Scenario 不带任何前置条件，故 `doc.river is None`
+   在零 `expected_*` 下即可判。lake 段的不对称是刻意的：原生格式里 lake 段本就可选，
+   只有调用方声明了**非零** lake 计数、段却不存在时才失败，那一支与 pin 无判定反转。
+   段**存在**但行数不符仍走 `_check_row_counts` 的 pin 行数消息（那道门对
+   `expected is None` 仍逐类跳过，不受本条影响）。连带后果：`run_state_variable_qc` 与
+   `state_ic_structure_complete` 的判定路径含这道**非 pin 闸门**（`_check_missing_sections`），
+   二者的逐函数溯源注释因此不得单挂「逐字移植」。
 
 对 pin 的**扩展**（非偏离，pin 无对应面）：
 
 - `StateResidualNormalization` 的 `content: str` 字段（pin `:111`）改名为
   `document: CfgIcDocument`——偏离 1 的连带后果（本层不再持有整文件字符串）。这是**唯一**
   登记的字段改名；`evidence()` 的键集不受影响（pin `:126-151` 本就不含 `content`）。
-- **段缺席的具体报错**：pin 没有「段缺席」概念，`doc.river is None` 在 pin 那里表现为
+- **段缺席的报错措辞**：pin 没有「段缺席」概念，`doc.river is None` 在 pin 那里表现为
   `river row count 0 != expected N`。spec state-tools 的 Scenario「缺 river 段被拒 → 指明
   缺失段」要求点名该段，故 `_check_missing_sections` 在段缺席时给出 `missing river section`。
-  该判定**无条件**（不需要调用方传 `expected_river_count`）——spec 的第一条 Requirement
-  独立要求「至少包含 mesh 状态段与 river `Stage` 段」，`doc.river is None` 在零 `expected_*`
-  下即可判；lake 段本就可选，只有调用方声明了**非零** lake 计数时段缺席才失败。
-  段**存在**但行数不符仍走 pin 的 `_check_row_counts` 行数消息。
+  **措辞**这一面 pin 无对应物，属扩展；该判定的**无条件性**是刻意偏离 5（见上），因为它
+  在 `expected_*` 全为 `None` 的同一输入上与 pin 判定反转。
 - QC 入口的 `max_bytes` 形参：一路传到 `cfg_ic.parse`，默认值即 `MAX_STATE_IC_BYTES`（未变）。
   本模块**不新增任何读取面**，有界读完全由 `cfg_ic.parse` 承担。
 
@@ -509,7 +522,9 @@ def run_state_variable_qc(
     Parsing failure is itself a QC failure (never a crash): a malformed or truncated
     IC file returns ``passed=False`` with a reason rather than raising.
     """
-    # NWM@8ae9b8f2 packages/common/state_qc.py:324-388（逐字移植；water_balance 见模块头 non-goal）
+    # NWM@8ae9b8f2 packages/common/state_qc.py:324-388（判定次序与消息移植；
+    # 判定路径含非 pin 闸门 `_check_missing_sections`（模块头偏离 5），
+    # water_balance 见模块头 non-goal，故不是逐字移植）
     checks: dict[str, Any] = {
         "ic_path": _source_label(source),
         "parsed": False,
@@ -584,7 +599,8 @@ def state_ic_structure_complete(
     Native SHUD headers do not contain the river count, so callers must still
     pass the model's expected count for a strict **row-count** decision.
     """
-    # NWM@8ae9b8f2 packages/common/state_qc.py:391-421（逐字移植）
+    # NWM@8ae9b8f2 packages/common/state_qc.py:391-421（判定次序移植；判定路径含非 pin
+    # 闸门 `_check_missing_sections`（模块头偏离 5），故不是逐字移植）
     try:
         doc = parse(source, max_bytes=max_bytes)
     except ValueError:

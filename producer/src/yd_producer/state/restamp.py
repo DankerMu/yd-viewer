@@ -10,7 +10,7 @@ header 判定基座（`cfg_ic_header_shape` / `cfg_ic_header_minute_index`）在
 路径——init 首态（率定末态重戳到 T）与发布前 checkpoint 定戳（重戳到 T+12）——只差 `target`
 实参，MUST NOT 分裂成两个函数或加 `mode` 开关。
 
-对 pin 的**刻意偏离**（四条，此处即全集）：
+对 pin 的**刻意偏离**（五条，此处即全集）：
 
 1. **闸门次序：`cfg_ic_header_shape` 提到 `cfg_ic_header_minute_index` 之前。** pin 的
    `_normalized_checkpoint_ic_file` 先取 minute-index（`state_cli.py:271`）、`None` 即早退，
@@ -37,8 +37,13 @@ header 判定基座（`cfg_ic_header_shape` / `cfg_ic_header_minute_index`）在
    （`state_cli.py:288-296`）先把 header 里现存的 minute token 读成 `observed_minute`，
    再按 `round(observed) != round(expected)` 判 `header_changed`；判为「未变」时**原样返回
    字节未动的产物**。于是 pin 有两种可观测形态：(a) 已是目标分钟的整数写法 `27000000` 被
-   保留，不会规范化成 `27000000.000000`；(b) 与目标差 `< 30 s` 的时标（`round()` 相等）被
-   **静默保留**为旧值。yd 侧一律经 `replace_tokens` 写入 `f"{expected:.6f}"`：本 seam 的
+   保留，不会规范化成 `27000000.000000`；(b) **`round()` 落到同一分钟**的时标被**静默保留**
+   为旧值——判据就是 `round(observed_minute) != round(expected_minute)`（`state_cli.py:294`，
+   两边单位都是**分钟**）。这里按谓词本身记，**不**写成「相差不到半分钟」这类秒级近似——
+   那既不充分也不必要：`9.51` 与 `10.49` 同 `round()` 为 10，相距 **58.8 s** 仍被静默保留；`10.4` 与
+   `10.6` 分属 10 与 11，相距仅 **12 s** 反而会被重写。banker's rounding 只会**放宽**该
+   窗口（`round(9.5) == round(10.5) == 10`，整 60 s 亦被静默保留）。
+   yd 侧一律经 `replace_tokens` 写入 `f"{expected:.6f}"`：本 seam 的
    契约是「header 时间**对应** target」（spec state-tools「重戳保数据」），秒级残差与记法
    漂移都不该跟着产物走进 warm start 链，故这是**收紧**——重戳后的分钟 token 恒为目标值的
    `%.6f` 规范形。代价是干净输入上的一次无意义 splice，行为上无副作用（数据区与 header
@@ -46,6 +51,14 @@ header 判定基座（`cfg_ic_header_shape` / `cfg_ic_header_minute_index`）在
    pin 该段的 `except ValueError` 回退子项**不在此登记**：它只在 minute token 解析不出
    浮点时生效，而 yd 侧的 shape 闸门（偏离 1）已保证该 token 必可被 `_as_float` 解析，故那
    条子分支在本 seam 上无对应物，登记它等于登记一条不存在的差异。
+5. **错误契约替换：形状拒绝抛 `ValueError`，不抛 pin 的 `StateManagerError`。** pin
+   （`state_cli.py:284-287`）在 header 形状不合法时抛 `StateManagerError`；本模块抛
+   `ValueError`（`restamp.py` 内唯一的拒绝点），消息前缀
+   `STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID` 与「拒绝、**不产出任何文档**」的决定
+   逐字保留，改的只有异常类型。`StateManagerError` 属 NWM 的异常层，本模块零 NWM 运行时
+   import，故该类型在本仓不存在；即便如此，替换仍按 #8 确立的家族惯例**记进模块头**——
+   `state/cfg_ic.py` 把 `OSError`→`ValueError` 记作它的偏离 3、`state/state_qc.py` 也登记
+   了自己的同类改动，只记在 `nwm-snapshot-inventory.md:49` 的「剥离点」列属家族内不对称。
 
 `_ensure_utc` 的 pin 语义（`state_cli.py:1186-1189`）逐字保留：**naive datetime 视为 UTC**，
 aware 转 UTC。**不得**改成拒绝 naive——那是无 pin 对应物的收窄。

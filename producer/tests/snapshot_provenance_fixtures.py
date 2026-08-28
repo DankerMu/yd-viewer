@@ -311,9 +311,18 @@ def _code_lines(text: str) -> list[str]:
     的一部分。
 
     源码 tokenize 不了（语法错、编码怪）时**退回裸行扫描**：守卫宁可误报，不可漏报。
+
+    **行数组 MUST 与 tokenize 的行号同源**，故按 `"\\n"` 切而不是 `str.splitlines()`：
+    后者还会在 `\\x0b \\x0c \\x1c \\x1d \\x1e \\x85 \\u2028 \\u2029` 上断行，而
+    `tokenize`（经 `io.StringIO`，`newline="\\n"`）只认 `\\n`。其中 `\\x0c \\x85 \\u2028
+    \\u2029` 能正常 tokenize，于是两套行号错位，`_blank_prose` 会把**真代码行**当 docstring
+    抹掉——那正是本守卫唯一不能犯的错（漏报）。`Path.read_text` 走通用换行，故到这里已不
+    存在孤立的 `\\r`；末尾换行只会多切出一个空串元素，不影响任何行号。
+    MUST NOT 改用「把这些字符加进跳过表」或「先归一化源码」——归一化会移动字节偏移，
+    把 `_blank_prose` 的**列**算术也弄错位。
     """
 
-    lines = text.splitlines()
+    lines = text.split("\n")
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
     except (tokenize.TokenError, SyntaxError, IndentationError):

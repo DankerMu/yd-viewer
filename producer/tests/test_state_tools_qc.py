@@ -405,6 +405,52 @@ def test_negative_residuals_are_zeroed_with_hand_computed_evidence() -> None:
     assert b"-5e-4" not in rendered
 
 
+# --- 行内 splice 辅助（`token_spans` / `replace_tokens`）的直接单元用例 ---
+#
+# 这两个是**跨模块公开**面（`restamp.py` import 它们做 header 行的同款 splice），而两个
+# 调用点在负残差路径上各自只传**单键**替换，于是「多键替换」的契约在任何层面都没有 oracle。
+# round-2 verifier 实测：去掉 `sorted(..., reverse=True)` 的 `reverse` 后全套 777 条全绿，
+# 且在 `assert len(replacements) <= 1` 探针下同样全绿——即没有任何用例行使过多键。
+
+
+def test_token_spans_slices_every_token_of_a_mixed_separator_line() -> None:
+    """切片与 `str.split()` 逐 token 对齐，且分隔字节（多空格 / Tab / 行尾空格）不属任何 token。"""
+    text = "1   -1e-6\t-5e-4   0.100000  "
+
+    spans = state_qc.token_spans(text)
+
+    assert spans == ((0, 1), (4, 9), (10, 15), (18, 26))
+    assert [text[start:end] for start, end in spans] == text.split()
+    assert state_qc.token_spans("   ") == ()
+    assert state_qc.token_spans("  a") == ((2, 3),)
+
+
+def test_replace_tokens_splices_right_to_left_so_earlier_edits_never_shift_later_spans() -> (
+    None
+):
+    """裁决 2 的排序不变量：span 是在**原文本**上算的，故替换必须自右向左落。
+
+    左到右的变异体在这条上不是「输出等价」——它会用**已经位移过**的字节偏移去切后一个
+    token。verifier 实测该变异体能静默产出一条合法数值行（`-1e-9` 变成 `-1e-000000`
+    即 -1.0 m，且后一列被吞），故这里断言结果 bytes 逐字面量相等，不断言「能不能解析」。
+    """
+    # 缩短（负值 token -> "0"）：两个替换 index，分隔符混排。
+    assert (
+        state_qc.replace_tokens("1   -1e-6\t-5e-4   0.100000  ", {1: "0", 2: "0"})
+        == "1   0\t0   0.100000  "
+    )
+    # 加长（restamp 的 minute token 就是加长）：位移方向相反，同样只能自右向左。
+    assert state_qc.replace_tokens("a  b  c", {0: "XXXX", 2: "YY"}) == "XXXX  b  YY"
+    # 三个替换 index：相邻与间隔各一对。
+    assert (
+        state_qc.replace_tokens("1\t-2   -3  -4 ", {1: "0", 2: "0", 3: "0"})
+        == "1\t0   0  0 "
+    )
+    # 单键与空 mapping 仍逐字节恒等（两个生产调用点的现有形态）。
+    assert state_qc.replace_tokens("1   -1e-6  ", {1: "0"}) == "1   0  "
+    assert state_qc.replace_tokens("1   -1e-6  ", {}) == "1   -1e-6  "
+
+
 def _token_spans(text: str) -> list[tuple[int, int]]:
     """测试侧**独立**实现的 token 切片（不复用被测模块的 `state_qc.token_spans`）。"""
     spans: list[tuple[int, int]] = []
@@ -421,34 +467,47 @@ def _token_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _assert_only_one_token_spliced(old: str, new: str) -> None:
-    """裁决 2 的**字节级** oracle：改动行内只有目标 token 的字节切片被替换。
+def _assert_only_these_tokens_spliced(
+    old: str, new: str, expected_indices: set[int]
+) -> None:
+    """裁决 2 的**字节级** oracle：改动行内只有 `expected_indices` 的字节切片被替换。
 
     为什么不能只断 token 序列 / Tab 计数 / `endswith` 布尔相等：`str.split()` 丢掉分隔
     与行尾空白，Tab 计数在**统一** Tab 分隔下对 `"\\t".join(body.split())` 恒成立，而
     `old.endswith("\\r\\n") == new.endswith("\\r\\n")` 比的是两个布尔值（两侧都为 False
     时空真）。实测：只有这条按**切片前缀/后缀逐字节比对**的断言能杀死 pin 式回写变异体。
+
+    为什么形参是**期望改动 index 的集合**而不是写死的 `len(differing) == 1`：同一行可以
+    有多个负值格（mesh 行有五个状态列），而写死 1 时那种行在结构上无法用本 oracle 覆盖。
+    单 token 的既有调用点照旧传单元素集合——集合相等比原来的 `len(...) == 1` **更严**
+    （还钉住了「改的是哪一个」），不构成放松。
     """
     old_body, new_body = old.splitlines()[0], new.splitlines()[0]
     assert old[len(old_body) :] == new[len(new_body) :], "行尾符被改写"
 
     old_spans, new_spans = _token_spans(old_body), _token_spans(new_body)
     assert len(old_spans) == len(new_spans), f"token 数变了：{old!r} -> {new!r}"
-    differing = [
+    differing = {
         i
         for i, ((a0, a1), (b0, b1)) in enumerate(zip(old_spans, new_spans, strict=True))
         if old_body[a0:a1] != new_body[b0:b1]
-    ]
-    assert len(differing) == 1, f"改动的 token 不止一个：{old!r} -> {new!r}"
-    index = differing[0]
-    assert old_body[old_spans[index][0] : old_spans[index][1]].startswith("-")
-    assert new_body[new_spans[index][0] : new_spans[index][1]] == "0"
-    # 目标 token 之前与之后的**全部字节**（含 token 间的原始分隔与行尾空格）逐字不变。
-    assert old_body[: old_spans[index][0]] == new_body[: new_spans[index][0]], (
-        f"目标 token 之前的字节被改写：{old!r} -> {new!r}"
+    }
+    assert differing == expected_indices, (
+        f"改动的 token 集合不符（期望 {sorted(expected_indices)}，"
+        f"实为 {sorted(differing)}）：{old!r} -> {new!r}"
     )
-    assert old_body[old_spans[index][1] :] == new_body[new_spans[index][1] :], (
-        f"目标 token 之后的字节被改写：{old!r} -> {new!r}"
+    for index in sorted(expected_indices):
+        assert old_body[old_spans[index][0] : old_spans[index][1]].startswith("-")
+        assert new_body[new_spans[index][0] : new_spans[index][1]] == "0"
+    # 目标 token 之外的**全部字节**（含 token 间的原始分隔与行尾空格）逐字不变：把测试侧
+    # **独立**实现的「按原文本 span 自右向左 splice」结果与产物逐字节比对。左到右的实现
+    # 会用已经位移过的偏移去切后一个 token，在多 index 行上必然在这里变红。
+    expected_body = old_body
+    for index in sorted(expected_indices, reverse=True):
+        start, end = old_spans[index]
+        expected_body = expected_body[:start] + "0" + expected_body[end:]
+    assert new_body == expected_body, (
+        f"目标 token 之外的字节被改写：{old!r} -> {new!r}（期望 {expected_body!r}）"
     )
 
 
@@ -458,28 +517,42 @@ def test_only_rows_that_actually_carry_a_negative_value_are_reserialised() -> No
     裁决 1/2 的唯一判别力来源：pin 式整文件 `"\\n".join` 与行内 `"\\t".join` 只在这里变红。
     数据行的行内分隔**必须混排**：统一单一分隔符时 `"\\t".join(body.split())` 与就地
     splice 的输出在字节上重合，这条断言就退化成永真。
+
+    第四条 mesh 行**同一行带两个负值**（canopy 与 unsat），钉住裁决 2 的排序不变量：
+    `replace_tokens` 自右向左落，使先落的替换不移动后落 token 的 span。这条行的形态是
+    verifier 实测的**静默**形——左到右的实现在这里不会抛，而是产出一条仍可解析的数值行
+    `... -1e-000000`（即 1e-9 m 的残差被发布成 -1.0 m、GW 列被吞），故必须逐字面量断言
+    整行 bytes，不能只断 `accepted` 或计数。
     """
     synthetic = build_cfg_ic_rows(
         mesh_rows=[
             mesh_row(1, canopy="1e-3", snow="-0.0", surface="2.5E+01"),
             mesh_row(2, unsat="-1e-6"),
             mesh_row(3, canopy="0.000000"),
+            mesh_row(4, canopy="-1e-9", unsat="-1e-9"),
         ],
         river_rows=[river_row(1, "2.5E+01"), river_row(2, "-5e-4")],
         eol="\r\n",
         delimiter="\t",
-        data_delimiters=("   ", "\t"),
+        # 三元循环：mesh 行的分隔序列是 `   ` `\t` `   ` `   ` `\t`，正是 verifier 复现
+        # 静默错位所用的形态（两元循环下同一行会退化成抛错的「响」形）。
+        data_delimiters=("   ", "\t", "   "),
         header_delimiter="   ",
         trailing_spaces="  ",
         blank_lines=True,
         trailing_newline=False,
     )
     doc = cfg_ic.parse(synthetic.payload)
-    changed = {synthetic.mesh_data_indices[1], synthetic.river_data_indices[1]}
+    #: 改动行 -> 该行内期望被 splice 的 token index 集合（mesh 行：canopy=1 … gw=5）。
+    changed = {
+        synthetic.mesh_data_indices[1]: {4},
+        synthetic.mesh_data_indices[3]: {1, 4},
+        synthetic.river_data_indices[1]: {1},
+    }
 
     result = state_qc.normalize_negative_residuals(doc)
 
-    assert result.evidence()["normalized_value_count"] == 2
+    assert result.evidence()["normalized_value_count"] == 4
     for index, (old, new) in enumerate(
         zip(doc.lines, result.document.lines, strict=True)
     ):
@@ -488,13 +561,24 @@ def test_only_rows_that_actually_carry_a_negative_value_are_reserialised() -> No
             continue
         assert new == old, f"line {index} changed: {old!r} -> {new!r}"
 
-    for index in changed:
+    for index, token_indices in changed.items():
         old, new = doc.lines[index], result.document.lines[index]
         # 构造自检：这一行确实带多空格分隔与非空行尾空格，否则下面的字节级断言对
         # canonical 化回写没有判别力。
         assert old.rstrip("\r\n").endswith("  "), old
         assert "   " in old, old
-        _assert_only_one_token_spliced(old, new)
+        _assert_only_these_tokens_spliced(old, new, token_indices)
+
+    # 同行双负值那一行的整行 bytes 逐字面量断言（自右向左 splice 的唯一正确产物）。
+    multi_index = synthetic.mesh_data_indices[3]
+    assert (
+        doc.lines[multi_index]
+        == "4   -1e-9\t0.100000   0.100000   -1e-9\t0.100000  \r\n"
+    )
+    assert (
+        result.document.lines[multi_index]
+        == "4   0\t0.100000   0.100000   0\t0.100000  \r\n"
+    )
 
     # 行内混排与行尾符两维都要有实例：mesh 改动行同时带多空格与 Tab 分隔、且以 CRLF 收尾；
     # river 改动行是文件末行、**无**行尾符（`endswith` 布尔相等在这里空真，故不能靠它）。
@@ -798,6 +882,27 @@ def test_ported_symbols_carry_their_own_provenance_comment() -> None:
         ), symbol
 
 
+def test_the_two_qc_entry_points_do_not_claim_a_bare_verbatim_port() -> None:
+    """偏离 5 的注释面：这两个函数的判定路径含非 pin 闸门，溯源注释不得单挂「逐字移植」。
+
+    `_check_missing_sections` 是 pin 无对应面的闸门（模块头偏离 5），它在
+    `expected_*` 全为 `None` 的负载上与 pin 判定反转；注释若仍写「逐字移植」，读者会按
+    「与 pin 同判」去用这两个入口。
+    """
+    source = source_probe.read_source(state_qc.__file__)
+    segments = source_probe.definition_segments(source)
+    for symbol in ("run_state_variable_qc", "state_ic_structure_complete"):
+        comments = "\n".join(
+            line.strip()
+            for line in segments[symbol].splitlines()
+            if line.strip().startswith("#")
+        )
+        assert "NWM@8ae9b8f2 packages/common/state_qc.py" in comments, symbol
+        assert "（逐字移植）" not in comments, symbol
+        assert "_check_missing_sections" in comments, symbol
+        assert "偏离 5" in comments, symbol
+
+
 def test_module_imports_the_cfg_ic_base_symbols_instead_of_re_porting_them() -> None:
     """`nwm-snapshot-inventory.md:44` 的双权威副本禁令。"""
     names = source_probe.definition_names(source_probe.read_source(state_qc.__file__))
@@ -862,13 +967,16 @@ def test_module_documents_the_deliberate_deviations() -> None:
     assert "刻意偏离" in head
     # 条数由 docstring 解析得出并与序号闭合（理由同 `test_cfg_ic.py` 的同名测试）。
     declared = source_probe.declared_deviation_count(head)
-    assert declared == 4
+    assert declared == 5
     for ordinal in range(1, declared + 1):
         assert head.count(f"\n{ordinal}. ") == 1, ordinal
     assert f"\n{declared + 1}. " not in head
     assert "with_replaced_lines" in head
     assert "StateResidualRejected" in head
     assert "finiteness 先于负值" in head
+    # 偏离 5：段缺席无条件判失败，与 pin 在 `expected_*` 全 None 的同一输入上判定反转。
+    assert "_check_missing_sections" in head
+    assert "判定反转" in head
     # 已知面与 non-goal 各留一条记述。
     assert "1_0" in head
     assert "_check_water_balance" in head

@@ -194,7 +194,11 @@ def test_minute_token_is_rewritten_even_when_the_pin_would_short_circuit() -> No
     (a) 已是目标分钟的**整数写法** `29455920` —— pin 保留原字节，yd 侧改写成 `%.6f`；
     (b) 目标比 header 晚 20 s（`round()` 仍相等）—— pin **静默保留旧值**，yd 侧写入
         `29455920.333333`（手算：`(1767355200 + 20) / 60`）。
-    两条 minute 期望值都由手算 epoch 秒得出，不经被测模块。
+    (c) **分桶边界**：header `29455919.51` 对目标 `29455920.49` —— 两者 `round()` 同为
+        29455920，相距 **58.8 s** 仍落在 pin 的静默保留窗口内。这一条钉死「窗口 = round()
+        落同一分钟」而不是「差 < 30 s」：后一种口径下本例本该被重写，故它是模块头偏离 4
+        那句定量描述的行为面判别器。
+    三条 minute 期望值都由手算 epoch 秒得出，不经被测模块。
     """
     payload = _dirty_payload_with_minute("29455920")
     doc = cfg_ic.parse(payload)
@@ -215,6 +219,22 @@ def test_minute_token_is_rewritten_even_when_the_pin_would_short_circuit() -> No
         "构造失效：pin 的 round() 判定在此必须为「未变」，否则这条用例证不了短路被剥离"
     )
     _assert_only_header_changed(payload, plus_20s, expected_minute=expected_minute)
+
+    # (c) 分桶边界：header 分钟 29455919.51 对目标 29455920.49，round() 相等而相距 58.8 s。
+    edge_payload = _dirty_payload_with_minute("29455919.51")
+    edge_doc = cfg_ic.parse(edge_payload)
+    edge_target = TARGET_T + timedelta(seconds=29.4)
+    edge_minute = _hand_minute(edge_target)
+    assert edge_minute == "29455920.490000"
+    assert round(29455919.51) == round(float(edge_minute)) == 29455920, (
+        "构造失效：pin 的 round() 判定在此必须为「未变」"
+    )
+    # 「差 < 30 s」那种口径在这里会判「已变」——本例正是它与真谓词分叉的地方。
+    assert abs(float(edge_minute) - 29455919.51) * 60 > 58.0
+
+    edge = restamp.restamp_to_absolute_time(edge_doc, edge_target)
+
+    _assert_only_header_changed(edge_payload, edge, expected_minute=edge_minute)
 
 
 def test_restamp_is_idempotent() -> None:
@@ -390,6 +410,36 @@ def test_module_defines_no_rekey_surface_symbol() -> None:
     assert "water_balance" not in restamp.restamp_to_absolute_time.__code__.co_varnames
 
 
+def test_module_docstring_block_is_a_prefix_and_counts_lines_like_ast() -> None:
+    """`source[len(block):]` 取模块体（上一条用例的 `body`）的前提是**前缀**性质。
+
+    两条边界各一例：(a) docstring 恰好结束于 EOF 且文件**无**末尾换行——无条件补 `\\n`
+    的实现在这里返回的不再是前缀；(b) docstring 内含 `\\x0c`——`str.splitlines()` 会在
+    它上面多断一行，而 `ast` 的 `end_lineno` 只按 `\\n` 计，切片会**少**切，把 docstring
+    截断在半路（方向 fail-closed，但仍是错的）。
+    """
+    header = "# NWM@8ae9b8f2 packages/common/state_cli.py\n"
+    for source in (
+        '"""doc"""\nVALUE = 1\n',
+        '"""doc"""',
+        '"""doc"""\n',
+        f'{header}"""doc\n\nmore\n"""\nimport os\n',
+    ):
+        block = source_probe.module_docstring_block(source)
+        assert source.startswith(block), (source, block)
+        assert block.rstrip().endswith('"""'), block
+
+    # (b) docstring 内的换页符：`splitlines()` 口径下 `[: end_lineno]` 会切在 `\x0c` 后。
+    form_feed = '"""doc\x0c 换页符\n"""\nVALUE = 1\n'
+    assert len(form_feed.splitlines()) != form_feed.count("\n")
+    block = source_probe.module_docstring_block(form_feed)
+    assert block == '"""doc\x0c 换页符\n"""\n'
+    assert form_feed[len(block) :] == "VALUE = 1\n"
+
+    # (a) 无末尾换行时返回值与源码逐字节相等（不多一个 `\n`）。
+    assert source_probe.module_docstring_block('"""doc"""') == '"""doc"""'
+
+
 def test_module_documents_the_deliberate_deviations() -> None:
     head = source_probe.module_docstring_block(
         source_probe.read_source(restamp.__file__)
@@ -398,13 +448,19 @@ def test_module_documents_the_deliberate_deviations() -> None:
     # 条数由 docstring 解析得出并与序号闭合（子串断言 `"三条" in head` 对改条数的变异体
     # 可能存活——docstring 别处也可能出现同一个词）。
     declared = source_probe.declared_deviation_count(head)
-    assert declared == 4
+    assert declared == 5
     for ordinal in range(1, declared + 1):
         assert head.count(f"\n{ordinal}. ") == 1, ordinal
     assert f"\n{declared + 1}. " not in head
-    # 四条偏离各自的关键词。
+    # 五条偏离各自的关键词。
     assert "cfg_ic_header_shape" in head and "cfg_ic_header_minute_index" in head
     assert "with_replaced_lines" in head
     assert "safe_fs" in head or "atomic_write_bytes_no_follow" in head
     # 偏离 4：pin 的 `header_changed` 短路不移植（下一条用例是它的行为面证据）。
     assert "header_changed" in head
+    # 偏离 4 的定量描述 MUST 是**谓词本身**，不是「差 < 30 s」那种近似（round() 落同一
+    # 分钟，窗口可达近 60 s；`test_..._short_circuit` 的 (c) 子例是它的行为面证据）。
+    assert "round(observed_minute) != round(expected_minute)" in head
+    assert "< 30 s" not in head
+    # 偏离 5：错误契约替换（pin 的 `StateManagerError` -> 本仓 `ValueError`）。
+    assert "StateManagerError" in head
