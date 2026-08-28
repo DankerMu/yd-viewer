@@ -778,7 +778,7 @@ pin 的重戳经 `atomic_write_bytes_no_follow` 落 `.{name}.normalized` 点前�
 - 新增 `producer/src/yd_producer/state/restamp.py`：任务 4.3 重戳面
 - 改 `producer/src/yd_producer/state/cfg_ic.py`：#54 第 3/4/5 条（分段唯一性守卫、BOM 感知诊断、`__post_init__` 不变量与 `with_replaced_lines`）。**连带强制项**：第 3/4 条各往 `parse` 里新增一条**无 pin 对应物**的 `raise ValueError`，故模块头的「对 pin 的刻意偏离」清单 MUST 由六条扩到**八条**（段重入守卫、BOM 拒绝），且 `__post_init__`/`with_replaced_lines` 若引入新的拒绝路径一并入册。漏更清单是 #8 已复发两轮的同一失败类（`false-exhaustiveness-claim`），本 issue MUST 由上面改造后的 `ast` 计数测试机械闭合
 - 改 `producer/src/yd_producer/state/__init__.py`：导出新符号，并更新模块 docstring 里「4.2–4.4 另行落地」的措辞
-- 新增 `producer/tests/test_state_qc.py`、`producer/tests/test_state_restamp.py`；扩充 `producer/tests/cfg_ic_fixtures.py` 的合成构造器（非有限值、BOM、段重入、U+0085 内嵌、负残差矩阵）
+- 新增 `producer/tests/test_state_tools_qc.py`、`producer/tests/test_state_tools_restamp.py`（**刻意避开** `producer/tests/test_state_qc.py` / `producer/tests/test_state_restamp.py` 这两个清单 §1 为 pin 用例**移植**保留的目标路径：本 issue 的用例是按 NWM 场景新写的，占用那两个路径就要贴上 `# NWM@8ae9b8f2 tests/...` 溯源头，等于在清单里申报一次没发生过的移植）；扩充 `producer/tests/cfg_ic_fixtures.py` 的合成构造器（非有限值、BOM、段重入、U+0085 内嵌、负残差矩阵）
 - 改 `producer/tests/test_cfg_ic.py`：#54 第 3/4/5 条在格式层的负例；**并按 #54 评论 2 的方向改造 `:718-733` 的偏离穷尽性测试**（现行写法自指——只断 docstring 写着「六条」、从代码零导出，故对「偏离清单漏登记」恒绿）：改为用 `ast` 数 `parse` 体内的 `ast.Raise` 节点并与模块头登记的偏离条数闭合。**计数域 MUST 覆盖所有承载登记偏离的函数**：`__post_init__` / `with_replaced_lines` 的拒绝路径若入册，其 `ast.Raise` 一并计入，否则漏登记不被该测试覆盖——那正是本测试要终结的那类恒绿
 - 改 `openspec/changes/m2-producer-core/specs/state-tools/spec.md`：结构检查 Requirement 补两条 Scenario（非有限值、river 行数与权威计数），负残差 Requirement 补一条 Scenario（非有限值在归零前被拒）并把「沿用 NWM 语义」收窄为「除模块头登记的偏离外沿用」——裁决 4 的 spec 授权
 - 改 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md`：`:44` 落地状态由「部分（格式层）」改为完成状态并点名本 issue 落的符号；`:45` 标注「部分（重戳面）」并写明 rekey 面路由 #16/#24、`_read_limited_*_no_follow` 的闭包切点；`:55` 标注只落重戳用例
@@ -943,7 +943,13 @@ Domain packs (from active profile):
 - 缺 river 段（无 river 列头）+ `expected_river_count=4` -> `passed=False`，`reason` 点名缺失的是 **river 段**（不是 `river row count 0 != expected 4`）
 - river 段存在但行数 3 != `expected_river_count=4` -> `passed=False`，`reason` 含实际 3 与期望 4
 - **U+0085 内嵌**：一条物理 river 行中间插入 U+0085 使 `splitlines` 断成两行 + `expected_river_count` 为真实行数 -> `passed=False`（#54 第 2 条：这是 river 段唯一的门，字节 roundtrip 抓不到它）
-- `expected_*` 全为 `None` -> 行数检查跳过，结构仍被解析，`passed=True`（pin 语义）
+- `expected_*` 全为 `None` -> **行数比对**跳过（pin 语义），结构仍被解析；**段缺席不随之跳过**：
+  mesh + river 双段齐全（无 lake）时 `passed=True`（lake 段本就可选），而缺 river 段时即使
+  `expected_*` 全为 `None` 也 -> `passed=False` 且 reason 点名 river 段、`state_ic_structure_complete`
+  返回 `False`。理由：spec state-tools 的第一条 Requirement 独立要求「至少包含 mesh 状态段与
+  river `Stage` 段」，`结构检查` 的「缺 river 段被拒」Scenario 也不带前置条件；把段缺席挂在调用方
+  计数上，等于让 #16 tracker 的默认调用（全 `None`）把只写到一半、river 段还没落盘的 checkpoint
+  判成「完整」——正是 `state_ic_structure_complete` docstring 自己点名要防的那一幕
 - 任一状态列 `nan` -> `passed=False` 且 reason 指明**非有限**；**并**断言同一行若改为负值则 reason 指明**负值**——两条一起才钉死「finiteness 先于负值」的次序（#54 明文要求；只测 NaN 被拒不区分是哪道门拦的）
 - **次序的精确语义是「行内逐列单遍」而非「整块两遍」**（pin `state_qc.py:826-839`：同一列先 isfinite 再负值再上界）。故 MUST 另有一条：同一行**前列为负值、后列为 NaN** -> reason 报**负值**（两遍式实现——先扫全块非有限、再扫全块负值——会在此报非有限而变红）
 - 状态值 > `_MAX_STATE_VALUE_M`（`1.0e6`）-> `passed=False` 指明超界；恰好 `1.0e6` -> 通过（钉死 `>` 而非 `>=`）

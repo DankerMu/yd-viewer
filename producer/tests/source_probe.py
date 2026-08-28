@@ -18,8 +18,26 @@ def read_source(module_file: str) -> str:
 
 
 def module_docstring_block(source: str) -> str:
-    """模块头 docstring 的原始文本（含三引号）。"""
-    return source[: source.index('"""', 3) + 3]
+    """模块头**前言**：文件开头直到模块 docstring 结束的原始文本（含三引号）。
+
+    按 `ast` 取 docstring 节点的 `end_lineno`，不用 `source.index('\"\"\"', 3)`：后者假定
+    文件第一个字符就是 docstring 的开引号。快照文件的**溯源头部注释**
+    （`# NWM@<sha> <原路径>`，形式见 `snapshot_provenance_fixtures._MARKER_COMMENT`）必须
+    落在前 5 行，于是 docstring 不再是第 0 个字节，旧写法会把返回值截成「注释 + 开引号」。
+
+    仍返回**前缀**而非 docstring 单体：调用方按 `source[len(block):]` 取模块体做「体内
+    不得出现某某字样」的断言，前缀性质是那条断言的前提。
+    """
+
+    tree = ast.parse(source)
+    assert tree.body, "空模块没有模块头"
+    node = tree.body[0]
+    assert isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant), (
+        "模块的第一条语句不是 docstring"
+    )
+    assert isinstance(node.value.value, str), "模块的第一条语句不是字符串字面量"
+    assert node.end_lineno is not None
+    return "".join(source.splitlines(keepends=True)[: node.end_lineno])
 
 
 def definition_segments(source: str) -> dict[str, str]:

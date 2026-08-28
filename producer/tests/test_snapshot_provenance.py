@@ -655,6 +655,9 @@ def test_each_forbidden_surface_is_individually_enforced(
     在 `store/object_path.py` 真落一个 registry/journal/reservation 面」这个组合态
     可达且无覆盖。本条给每一项配一个注入式 fixture，`test_forbidden_surfaces_match_
     the_declared_grep` 负责词表本身不被删项。
+
+    注入点是**普通字符串字面量**而不是行尾注释：扫描口径收紧后（注释与 docstring 属惰性
+    散文，不再计为命中，见 `_code_lines`），注释形态的注入不再可达，用例会永远绿。
     """
 
     targets = {
@@ -664,7 +667,7 @@ def test_each_forbidden_surface_is_individually_enforced(
         tmp_path,
         {
             "producer/src/yd_producer/store/safe_fs.py": "x = 1\n",
-            "producer/src/yd_producer/store/leaked.py": f"y = 1  # {token}\n",
+            "producer/src/yd_producer/store/leaked.py": f'y = "{token}"\n',
         },
     )
 
@@ -727,6 +730,49 @@ def test_db_free_scan_catches_unregistered_files_inside_a_snapshot_package(
 
     assert [hit.split(":")[0] for hit in hits] == [
         "producer/src/yd_producer/store/helper.py"
+    ]
+
+
+def test_db_free_scan_ignores_inert_prose_but_not_real_code(tmp_path: Path) -> None:
+    """扫描口径：注释与 docstring 里的禁区词不算命中，**执行得到的代码**里算。
+
+    两向都要有实例，否则这条口径退化成单向豁免：只证「散文不再命中」，把整段扫描改成
+    `return []` 也照样绿；只证「代码仍命中」，则涂白规则是否生效无从判别。
+
+    成因是真的：`state/state_qc.py` / `state/restamp.py` / 已合入 master 的
+    `state/cfg_ic.py` 的模块头都写着「零数据库/scheduler 依赖」——**否定**陈述被裸串扫描
+    判成了肯定命中。
+    """
+
+    targets = {
+        "producer/src/yd_producer/store/safe_fs.py": "packages/common/safe_fs.py"
+    }
+    _fake_repo(
+        tmp_path,
+        {
+            "producer/src/yd_producer/store/safe_fs.py": "x = 1\n",
+            "producer/src/yd_producer/store/prose.py": (
+                '"""零数据库/scheduler 依赖，不读 os.environ。"""\n'
+                "\n"
+                "# 本模块不碰 registry / journal / reservation。\n"
+                "VALUE = 1\n"
+                "\n"
+                "\n"
+                "def helper() -> int:\n"
+                '    """不经 psycopg，也不读 DATABASE_URL。"""\n'
+                "    return VALUE\n"
+            ),
+            "producer/src/yd_producer/store/real.py": (
+                'import os\n\nURL = os.getenv("DATABASE_URL")\n'
+            ),
+        },
+    )
+
+    hits = _forbidden_hits(tmp_path, _scan_files(tmp_path, targets))
+
+    assert hits == [
+        "producer/src/yd_producer/store/real.py:3: DATABASE_URL",
+        "producer/src/yd_producer/store/real.py:3: os.getenv",
     ]
 
 

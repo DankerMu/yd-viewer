@@ -1,3 +1,4 @@
+# NWM@8ae9b8f2 packages/common/state_qc.py
 """SHUD `cfg.ic` 状态变量 QC：结构检查（任务 4.2）、负残差归零（任务 4.4）与 header 判定基座。
 
 溯源：`NWM@8ae9b8f2 packages/common/state_qc.py`。判定语义与数值常量整体移植自该 pin，
@@ -26,8 +27,9 @@ pin 分段逻辑的双权威副本（`nwm-snapshot-inventory.md:44` 的禁令）
    的行尾符）。
 2. **改行的内部形态：只替换目标 token 的字节切片，保留行内其余空白布局与行尾符**。pin 改
    行后 `"\\t".join(tokens)` 会把**未被改动**的 token 之间的原始分隔一律重写成单 Tab；元素
-   id 与未改动的状态列的字节不该动。故本模块用 `_token_spans` / `_replace_tokens` 就地
-   splice。（这两条偏离**只在脏输入上可证伪**——canonical 化的写法在干净输入上恒绿。）
+   id 与未改动的状态列的字节不该动。故本模块用 `token_spans` / `replace_tokens` 就地
+   splice（二者是**公开**名字：`restamp.py` 跨模块 import 它们做 header 行的同款 splice）。
+   （这两条偏离**只在脏输入上可证伪**——canonical 化的写法在干净输入上恒绿。）
 3. **非有限值 MUST 在任何投影之前被拒**（`normalize_negative_residuals` 抛 `ValueError`）。
    pin 的残差函数**没有** finiteness 门，实测其后果：`nan >= 0.0` 为 False 故 NaN 被**静默
    归零**，`correction=-nan` 与 `nan > 1e-2` 皆为 False 故不计入 `over_tolerance_clamp_count`，
@@ -54,6 +56,9 @@ pin 分段逻辑的双权威副本（`nwm-snapshot-inventory.md:44` 的禁令）
 - **段缺席的具体报错**：pin 没有「段缺席」概念，`doc.river is None` 在 pin 那里表现为
   `river row count 0 != expected N`。spec state-tools 的 Scenario「缺 river 段被拒 → 指明
   缺失段」要求点名该段，故 `_check_missing_sections` 在段缺席时给出 `missing river section`。
+  该判定**无条件**（不需要调用方传 `expected_river_count`）——spec 的第一条 Requirement
+  独立要求「至少包含 mesh 状态段与 river `Stage` 段」，`doc.river is None` 在零 `expected_*`
+  下即可判；lake 段本就可选，只有调用方声明了**非零** lake 计数时段缺席才失败。
   段**存在**但行数不符仍走 pin 的 `_check_row_counts` 行数消息。
 - QC 入口的 `max_bytes` 形参：一路传到 `cfg_ic.parse`，默认值即 `MAX_STATE_IC_BYTES`（未变）。
   本模块**不新增任何读取面**，有界读完全由 `cfg_ic.parse` 承担。
@@ -393,15 +398,25 @@ def _check_missing_sections(
 ) -> str | None:
     """段缺席时点名该段。pin 无此面（见模块头「对 pin 的扩展」），由 spec Scenario 强制。
 
-    只在调用方给出了**非零**期望计数时判定：`expected_* is None` 沿用 pin 的「跳过」语义，
-    `expected_* == 0` 时段缺席与期望自洽。段**存在**但行数不符走 `_check_row_counts`。
+    **段缺席的判定不依赖调用方计数**：spec state-tools 的第一条 Requirement 独立要求
+    `cfg.ic`「至少包含 mesh 状态段与 river `Stage` 段」，故 `doc.river is None` 在零
+    `expected_*` 下就已可判，且 `结构检查` Requirement 的「缺 river 段被拒」Scenario 不带
+    任何前置条件。`expected_river_count` 只参与**行数比对**（那一半仍按 pin 在 `None` 时
+    跳过，见 `_check_row_counts`），不再充当段缺席的开关。
+
+    **river 与 lake 的不对称是刻意的，不是疏漏**：lake 段在原生 `cfg.ic` 格式里**本就
+    可选**（`doc.lake is None` 是合法形态，spec 写的是「可能含 lake 段」），故 lake 段缺席
+    MUST NOT 无条件失败——只有调用方**声明了**非零 lake 计数、段却不存在时才失败。
+
+    段**存在**但行数不符走 `_check_row_counts` 的 pin 行数消息。
     """
-    for kind, section in (("river", doc.river), ("lake", doc.lake)):
-        expected = row_counts.get(f"expected_{kind}")
-        if expected is None or int(expected) == 0:
-            continue
-        if section is None:
-            return f"missing {kind} section (expected {expected} rows)"
+    if doc.river is None:
+        expected_river = row_counts.get("expected_river")
+        detail = "" if expected_river is None else f" (expected {expected_river} rows)"
+        return f"missing river section{detail}"
+    expected_lake = row_counts.get("expected_lake")
+    if expected_lake is not None and int(expected_lake) != 0 and doc.lake is None:
+        return f"missing lake section (expected {expected_lake} rows)"
     return None
 
 
@@ -562,9 +577,12 @@ def state_ic_structure_complete(
     remain the responsibility of :func:`run_state_variable_qc` at state-save
     time.  The tracker (#16) uses this narrower predicate while watching a
     non-atomically rewritten ``cfg.ic.update`` file so it never preserves a
-    header-matching but only partially written checkpoint. Native SHUD headers do
-    not contain the river count, so callers must pass the model's expected count
-    for a strict completeness decision.
+    header-matching but only partially written checkpoint. That promise holds
+    **without** caller-supplied counts for the river section: a payload whose
+    river ``Stage`` section has not been written yet returns ``False`` even when
+    every ``expected_*`` is ``None`` (see :func:`_check_missing_sections`).
+    Native SHUD headers do not contain the river count, so callers must still
+    pass the model's expected count for a strict **row-count** decision.
     """
     # NWM@8ae9b8f2 packages/common/state_qc.py:391-421（逐字移植）
     try:

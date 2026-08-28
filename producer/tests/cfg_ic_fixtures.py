@@ -116,6 +116,7 @@ def build_cfg_ic(
     minute: str = DEFAULT_MINUTE,
     mesh_state_columns: int = MESH_STATE_COLUMNS,
     lake_body_rows: int | None = None,
+    mesh_header_tokens: tuple[str, ...] = MESH_COLUMN_HEADER_TOKENS,
     river_header_tokens: tuple[str, ...] = RIVER_COLUMN_HEADER_TOKENS,
     lake_header_tokens: tuple[str, ...] = LAKE_COLUMN_HEADER_TOKENS,
 ) -> SyntheticCfgIc:
@@ -127,8 +128,17 @@ def build_cfg_ic(
     `lake_count`）。`leading_blank_lines` 在 header 之前插空行（偶数位空串、奇数位纯空白），
     用于钉死「header 行 = 首个非空行」。`intra_section_blank_lines` 在每个**至少两行数据**
     的段的首条数据行之后插一条空行，使该段的数据行号不连续。
-    `river_header_tokens` / `lake_header_tokens` 选择段列头拼写（生产拼写见模块头常量）。
+    `mesh_header_tokens` / `river_header_tokens` / `lake_header_tokens` 选择段列头拼写
+    （生产拼写见模块头常量）。`mesh_header_tokens` 允许把 `Unsat` 挪出索引 4——4.4 的投影列
+    定位按**列头文本**查找，写死索引 4 的实现只有在列序被打乱时才变红；列序固定的 fixture
+    让「按文本定位」与「按固定索引定位」在观测上重合，那条断言即无判别力。
+    列数由 `mesh_state_columns` 决定，`mesh_header_tokens` 的 token 数须与之相等。
     """
+    if len(mesh_header_tokens) != mesh_state_columns:
+        raise AssertionError(
+            f"mesh 列头 token 数 {len(mesh_header_tokens)} 与 mesh_state_columns "
+            f"{mesh_state_columns} 不符"
+        )
     emitter = _Emitter(
         eol=eol,
         delimiter=delimiter,
@@ -145,7 +155,7 @@ def build_cfg_ic(
     if blank_lines:
         emitter.blank()
 
-    mesh_header_index = emitter.emit(MESH_COLUMN_HEADER_TOKENS, "column_header")
+    mesh_header_index = emitter.emit(mesh_header_tokens, "column_header")
     mesh_data_indices: list[int] = []
     for element in range(1, mesh_count + 1):
         values = []
@@ -237,10 +247,12 @@ def build_cfg_ic_rows(
     eol: str = "\n",
     delimiter: str = " ",
     header_delimiter: str | None = None,
+    data_delimiters: Sequence[str] | None = None,
     trailing_spaces: str = "",
     header_trailing_spaces: str | None = None,
     blank_lines: bool = False,
     trailing_newline: bool = True,
+    mesh_header_tokens: tuple[str, ...] = MESH_COLUMN_HEADER_TOKENS,
     river_header_tokens: tuple[str, ...] = RIVER_COLUMN_HEADER_TOKENS,
     lake_header_tokens: tuple[str, ...] = LAKE_COLUMN_HEADER_TOKENS,
 ) -> SyntheticCfgIc:
@@ -254,6 +266,12 @@ def build_cfg_ic_rows(
     给了就逐字发（用于两 token 的 #1197 形状、四 token 兼容布局、>=5 token 未知布局）。
     `header_delimiter` / `header_trailing_spaces` 让 header 行的空白布局独立于数据行——
     脏矩阵要的正是「header 多空格 + 行尾空格 + 数据行 Tab 分隔」这种混排。
+
+    `data_delimiters` 让**数据行行内**的分隔逐位不同（按序循环使用，例如
+    `("   ", "\\t")` 发出 `1   0.1\t0.2   0.3\t...`）。存在的理由是判别力：数据行若统一用
+    单一分隔符，`"\\t".join(body.split())` 这种 canonical 化回写在字节上与就地 splice **完全
+    重合**，裁决 2 的「改动行只替换目标 token 的字节」在负残差路径上就没有任何用例能证伪。
+    `mesh_header_tokens` 的作用同 `build_cfg_ic`（把 `Unsat` 挪出索引 4）。
     """
     header_delimiter = delimiter if header_delimiter is None else header_delimiter
     header_trailing_spaces = (
@@ -262,8 +280,18 @@ def build_cfg_ic_rows(
     texts: list[str] = []
     roles: list[str] = []
 
+    def _join(tokens: Sequence[str], sep: str) -> str:
+        if data_delimiters is None:
+            return sep.join(tokens)
+        parts = [tokens[0]] if tokens else []
+        for position, token in enumerate(tokens[1:]):
+            parts.append(data_delimiters[position % len(data_delimiters)])
+            parts.append(token)
+        return "".join(parts)
+
     def emit(tokens: Sequence[str], role: str, *, sep: str, tail: str) -> int:
-        texts.append(sep.join(tokens) + tail)
+        text = _join(tokens, sep) if role == "data" else sep.join(tokens)
+        texts.append(text + tail)
         roles.append(role)
         return len(texts) - 1
 
@@ -280,7 +308,7 @@ def build_cfg_ic_rows(
         blank()
 
     mesh_header_index = emit(
-        MESH_COLUMN_HEADER_TOKENS, "column_header", sep=delimiter, tail=trailing_spaces
+        mesh_header_tokens, "column_header", sep=delimiter, tail=trailing_spaces
     )
     mesh_data_indices = [
         emit(row, "data", sep=delimiter, tail=trailing_spaces) for row in mesh_rows

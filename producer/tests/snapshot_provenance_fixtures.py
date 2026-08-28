@@ -10,7 +10,8 @@ generated/vendored/data，手写测试套件不属于那一类。导入惯例照
 模块**里，正反两向都从这里取，仍不存在第二份拷贝。
 
 本模块**必须**留在 `tests/` 下、且**不得**命名成 `test_*.py`：
-- 它把禁区词（`psycopg`、`DATABASE_URL`、scheduler/registry 等）当字符串字面量带在身上。
+- 它把禁区词（`psycopg`、`DATABASE_URL`、scheduler/registry 等）当**普通字符串字面量**
+  带在身上，而扫描口径只放过注释与 docstring、不放过普通字面量（见 `_code_lines`）。
   放到 `src/yd_producer/` 下，它会被 DB-free 扫描集吃进去并把自己钉红；`producer/tests/`
   下的非快照文件不在扫描集内（已声明的非目标 F2）。
 - 反向守卫会扫本文件：这里任何 `#` 注释行的内容都不得**恰为**溯源头部形式，否则本文件
@@ -19,7 +20,9 @@ generated/vendored/data，手写测试套件不属于那一类。导入惯例照
 
 from __future__ import annotations
 
+import io
 import re
+import tokenize
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -59,6 +62,10 @@ SNAPSHOT_PACKAGE_ROOT = Path("producer") / "src" / "yd_producer"
 #: declared_grep` 断言两者相等——这里刻意不写第二份手工名单，也不写计数地板：
 #: 参数化用例只能证明「表里的每一项都真的被执行」，删掉一项时它是**取消选择**（用例
 #: 数从 8 掉到 4），不是变红；把词表钉在声明上的是那条相等断言。
+#:
+#: **命中口径**：扫的是源码里**会被执行**的那部分文本——注释与 docstring 先被
+#: `_code_lines` 涂白，普通字符串字面量照扫（`os.getenv("DATABASE_URL")` 仍是命中）。
+#: 词表本身不变，变的只是「在哪儿看见它算数」。
 FORBIDDEN_SURFACES = (
     "psycopg",
     "DATABASE_URL",
@@ -273,11 +280,85 @@ def _declared_forbidden_surfaces(text: str | None = None) -> tuple[str, ...]:
     return tuple(token.replace("\\.", ".") for token in matches[0].split("|"))
 
 
+def _blank_prose(lines: list[str], token: tokenize.TokenInfo) -> None:
+    """把一个 token 覆盖的字节区间就地涂成空格，**行数与行号一律不变**。
+
+    涂白而不是删行：命中报告里的行号是证据的一部分（`<路径>:<行号>: <词>`），删行会让
+    其后每一条命中的行号整体漂移。
+    """
+
+    (start_row, start_col), (end_row, end_col) = token.start, token.end
+    for row in range(start_row, end_row + 1):
+        line = lines[row - 1]
+        begin = start_col if row == start_row else 0
+        finish = min(end_col if row == end_row else len(line), len(line))
+        if finish > begin:
+            lines[row - 1] = line[:begin] + " " * (finish - begin) + line[finish:]
+
+
+def _code_lines(text: str) -> list[str]:
+    """把源码里的**注释与文档字符串**涂白，只留下会被解释器执行的那部分文本。
+
+    口径的理由：DB-free 守卫要抓的是「快照面上真的存在数据库 / scheduler 依赖」，而
+    `# 零数据库/scheduler 依赖` 这类叙述、以及模块头 docstring 里对禁区面的**否定**陈述，
+    在运行期完全惰性。裸串匹配把它们一律判成命中，逼出的唯一出路是逐文件豁免名单——
+    那正是本模块要消灭的第二份名单（`producer/src/yd_producer/state/cfg_ic.py` 已合入
+    master，只因 #9 在同目录登记了兄弟文件就被这条裸串扫描钉红，可见误报打的不止是新码）。
+
+    刻意**不**豁免普通字符串字面量：真实的 DB 面长成 `os.getenv("DATABASE_URL")`，词恰好
+    在字符串里；豁免全部字面量等于把守卫关掉。被涂白的字符串只有**语句位置**上的那一类
+    （模块 / 类 / 函数的 docstring，以及任何独立成句的字符串字面量）——那是散文，不是表达式
+    的一部分。
+
+    源码 tokenize 不了（语法错、编码怪）时**退回裸行扫描**：守卫宁可误报，不可漏报。
+    """
+
+    lines = text.splitlines()
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, SyntaxError, IndentationError):
+        return lines
+
+    #: 逻辑行的起点判据：只有这些 token 之后，下一个 STRING 才处在「语句位置」。
+    line_starts = {
+        tokenize.NEWLINE,
+        tokenize.INDENT,
+        tokenize.DEDENT,
+        tokenize.ENCODING,
+    }
+    skippable = {tokenize.COMMENT, tokenize.NL}
+    previous_significant: int | None = None
+    for position, token in enumerate(tokens):
+        if token.type == tokenize.COMMENT:
+            _blank_prose(lines, token)
+            continue
+        if token.type in skippable:
+            continue
+        if token.type == tokenize.STRING and (
+            previous_significant is None or previous_significant in line_starts
+        ):
+            following = next(
+                (item for item in tokens[position + 1 :] if item.type not in skippable),
+                None,
+            )
+            if following is not None and following.type in {
+                tokenize.NEWLINE,
+                tokenize.ENDMARKER,
+            }:
+                _blank_prose(lines, token)
+                previous_significant = token.type
+                continue
+        previous_significant = token.type
+    return lines
+
+
 def _forbidden_hits(repo_root: Path, files: Iterable[Path]) -> list[str]:
+    """扫描集上的禁区面命中；注释与 docstring 不计（口径见 :func:`_code_lines`）。"""
+
     hits: list[str] = []
     for path in files:
         for number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), start=1
+            _code_lines(path.read_text(encoding="utf-8")), start=1
         ):
             for token in FORBIDDEN_SURFACES:
                 if token in line:

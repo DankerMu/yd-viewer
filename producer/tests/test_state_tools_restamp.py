@@ -36,7 +36,10 @@ EXPECTED_MINUTE_T_PLUS_12 = "29456640.000000"
 #: 从 NWM pin `state_cli.py` 移植的符号全集：每一个都必须自带**自己的**溯源注释。
 PORTED_SYMBOLS = ("_ensure_utc", "restamp_to_absolute_time")
 
-#: 裁决 7 的 non-goal：rekey 面七符号在本模块内一律不得有定义。
+#: 裁决 7 的 non-goal：rekey 面七符号 + `_check_water_balance` non-goal 的两个名字，
+#: 在本模块内一律不得有定义。两个集合**必须与 `test_state_tools_qc.py` 的 `NON_GOAL_SYMBOLS`
+#: 逐字相同**：fixture 要求 state_qc / restamp 两侧都绑住 rekey 面与 water-balance 面，
+#: 少一项就是一条静默解除的义务（`water_balance` 曾只绑在 state_qc 一侧）。
 REKEY_SYMBOLS = (
     "StateCheckpoint",
     "StateRunContext",
@@ -45,6 +48,8 @@ REKEY_SYMBOLS = (
     "_checkpoint_with_header_time",
     "_lead_hours_from_run_valid_time",
     "STATE_CHECKPOINT_IC_HEADER_SHAPE_REKEY_SKIPPED",
+    "_check_water_balance",
+    "water_balance",
 )
 
 
@@ -164,6 +169,52 @@ def test_dirty_document_keeps_every_unchanged_byte_and_the_header_layout() -> No
     assert b"\t" in rendered
     assert not rendered.endswith(b"\n")
     assert rendered.count(b"\r\n") == payload.count(b"\r\n")
+
+
+def _dirty_payload_with_minute(minute: str) -> bytes:
+    """与 `_dirty_payload()` 同一张脏矩阵，只把 header 的 minute token 换成给定文本。"""
+    return build_cfg_ic_rows(
+        mesh_rows=[mesh_row(1), mesh_row(2), mesh_row(3)],
+        river_rows=[river_row(1, "1e-3"), river_row(2, "2.5E+01")],
+        header_tokens=("3", "6", minute),
+        eol="\r\n",
+        delimiter="\t",
+        header_delimiter="   ",
+        header_trailing_spaces="  ",
+        blank_lines=True,
+        trailing_newline=False,
+    ).payload
+
+
+def test_minute_token_is_rewritten_even_when_the_pin_would_short_circuit() -> None:
+    """偏离 4 的行为面：pin 的 `header_changed` 短路（`state_cli.py:288-296`）不移植。
+
+    pin 先读出 `observed_minute`，`round(observed) != round(expected)` 为假就**原样返回
+    字节未动的产物**。两条子形态各钉一条断言：
+    (a) 已是目标分钟的**整数写法** `29455920` —— pin 保留原字节，yd 侧改写成 `%.6f`；
+    (b) 目标比 header 晚 20 s（`round()` 仍相等）—— pin **静默保留旧值**，yd 侧写入
+        `29455920.333333`（手算：`(1767355200 + 20) / 60`）。
+    两条 minute 期望值都由手算 epoch 秒得出，不经被测模块。
+    """
+    payload = _dirty_payload_with_minute("29455920")
+    doc = cfg_ic.parse(payload)
+
+    # (a) round() 相等且分钟数完全一致：pin 恒等返回，yd 侧规范化为 %.6f。
+    same_minute = restamp.restamp_to_absolute_time(doc, TARGET_T)
+    assert f"{TARGET_T_EPOCH_SECONDS / 60:.6f}" == EXPECTED_MINUTE_T
+    header = same_minute.lines[same_minute.header_index]
+    assert "29455920.000000" in header
+    assert cfg_ic.render(same_minute) != payload, "产物与输入字节相同 = pin 式短路"
+    _assert_only_header_changed(payload, same_minute, expected_minute=EXPECTED_MINUTE_T)
+
+    # (b) 目标晚 20 s：pin 的 round() 判定为「未变」，yd 侧照写秒级残差。
+    plus_20s = restamp.restamp_to_absolute_time(doc, TARGET_T + timedelta(seconds=20))
+    expected_minute = f"{(TARGET_T_EPOCH_SECONDS + 20) / 60:.6f}"
+    assert expected_minute == "29455920.333333"
+    assert round((TARGET_T_EPOCH_SECONDS + 20) / 60) == round(29455920.0), (
+        "构造失效：pin 的 round() 判定在此必须为「未变」，否则这条用例证不了短路被剥离"
+    )
+    _assert_only_header_changed(payload, plus_20s, expected_minute=expected_minute)
 
 
 def test_restamp_is_idempotent() -> None:
@@ -331,6 +382,12 @@ def test_module_defines_no_rekey_surface_symbol() -> None:
     """裁决 7 的执行子句：rekey 面路由 #16/#24，落地即死代码。"""
     names = source_probe.definition_names(source_probe.read_source(restamp.__file__))
     assert names.isdisjoint(REKEY_SYMBOLS), names & set(REKEY_SYMBOLS)
+    # 集合本身也钉住：删掉一项时上面那条断言是「取消检查」而不是变红。
+    assert {"_check_water_balance", "water_balance"} <= set(REKEY_SYMBOLS)
+    for symbol in REKEY_SYMBOLS:
+        assert not hasattr(restamp, symbol), symbol
+    # `water_balance` 也不得作为重戳入口的形参出现。
+    assert "water_balance" not in restamp.restamp_to_absolute_time.__code__.co_varnames
 
 
 def test_module_documents_the_deliberate_deviations() -> None:
@@ -341,11 +398,13 @@ def test_module_documents_the_deliberate_deviations() -> None:
     # 条数由 docstring 解析得出并与序号闭合（子串断言 `"三条" in head` 对改条数的变异体
     # 可能存活——docstring 别处也可能出现同一个词）。
     declared = source_probe.declared_deviation_count(head)
-    assert declared == 3
+    assert declared == 4
     for ordinal in range(1, declared + 1):
         assert head.count(f"\n{ordinal}. ") == 1, ordinal
     assert f"\n{declared + 1}. " not in head
-    # 三条偏离各自的关键词。
+    # 四条偏离各自的关键词。
     assert "cfg_ic_header_shape" in head and "cfg_ic_header_minute_index" in head
     assert "with_replaced_lines" in head
     assert "safe_fs" in head or "atomic_write_bytes_no_follow" in head
+    # 偏离 4：pin 的 `header_changed` 短路不移植（下一条用例是它的行为面证据）。
+    assert "header_changed" in head

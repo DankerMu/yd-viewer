@@ -98,6 +98,45 @@ def test_missing_river_section_is_reported_by_name_not_by_row_count() -> None:
     assert "row count 0" not in result.reason
 
 
+def test_missing_river_section_is_rejected_without_any_expected_count() -> None:
+    """spec `结构检查` 的「缺 river 段被拒」Scenario **不带前置条件**。
+
+    段缺席不是「行数比对」的一个特例：spec 的第一条 Requirement 独立要求 `cfg.ic`
+    「至少包含 mesh 状态段与 river `Stage` 段」，故 `doc.river is None` 在零 `expected_*`
+    下就已可判。把它挂在调用方计数上，等于让 `#16` tracker 的默认调用（全 `None`）把只写
+    到一半、river 段还没落盘的 checkpoint 判成「完整」。
+    """
+    payload = _payload(mesh_rows=_plain_mesh(3))
+
+    result = state_qc.run_state_variable_qc(payload)
+
+    assert result.passed is False
+    assert result.reason == "missing river section"
+    assert result.checks["row_counts"]["expected_river"] is None
+    assert state_qc.state_ic_structure_complete(payload) is False
+
+
+def test_missing_lake_section_stays_legal_without_a_declared_lake_count() -> None:
+    """与上一条的**不对称是刻意的**：lake 段在原生格式里本就可选。
+
+    只有调用方声明了非零 lake 计数、段却不存在时才失败。
+    """
+    payload = _payload(mesh_rows=_plain_mesh(3), river_rows=_plain_river(4))
+
+    ok = state_qc.run_state_variable_qc(payload)
+    assert ok.passed is True, ok.reason
+    assert ok.reason is None
+    assert state_qc.state_ic_structure_complete(payload) is True
+
+    # 声明了 lake 计数才点名缺段。
+    declared = state_qc.run_state_variable_qc(payload, expected_lake_count=2)
+    assert declared.passed is False
+    assert declared.reason == "missing lake section (expected 2 rows)"
+    # 声明为 0 与「段缺席」自洽，仍通过。
+    zero = state_qc.run_state_variable_qc(payload, expected_lake_count=0)
+    assert zero.passed is True, zero.reason
+
+
 def test_river_row_count_mismatch_reports_actual_and_expected() -> None:
     result = state_qc.run_state_variable_qc(
         _payload(mesh_rows=_plain_mesh(3), river_rows=_plain_river(3)),
@@ -366,10 +405,59 @@ def test_negative_residuals_are_zeroed_with_hand_computed_evidence() -> None:
     assert b"-5e-4" not in rendered
 
 
+def _token_spans(text: str) -> list[tuple[int, int]]:
+    """测试侧**独立**实现的 token 切片（不复用被测模块的 `state_qc.token_spans`）。"""
+    spans: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, char in enumerate(text):
+        if char.isspace():
+            if start is not None:
+                spans.append((start, index))
+                start = None
+        elif start is None:
+            start = index
+    if start is not None:
+        spans.append((start, len(text)))
+    return spans
+
+
+def _assert_only_one_token_spliced(old: str, new: str) -> None:
+    """裁决 2 的**字节级** oracle：改动行内只有目标 token 的字节切片被替换。
+
+    为什么不能只断 token 序列 / Tab 计数 / `endswith` 布尔相等：`str.split()` 丢掉分隔
+    与行尾空白，Tab 计数在**统一** Tab 分隔下对 `"\\t".join(body.split())` 恒成立，而
+    `old.endswith("\\r\\n") == new.endswith("\\r\\n")` 比的是两个布尔值（两侧都为 False
+    时空真）。实测：只有这条按**切片前缀/后缀逐字节比对**的断言能杀死 pin 式回写变异体。
+    """
+    old_body, new_body = old.splitlines()[0], new.splitlines()[0]
+    assert old[len(old_body) :] == new[len(new_body) :], "行尾符被改写"
+
+    old_spans, new_spans = _token_spans(old_body), _token_spans(new_body)
+    assert len(old_spans) == len(new_spans), f"token 数变了：{old!r} -> {new!r}"
+    differing = [
+        i
+        for i, ((a0, a1), (b0, b1)) in enumerate(zip(old_spans, new_spans, strict=True))
+        if old_body[a0:a1] != new_body[b0:b1]
+    ]
+    assert len(differing) == 1, f"改动的 token 不止一个：{old!r} -> {new!r}"
+    index = differing[0]
+    assert old_body[old_spans[index][0] : old_spans[index][1]].startswith("-")
+    assert new_body[new_spans[index][0] : new_spans[index][1]] == "0"
+    # 目标 token 之前与之后的**全部字节**（含 token 间的原始分隔与行尾空格）逐字不变。
+    assert old_body[: old_spans[index][0]] == new_body[: new_spans[index][0]], (
+        f"目标 token 之前的字节被改写：{old!r} -> {new!r}"
+    )
+    assert old_body[old_spans[index][1] :] == new_body[new_spans[index][1] :], (
+        f"目标 token 之后的字节被改写：{old!r} -> {new!r}"
+    )
+
+
 def test_only_rows_that_actually_carry_a_negative_value_are_reserialised() -> None:
-    """脏矩阵：CRLF + 行尾空格 + Tab 分隔 + 段间空行 + 混合记法 + 无末尾换行。
+    """脏矩阵：CRLF + 行尾空格 + 数据行内多空格/Tab 混排 + 段间空行 + 混合记法 + 无末尾换行。
 
     裁决 1/2 的唯一判别力来源：pin 式整文件 `"\\n".join` 与行内 `"\\t".join` 只在这里变红。
+    数据行的行内分隔**必须混排**：统一单一分隔符时 `"\\t".join(body.split())` 与就地
+    splice 的输出在字节上重合，这条断言就退化成永真。
     """
     synthetic = build_cfg_ic_rows(
         mesh_rows=[
@@ -380,6 +468,7 @@ def test_only_rows_that_actually_carry_a_negative_value_are_reserialised() -> No
         river_rows=[river_row(1, "2.5E+01"), river_row(2, "-5e-4")],
         eol="\r\n",
         delimiter="\t",
+        data_delimiters=("   ", "\t"),
         header_delimiter="   ",
         trailing_spaces="  ",
         blank_lines=True,
@@ -401,19 +490,18 @@ def test_only_rows_that_actually_carry_a_negative_value_are_reserialised() -> No
 
     for index in changed:
         old, new = doc.lines[index], result.document.lines[index]
-        # 行尾符与行尾空格不变，行内分隔仍是 Tab，只有负值 token 变成 "0"。
-        assert old.endswith("\r\n") == new.endswith("\r\n")
-        assert new.count("\t") == old.count("\t")
-        old_tokens, new_tokens = old.split(), new.split()
-        assert len(old_tokens) == len(new_tokens)
-        differing = [
-            i
-            for i, (a, b) in enumerate(zip(old_tokens, new_tokens, strict=True))
-            if a != b
-        ]
-        assert len(differing) == 1
-        assert new_tokens[differing[0]] == "0"
-        assert old_tokens[differing[0]].startswith("-")
+        # 构造自检：这一行确实带多空格分隔与非空行尾空格，否则下面的字节级断言对
+        # canonical 化回写没有判别力。
+        assert old.rstrip("\r\n").endswith("  "), old
+        assert "   " in old, old
+        _assert_only_one_token_spliced(old, new)
+
+    # 行内混排与行尾符两维都要有实例：mesh 改动行同时带多空格与 Tab 分隔、且以 CRLF 收尾；
+    # river 改动行是文件末行、**无**行尾符（`endswith` 布尔相等在这里空真，故不能靠它）。
+    mesh_changed = doc.lines[synthetic.mesh_data_indices[1]]
+    assert "\t" in mesh_changed and "   " in mesh_changed, mesh_changed
+    assert mesh_changed.endswith("  \r\n"), mesh_changed
+    assert not doc.lines[synthetic.river_data_indices[1]].endswith("\n")
     # `-0.0` 不是负值（`-0.0 >= 0.0` 为 True），故那一格的记法逐字保留。
     assert "-0.0" in result.document.lines[synthetic.mesh_data_indices[0]]
     assert not cfg_ic.render(result.document).endswith(b"\n")
@@ -614,10 +702,53 @@ def test_normalization_is_idempotent() -> None:
 def test_projection_column_is_located_by_column_header_text_not_by_a_fixed_index() -> (
     None
 ):
-    """river 列头拼 `River_Stage` 时 stage 列仍被识别；unsat 不在索引 4 时同样。
+    """列序被打乱时两个投影列仍被识别。
 
-    写死索引 4 的实现在生产拼写下会把修正记到错误的域均桶里。
+    这条**必须**在非 canonical 列序上跑：`Unsat` 在 canonical mesh 列头里恰好落在索引 4、
+    `Stage` 在两列 river 列头里恰好落在索引 1，于是「按列头文本查找」与「写死索引」在
+    canonical fixture 上观测重合，用例对 `unsat_index = 4` / `stage_index = 1` 两个变异体
+    双双存活。此处 mesh 列头把 `Unsat` 挪到索引 1，river 列头插一个填充列把 `Stage` 挪到
+    索引 2。
     """
+    # 列头：Index Unsat Canopy Snow Surface GW —— unsat 在索引 1，不在 4。
+    mesh_header = ("Index", "Unsat", "Canopy", "Snow", "Surface", "GW")
+    # 列头：Index Depth Stage —— stage 在索引 2，不在 1。
+    river_header = ("Index", "Depth", "Stage")
+    synthetic = build_cfg_ic_rows(
+        mesh_rows=[
+            ("1", "-1e-6", "0.100000", "0.100000", "0.100000", "0.100000"),
+            *(
+                (str(element), "0.100000", "0.100000", "0.100000", "0.100000", "0.1")
+                for element in range(2, 5)
+            ),
+        ],
+        river_rows=[
+            ("1", "0.100000", "-5e-4"),
+            *((str(element), "0.100000", "0.100000") for element in range(2, 5)),
+        ],
+        mesh_header_tokens=mesh_header,
+        river_header_tokens=river_header,
+    )
+    doc = cfg_ic.parse(synthetic.payload)
+    # 构造自检：解析器确实按这两个列头分段，且投影列真的不在写死的位置上。
+    assert mesh_header.index("Unsat") == 1
+    assert river_header.index("Stage") == 2
+    assert doc.mesh.row_count == 4
+    assert doc.river is not None and doc.river.row_count == 4
+
+    evidence = state_qc.normalize_negative_residuals(doc).evidence()
+
+    assert evidence["normalized_value_count"] == 2
+    assert evidence["normalized_unsat_row_count"] == 1
+    assert evidence["max_unsat_correction_m"] == pytest.approx(1e-6, rel=1e-12)
+    assert evidence["mean_unsat_correction_m"] == pytest.approx(1e-6 / 4, rel=1e-12)
+    assert evidence["normalized_river_row_count"] == 1
+    assert evidence["max_river_correction_m"] == pytest.approx(5e-4, rel=1e-12)
+    assert evidence["mean_river_correction_m"] == pytest.approx(5e-4 / 4, rel=1e-12)
+
+
+def test_projection_column_lookup_accepts_the_production_river_spelling() -> None:
+    """生产拼写 `Index River_Stage`（真实 `.cfg.ic.update` 的形态）仍被识别为 stage 列。"""
     synthetic = build_cfg_ic_rows(
         mesh_rows=[mesh_row(1, unsat="-1e-6"), *_plain_mesh(4)[1:]],
         river_rows=[river_row(1, "-5e-4"), *_plain_river(4)[1:]],
