@@ -320,6 +320,9 @@ Required evidence（round 1 审核后追加；上表的取证方法被变异体�
 - **非 PathLike `raw_root`（偏离 9）**：`judge(123, ...)` -> 抛 `ConfigError` 且 `path is None`（不得外泄裸 `TypeError`）
 - **渲染出 `""`、`"."` 或 `".."`（偏离 5 / r2-cand-03）**：三者与分隔符同样被拒。**三个取值都 MUST 用含 `{lead}` 且渲染结果逐字为该值的模式来构造，并配 `lead_hours` 单元素**——否则用例会被更早的门吸收而零判别力：不含 `{lead}` 的模式（如裸 `".."`）先被 `{lead}` 必需门拦下、报文是"不含 `{lead}`"，而"断言抛 `ConfigError` 且 `path` 为 bundles 点分路径"在两个门下同样成立，于是该参数分不出单文件名约束在不在。多 lead 则会被单射门吸收。这是本 issue 记录在案的**第三处门重叠**（另两处：不含任何占位符的模式被单射门吸收；`""`/`"."` 曾被单射门吸收后由单元素 `lead_hours` 解开）
 - **UTC 判据为零偏移量而非 tzinfo 身份（cand-04）**：以 `zoneinfo.ZoneInfo("UTC")` 或 `timezone(timedelta(0), name="Z")` 构造 cycle -> 判定正常返回。MUST NOT 用 `timezone(timedelta(0))`：CPython 对无名零偏移返回 `timezone.utc` 单例，该取值对本条零判别力（实测判据换成 `tzinfo is UTC` 后 47 例全绿）
+- **非 datetime 的 `cycle`（round 3 r3-cand-03；与上方"非 PathLike `raw_root`"成对）**：`judge(root, "gfs", cycle, config)` 传 `date`/`str`/`int`/`None` -> 各抛 `ConfigError` 且 `path is None`（不得外泄裸 `AttributeError`）。理由：主消费方 3.2/11.1 传 `date` 而非 `datetime`、或从别处拿到字符串戳，是这条链上最常见的传参错；实测把该守卫变异成 `if False:` 时 87 例全绿，而变异体下 `date(2026,3,4)` 会在 `cycle.utcoffset()` 抛裸 `AttributeError`，直接违反 Invariant A
+- **词表门与 `_render` 异常漏斗 MUST 可分离（round 3 r3-cand-01）**：上方"bundle 模式含词表外具名字段/位置字段"那行的三个取值，仅断言"抛 `ConfigError` 且消息含字段名"时零判别力——删掉整个词表校验循环后它们仍全绿，因为落进 `_render` 的 `KeyError`/`IndexError` 兜底产出同 `path`、同含模式名与字段名的报文。用例 MUST 另断言 `excinfo.value.__cause__` 不是 `KeyError`/`IndexError`（词表门直接 `raise`、无 `__cause__`）**且**报文含 `_validate_pattern` 独有措辞。位置字段 `{}` 的 `field` 为空串，故守卫 MUST 写 `if field is not None:` 而非 `if field:`，否则该参数被静默跳过
+- **哨兵桩 MUST 对宽捕获探针有判别力（round 3 r3-cand-02）**：桩体抛 `AssertionError` 只杀得掉不吞异常与 `except OSError` 的探针；`except Exception:` / 裸 `except:` 探针全部存活（实测 `os.walk`/`os.stat`/`os.listdir` 四个宽捕获变异体均 87 全绿，而同形态的 `except OSError` 对照组变红 20–21 例）。正确形态：桩体先把被调原语名 append 进模块级列表再抛 `AssertionError`（保留纵深），并在拒绝路径 `monkeypatch.undo()` 之后、happy path `judge` 返回之后断言该列表为空。**MUST NOT** 改用 `BaseException` 子类——裸 `except:` 同样吞得掉。`os.access` 那条兄弟取证（cand-08）换用同一记录式桩即顺带闭合
 - `cd producer && uv run pytest` -> 退出码 0
 - `cd producer && uv run ruff check .` 与 `uv run ruff format --check .` -> 退出码 0
 - `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
@@ -334,7 +337,8 @@ Trigger A: round 1 cand-02（`Path.is_file()` 的 `OSError` 未收敛）-> round
 
 Failure class B: test-evidence —— 取证方法钉的是"例子"而不是"不变量"
 Invariant B: 每条证据行 MUST 表达被测**性质**，且其构造 MUST 与被测实现的具体原语/拼法解耦；用例 MUST 由一个能证伪该性质的变异体验证过。
-Trigger B: round 1 cand-06/07/08（哨兵桩具体名字、oracle 复用实现的 sorted、chmod 用例对 open-vs-access 零判别力）-> round 2 r2-cand-01/03/04（哨兵变死桩、`..` 参数被 `{lead}` 门吸收、ENOTDIR 分支无用例）。
+Invariant B 的验收判据（round 3 换轨）：审计对象 MUST 是"**逐守卫是否存在杀手变异体**"，MUST NOT 是"逐个已有用例是否有判别力"——后者扫不出"该有而根本没写的用例"（r3-cand-03 即此类）。`judge` 的每一道门（含类型守卫、值域门、模式门、分类分支）MUST 各有一个能杀死它的变异体；不可达的防御腿（如三个调用点均不可达的 `ValueError`）MUST 在报告里显式登记为死腿，不得默认为已闭合。
+Trigger B: round 1 cand-06/07/08（哨兵桩具体名字、oracle 复用实现的 sorted、chmod 用例对 open-vs-access 零判别力）-> round 2 r2-cand-01/03/04（哨兵变死桩、`..` 参数被 `{lead}` 门吸收、ENOTDIR 分支无用例）。 -> round 3 r3-cand-01/02/03（词表门 3 个参数零判别力、哨兵对宽捕获探针零判别力、`isinstance(cycle, datetime)` 守卫零覆盖）。**连续三轮复发，三轮形态各异（桩错函数 -> 桩错边界层 -> 门根本没有对应用例），已触发 three-round hard gate；retro shape = depth，corrective action = 上述审计对象换轨**（见 `.workplans/pr-38/review/review-failure-retro.md`）。
 ```
 
 Non-goals:
