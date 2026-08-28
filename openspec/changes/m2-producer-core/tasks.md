@@ -807,7 +807,8 @@ Regression rows:
 - 多 bundle 配置（`len(bundles) != 1`）在 staging 侧不受支持，需 config 长出 variable→bundle 映射后才能放开（上方单 bundle 约束）
 - 源侧 symlink 一律拒绝，与 3.1 的 `is_file()` 跟随语义有意不对称（上方复制语义）
 - **源 `manifest.json` 叶子段自身不查 symlink，本 issue 有意排除**：symlink MUST 的作用域由上方复制语义逐字限定为「每个源 **bundle 路径**」，Regression rows 有链 bundle 行与链 cycle 目录行、无叶子行。该叶子的**全部祖先段**已被 bundle 走查覆盖，故缺口仅限「叶子自身是链」这一形态。round 1 verifier REFUTED、round 2 复现机制为真后仍维持 REFUTED（无绑定文本归属，verifier 不以翻转判决来裁定范围）。若后续要收口，属 fixture 修订而非实现缺陷
-- **产出 manifest 不拒 `NaN`/`Infinity`**：`json.dumps` 默认 `allow_nan=True`，源侧若带非标准 JSON 字面量会原样穿过序列化闸门，严格解析器读不了（round 2 实测）。判 DEFER 的依据是唯一具名契约边界未断——pin 侧 converter 用 `json.load`，默认同样接受。加固成本为一个实参 `allow_nan=False`（抛的 `ValueError` 直接落进现有 except、kind 仍为 `source-manifest`）。follow-up：**issue #73**
+- **九项闭合 kind 词表本身无判别器**：九个 kind 各有具名用例与杀手变异体，但测试从不 import `ERROR_KINDS`，加入第十项的变异体在 747 passed 全绿下存活（round 2 实测，同环境控制变异体 13 failed，harness 已校准）。今日无运行期影响故判 DEFER，但本模块最强的 oracle 锚（逐字钉死的闭合集）目前不设防。follow-up：**issue #76**
+- **产出 manifest 不拒 `NaN`/`Infinity`**：`json.dumps` 默认 `allow_nan=True`，源侧若带非标准 JSON 字面量会原样穿过序列化闸门，严格解析器读不了（round 2 实测）。判 DEFER 的依据是唯一具名契约边界未断——pin 侧 converter 用 `json.load`，默认同样接受。加固成本为一个实参 `allow_nan=False`（抛的 `ValueError` 直接落进现有 except、kind 仍为 `source-manifest`）。follow-up：**issue #75**
 
 #### Review focus
 
