@@ -13,6 +13,9 @@ dependencies = [
     "xarray>=2025.1",
 ]
 
+[project.scripts]
+yd-producer = "yd_producer.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8",

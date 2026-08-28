@@ -31,6 +31,7 @@ VALID_CONFIG: dict[str, Any] = {
     "output_interval_minutes": 60,
     "checkpoint_hours": [12],
     "reach_count": 3988,
+    "nwm_mapping_builder_module": "workers.mapping_builder.cli",
     "cycle": {"hours": [0, 12]},
     "variants": {"gfs": "input/models/yd_gfs", "ifs": "input/models/yd_ifs"},
     "raw": {
@@ -81,6 +82,9 @@ SPEC_PINNED_TOP_LEVEL_KEYS = (
     "output_interval_minutes",
     "checkpoint_hours",
     "reach_count",
+    # spec cli-config「config.toml 装载与校验」Requirement 已用反引号把该 key 钉在顶层，
+    # 与上面四个同判据（issue #3 fixture 记录下来的决定，非默认）。
+    "nwm_mapping_builder_module",
 )
 
 # --- 第二本账：从 fixture 手工转录的必需 key 全集 ----------------------------
@@ -110,6 +114,8 @@ PINNED_CONFIG_KEYS = (
     "output_interval_minutes",
     "checkpoint_hours",
     "reach_count",
+    # issue #3 fixture 的 TOML key schema 在 `reach_count` 之后加入本键（#32 三步之第 1 步）
+    "nwm_mapping_builder_module",
     # tasks.md:49-50 [cycle]
     "cycle",
     "cycle.hours",
@@ -436,6 +442,7 @@ def test_load_config_returns_all_fields(tmp_path):
     assert config.output_interval_minutes == 60
     assert config.checkpoint_hours == (12,)
     assert config.reach_count == 3988
+    assert config.nwm_mapping_builder_module == "workers.mapping_builder.cli"
     assert config.cycle.hours == (0, 12)
     assert config.variants.gfs == "input/models/yd_gfs"
     assert config.variants.ifs == "input/models/yd_ifs"
