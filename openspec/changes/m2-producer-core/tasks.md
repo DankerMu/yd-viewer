@@ -775,7 +775,7 @@ Regression rows:
 - 零写入拒绝的取证 MUST 是调用前后对 `work_dir` 做递归快照比对，MUST NOT 只断言 `manifest_path` 不存在
 - 变异实验按 profile 的 "Mutation-testing hazards" 与 "Orchestration hazards" 两节执行：唯一命名的私有 scratch 副本、`rsync --exclude='.venv'`、`env -u VIRTUAL_ENV uv sync --frozen`、`PYTHONDONTWRITEBYTECODE=1` 且逐变异体清 `__pycache__`、断言 `yd_producer.__file__` 落在副本内、先跑一个必然变红的控制变异校准
 - 闸门枚举 MUST 用 **AST 遍历全部可执行语句**（不用 grep——grep 看不见 `status = path.stat()` 这类值传播闸门），逐条落进「表内」或「死腿登记」两桶，审计表作为交付物落盘到 `.workplans/pr-<N>/review/`
-- 禁区 grep：`grep -rnE 'psycopg|DATABASE_URL|scheduler|registry|reservation' producer/src/yd_producer/rawcopy.py` -> 零命中
+- DB-free 隔离检查（**刻意不写成「禁区 grep：」**：该前缀是组 2 词表声明集的唯一锚，`test_snapshot_provenance.py::test_forbidden_surfaces_match_the_declared_grep` 断言全文恰有一条，第二条会把那条判别器打红）：`grep -rnE 'psycopg|DATABASE_URL|scheduler|registry|reservation' producer/src/yd_producer/rawcopy.py` -> 零命中
 - `cd producer && uv sync --frozen` -> 无 lock drift（`dependencies = []` 是 Must-preserve 项，本条是它的判别器）
 - `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
 - `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
