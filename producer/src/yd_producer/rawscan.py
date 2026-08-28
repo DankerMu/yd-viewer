@@ -5,7 +5,7 @@ bundle 文件模式、GFS f000 特例）、openspec `raw-scan` 的 Requirement�
 完整性判定」。目录布局与文件名形态转录自 NWM pin `8ae9b8f2`（见下方溯源注释）。
 
 设计约束：
-- **纯函数、零写入**：只对预期文件做 `is_file()` 与 `open(..., "rb")` 读一个字节，
+- **纯函数、零写入**：只对预期文件做 `stat()` 与 `open(..., "rb")` 读一个字节，
   不创建/修改/删除任何路径，不产生 manifest（manifest 归任务 3.2）。
 - **不列目录**：预期文件集严格由 `lead_hours × bundles` 构造。以目录稳定时间、末
   lead 存在或任何动态推断替代逐文件检查是 spec 的 MUST NOT。
@@ -16,6 +16,7 @@ bundle 文件模式、GFS f000 特例）、openspec `raw-scan` 的 Requirement�
 """
 
 import os
+import stat as stat_module
 import string
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -26,14 +27,24 @@ from yd_producer.config import Config, ConfigError, RawSourceConfig
 
 __all__ = [
     "GFS_F000_UNAVAILABLE_VARIABLES",
+    "SOURCE_DIR_NAMES",
     "ScanVerdict",
     "judge",
 ]
 
-# 合法 source 词表：目录名即该字面量小写形式
-# （NWM@8ae9b8f2 workers/data_adapters/gfs_adapter.py:615 的
-#  `raw/{source_id}/{compact_cycle}/{bundle_filename}`）。
+# 合法 source 词表：同时也是 `config.raw` 的属性名，恒小写。
 SOURCES: tuple[str, ...] = ("ifs", "gfs")
+
+# 入参 source（`config.raw` 属性名，恒小写）→ raw 目录段。二者是两个不同的身份，
+# MUST NOT 由同一字面量同时承担：pin 的存储身份表
+#   `_STORAGE_SOURCE_IDS = {"GFS": "gfs", "ERA5": "ERA5", "IFS": "IFS"}`
+# （NWM@8ae9b8f2 packages/common/source_identity.py:5-9）刻意让 GFS 落**小写**、
+# IFS 落**大写**，两个 adapter 的默认 `source_id` 与之一致且 IFS 的 `local_key` 逐字
+# 使用（ifs_adapter.py:181、:621-623），object store 侧不做任何大小写归一。目录段即
+# `raw/{source_id}/{compact_cycle}/{bundle_filename}`（gfs_adapter.py:615）中的
+# `source_id`。大小写敏感的 Linux NFS 上把 IFS 写成小写会让该源恒判不完整。
+# 本映射与 yd 自己产物侧的小写 `source`（docs/products-contract.md §5）无关。
+SOURCE_DIR_NAMES: dict[str, str] = {"ifs": "IFS", "gfs": "gfs"}
 
 # 合法 cycle 起报时刻（compute-loop §7.1；`config.cycle.hours` MUST 是其子集）。
 CYCLE_HOURS_DOMAIN: frozenset[int] = frozenset({0, 12})
@@ -46,6 +57,9 @@ CYCLE_DIR_FORMAT = "%Y%m%d%H"
 # （NWM@8ae9b8f2 workers/data_adapters/gfs_adapter.py:1878-1880 与
 #  workers/data_adapters/ifs_adapter.py:1688-1690 的文件名形态）。
 BUNDLE_PATTERN_FIELDS: tuple[str, ...] = ("cycle_hour", "lead")
+
+# 每个 bundle 模式 MUST 含该字段：预期集的单射性由它承担（见 `_validate_pattern`）。
+LEAD_FIELD = "lead"
 
 # f000（分析时刻）无定义的累积/平均量。
 # 转录自 NWM@8ae9b8f2 workers/data_adapters/gfs_adapter.py:107
@@ -155,7 +169,8 @@ def _pattern_fields(pattern: str, path: str) -> list[str]:
 
 
 def _validate_pattern(pattern: str, path: str) -> None:
-    for field in _pattern_fields(pattern, path):
+    fields = _pattern_fields(pattern, path)
+    for field in fields:
         if field in BUNDLE_PATTERN_FIELDS:
             continue
         if field == "":
@@ -169,6 +184,18 @@ def _validate_pattern(pattern: str, path: str) -> None:
         raise ConfigError(
             f"配置项 `{path}` 的 bundle 模式 {pattern!r} 含{reason}；"
             "只接受 " + "、".join(f"`{{{name}}}`" for name in BUNDLE_PATTERN_FIELDS),
+            path,
+        )
+    if LEAD_FIELD not in fields:
+        # 只做占位符白名单守不住「预期文件集 = lead_hours × bundles」：漏写 `{lead}`
+        # 的模式让全部 lead 渲染成同一路径，预期集塌缩成一个点，57 个 lead 只要 1 个
+        # 文件落盘即判整轮完整——与空列表是同一病理的两扇门，故一并 fail closed。
+        # 注意 `string.Formatter().parse` 不暴露嵌套格式说明符内的字段，故
+        # `"f{cycle_hour:0{lead}d}"` 这类只把 `lead` 写在 spec 里的模式也会被拒：
+        # 方向 fail-closed，属有意为之。漏写 `{cycle_hour}` 无害（cycle 目录已隔离）。
+        raise ConfigError(
+            f"配置项 `{path}` 的 bundle 模式 {pattern!r} 不含 `{{{LEAD_FIELD}}}`；"
+            "每个模式必须逐 lead 渲染出互不相同的文件名",
             path,
         )
 
@@ -212,12 +239,53 @@ def _is_readable(path: Path) -> bool:
     return True
 
 
+def _check(path: Path) -> str:
+    """逐文件三态分类：`"ok"` / `"missing"` / `"unreadable"`。
+
+    语义等同 `Path.is_file()`（跟随 symlink，须是普通文件），但**自己做 stat 分类**
+    而不直接调用它：`Path.is_file()` 吞掉哪些 errno 随 CPython 版本变（3.12 只吞
+    ENOENT/ENOTDIR/EBADF/ELOOP，EACCES/EIO/ESTALE 上抛；3.13+ 起吞掉全部 `OSError`），
+    依赖它会让"cycle 目录缺 x 位"这个生产 NFS 上最常见的形态在不同解释器上一会儿以裸
+    `PermissionError` 逃出 `judge`（违反"不完整不是异常"），一会儿被静默记成"缺失"
+    （`unreadable_files` 分支不可达）。这里把「不存在」与「不可访问」显式分开，两者
+    都不外泄异常，且跨版本一致。
+
+    生产 raw 根是 NFS 上由 NWM 以另一 uid 写入的目录树，权限类失败与 `open` 同样归入
+    `unreadable_files`。
+    """
+    try:
+        status = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return "missing"
+    except OSError:
+        return "unreadable"
+    if not stat_module.S_ISREG(status.st_mode):
+        # 目录、指向目录的 symlink 与其它非普通文件都算缺失（`is_file()` 语义）；
+        # 断链 symlink 的 stat 抛 FileNotFoundError，已落在上一支。
+        return "missing"
+    return "ok" if _is_readable(path) else "unreadable"
+
+
 # --- 判定入口 ---------------------------------------------------------------
 
 
-def _expected_leads(source_config: RawSourceConfig) -> tuple[int, ...]:
-    """预期 lead，按升序（`lead_hours` 在 `config.toml` 内的书写顺序不作数）。"""
-    return tuple(sorted(source_config.lead_hours))
+def _expected_leads(source_config: RawSourceConfig, source: str) -> tuple[int, ...]:
+    """预期 lead，按升序（`lead_hours` 在 `config.toml` 内的书写顺序不作数）。
+
+    重复值 fail closed：它会让同一路径在预期集里出现多次，预期集不再是
+    `lead_hours × bundles` 的单射像（与模式漏 `{lead}` 是同一病理的兄弟触发门）。
+    """
+    leads = tuple(source_config.lead_hours)
+    duplicated = sorted({lead for lead in leads if leads.count(lead) > 1})
+    if duplicated:
+        path = f"raw.{source}.lead_hours"
+        raise ConfigError(
+            f"配置项 `{path}` 含重复的 lead "
+            + "、".join(str(lead) for lead in duplicated)
+            + "；预期文件集必须是 lead_hours × bundles 的单射像",
+            path,
+        )
+    return tuple(sorted(leads))
 
 
 def _variables_for_lead(source_config: RawSourceConfig, lead: int) -> tuple[str, ...]:
@@ -249,17 +317,34 @@ def _iter_expected(
             yield cycle_root / _render(pattern, cycle_hour, lead, path)
 
 
+def _reject_collisions(expected_files: tuple[Path, ...], path: str) -> None:
+    """预期集 MUST 单射：任何重复项都让"全部存在才算完整"近似恒真。
+
+    到这里 lead 已去重、每个模式也已确保含 `{lead}`，故剩余的重复项来自 `bundles`
+    自身——两个不同模式渲染出同名，或 `bundles` 里直接写了重复元素。
+    """
+    seen: set[Path] = set()
+    for candidate in expected_files:
+        if candidate in seen:
+            raise ConfigError(
+                f"配置项 `{path}` 渲染出重复的预期文件 {candidate.name!r}；"
+                "每个 (lead, bundle) 对必须渲染出互不相同的文件名",
+                path,
+            )
+        seen.add(candidate)
+
+
 def judge(
     raw_root: str | os.PathLike[str],
     source: str,
     cycle: datetime,
     config: Config,
 ) -> ScanVerdict:
-    """判定 `<raw_root>/<source>/<YYYYMMDDHH>/` 下该轮 raw 是否完整。
+    """判定 `<raw_root>/<存储身份>/<YYYYMMDDHH>/` 下该轮 raw 是否完整。
 
-    `raw_root` 是 NWM raw 根（其下为 `<source>/<YYYYMMDDHH>/`）；`source` 取
-    `"ifs"`/`"gfs"`（大小写敏感，词表外 fail closed）；`cycle` MUST 是 tz-aware 的
-    UTC 整点。
+    `raw_root` 是 NWM raw 根；`source` 取 `"ifs"`/`"gfs"`（大小写敏感，词表外 fail
+    closed），它是 `config.raw` 的属性名，目录段另经 `SOURCE_DIR_NAMES` 翻译（IFS 落
+    大写）；`cycle` MUST 是 tz-aware 的 UTC 整点。
 
     判定顺序逐段短路：配置取值域 → 请求校验 → 模式校验与渲染 → 逐文件检查。前三段
     的失败一律抛 `ConfigError`，且发生在任何文件系统访问之前——`raw_root` 不存在时
@@ -279,14 +364,20 @@ def judge(
         root = Path.cwd() / root
 
     source_config: RawSourceConfig = getattr(config.raw, source)
-    cycle_root = root / source / cycle.astimezone(UTC).strftime(CYCLE_DIR_FORMAT)
-    leads = _expected_leads(source_config)
-    # 预期集在任何 stat 之前完整构造：模式校验的失败不得等到扫到该文件时才暴露。
-    expected_files = tuple(
-        _iter_expected(
-            cycle_root, source_config, leads, cycle.hour, f"raw.{source}.bundles"
-        )
+    # 目录段由 `SOURCE_DIR_NAMES` 翻译得到，MUST NOT 直接用入参 `source`：IFS 的
+    # 存储身份是大写（见该常量的 pin 溯源注释）。
+    cycle_root = (
+        root
+        / SOURCE_DIR_NAMES[source]
+        / cycle.astimezone(UTC).strftime(CYCLE_DIR_FORMAT)
     )
+    leads = _expected_leads(source_config, source)
+    # 预期集在任何 stat 之前完整构造：模式校验的失败不得等到扫到该文件时才暴露。
+    bundles_path = f"raw.{source}.bundles"
+    expected_files = tuple(
+        _iter_expected(cycle_root, source_config, leads, cycle.hour, bundles_path)
+    )
+    _reject_collisions(expected_files, bundles_path)
     expected_variables = {
         lead: _variables_for_lead(source_config, lead) for lead in leads
     }
@@ -294,11 +385,10 @@ def judge(
     missing: list[Path] = []
     unreadable: list[Path] = []
     for path in expected_files:
-        if not path.is_file():
-            # `is_file()` 跟随 symlink：指向目录的 symlink、断链 symlink 与目录本身
-            # 都算缺失。
+        status = _check(path)
+        if status == "missing":
             missing.append(path)
-        elif not _is_readable(path):
+        elif status == "unreadable":
             unreadable.append(path)
 
     return ScanVerdict(
