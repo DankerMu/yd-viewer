@@ -50,3 +50,61 @@
 
 按 skill 规则，keep/cut 是**人工裁决、默认 keep**。此处按默认 keep 记录并给出依据，
 **尚未经人工确认**；如需改为 cut，直接修改本文件状态即可，无需回溯已合并的 PR。
+
+## 复议记录
+
+### 2026-08-28：issue #11 / PR #57 合并后
+
+`loop_log_audit.py` 再次报出同一条 DECIDABLE。新归因：**9 个多轮合并 PR，
+core=28、rotated=34**（上次 8 个 PR、23 / 33）。本次 PR 贡献 core +5、rotated +1。
+
+**决策不变：keep。** 复议条件逐条核对，均未触发：
+
+- 「rotated 命中连续两个 PR 全为 P3」：PR #57 的 rotated 命中是 round 2 的
+  spec-compliance `ruling-overreach`，**P1/major** —— 而且抓的是编排者自己写的 fixture
+  越权替 issue #47 作裁决，属于固定阵容结构上抓不到的一类（写 fixture 的人不会
+  自查越权）。连续两个 P3 不成立。
+- 「已闭合项被重报超过该轮 finding 总数一半」：#57 四轮零重报。
+
+新增一条支持 keep 的证据：round 4 换进 invariant-state 后三位 reviewer 零 finding，
+而正是这一轮独立扫了 29 个变异体、判定枚举完备性 closed —— 轮换进来的 lens 的价值
+不止于「多抓几条」，也包括**给出固定阵容给不出的收敛证明**。
+
+已知的指标缺陷（本次发现，记录不修）：`loop_log_audit.py` 读的是每条记录的
+`catches` 键，而 issue #5 / PR #40 那行写成了 `findings`，因此该 PR 对轮换归因
+贡献为 0，审计口径其实是 9 个 PR 里的 8 个。结论方向不受影响（#40 的 round 4/5
+命中全部来自轮换进来的 lens，补上只会让 rotated 更高）。
+
+状态仍为**默认 keep、待人工确认**。
+
+### 2026-08-28：issue #22 / PR #62 合并后
+
+`loop_log_audit.py` 第三次报出同一条 DECIDABLE。新归因：**10 个多轮合并 PR，
+core=32、rotated=35**（上次 9 个 PR、28 / 34）。本次 PR 贡献 **core +4、rotated +1**。
+
+**决策不变：keep。** 复议条件逐条核对，均未触发：
+
+- 「rotated 命中连续两个 PR 全为 P3」：不成立。PR #57 的 rotated 命中是 P1/major；
+  本 PR 的 rotated 命中是 minor，未构成连续两个。
+- 「已闭合项被重报超过该轮 finding 总数一半」：#62 三轮零重报，每轮 reviewer 都按 brief
+  逐条给出前轮 finding 的 closed / still-failing 判定并附证据。
+
+本次的归因形状与前两次不同，值得记一笔：**#62 的 round 1 一次就铺满了六个 lens，
+round 2/3 都是它的子集，所以常规轮次的 rotated 贡献为 0**——按本 ADR 的口径，
+「轮换」在这个 PR 的复核轮里根本没发生。唯一那条 rotated 命中来自 **Phase 7 的
+`final-head-confirmation`**：一个不在任何 round-1 阵容里的 lens，任务只有「这些声明在
+这个 head 上是不是真的」。它抓到的是编排者**为修一处不实断言而写的提交自己引入的
+另一处不实断言**（变异体 (m2) 的批次归属，PR #62 偏离 23）。
+
+这条对 keep 的支持方向与前两次不同，因此单独记录：前两次的论据是「换进来的 lens 抓得更多」，
+这一次的论据是**有些缺陷在结构上只有换人才可能被抓到**——写下该断言的人刚刚才校对过它，
+再让同一个视角复查一遍，得到的是同一个判断。这不是注意力问题，无法靠更仔细来解决。
+
+同时记一条对轮换**不利**的观察，不作为推翻依据但应进入下次复议：本 PR 14 条 CONFIRMED 里
+有 7 条属 evidence-accuracy / evidence-record，而这一类的根因是机械的（数字写在旧 head 上、
+head 一动即过期，且 `evidence_check.py` 不校验计数）。**换 lens 对它没有帮助**——三轮里
+换了几个视角都在重复报同一批过期数字。真正闭合它的是流程改动（在冻结 head 上一次性重测重写、
+先贴评论再写指针），不是阵容改动。轮换的边际价值在**判断类**缺陷上高，在**记账类**缺陷上近乎为零；
+若日后要给轮换做成本收益，应按缺陷类别分开算，而不是看总命中数。
+
+状态仍为**默认 keep、待人工确认**。

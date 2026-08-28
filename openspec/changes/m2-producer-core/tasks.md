@@ -808,7 +808,7 @@ pin 的重戳经 `atomic_write_bytes_no_follow` 落 `.{name}.normalized` 点前�
 
 **B. 任务 4.3 重戳（`state/restamp.py`）**
 
-- `cfg_ic_header_minute_index(header_tokens) -> int | None`（pin `state_qc.py:609`）、`cfg_ic_header_minute_time(header_tokens) -> float | None`（`:629`）、`CfgIcHeaderShape` 与 `cfg_ic_header_shape(header_tokens, *, expected_mesh_count=None)`（`:664`）、`_VALID_CFG_IC_HEADER_TOKEN_COUNTS = (3, 4)`（`:646`）逐字移植。落点为 `state_qc.py`（pin 同文件），`restamp.py` 导入之。
+- `cfg_ic_header_minute_index(header_tokens) -> int | None`（pin `state_qc.py:609`）、`cfg_ic_header_minute_time(header_tokens) -> float | None`（`:629`）、`CfgIcHeaderShape` 与 `cfg_ic_header_shape(header_tokens, *, expected_mesh_count=None)`（`:664`）、`_VALID_CFG_IC_HEADER_TOKEN_COUNTS = (3, 4)`（`:646`）逐字移植。**落点是 `state/header_time.py`，不是 `state_qc.py`**：issue #22（任务 12.1）因严格前沿闸门需要同一判定基座而先行落地了这五个符号，快照清单 §1 中 `packages/common/state_qc.py` 行明文「#9 MUST 从 `header_time` 导入这五个符号，MUST NOT 再移植一份」。故 `state_qc.py` / `restamp.py` 一律 **import**，两模块的模块级定义名字集 MUST NOT 含这五个名字——否则即造出 pin header 判定的双权威副本。（本条原写「落点为 `state_qc.py`（pin 同文件）」，是 #22 落地前的写法；#22 合并后按文档优先原则更正。）
 - `restamp_to_absolute_time(doc: CfgIcDocument, target: datetime) -> CfgIcDocument`：**唯一**重戳函数，两条调用路径（init 首态定 T、发布前 checkpoint 定 T+12）只差 `target` 实参，MUST NOT 分裂成两个函数或加 `mode` 开关。语义：
   - `minute = _ensure_utc(target).timestamp() / 60.0`，写成 `f"{minute:.6f}"`（pin `state_cli.py:299` 的字面格式）；
   - 覆写**之前** MUST 先过 `cfg_ic_header_shape(header_tokens)`；不合法则抛 `ValueError`，消息以 `STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID` 起头（pin #1430 的中毒 IC 闸门：两 token 形状下被定位的「minute」其实是 mesh 状态列数，覆写它会造出让 SHUD 申请约 183 GB 的文件）；
@@ -1029,7 +1029,7 @@ Domain packs (from active profile):
 ## 5. 执行器抽象：JobExecutor 协议与 fake
 
 - [x] 5.1 定义 `JobExecutor` 协议（submit/poll、job ID/partition/终态/起止时间语义）与进程内 fake（成功/失败/超时可编排），接口契约测试
-- [ ] 5.2 实现 Slurm 生产执行器（`sbatch`/`sacct` 封装，参数全部装配自 `local.toml`、零内置默认）；本阶段不做行为测试（M4 oracle），本地判据 = 参数装配纯函数检查 + 协议一致性
+- [x] 5.2 实现 Slurm 生产执行器（`sbatch`/`sacct` 封装，参数全部装配自 `local.toml`、零内置默认）；本阶段不做行为测试（M4 oracle），本地判据 = 参数装配纯函数检查 + 协议一致性
 
 依赖：组 1（Slurm 字段结构）
 §13.1 归属：控制器（支撑）
@@ -1131,6 +1131,187 @@ Review focus:
 - 是否存在任何隐式默认：`clock` 是否可省、未编排 name 是否落到"默认成功"、dataclass 是否带默认值
 - 失败路径是否全部收敛到 `ExecutorError`，且 `job_id` 属性可机检定位
 - 时间断言是否用注入时钟的确定性精确值，而非挂钟近似
+
+### Issue #11 fixture（任务 5.2）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：改动面正面命中强制 expanded 触发词 `public API`（本 issue 是 `JobExecutor` 的生产实现，#26–#28 直接消费）与 `parser`/`format`/`schema`（`sacct` 输出解析、五项资源字段→`sbatch` flag 的翻译表）。#2 与 #10 已在同构情形——"无既有消费者但为跨 issue 共享契约"——override 为 expanded，本组保持 compact 与该先例冲突）
+Repair intensity: medium（无写入面：本模块不打开、不创建、不删除任何文件，`log_path` 只作为 `sbatch --output/--error` 的实参传递；故 `Invariant Matrix` 不适用，与 #10 同判据）
+Project profile: yd-viewer
+
+**模块归属裁决（先读这条，它决定文件落点）**：issue 正文写"Module / Scope: producer 包 `yd_producer.executor`（Slurm 实现）"，但 Slurm 生产实现 **MUST NOT 写进 `producer/src/yd_producer/executor.py`**。理由是硬的：#10 fixture 把"源码机检"钉成了验收项，`producer/tests/test_executor.py:518-520` 逐字断言 `executor.py` 文本中不出现 `partition`/`account`/`cpus`/`memory`/`walltime` 任一字面量；而本 issue 的验收标准"装配产物含全部五项资源参数"必然要求这些字段名出现在装配层——`sbatch` flag 无法从键名推导（`cpus`→`--cpus-per-task`、`memory`→`--mem`、`walltime`→`--time`）。把实现塞进 `executor.py` 只有两条出路：删掉那条守卫测试（oracle 完整性违规，Phase 8 硬闸拦截），或让装配拿不到字段名（做不出验收）。故本 issue 落**同包新模块** `producer/src/yd_producer/slurm.py`：`executor.py` 是**不透明协议层**，`slurm.py` 是 #10 fixture 所称"调用方按 `required_fields` 的键取值"里的那个**受权解释点**。issue 的 "PR Boundary: executor 模块扩展" 按包义解读（`yd_producer` 的执行器面扩展），不按单文件解读。
+
+Change surface:
+- 新增 `producer/src/yd_producer/slurm.py`：`SBATCH_FLAGS`、`build_sbatch_command`、`parse_sbatch_job_id`、`build_sacct_command`、`SACCT_ENV`、`parse_sacct_record`、`SLURM_STATE_MAP`、`SlurmJobExecutor`、`subprocess_runner`
+- 新增 `producer/tests/test_slurm.py`
+- 不改动 `executor.py`、`config.py`、`cli.py`、`geometry.py`、`nwm.py`、`pyproject.toml`、`uv.lock`
+
+Must preserve:
+- `producer/src/yd_producer/executor.py` **零改动**，`producer/tests/test_executor.py` 全部用例继续通过——含 `:518-520` 的字面量守卫（本 issue 不放宽、不改写、不删除该守卫；它守的是协议层，不是本模块）
+- `yd_producer.config` / `cli` / `geometry` / `nwm` 行为不变，既有测试全绿
+- producer 依赖面不变：本 issue 只用 stdlib（`dataclasses`/`datetime`/`os`/`shlex`/`subprocess`/`typing`），`uv sync --frozen` 无 drift
+
+Must add/change（逐条钉死，实现方消费不重议）:
+
+**A. 字段翻译表与键集权威的分工**
+
+- `SBATCH_FLAGS: Mapping[str, str]` 是本模块的**翻译表**：把 `local.toml` 的资源字段名映射为 `sbatch` 长选项名，至少含 `partition`→`--partition`、`account`→`--account`、`cpus`→`--cpus-per-task`、`memory`→`--mem`、`walltime`→`--time`。它是**翻译**权威，不是**键集**权威。
+- `build_sbatch_command(spec: JobSpec, *, required_fields: Sequence[str]) -> tuple[str, ...]`：键集权威仍是 `Config.slurm.required_fields`，由调用方逐次传入，**MUST NOT** 在本模块内写死一份"必需五项"的清单或从 `SBATCH_FLAGS` 的键集反推必需性。判定：
+  - `spec.resources` 的键集与 `required_fields` 不完全相等（缺项或多余项）-> 抛 `ExecutorError`，消息含首个缺/多的键名（承 `load_local` 的键集相等语义；缺项即验收标准的"缺任一 Slurm 字段时装配报错"）；
+  - `required_fields` 里出现 `SBATCH_FLAGS` 没有对应 flag 的字段名 -> 抛 `ExecutorError` 并指名该字段（**MUST NOT** 静默丢弃：静默丢弃等于把一个现场配置的资源约束扔掉后照常提交）；
+  - `SBATCH_FLAGS` 里有 `required_fields` 未声明的条目 -> **不报错**（config 是键集权威，翻译表允许有富余条目）。
+- **零内置默认**：本模块 MUST NOT 为任何资源参数提供 fallback 取值；`build_sbatch_command` 的 `required_fields` 与 `SlurmJobExecutor` 的 `clock`/`runner` 一律无默认值。
+
+**B. `sbatch` 命令装配（纯函数，确定性可断言）**
+
+产物为 `tuple[str, ...]`，顺序 MUST 固定为：
+
+1. `"sbatch"`、`"--parsable"`
+2. `"--job-name", spec.name`
+3. `"--chdir", str(spec.work_dir)`
+4. `"--output", str(spec.log_path)`、`"--error", str(spec.log_path)`——**同一个路径**，使 stdout 与 stderr 落进同一份文件；两个 flag **都显式给出**，MUST NOT 依赖"省略 `--error` 时 Slurm 隐式并流"这一隐含默认。`spec.log_path` 是**调用方给定的作业日志路径**（计算节点可见，即 scratch 侧），**不是** `logs/<source>/<T>.log` 本身：后者只在失败轮存在（compute-loop §13 的产物表）、由控制器作为唯一 NFS writer 写入（agent-ops §8.4，且 §8.5 禁止把 NFS 路径当作发布目标交给看不到 NFS 的计算节点），其**写入与合并归发布器 #24**（#10 fixture 的 Non-goals 已如此归属）。本模块只把这个路径当值传递，不打开、不创建（round 2 审核 cand-10，verifier CONFIRMED/FIX_NOW：早先此处把两者写成同一份文件，与 §D 自相矛盾）
+5. 资源 flag：按 `required_fields` 的字段名 **`sorted()` 升序**逐项展开为 `SBATCH_FLAGS[name], str(value)`（排序而非沿用 `required_fields` 的书写序，是为了让产物只依赖键集不依赖 `config.toml` 里的行序；`str(value)` 使 `cpus = 8` 这类 int 取值可入 argv）
+6. `"--wrap", shlex.join(spec.command)`
+
+**C. `sbatch` 输出解析（纯函数）**
+
+- `parse_sbatch_job_id(stdout: str) -> str`：`--parsable` 下 `sbatch` 输出 `<jobid>` 或 `<jobid>;<cluster>`。取 `;` 前首段并 `strip()`；结果为空、或非全数字 -> 抛 `ExecutorError`（`job_id=None`，此刻还没有 id）。多行输出取首个**非空行**。
+- **「非空行」的判据 MUST 为「`strip()` 后非空」**（本模块所有涉及"非空行"的地方同判据，含 §D 的行数判定）。纯空白行 MUST 被跳过/不计数，MUST NOT 只用 `if line:` 一类真值判断——那会把 `"   "` 当成一行有效输出。**`strip()` 与该判据都是可机检的属性，MUST 各有一条"改坏即变红"的接受态用例**（见 Required evidence；round 3 审核 cand-14 与 gate retro 的直接产物：此前 `strip()` 只写在散文里、未进 Required-evidence 枚举，测试忠实照枚举写，于是该属性三轮无 oracle）。
+
+**D. `sacct` 命令与输出解析（纯函数）**
+
+- `build_sacct_command(job_id: str) -> tuple[str, ...]` MUST 为 `("sacct", "-j", job_id, "-X", "--noheader", "--parsable2", "--format=JobID,State,Start,End")`。**四列止步于此是本 fixture 的明示裁决，不是遗漏**——两项本可加的列各有归属，逐条见下：
+  - **不取 `ExitCode`**：`specs/run-controller/spec.md`「失败处理」MUST 要求合并日志含退出码，但 `JobRecord`（#10 已合并、frozen、全字段无默认）没有承载它的字段；加字段即改 `executor.py` 的公共 schema，与本 issue「`executor.py` 零改动」和 #10 既有测试直接冲突，属跨 issue 变更。故本 issue **不取该列**，理由**只**有两条、且都是本 issue 自身的边界：`JobRecord`（#10 已合并、frozen、全字段无默认）没有承载退出码的字段，加字段即改 `executor.py` 的公共 schema，与本 issue「`executor.py` 零改动」冲突；且本 fixture 已把 `build_sacct_command` 的 argv 逐元素钉死，改列即改那条 oracle。
+
+承载体的裁决 issue 是**已存在的 #47**「失败日志退出码的载体待裁决」（PR #39 已 DEFER 到此），**不另开新 issue**——本 fixture 早先写的"Phase 8 经 issue-scribe 落一条 tracked issue"是重复路由，已更正。**本 fixture MUST NOT 替 #47 作裁决**：#47 的方案 (b) 含两个并列支——「由作业自身的批处理封装写进它自己的日志（该日志由 #24 合并）」**或**「由 #11 另起一次 `sacct` 取得」——**两支在 #47 处均保持开放**。本 fixture 早先的措辞只复述了前一支并加了"不经 `sacct` 取退出码"，等于替 #47 关掉了后一支（round 2 审核 cand-09，verifier CONFIRMED/FIX_NOW），已删除。若 #47 最终选 `sacct` 支，届时按文档优先原则先修订本 fixture 钉死的 argv 再动码。在 #47 落定前，**#24 的日志合成 MUST NOT 假定退出码来自本模块**。
+  - **不取 `Submit`**：`submitted_at` 由 `submit` 取一次本地时钟写定（#10 fixture 的打戳时机 MUST），而 `sacct` 在作业刚提交时可能尚无记录（见 Known limits），提交那一刻根本取不到 `Submit`；若改为 `poll` 时用 `Submit` 覆写，同一字段会在一次 run 内先后报出两个值——一个字段两个权威，比时钟偏斜更坏。故保留本地钟，偏斜风险按 Known limits 归 M4。`-X` **不可省**：缺它 `sacct` 会连作业步（`.batch`/`.extern`）一起吐，解析拿到多行且首行未必是分配本体。
+- `SACCT_ENV: Mapping[str, str]` MUST 至少含 `{"TZ": "UTC", "SLURM_TIME_FORMAT": "standard"}`。**并入语义钉死为叠加而非替换**：`SlurmJobExecutor` 在调用 runner 前构造 `{**os.environ, **SACCT_ENV}` 传入；MUST NOT 只传 `SACCT_ENV`——那会让子进程丢掉 `PATH` 与 Slurm 客户端环境，M4 现场每次 `poll` 都失败，正是这条钉死本要防的失败类。叠加发生在 executor 侧（可测），不在 `subprocess_runner` 侧（不测）。理由：`sacct` 默认吐集群本地时间且格式受该环境变量左右，而 `JobRecord.__post_init__` 对 naive 与非零偏移 `datetime` 一律 fail closed（`executor.py:_require_utc`）——不钉死时区就是把一个必然的 `ExecutorError` 留到 M4 现场触发。
+- `parse_sacct_record(stdout: str, job_id: str) -> tuple[JobState, datetime | None, datetime | None]`：
+  - 非空行数 MUST 恰为 1（「非空行」判据同 §C：`strip()` 后非空）；为 0 或 >1 -> 抛 `ExecutorError(job_id=job_id)`（`-X` 下多行意味着出现了未预期的作业副本，静默取首行会让 `poll` 报告一个没被查询的实体）。该唯一行按 `|` 拆四列；列数不等于 4 -> 抛 `ExecutorError(job_id=job_id)`；
+  - 首列 JobID 与查询 `job_id` 不相等 -> 抛 `ExecutorError(job_id=job_id)`（防串台）；
+  - State 列先按空格截首词（`sacct` 的 `CANCELLED by 1234` 形态 MUST 归一为 `CANCELLED`），再查 `SLURM_STATE_MAP`；**未知状态串 -> 抛 `ExecutorError(job_id=job_id)`，MUST NOT 兜底映射为 `FAILED`**（兜底会把"没见过的调度器状态"伪装成"作业自身失败"，正是 #10 拆分 `TIMEOUT`/`FAILED` 要保住的那条运维判据）；
+  - Start/End 列为 `Unknown` / `None` / 空 -> `None`；否则按 `%Y-%m-%dT%H:%M:%S` 解析并挂 `timezone.utc`；格式不合 -> 抛 `ExecutorError(job_id=job_id)`。
+- `SLURM_STATE_MAP: Mapping[str, JobState]` MUST 逐条为：`PENDING`/`REQUEUED`/`REQUEUE_HOLD`→`PENDING`（重排队是健康作业的中间态，落进「未知串必抛」会把它变成假故障）；`RUNNING`/`CONFIGURING`/`COMPLETING`/`RESIZING`/`SUSPENDED`→`RUNNING`；`COMPLETED`→`SUCCEEDED`；`TIMEOUT`→`TIMEOUT`（**MUST NOT** 折叠进 `FAILED`）；`FAILED`/`CANCELLED`/`NODE_FAIL`/`OUT_OF_MEMORY`/`BOOT_FAIL`/`DEADLINE`/`PREEMPTED`/`REVOKED`→`FAILED`。
+
+**E. `SlurmJobExecutor`（协议一致性，注入式运行器）**
+
+- `SlurmJobExecutor(*, required_fields: Sequence[str], clock: Callable[[], datetime], runner: Callable[..., str])`，三者**均无默认值**。`runner(argv: Sequence[str], *, env: Mapping[str, str] | None) -> str` 返回子进程 stdout；模块另提供 `subprocess_runner` 作为真实实现。
+- 注入 runner **不是** design.md D3 所弃的 "subprocess mock"：D3 弃的是"用命令行 mock 替代 `JobExecutor` 协议 fake 去测控制器状态机"；此处 runner 是本模块自身的进程边界，注入它测的是 argv 装配与输出解析的**组装**，argv 形态由本 fixture 逐字钉死，不脆弱。真实 `sbatch`/`sacct` 行为仍归 M4。
+- `submit(spec) -> JobRecord`：`build_sbatch_command` → `runner` → `parse_sbatch_job_id` → 取一次 `clock()` 作 `submitted_at` → 返回 `JobRecord(state=PENDING, started_at=None, ended_at=None, resources=spec.resources)`；并在实例内按 `job_id` 记住该记录（`poll` 需要 `name`/`resources`/`submitted_at`，`sacct` 不提供）。runner 抛出的任何异常 MUST 转成 `ExecutorError`，MUST NOT 外泄 `OSError`/`CalledProcessError`。
+- `submit` 调用 runner 时 `env=None`（继承当前进程环境，无需时区钉死——`sbatch` 的输出只有 job id）；`poll` 调用 runner 时 `env={**os.environ, **SACCT_ENV}`。
+- `poll(job_id) -> JobRecord`：本实例未提交过的 `job_id` -> 抛 `ExecutorError(job_id=job_id)`（与协议「未知 `job_id` 必抛」一致）；否则 `build_sacct_command` → `runner`（并入 `SACCT_ENV`）→ `parse_sacct_record` → 用解析出的 state/start/end 重建 `JobRecord`（`submitted_at`/`name`/`resources` 取自记住的提交记录），更新实例内记录并返回。记录不变式仍由 `JobRecord.__post_init__` 在构造点复检——本模块 MUST NOT 自行复制那套不变式（第二权威）。
+- 终态幂等：已达终态的 job 再 `poll` MUST 返回同一记录且 MUST NOT 再调 runner。
+- `isinstance(SlurmJobExecutor(...), JobExecutor)` MUST 为真，且 `submit`/`poll` 的 `inspect.signature` 与协议同名方法逐参数一致（承 #10 evidence 先例）。
+
+Seams under test:
+- `build_sbatch_command` / `parse_sbatch_job_id` / `build_sacct_command` / `parse_sacct_record`（纯函数，可逐值断言——issue 正文所称"参数装配纯函数检查"）
+- `SlurmJobExecutor.submit/poll` 配记录型假 runner + `StepClock`（"协议一致性"）
+- `subprocess_runner`：**不测**（真实进程边界，M4 oracle）
+
+Risk packs considered (core):
+- Public API / CLI / script entry: selected - `SlurmJobExecutor` 是 `JobExecutor` 的生产实现，#26–#28 按协议消费；四个纯函数是本模块公开面
+- Config / project setup: selected - 资源参数全部装配自 `local.toml`，键集权威归属与零默认是核心验收项
+- File IO / path safety / overwrite: not selected - 本模块不打开、不创建、不删除任何文件；`work_dir`/`log_path` 只作为 argv 实参转成字符串
+- Schema / columns / units / field names: selected - `sacct --format` 的四列顺序、`|` 分隔、状态串词表、时间格式即解析 schema，错配直接污染运行报告与 receipt
+- Auth / permissions / secrets: not selected - argv 里只有队列名/账户名/资源额度一类调度参数，无凭据；本模块不打印命令输出
+- Concurrency / shared state / ordering: selected - 实例内 job 记录表是共享可变状态；终态幂等与"未知 job_id 必抛"是其契约（真实并发归控制器 flock，本模块单线程）
+- Resource limits / large input / discovery: not selected - 无发现逻辑；`sacct` 输出为单作业单行（`-X`）
+- Legacy compatibility / examples: not selected - 全新模块，仓库内零既有消费者（控制器尚未落地）
+- Error handling / rollback / partial outputs: selected - fail-closed 是核心验收项：键集不等、无 flag 字段、未知状态串、空/畸形 `sacct` 输出、runner 异常全部收敛到 `ExecutorError`，不返回半成品记录
+- Release / packaging / dependency compatibility: selected - 只用 stdlib，不得新增依赖，`uv sync --frozen` 无 drift
+- Documentation / migration notes: not selected - 无迁移；模块语义由本 fixture 钉死
+
+Domain packs (from active profile):
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: selected - `sacct` 时间戳→tz-aware UTC 的转换在此定型，错配会静默错位 receipt 与 cycle 的绝对时间比较
+- 状态链 / warm-start 定戳: not selected - 本模块不读写 `cfg.ic`
+- NWM 快照溯源 / DB-free 隔离: not selected - 全新代码，非快照，无 NWM import、无数据库连接
+
+Required evidence（每条 input -> expected output）:
+
+装配（B）:
+- `required_fields=("partition","account","cpus","memory","walltime")`、`resources={"partition":"cpu","account":"acct","cpus":8,"memory":"32G","walltime":"04:00:00"}`、`spec.command=("shud","yd")` -> `build_sbatch_command` 返回**逐元素精确相等**的元组：`("sbatch","--parsable","--job-name",<name>,"--chdir",<work_dir>,"--output",<log_path>,"--error",<log_path>,"--account","acct","--cpus-per-task","8","--mem","32G","--partition","cpu","--time","04:00:00","--wrap","shud yd")`（资源段按字段名 `sorted()` 升序；`cpus=8` 的 int 已转字符串）
+- 同上但 `required_fields` 书写序改为 `("walltime","cpus","partition","memory","account")` -> 产物与上一条**完全相同**（证明产物只依赖键集，不依赖行序）
+- **参数化：** 逐个删掉 `resources` 中的一项（五次）-> 每次抛 `ExecutorError`，消息含该缺失键名
+- `resources` 多一个 `required_fields` 未声明的键 -> 抛 `ExecutorError`，消息含该多余键名
+- `required_fields` 含 `SBATCH_FLAGS` 无对应 flag 的字段名（如 `"gres"`，且 `resources` 同步带该键使键集相等）-> 抛 `ExecutorError`，消息含 `gres`（MUST NOT 静默丢弃，MUST NOT 只是少一个 flag 地正常返回）
+- `SBATCH_FLAGS` 有富余条目而 `required_fields` 只声明其中三项（`resources` 同步只带三项）-> 正常返回，产物只含那三项的 flag（config 是键集权威）
+- `spec.command=("shud","--in","a b")` -> `--wrap` 的实参为 `shlex.join` 结果（含空格的元素被引起来），argv 长度不变（`--wrap` 后恒为**单个**字符串）
+- `--output` 与 `--error` 的实参**都**等于 `str(spec.log_path)`（显式并流；断言两个 flag 均在产物中出现）
+- 源码机检：`producer/src/yd_producer/executor.py` 的文本在本 PR 后仍不含 `partition`/`account`/`cpus`/`memory`/`walltime` 任一字面量（`test_executor.py:518-520` 的既有守卫继续绿即为证据，不新增重复用例）
+
+`sbatch` 输出（C）:
+- `"12345\n"` -> `"12345"`；`"12345;cluster0\n"` -> `"12345"`；`"\n12345\n"` -> `"12345"`
+- **接受态归一化（钉死 `strip()`；去掉 `strip()` 后这两条 MUST 变红）**：`"12345 \n"` -> `"12345"`；`"12345 ; cluster0\n"` -> `"12345"`
+- **接受态「非空行」判据（把 `line.strip()` 换成 `line` 后 MUST 变红）**：`"   \n12345\n"` -> `"12345"`（纯空白行被跳过，不被当作首个非空行）
+- `""`、`"   \n"`、`"abc"`、`";cluster0"` -> 各抛 `ExecutorError` 且 `exc.job_id is None`
+
+`sacct`（D）:
+- `build_sacct_command("12345")` -> 逐元素等于 `("sacct","-j","12345","-X","--noheader","--parsable2","--format=JobID,State,Start,End")`
+- `SACCT_ENV["TZ"] == "UTC"` 且 `SACCT_ENV["SLURM_TIME_FORMAT"] == "standard"`
+- `"12345|COMPLETED|2026-08-28T00:00:00|2026-08-28T01:00:00"` -> `(SUCCEEDED, 2026-08-28T00:00:00+00:00, 2026-08-28T01:00:00+00:00)`，两个 `datetime` 断言 `tzinfo is not None and utcoffset() == timedelta(0)`
+- **参数化：** `SLURM_STATE_MAP` 的每个键各一行 -> 得到该键映射的 `JobState`；其中 `TIMEOUT` 行 -> `JobState.TIMEOUT`（**断言 `is not JobState.FAILED`**）
+- `"12345|CANCELLED by 1234|...|..."` -> `FAILED`（空格后缀被截）
+- `"12345|PENDING|Unknown|Unknown"` -> `(PENDING, None, None)`；`None` 与空串两种写法同样得 `None`
+- `"12345|BOGUS_STATE|Unknown|Unknown"` -> 抛 `ExecutorError` 且 `exc.job_id == "12345"`（MUST NOT 得到 `FAILED`）
+- `""`（空输出）-> 抛 `ExecutorError`，`exc.job_id == "12345"`（fail closed；见 Known limits 的 sacct 落库延迟一条）
+- **「非空行」判据（把行过滤的 `line.strip()` 换成 `line` 后 MUST 变红）**：`"   \n12345|COMPLETED|2026-08-28T00:00:00|2026-08-28T01:00:00"` -> 正常解析为 `SUCCEEDED`（纯空白行不计入行数，不触发"行数不为 1"）
+- 两行合法记录（`"12345|COMPLETED|...|...\n12345|FAILED|...|..."`）-> 抛 `ExecutorError`，`exc.job_id == "12345"`（MUST NOT 静默取首行）
+- `"12345|COMPLETED|2026-08-28T00:00:00"`（三列）-> 抛 `ExecutorError`
+- `"99999|COMPLETED|...|..."`（JobID 串台）-> 抛 `ExecutorError`，`exc.job_id == "12345"`
+- `"12345|COMPLETED|28/08/2026 00:00|..."`（时间格式不合）-> 抛 `ExecutorError`
+
+协议一致性与组装（E）:
+- `isinstance(SlurmJobExecutor(...), JobExecutor)` 为真；`inspect.signature` 逐参数比对 `submit`/`poll` 与 `JobExecutor` 同名方法一致
+- 记录型假 runner（返回 `"12345"`）+ `StepClock(start=..., step=...)` 下 `submit(spec)` -> 假 runner 收到的 argv 与 `build_sbatch_command` 的产物逐元素相等；返回记录 `state is PENDING`、`job_id == "12345"`、`started_at is None`、`ended_at is None`、`submitted_at` 等于 `StepClock` 的首值（精确值断言，非"约等于现在"）、`resources` 与 `spec.resources` 逐键相等
+- 承上 `poll("12345")`，假 runner 返回 `"12345|RUNNING|2026-08-28T00:00:00|Unknown"` -> 收到的 argv 等于 `build_sacct_command("12345")`；返回记录 `state is RUNNING`、`started_at` 非 None、`ended_at is None`、`name`/`resources`/`submitted_at` 与提交记录一致
+- 承上再 `poll`，返回 `COMPLETED` 行 -> 记录进 `SUCCEEDED`；此后再 `poll` 两次 -> 返回值相等且假 runner **调用次数不再增加**（终态幂等，不再触 `sacct`）
+- `poll("nosuch")`（本实例未提交过）-> 抛 `ExecutorError` 且 `exc.job_id == "nosuch"`，假 runner 调用次数为 0
+- **env 叠加（两条判别性断言，各挡一种错法）**：`monkeypatch.setenv("YD_SENTINEL", "1")` 与 `monkeypatch.setenv("TZ", "Asia/Shanghai")` 后 `poll` -> 假 runner 收到的 `env` **同时**含 `YD_SENTINEL=1`（挡 `env=SACCT_ENV` 的整体替换写法）与 `env["TZ"] == "UTC"`（挡 `{**SACCT_ENV, **os.environ}` 的顺序写反）；`submit` 收到的 `env is None`
+- 假 runner 抛 `OSError` / `subprocess.CalledProcessError` -> `submit` 与 `poll` 各抛 `ExecutorError`（原异常 MUST NOT 外泄；以 `pytest.raises(ExecutorError)` 断言），且 `str(exc)` **含原异常文本**（`sbatch` 的诊断信息走 stderr、runner 只回 stdout，转译若不带原文就只剩「非全数字」一类无信息消息）
+- `inspect.signature(subprocess_runner)` 与 `runner` 契约一致——首参为位置 argv、`env` 为 keyword-only——且模块可导入（该符号不测行为，但必须存在且签名对得上——否则它可以完全不存在而全绿）
+- 假 runner 令 `sacct` 返回 `COMPLETED` 但 `Start` 早于 `submitted_at` -> 抛 `ExecutorError`（不变式由 `JobRecord.__post_init__` 拦下；证明本模块未绕过构造点校验）
+- `SlurmJobExecutor` 的 `required_fields`/`clock`/`runner` 三个参数均**不可省**（缺任一即 `TypeError`），且均为 keyword-only
+- 全部失败路径以 `pytest.raises(ExecutorError)` 表达，MUST NOT 用 `pytest.raises(Exception)`
+
+工程门禁:
+- `cd producer && uv run pytest` -> 退出码 0（含 `test_executor.py` 既有用例全绿）
+- `cd producer && uv run ruff check .` 与 `uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 退出码 0
+
+Non-goals:
+- 真实 `sbatch`/`sacct` 提交与查询行为、真实状态码在集群上的取值分布 —— M4 oracle（design.md D3、issue 正文 Out of Scope）
+- `subprocess_runner` 自身的**行为**测试（真实进程边界，M4 oracle）。其存在性与签名一致性仍有一条 evidence（见上），因为仓库没有类型检查闸，纯靠类型标注等于没有闸。
+- 控制器对本执行器的消费（前沿、双源并行、失败隔离、flock）—— 组 12–14，issue #22–#28
+- 作业取消 / watchdog —— compute-loop §10 明确不做
+- `local.toml` 资源取值的语义校验（`walltime` 格式、`partition` 是否真实存在、`memory` 单位）—— 装载层只校验类型（#2 已裁决"不做值域校验"），真实取值的正确性归 M4 现场
+- **不钉以下三处 `strip()`，按 slack 处理**（round 3 的系统性归一化扫描共发现 6 个存活变异体，其余三处逐条裁决于此，使后续轮次不再重复发现同一批）：`_parse_sacct_time` 对时间列的 `raw.strip()`、JobID 串台比对的 `reported_id.strip()`、状态串截首词前的 `raw_state.strip()`。理由：三者都是 `--parsable2` 输出上不会出现的形态（该模式不产生列内 padding），且都不在 spec 或本 fixture 的任何 MUST 之下；它们是防御性余量，不是被钉死的属性。若日后现场证明 `sacct` 会吐 padding，按文档优先先修订本条再动码。
+- 跨进程的 job 记录持久化：`poll` 依赖实例内提交记录，故只支持"同一 run 进程内提交后轮询"。这正是 `specs/run-controller/spec.md`「并发与锁」的形态（单进程持 flock 覆盖提交→等待→发布全生命周期），非缺陷
+- `squeue` 回退：`sacct` 落库前的查询空窗按 fail closed 处理（见 Known limits），本 issue 不引入第二个查询通道
+
+Known limits（每条在 PR 工作说明中复述，并按 Phase 8 规则路由）:
+- **`sacct` 落库延迟**：作业刚提交时 `sacct` 可能尚无记录，本模块按 fail closed 抛 `ExecutorError`。M2 无真实调度器，无法判定该窗口是否需要重试/回退 `squeue`；归 M4 现场验证。
+- **时钟偏斜**：`submitted_at` 取本地时钟、`started_at` 由 Slurm 报告，登录节点与计算节点时钟偏斜可能触发 `JobRecord` 的 `submitted_at <= started_at` 不变式而抛 `ExecutorError`。M2 不引入容差（容差是一个内置默认，正是本 issue 要消除的形态）；归 M4 现场验证。
+- **退出码不经本模块（承载体裁决仍在 #47，本 fixture 不预判）**：`specs/run-controller/spec.md`「失败处理」要求合并日志含退出码，本模块的 `sacct --format` 明示不取 `ExitCode`（理由见 §D，均为本 issue 自身边界）。承载体的裁决 issue 是已存在的 **#47**，不另开新件；其方案 (b) 的两个并列支（作业体自写日志由 #24 合并 / 由 #11 另起一次 `sacct`）**均未被本 fixture 关闭**。在 #47 落定前 **#24** 的日志合成 MUST NOT 假定退出码来自本模块。
+- **进程死亡窗口（孤儿作业）**：`poll` 只认本实例提交过的 `job_id`（fixture §E 的 MUST），故 run 进程在等待期被杀后，flock 随进程释放而 Slurm 作业仍在跑，下一个 tick 无从发现它——按「未提交残留清理重跑」删 work 并重新提交，会出现同源两个在途作业（违反 agent-ops §8.3），且孤儿作业继续往被删的目录写。**更正本 fixture 早先的措辞**：Non-goals 里「跨进程 job 记录持久化…正是「并发与锁」的形态，非缺陷」只对**进程存活**的正常路径成立；崩溃一支不被「并发与锁」覆盖。归属：崩溃恢复前置由 **#23/#28** 的 fixture 裁决（按 receipt 里的 job ID 作一次存活确认，或"见半成品 work 即停该源等人工"）。
+- **已提交但未登记窗口**：`submit` 先调 runner 再解析 job id，故 `sbatch` 退出 0、作业已排队、而 stdout 形态超出 §C 钉死的域时，`parse_sbatch_job_id` 抛错且 `self._records` 里什么都没有——后果与上一条同类。缓解：错误消息带原始行/原始 stdout，运维可人工定位。归属同上（**#23/#28**）。
+- **`poll` 抛错 ≠ 作业失败**：`ExecutorError` 只有 `job_id` 一个结构化属性，「`sacct` 尚未落库」与「解析失败」抛的是同一个无类别异常，控制器没有可机检的判别位。本 issue 不加判别位（那要么改 `executor.py` 的公共异常、要么在协议层外另立一套，均越界）；**#26** 的 fixture MUST 钉死「`poll` 抛出异常不得直接触发「失败处理」的 work 删除」。
+- **重排队语义未钉（M4 现场剧本）**：`REQUEUED`/`REQUEUE_HOLD` 被当作健康中间态，但三处相邻面都没有保证一次重排队能活下来——(i) `sacct -j <id> -X` 对重排队作业是否吐多行未经现场确认，多行会被「行数恰为 1」硬抛；(ii) `sbatch` 未给 `--open-mode`，重跑是截断还是追加取决于站点 `JobFileAppend`，截断会抹掉首次尝试的 stdout/stderr，与「失败处理」的"完整 stdout/stderr"相抵；(iii) `PREEMPTED`→`FAILED` 见下条。M4 剧本：提交 → `scontrol requeue <id>` → 跑本 fixture 钉死的 `build_sacct_command` argv，数行数并核对日志是否保留首次尝试。`--open-mode` 的归属由 **#24/#25** 的 fixture 裁决（加 flag 会改本 fixture 逐元素钉死的 argv，故不在本 issue 做）。
+- **`PREEMPTED` 被钉成终态**：`PREEMPTED`→`FAILED` 叠加「终态幂等、不再查 `sacct`」，意味着被抢占后重排队仍在跑的作业会被本模块永久报成失败，控制器据此删 work 目录。M2 无真实调度器无法判定该形态是否出现；归 compute-loop §10 / M4 现场验证（本模块不做取消、不做 watchdog 是 §10 明确不做的范围）。
+- **`sacct` 时间列与 `JobRecord` 不变式的对撞（双向）**：本 fixture 假定运行中作业 `End=Unknown`、终态作业两列都有值。若某版本对运行中作业给出预估 `End`，「非终态不得带 `ended_at`」硬抛；反向地，终态行若 `End=Unknown`，「终态必须带 `ended_at`」硬抛，`COMPLETED` 行若 `Start=Unknown`，「终态（非 FAILED/TIMEOUT）必须带 `started_at`」也硬抛（`executor.py:150-176`）。方向与 fail closed 一致（宁可报错不可乱报时间），但会让 `poll` 在该形态上不可用；归 M4 现场验证。
+- **`required_fields` 删项 = 交给 Slurm 默认**：若 `config.toml` 的 `slurm.required_fields` 删掉某项（如 `partition`），装配层按键集权威正常产出不含该 flag 的命令，实际取值退化为集群默认。这不是本模块的内置默认（本模块无 fallback 取值），但确实是一条"配置层可静默放弃约束"的路径；`config.toml` 生产实例的字段完整性归 **#29**。
+
+Review focus:
+- `executor.py` 是否真的零改动，`test_executor.py:518-520` 的字面量守卫是否原样保留（放宽/删除该守卫即 oracle 完整性违规）
+- 键集权威是否唯一：`slurm.py` 内是否出现任何"必需五项"的固定清单，或以 `SBATCH_FLAGS` 的键集充当必需性判据（两者皆为第二权威）
+- 是否存在任何隐式默认：资源参数的 fallback 取值、`required_fields`/`clock`/`runner` 的默认值、未知 `sacct` 状态串兜底为 `FAILED`、空 `sacct` 输出兜底为 `PENDING`
+- `TIMEOUT` 是否在任何路径上被折叠为 `FAILED`
+- 时间是否一律 tz-aware UTC，且 `SACCT_ENV` 的时区钉死是否真的并入了子进程环境（只定义常量而不传入等于没做）
+- 记录不变式是否仍由 `JobRecord.__post_init__` 独家承担，本模块是否复制了一份（第二权威）
+- 失败路径是否全部收敛到 `ExecutorError` 且 `job_id` 属性可机检定位；runner 的原生异常是否被吞而未转译
+- 传给 runner 的 `env` 是 `os.environ` 叠加 `SACCT_ENV`（子进程仍有 `PATH`），还是把 `SACCT_ENV` 当整个环境替换掉
+- **成功路径的输入归一化是否也有 oracle**（常驻轴，非一次性检查）：`strip()`、"非空行"判据、分隔符切分这一类**接受态**属性，是否各有一条"改坏即变红"的用例——而不是只测失败路径。本 PR 三轮复发的 test-coverage-gap 全部源自这一轴从未进过变异清单（gate retro 的根因结论）
+- argv 断言是否逐元素精确比对，而非"包含某个 flag"式的弱断言
 
 ## 6. forcing-chain（二）：科学计算依赖引入
 
@@ -1421,7 +1602,7 @@ Minimal mergeable slice: atomic - 单一编排函数，拒绝守卫/扫描窗/�
 
 ## 12. run-controller（一）：前沿发现与锁
 
-- [ ] 12.1 实现严格前沿纯函数：`DONE`/状态文件集合 → 每源待跑 T 或停止原因（全新链、D+12h、状态缺失、时间头不对应 T、raw 缺口、缺轮阻塞）
+- [x] 12.1 实现严格前沿纯函数：`DONE`/状态文件集合 → 每源待跑 T 或停止原因（全新链、D+12h、状态缺失、时间头不对应 T、raw 缺口、缺轮阻塞）
 - [ ] 12.2 实现未提交残留识别与清理重跑判定（保留 T 状态、删更晚状态与半成品）
 - [ ] 12.3 实现非阻塞 flock 封装（持有即跳过、覆盖全生命周期），进程内测试跳过语义
 
@@ -1429,6 +1610,179 @@ Minimal mergeable slice: atomic - 单一编排函数，拒绝守卫/扫描窗/�
 §13.1 归属：控制器（前沿/flock 幂等/raw 缺口）
 Suggested fixture level: compact - tmp 目录树表达 DONE/状态组合即可
 Minimal mergeable slice: 前沿确定纯函数（12.1）——判定逻辑独立合并保绿，残留清理与锁为后继
+
+### Issue #22 fixture（任务 12.1）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：正面命中 `openspec/project-profile.md` 的 domain expanded-triggers `DONE`、`cycle`、前沿/frontier、状态链/warm start——profile 触发词按 `issue-risk-contract.md` 与核心触发词同为强制；另本 issue 需落一个共享 helper 根 `state/header_time.py`）
+Repair intensity: high（本函数是 profile 首位风险轴「断链即整链失效」的**唯一执行点**：它决定每源用哪一份状态起跑；且本 issue 落 `state/header_time.py` 这一共享 helper 根，由 #9 的重戳与结构检查复用。适用 `Invariant Matrix`）
+Project profile: yd-viewer
+
+**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #22 的依赖只列 #2/#8，但验收标准里的「时间头不对应绝对 T 即停」需要 header 时间语义符号（`cfg_ic_header_minute_index` / `cfg_ic_header_shape`），而 `nwm-snapshot-inventory.md:44` 把它们归在 #9（任务 4.3）。缺失的 seam 本 issue 自行补齐（见下方裁决 1），并按核心规则「needed-but-missing seam is a reported deviation」记录在此。
+
+**核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
+
+1. **读侧 header 时间原语落地在本 issue，不注入 fake**。把 pin 的 `cfg_ic_header_minute_index`(`state_qc.py:609`)、`cfg_ic_header_minute_time`(`:629`)、`cfg_ic_header_shape`(`:664`)、`CfgIcHeaderShape`(`:650`) 与其闭包常量 `_VALID_CFG_IC_HEADER_TOKEN_COUNTS`(`:646`) 移植到**新文件** `producer/src/yd_producer/state/header_time.py`，`_as_float` **MUST 从 `state.cfg_ic` 导入**（pin 的 docstring 逐字声明这三个符号与 `_header_counts` 共享「最后一个数值 token 即 minute-time」规则，两份定义即双权威）。这是 `nwm-snapshot-inventory.md:44` 行的**第二次部分落地**（第一次是 #8 的格式层），该行的落地状态注记随本 PR 更新。#9 MUST 从 `header_time` 导入这五个符号，MUST NOT 再移植一份。
+   - **不选注入式 seam** 的理由：若把「header 时间是否对应 T」做成调用方传入的 callable，验收 Scenario「时间头不对应 T 即停」退化为「fake 说停就停」的永真式，spec 的 MUST 没有任何用例把守。
+   - 不落 `state/state_qc.py`、不动 `state/cfg_ic.py`：后者的 fixture 带逐函数溯源窗口断言与已审的变异套件，改它等于重开 #8 的审核面。
+2. **MUST NOT 移植 `_valid_time_from_header_minute`**（`state_cli.py:359`，归 #9）。该函数**刻意接受相对分钟**（`0 <= m <= horizon` 时按 `cycle_time + m` 解释）——对 checkpoint 重戳是对的，对前沿闸门是**错的**：compute-loop §8 与 `specs/run-controller/spec.md` 的判据逐字是「以绝对时间判定」，宽容读法会让一份未重戳的残留 header（如 `720.000000`）在 T=cycle+12h 时被判为「对应 T」而放行，正是断链的入口。本 issue 的判据是自有的绝对时间比较（裁决 3），并把该**刻意不移植**写进模块头。
+3. **绝对时间判据钉死**：header shape 有效 → 取 minute token → **先过 `math.isfinite` 闸**（`_as_float` 逐字移植自 pin，`nan`/`inf`/`-inf` 都会被 `float()` 接受并计入数值 token，随后 `round()` 会抛 `ValueError`/`OverflowError`）→ `round(observed_minute) == round(T.timestamp() / 60)` 才算对应 T，否则停。非有限值一律 `HEADER_TIME_MISMATCH`，MUST NOT 以异常逃逸。四舍五入到整分钟是因为 header 的 minute token 是浮点文本（pin 写入侧是 `valid_time.timestamp()/60`，形如 `27000000.000000`）；cycle 间距 12h，±30s 容差不产生歧义。shape 无效（数值 token 数不是 3 或 4）一律停，MUST NOT 退化为「取最后一个数值 token」的宽松读法。
+4. **只读 header 行，MUST NOT 全量解析文件体**。结构检查（缺段、行数不符、数值区损坏）是任务 4.2 / #9 的面；本函数对 T 状态只做「存在、可读、header 时间对应 T」三判。读取 MUST 走**只读首行的有界读**：先用已取得的 `st_size` 判超界（`> MAX_STATE_IC_BYTES` 即 `STATE_UNREADABLE`），再分块读到首个非空行为止，累计读入 MUST NOT 超过 `MAX_STATE_IC_BYTES + 1` 字节。MUST NOT「先 `read(MAX+1)` 再 `decode` 再 `splitlines()`」——那样 64 MiB 上界会放大成数百 MiB 常驻（round 1 验证闸门 batch resource-limits cand-04 CONFIRMED/FIX_NOW：实测 63 MiB 短行文件 traced peak 297 MiB / `ru_maxrss` 537 MiB，16 MiB 纯换行文件 traced peak 168 MiB ≈ 10.5x），正好架空 `MAX_STATE_IC_BYTES` 自述的 OOM 保护意图。**候选行本身也 MUST 有界**（round 2 batch resource-and-coverage-2 cand-12 CONFIRMED/FIX_NOW）：字节预算只约束「读了多少」，不约束「首行有多长」——首个 `MAX+1` 字节里没有 `\n` 时（64 MiB 无换行文本，或截断/预分配出来的**全 NUL** 文件——NUL 是合法 UTF-8 且不是 `str.strip()` 的空白，整个文件成为一个巨大的 header 行），`pending`、`bytes(pending)`、`decode()`、`split()` 各自实体化一份文件大小的对象，实测端到端 traced peak 576 MiB / `ru_maxrss` 681 MiB。故新增规则：首个非空行累计超过 `MAX_HEADER_LINE_BYTES`（模块常量，取 64 KiB——原生 header 只有 3–4 个 token，两个数量级余量）仍未遇到 `\n` 时，MUST 立即判 `STATE_UNREADABLE` 并停止读取，MUST NOT 继续累积；跳过前导空行时已丢弃的空白不计入候选行长度。注意这条**改变了可观测行为**：全 NUL 的 64 MiB 状态由 `HEADER_TIME_MISMATCH` 变为 `STATE_UNREADABLE`——两者都停源，方向一致。状态文件的可读性判定 MUST **跟随** symlink（与 `state/cfg_ic.py` 的 `_read_bytes_limited` 调用点注释逐字保留的「刻意不走 no-follow 安全读」同一理由：macOS `/tmp` 本身是 symlink，测试树会被误拒）；只有目录、socket/FIFO、断链 symlink、不可读、非 UTF-8、超界归 `STATE_UNREADABLE`。no-follow 的越界拒绝属删除/发布面，归 #24/#25。
+5. **cycle 可见集判据（`states/` 与 `output/` 对称适用）**：条目名为 10 位数字**且**可被 `%Y%m%d%H` 解析（小时不限 00/12——形态与可解析性是唯一的门），`states/<source>/` 侧另需固定后缀 `.cfg.ic`。不满足者对前沿**不可见**，MUST NOT 因此报错停源，也 MUST NOT 抛 `ValueError`。两侧对称是必需的：`output/` 下同样会有 stray 文件、#25 保留窗口清理中断留下的半删目录与 `.DS_Store`。**可见集另加一道可表示性门**：解析出的 cycle MUST 满足 `cycle + 12h` 在 `datetime` 值域内，否则同样判为不可见——`9999123123` 是 10 位数字且 `%Y%m%d%H` 可解析，`datetime(9999,12,31,23) + 12h` 抛 `OverflowError`（round 1 batch error-classification cand-03 CONFIRMED/FIX_NOW，实测逃逸出 `decide_frontier`）。选可见性门而非新增停止原因，是为了保住闭合词表：这类条目在语义上就是「不是合法 cycle」。理由：`specs/run-controller/spec.md:75` 的发布把临时文件 rename 在 `states/<source>/` **目录内**完成，临时名的形态由 #24 定；若前沿对不可解析文件名 fail-closed，一次崩溃的发布会把该源**永久砖化**，与「无 `DONE` 残留必须可干净重跑」直接冲突。残留的**清理**归 #23。
+6. **全新链取最早状态文件名**（`spec.md` 的 MUST 逐字：「待跑 T 为 init 写入的最早状态文件名」）。compute-loop §10 另有一句「全新链只允许存在 init 写入的最早状态」，读作前沿侧的 fail-closed 会与 spec 的 MUST 冲突；本 fixture 按 spec 取最早，不把「无 DONE 却有多份状态」判为异常（那是 #23 残留面的判定）。该张力记录在此，路由至 #23 fixture，不在本 PR 处理。
+7. **前沿只由 DONE 集合推进**：存在比 T 更晚的状态文件时，待跑 T **仍是** D+12h，MUST NOT 因更晚状态而前进。这一条同时是「崩溃残留恢复」在前沿层的边界证据（清理动作归 #23）。
+9. **枚举/探测失败 MUST 与「不存在」分流，且 MUST NOT fail-open**（round 1 batch error-classification cand-01/cand-02 双 CONFIRMED/FIX_NOW，实测：`chmod 0o000 output/<最新 cycle>` 让前沿**倒退**到已 `DONE` 的 cycle 且仍判可跑；`chmod 0o000 states/<source>` 让 `PermissionError` 直接逃出 `decide_frontier`）。统一规则：
+   - **只有** `FileNotFoundError` / `NotADirectoryError`（路径确实不存在）才等价于「空集合」；
+   - 其余任何 `OSError`（`EACCES`/`EPERM`/`EIO`/`ESTALE`/`ELOOP`…）MUST 判为**无法确定**，停该源并返回新增的第六个停止原因 `DISCOVERY_UNREADABLE`（词表由 5 项扩为 6 项，本轮起为新的闭合词表）；
+   - 该规则适用于**每一处**文件系统探测：`output/` 与 `states/<source>/` 的列目录、`DONE` 的普通文件判定、状态文件的存在性/symlink 探测（MUST NOT 用裸 `Path.exists()`/`is_symlink()`——`pathlib` 只吞 `ENOENT/ENOTDIR/EBADF/ELOOP/EINVAL`，`EACCES`/`EIO` 会穿透）；
+   - 状态文件**本身**不可读仍归 `STATE_UNREADABLE`（其 docstring 已含「权限拒绝」）；`DISCOVERY_UNREADABLE` 专指**集合无法枚举/条目无法判定**这一层；
+   - fail-open 的方向性理由：`states/` 侧判空是 fail-closed（`NO_INITIAL_STATE`），`output/` 侧判空却让链看起来是全新链，把前沿**倒退**到已发布 cycle——products-contract §4.4「重复运行看到 `DONE` 时不覆盖正式产物」的发布侧守卫归 #24 尚未落地，本函数当前是唯一闸门。
+10. **注入的 `raw_complete` 的可接受输入域 MUST 写进 docstring**（round 1 batch integration-contract cand-06 CONFIRMED/FIX_NOW）：本函数返回的 T 可能带任意可解析的 cycle 小时（裁决 5 刻意如此），而生产实现 `rawscan.judge` 只对 `config.cycle.hours` 全域（实测 18Z 目标使其在任何文件系统访问之前抛 `ConfigError`，异常穿透 `decide_frontier`）。本 issue owed 的是**声明的前置条件**而非守卫；接线与守卫归 #26，并在组 14 记录该约束。
+8. **raw 完整性以注入方式消费**：前沿函数接收「给定 cycle 是否 raw 完整」的可调用判定（`Callable[[datetime], bool]`），不在本 issue 内组装 `Config` 与 raw 目录树。理由：`rawscan.judge` 已由 #6 落地并自带完整用例，前沿层要证明的是**「raw 不完整 → 停在 T、前沿不前进、MUST NOT 跳轮」**这一条控制流。多轮追赶的**顺序执行**归 #26/#27。
+
+Change surface:
+- 新增 `producer/src/yd_producer/state/header_time.py`：移植的 header 时间原语（逐函数带 `NWM@8ae9b8f2 packages/common/state_qc.py:<行>` 溯源头）
+- 新增 `producer/src/yd_producer/controller.py`：严格前沿纯函数与停止原因词表
+- 新增 `producer/tests/test_header_time.py`、`producer/tests/test_controller_frontier.py` 与 tmp 目录树 fixture 构造器
+- 更新 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md:44` 的落地状态注记（第二次部分落地：读侧 header 时间原语）
+
+Must preserve:
+- 移植的五个符号与 pin 逐字一致（含「最后一个数值 token 即 minute-time」与 3/4 token shape 门）；任何偏离 MUST 在模块头注明
+- stdlib-only、零运行时 NWM import、零数据库/scheduler 依赖；不新增依赖、`producer/uv.lock` 不变
+- 零写入：本 issue 的两个模块 MUST NOT 创建/修改/删除任何路径（残留清理归 #23、发布归 #24）
+- `state/cfg_ic.py` 与 `producer/tests/test_cfg_ic.py` MUST NOT 被修改（#8 已审面）
+
+Must add/change:
+- `state/header_time.py`：`cfg_ic_header_minute_index(tokens) -> int | None`、`cfg_ic_header_minute_time(tokens) -> float | None`、`cfg_ic_header_shape(tokens, *, expected_mesh_count=None) -> CfgIcHeaderShape`，加 `CfgIcHeaderShape` 与 `_VALID_CFG_IC_HEADER_TOKEN_COUNTS`（共五个符号）；`_as_float` 从 `cfg_ic` 导入
+- `controller.py`：
+  - `StopReason` 枚举，**闭合词表**且逐项可区分：`NO_INITIAL_STATE`（无 DONE 且无任何合法状态文件）、`STATE_MISSING`（T 的状态文件不存在）、`STATE_UNREADABLE`（存在但不可读/非普通文件/非 UTF-8/超界）、`HEADER_TIME_MISMATCH`（header shape 无效、minute token 非有限、或时间不对应绝对 T）、`RAW_INCOMPLETE`（T 的 raw 未齐）
+  - `FrontierDecision`（frozen dataclass）：`source`、`cycle: datetime | None`（可跑时为待跑 T，停止时 `None`）、`stop_reason: StopReason | None`、`detail: str`（含具体路径/观测值，供运行报告与日志）；`cycle` 与 `stop_reason` **恰有一个**非 `None`
+  - `decide_frontier(*, yd_root: Path, source: str, raw_complete: Callable[[datetime], bool]) -> FrontierDecision`：`DONE` 集合来自 `output/<cycle_id>/<source>/DONE`（普通文件），状态集合来自 `states/<source>/<cycle_id>.cfg.ic`
+  - 判定顺序固定（compute-loop §10 逐条）：DONE 定 D → T=D+12h（无 DONE 则取最早状态名）→ 状态存在/可读/header 时间 → raw 完整性
+  - 时间一律 UTC aware；`cycle_id` 解析用 `datetime.strptime(..., "%Y%m%d%H").replace(tzinfo=UTC)`，解析失败即「不可见」（裁决 5），MUST NOT 让 `ValueError` 逃逸——「10 位数字」与「可解析」不等价（`2026023100`、`9999999999` 都是 10 位数字却非法）
+
+Seams under test:
+- `controller.decide_frontier(...)`：tmp 目录树（`output/`、`states/`）+ 注入的 `raw_complete` → `FrontierDecision`，无写入
+- `state.header_time.*`：纯 token 序列 → 判定，无 IO
+
+Selected risk packs（项目特有检查）:
+- Schema / columns / units / field names: header shape 门（3/4 数值 token）与 minute token 语义即契约
+- File IO / path safety / overwrite: 只读、有界读、非普通文件/不可读被分类为 `STATE_UNREADABLE`；零写入是可断言的负面证据
+- Error handling / rollback / partial outputs: 每类停止都有专属 `StopReason`，MUST NOT 以异常逃逸；`OSError` 不外泄
+- Resource limits / large input / discovery: 目录枚举只认裁决 5 的可见集（10 位数字且可解析）；状态文件读取有界
+- Legacy compatibility / examples: 3-token native 与 4-token 兼容 header 都要判；相对分钟 header 明确判为不对应 T
+
+Risk packs considered (core):
+- Public API / CLI / script entry: not selected - 不接入 CLI（`run` 入口体归 #26）
+- Config / project setup: not selected - 不读 `config.toml`/`local.toml`；raw 判定经注入
+- File IO / path safety / overwrite: selected - 见上
+- Schema / columns / units / field names: selected - 见上
+- Auth / permissions / secrets: not selected - 无凭据面；权限相关只体现为不可读分类
+- Concurrency / shared state / ordering: not selected - 纯判定函数无共享状态；flock 归 #23、双源并行归 #28
+- Resource limits / large input / discovery: selected - 见上
+- Legacy compatibility / examples: selected - 见上
+- Error handling / rollback / partial outputs: selected - 见上
+- Release / packaging / dependency compatibility: not selected - 不新增依赖，lock 不变
+- Documentation / migration notes: not selected - 无迁移；溯源由模块头注释与清单行注记承载
+
+Domain packs (from active profile):
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: **selected** - cycle 00/12、D+12h 推进、绝对分钟时间头
+- 状态链 / warm-start 定戳一致性: **selected** - 本函数即该风险轴的执行点
+- NWM 快照溯源与 DB-free 隔离: **selected** - 五个移植符号须带溯源头；断言零 NWM import、零 DB 符号
+
+Invariant Matrix
+Governing invariant: 每源的待跑 cycle 只由该源自己的 `DONE` 集合推进（无 DONE 取最早首态，否则 D+12h）；目标 T 的状态缺失/不可读/时间头非绝对 T 或 T 的 raw 未齐时一律停该源，MUST NOT 取更旧状态、跳轮、冷启动或互借另一源状态。
+Source-of-truth identity/contract: `output/<YYYYMMDDHH>/<source>/DONE`（完成判据）与 `states/<source>/<YYYYMMDDHH>.cfg.ic` 的**文件名 cycle** 与**header 绝对分钟时间**必须同时对应同一个 T
+Surfaces:
+- Producers: none - 本 issue 零写入；`DONE`/状态的产出面归 #21（init）与 #24（发布）
+- Validators/preflight: `controller.decide_frontier`、`state/header_time.py` 的 shape 门
+- Storage/cache/query: 只读 `<YD_ROOT>/output/**/DONE` 与 `<YD_ROOT>/states/<source>/*.cfg.ic`
+- Public routes/entrypoints: none - 不接入 CLI，入口经 #26 的 `run_once`
+- Frontend/downstream consumers: #23（残留清理复用同一前沿结论）、#26/#27（run_once 与多轮追赶）、#28（双源并行）
+- Failure paths/rollback/stale state: 每类停止走 `StopReason` 返回值而非异常；无写入故无回滚；崩溃残留（更晚状态/半成品目录）MUST NOT 改变前沿结论
+- Evidence/audit/readiness: `FrontierDecision.detail` 是运行报告里该源停止原因的载体
+Regression rows:
+- 某源 `output/2026082600/<source>/DONE` 存在且 `states/<source>/2026082612.cfg.ic` header 对应绝对 2026-08-26T12Z、raw 齐 -> 待跑 T=2026082612
+- 同上但 header 是相对分钟 `720.000000` -> `HEADER_TIME_MISMATCH`，MUST NOT 被解释为 cycle+720min
+- 同上但 `states/<source>/` 另有更晚的 `2026082700.cfg.ic`（崩溃残留） -> 待跑 T 仍为 2026082612
+- 同上但 T 状态缺失、只有更旧的 `2026082600.cfg.ic` -> `STATE_MISSING`，MUST NOT 回退到旧状态
+- 另一源目录完全为空 / 停止 -> 本源结论不受影响（逐源独立，两源交叉断言）
+- `states/<source>/` 内有发布残留临时名（如 `.2026082612.cfg.ic.tmp` 与一个子目录） -> 不影响任何结论，不抛错
+- `output/` 存在但不可枚举（EACCES/EIO/ESTALE 类） -> `DISCOVERY_UNREADABLE`，**MUST NOT** 判为全新链或让前沿倒退到已 `DONE` 的 cycle
+- `output/` / `states/<source>/` 不存在 -> 仍分别是全新链 / `NO_INITIAL_STATE`（「不存在」与「不可读」严格分流）
+- 任一探测点遇到 `EACCES`/`EIO`/`OverflowError` -> 一律收敛为停止原因，MUST NOT 逃出 `decide_frontier`
+- 64 MiB 无换行（含全 NUL）的状态文件 -> `STATE_UNREADABLE`，常驻内存与 `MAX_HEADER_LINE_BYTES` 同量级
+- 一源的 `output/<cycle>/<source>/` 不可读、另一源正常 -> 前者 `DISCOVERY_UNREADABLE`、后者结论不受影响
+- `states/ifs/<T>.cfg.ic` 缺失而 `states/gfs/<T>.cfg.ic` 存在且 header 正确 -> ifs `STATE_MISSING`，MUST NOT 互借 gfs 的同名状态
+- `output/<cycle>/<source>/DONE` 是目录或断链 symlink -> 该 cycle 不计入 DONE 集合，不抛错
+
+Required evidence（每条 input -> expected output）:
+- **全新链**：无任何 `DONE`，`states/ifs/` 只有 `2026082000.cfg.ic`（header 对应绝对 2026-08-20T00Z）、raw 齐 -> `cycle == 2026-08-20T00:00Z`，`stop_reason is None`（spec Scenario「全新链取首态文件名」）
+- **全新链多份状态**：无 `DONE`，状态有 `2026082000` 与 `2026082012` -> 取**最早** `2026082000`（裁决 6）
+- **无 DONE 且无任何合法状态文件**（空目录 / 目录不存在 / 只有非法名） -> `NO_INITIAL_STATE`，不抛异常
+- **前沿推进**：最新 `DONE` 为 `2026082600` -> T=`2026082612`（spec Scenario「前沿推进 D+12h」）
+- **最新 DONE 取最大而非最后写入**：`DONE` 集合为 `{2026082600, 2026082512, 2026082700}` 且 mtime 逆序 -> D=`2026082700`，T=`2026082712`（钉死「取最大 cycle」而非「取 mtime 最新」）
+- **DONE 逐源独立**：`output/2026082600/gfs/DONE` 存在而 `ifs/` 无 -> 对 `ifs` 该 cycle 不计入其 DONE 集合（两源在同一棵树上交叉断言）
+- **状态缺失即停 + 不互借另一源**：`states/ifs/` 只有更旧的 `2026082600.cfg.ic`（T=`2026082612` 缺失），而 `states/gfs/2026082612.cfg.ic` **存在且 header 正确** -> ifs `STATE_MISSING`（MUST NOT 借 gfs 的同名状态、MUST NOT 回退旧状态），gfs 在同一棵树上同次得到正常结论（spec Scenario「精确状态缺失即停该源」+ MUST NOT「互借另一源状态」）
+- **时间头不对应 T 即停**（spec Scenario）：逐条各一用例 -> 全部 `HEADER_TIME_MISMATCH`
+  - header 绝对分钟对应 T-12h（拿旧状态改名冒充）
+  - header 是相对分钟 `0.000000` 与 `720.000000`（裁决 2 的承重条：**移植了 `_valid_time_from_header_minute` 的实现必须在这两条上变红**）
+  - header 只有 2 个数值 token（`23106\t6`，pin issue #1197 形态）-> shape 无效
+  - header 有 5 个数值 token -> shape 无效（fail-closed，MUST NOT 取最后一个 token 蒙混）
+  - header 行非数值/为空 -> 无效
+  - header 为 `23106\t6\tnan` / `23106\t6\tinf` / `23106\t6\t-inf`（三个数值 token，shape 判 valid）-> `HEADER_TIME_MISMATCH`，MUST NOT 外泄 `ValueError`/`OverflowError`
+- **时间头对应 T 的正例覆盖两种布局**：3-token native（`<mesh> <mesh-state-columns> <minute>`）与 4-token 兼容（`<mesh> <river> <lake> <minute>`）各一 -> 均放行
+- **不可读分类**：状态文件为目录 / socket 或 FIFO / **断链 symlink** / `chmod 0o000`（非 root 时；root 下 `pytest.skip` 并说明）/ 非 UTF-8 字节 / 超字节上界 -> 均 `STATE_UNREADABLE`，MUST NOT 外泄 `OSError`/`UnicodeDecodeError`，MUST NOT 无界读入
+- **symlink 跟随的正例**：状态文件是**指向合法状态文件的 symlink**（header 对应 T） -> **放行**（可跑），钉死裁决 4 的跟随语义
+- **raw 缺口不提交**：T 的 `raw_complete` 返回 False -> `RAW_INCOMPLETE`，`cycle is None`（spec Scenario「raw 未齐不提交」）
+- **缺轮阻塞不跳轮**：`raw_complete` 对 T 为 False、对 T+12h/T+24h 为 True -> 结论仍是**停在 T**，返回值中 MUST NOT 出现 T+12h/T+24h（spec「MUST NOT 自动跳过 cycle」的判别条）
+- **判定顺序**：T 状态缺失**且** raw 也未齐 -> `STATE_MISSING`（状态判据先于 raw，compute-loop §10 顺序），且此时 `raw_complete` **MUST NOT 被调用**（用记录型 fake 断言调用次数为 0）
+- **崩溃残留不改变前沿**：树中同时有 `states/<source>/<T+12>.cfg.ic` 与只含 DAT 无 `DONE` 的 `output/<T>/<source>/` -> 待跑 T 不变；本函数不删除任何路径（跑前跑后对整棵树做**递归快照比对**，证明零写入；快照维度 MUST 钉死为「相对路径 + 条目类型 + `st_mode` + size + 内容摘要」，否则等长原地改写在比对下不可见）
+- **非法条目不砖化，两侧对称**（裁决 5）：`states/<source>/` 内共存临时名文件、子目录、点文件、`2026023100.cfg.ic`（10 位但非法日期）、`9999999999.cfg.ic`；`output/` 下共存 stray 文件、`.tmp-2026082600/` 半删目录与非 10 位目录 -> 结论与干净树逐字段一致，不抛错
+- **`DONE` 必须是普通文件**：某 cycle 的 `DONE` 是**目录**、另一 cycle 的 `DONE` 是**断链 symlink** -> 两者均不计入 DONE 集合（若无其他 DONE 则走全新链/`NO_INITIAL_STATE` 分支），不抛错
+- **header_time 单元级**：`cfg_ic_header_minute_index` / `_minute_time` / `cfg_ic_header_shape` 对 2/3/4/5 数值 token、含非数值 token、`expected_mesh_count` 匹配与不匹配 -> 与 pin 逐条一致；断言 `_as_float` 来自 `cfg_ic`（`header_time._as_float is cfg_ic._as_float`），防重复移植
+- **溯源与隔离断言**：`state/header_time.py` 与 `controller.py` 含/不含相应标记——五个移植符号（三个函数 + `CfgIcHeaderShape` + `_VALID_CFG_IC_HEADER_TOKEN_COUNTS`）**逐符号**带 `NWM@8ae9b8f2 packages/common/state_qc.py:<行>`（取窗按函数边界，不用定长窗口，见 #8 的实测教训）；两模块源码内无 NWM import、无数据库符号
+- **预登记必须被杀死的变异体**（按 `openspec/project-profile.md` 的 "Mutation-testing hazards" 执行：`rsync --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache'` 到含 `issue-22` 唯一标识的 scratch 目录、副本内 `rm -rf .venv && uv sync`、先断言 `yd_producer.__file__` 落在副本内、每个变异体之间 `PYTHONDONTWRITEBYTECODE=1` 并清 `__pycache__`、另跑一个必然变红的控制变异校准）：
+  - (a) 绝对时间判据放宽为「接受相对分钟」（即移回 pin 的 `_valid_time_from_header_minute` 语义）-> 相对分钟用例必须变红
+  - (b) `D+12h` 改为 `D+24h` 或改为「取最晚状态文件名」-> 前沿推进用例与崩溃残留用例必须变红
+  - (c) 状态缺失时回退到更旧状态 -> `STATE_MISSING` 用例必须变红
+  - (d) raw 未齐时前进到下一个 raw 齐的 cycle -> 缺轮阻塞用例必须变红
+  - (e) shape 门去掉（3/4 token 限制放开）-> 2-token 与 5-token 用例必须变红
+  - (f) 去掉 `math.isfinite` 闸 -> `nan`/`inf` 用例必须变红（异常逃逸）
+  - (g) 状态路径查找回退到兄弟源目录 -> 「不互借另一源」用例必须变红
+  - (h) `DONE` 判定由 `is_file()` 改为 `exists()` -> 「DONE 是目录/断链 symlink」用例必须变红
+- **枚举失败不 fail-open**（裁决 9）：`output/` 整体不可枚举 -> `DISCOVERY_UNREADABLE`，`cycle is None`，**MUST NOT** 走全新链分支；`output/<最新 DONE cycle>/` 单个目录不可读（其余 cycle 正常）-> 同样 `DISCOVERY_UNREADABLE`，MUST NOT 退回更旧的 `DONE` 让前沿倒退；`states/<source>/` 不可枚举 -> `DISCOVERY_UNREADABLE` 而非 `NO_INITIAL_STATE`（三条均带非 root 跳过守卫）
+- **「不存在」仍是空集合**：`output/` 目录不存在、`states/<source>/` 目录不存在 -> 分别仍为全新链 / `NO_INITIAL_STATE`（钉死 errno 分流没有把「不存在」一起判成不可读）
+- **状态存在性探测不得让 `OSError` 穿透**（裁决 9）：`chmod 0o000 states/<source>`（父目录不可读，非 root）-> 返回停止原因并在 detail 指名，MUST NOT 抛 `PermissionError`。现有的「文件 `chmod 0o000`」用例对这条**没有判别力**（`stat()` 仍成功，失败落在已被 guard 的读取处）
+- **可表示性门**（裁决 5 增补）：`output/9999123123/<source>/DONE`（10 位、可解析、+12h 溢出）-> 该条目不可见，结论与不含它的树逐字段一致，MUST NOT 抛 `OverflowError`；`states/<source>/9999123123.cfg.ic` 同理
+- **首行有界读不放大内存**（裁决 4 增补）：构造接近上界但合法的状态文件（如 16 MiB 纯换行 + 末尾 header 行），在 `tracemalloc` 下断言 `_read_header_line` 的 traced peak 与文件大小同量级（不得达到其数倍）；恰好上界/超一字节的既有分类行为不变
+- **无换行的巨大首行被截断拒绝**（裁决 4 二次增补）：64 MiB 无 `\n` 的状态文件（可打印字节与**全 NUL** 两种载荷各一）-> `STATE_UNREADABLE`，且 `tracemalloc` traced peak MUST 与 `MAX_HEADER_LINE_BYTES` 同量级（远小于文件大小）；同时断言合法的长空行前缀（首行位于数 MB 空行之后）仍能被正确读出
+- **候选行上界的边界方向**（裁决 4 二次增补的边界行；Phase 6.2 不变量审计报出的覆盖缺口——把 `newline > MAX_HEADER_LINE_BYTES` 改成 `>=` 能在当时的 584 条用例里存活）：首行长度**恰好** `MAX_HEADER_LINE_BYTES` 的合法状态 -> 正常可跑（不得因上界而拒绝）；`MAX_HEADER_LINE_BYTES + 1` -> `STATE_UNREADABLE`。上界常量 MUST 由测试从 `controller` 导入，不得在用例里写死 65536；接受侧 MUST 走到真实可跑结论（padding 用 `str.split()` 会丢弃的尾随空格），不得因无关原因而通过
+- **新停止原因同样逐源隔离**（裁决 9 的遗漏行，round 2 cand-14 CONFIRMED/FIX_NOW 的覆盖缺口）：同一棵树上 `output/<cycle>/gfs/` 不可读而 `ifs/` 正常 -> gfs `DISCOVERY_UNREADABLE`、ifs 得到正常可跑结论（现有四条 discovery 用例全是单源，既有的逐源行只覆盖「缺失」与 `STATE_MISSING`）
+- **`raw_complete` 输入域声明**（裁决 10）：`decide_frontier` 的 docstring 含「返回的 T 可能带任意可解析 cycle 小时，`raw_complete` MUST 对该域全域（或由调用方把 `ConfigError` 收敛为停源）」，并以一条源码断言钉住
+- **溯源行号与偏离清单准确**：`header_time.py` 的 `cfg_ic_header_minute_time` 溯源窗口为 `:629-639`（不得越进 `_VALID_CFG_IC_HEADER_TOKEN_COUNTS` 的注释块）；模块头「刻意偏离」清单 MUST 覆盖**全部** ruff 格式化差异（含 `mesh_count` 三元折行、`r` 前缀、docstring 后空行删除），不得再写不成立的「此处即全集」
+- 预登记变异体追加九条并同样 KILLED（round 1 复核后四条 (i)–(l)；round 2 三条：fixture 新登记的 (m)/(n) 与重跑时自选的反向配重 (m2)，baseline 584；Phase 6.2 审计两条 (o)/(o2)，baseline 586；此处刻意写全数而不写「四条」——该计数曾随两次追加而失准）：(i) `except OSError` 恢复为一律判空 -> 枚举失败三条必须变红；(j) 状态存在性探测改回裸 `Path.exists()` -> 父目录不可读用例必须变红；(k) 去掉可表示性门 -> `9999123123` 用例必须变红；(l) 首行有界读改回 `read(MAX+1)+splitlines()` -> 内存用例必须变红；(m) 去掉 `MAX_HEADER_LINE_BYTES` 截断（候选行无上界）-> 无换行巨大首行用例必须变红；(n) `_done_cycles` 改为枚举 `output/<cycle>/` 目录项而非逐源 stat `DONE` -> 逐源隔离用例必须变红；(m2) 上界改为计入**累计已读字节**（被跳过的空行也计数）-> 长空行前缀用例必须变红（该条是上一条的反向配重：只防放大而不防过严，会让合法的长空行前缀被误拒）；(o) 换行处的上界比较 `newline > 上界` 改 `>=` -> 恰好上界用例必须变红；(o2) 块尾的 `len(pending) > 上界` 改 `>=` -> 同一条用例必须变红（(o)/(o2) 由 Phase 6.2 审计追加；因 `_READ_CHUNK_BYTES == MAX_HEADER_LINE_BYTES`，恰好上界的首行必然跨块，一条用例同时钉住两处判定）
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+
+Non-goals:
+- 残留清理与 flock（任务 12.2/12.3，issue #23）：本 issue 只证明残留**不改变前沿结论**，不删除任何路径
+- 发布顺序、`DONE` 写入、旧状态清理（任务 13.x，issue #24/#25）
+- `run_once` 编排、多轮追赶的顺序执行、双源并行与失败隔离（issue #26/#27/#28）
+- 重戳、结构检查、负残差（任务 4.2–4.4，issue #9）：本 issue 只落**读侧** header 时间原语，且明确不移植 `_valid_time_from_header_minute`
+- 与真实 `rawscan.judge` 的接线（`Config` 装配）：归 #26；本 issue 以注入判定证明控制流
+- 真实 NFS/Slurm 行为、数值正确性：归 M4
+
+Review focus:
+- 绝对时间判据是否真的**只**接受绝对分钟——任何在 `0 <= m <= horizon` 上按相对分钟解释的分支都是缺陷（正例恒绿，只在相对分钟用例上变红）
+- 前沿是否真由 `DONE` 集合推进而非由状态文件名的最大值推进（崩溃残留用例是唯一判别条）
+- 是否越界落地了 #23 的清理动作、#24 的发布动作或 #9 的结构检查符号（含"顺手先放着"的死代码）；零写入是否有递归树快照证据
+- `states/` 与 `output/` 的可见集是否严格按裁决 5（10 位数字**且** `%Y%m%d%H` 可解析）判定，非法条目是否真的不砖化该源
+- 停止原因是否逐类可区分且不以异常逃逸；`OSError`/`UnicodeDecodeError` 是否被吞成分类结果
+- 移植三符号是否与 pin 逐字一致、逐函数带溯源注释、`_as_float` 是否复用 `cfg_ic` 而非重复定义
 
 ## 13. run-controller（二）：发布、失败与清理
 
@@ -1451,3 +1805,5 @@ Minimal mergeable slice: 发布器（13.1）——发布顺序与契约检查对
 §13.1 归属：控制器/发布（逐 task 标注场景）
 Suggested fixture level: expanded - 多轮端到端目录树与可编排 fake executor
 Minimal mergeable slice: 单源单轮骨架（14.1）——一条端到端路径独立合并保绿，追赶与双源为后继
+
+**14.1 接线约束（由 issue #22 / PR #62 round 1 验证闸门传下，batch integration-contract cand-06 CONFIRMED）**：`controller.decide_frontier` 返回的待跑 T 可能带**任意可解析的 cycle 小时**（issue #22 fixture 裁决 5 刻意如此：对不可解析文件名 fail-closed 会让一次崩溃的发布永久砖化该源），而 `rawscan.judge` 只对 `config.cycle.hours` 全域——实测一个 stray 的 `states/<source>/2026081918.cfg.ic` 会让 18Z 目标进入 `judge`，在任何文件系统访问之前抛 `ConfigError` 并**穿透** `decide_frontier`，把「停一个源」放大成「整个 tick 崩」。14.1 MUST 二选一并配用例：(a) 接线前把目标限制到 `config.cycle.hours`，或 (b) 把注入的 `raw_complete` 包一层，把 `ConfigError` 收敛为该源的停止原因。
