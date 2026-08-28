@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from yd_producer.store.object_path import validate_object_path
 from yd_producer.store.object_store import (
     OBJECT_KIND_ABSENT,
     OBJECT_KIND_DIRECTORY,
@@ -193,3 +194,21 @@ def test_iter_bytes_streams_the_whole_object(tmp_path: Path) -> None:
     assert list(store.iter_bytes(_KEY, chunk_size=4)) == [b"0123", b"4567", b"89"]
     with pytest.raises(ValueError, match="chunk_size must be positive."):
         list(store.iter_bytes(_KEY, chunk_size=0))
+
+
+def test_validate_object_path_alone_accepts_parent_traversal() -> None:
+    """`validate_object_path` 单独调用**不是**穿越闸门——pin 语义，本 PR 刻意不改。
+
+    它只做前缀白名单匹配（`packages/common/storage.py` 的 `_match_pattern`：变量段原样
+    捕获，不校验段内容），所以 `..` 会被当成合法的 `{cycle_time}` 值。真正闭合
+    containment 的是复合入口 `LocalObjectStore.resolve_path` =
+    `normalize_object_key`（拒 `..` 与空键）→ `validate_object_path`（前缀白名单，拒
+    绝对路径 strip 后的非法前缀）→ `relative_to(root)`。清单 §1 该行 `剥离点` 为 `无`，
+    组 3/7/13 若把本函数读成穿越闸门即为误用。
+    """
+    result = validate_object_path("raw/gfs/../../../etc/passwd")
+
+    assert result.valid is True
+    assert result.category == "raw"
+    assert result.components == {"source": "gfs", "cycle_time": ".."}
+    assert result.error is None
