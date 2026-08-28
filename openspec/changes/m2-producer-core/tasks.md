@@ -1082,7 +1082,7 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 - 观测源固定为 `run_dir / f"{project_name}.cfg.ic.update"`（暴露为只读属性 `source_path`）；捕获产物落 `run_dir / "state_checkpoints"`（只读属性 `checkpoint_dir`）。**MUST NOT** 从 manifest 里按四路 fallback 猜 project name（pin `_project_name`(:4114) 的四选一加下标兜底），也 **MUST NOT** 递归搜索其它文件名——文件名由调用方显式给出，猜错就是永远读不到 header。
 - `checkpoint_hours` 的**唯一权威是 `Config.checkpoint_hours`**（`config.toml`，已由 issue #2 落装载器）。本模块 MUST NOT 写死 `12` 或 `720`，MUST NOT 从 manifest 读、MUST NOT 从 forecast horizon 推。
 - 构造期 fail closed（每条各抛 `TrackerError`）：`checkpoint_hours` 为空；含 ≤0 的小时；含重复项；`project_name` 为空或含路径分隔符 / `.` / `..` / **含 NUL 字节**；`run_dir` 的任一分量**含 NUL 字节**。**这是对 pin 的刻意偏离**：pin 的 `_state_checkpoint_hours`(:3923-3941) 对不可解析值 `continue`、对 ≤0 与超 horizon 静默过滤、对重复静默去重——三条都是 fail-open，一个配置笔误会退化成「跑完没有 checkpoint 也不报错」。
-- **NUL 这两条是 rung-1 义务而非洁癖**：`os.stat`/`os.open` 对路径里的 NUL 抛的是 `ValueError` 而**不是** `OSError`，`safe_fs` 也不转译它，于是它绕过 `_FS_FAILURES` 直接从 `capture_available()` 外泄，违 §A「唯一对外异常」。而它**可从配置到达**——TOML 的基本字符串接受 `\u0000`。修法 MUST 是构造期的**纯字符串检查**（不碰文件系统，§B 不破），MUST NOT 把 `ValueError` 并进 `_FS_FAILURES`：那会连 `state.parse` 的 `ValueError` 一起吞掉，而 `_copy_is_intact` 正靠它做判别。
+- **NUL 这两条是 rung-1 义务而非洁癖**：`os.stat`/`os.open` 对路径里的 NUL 抛的是 `ValueError` 而**不是** `OSError`，`safe_fs` 也不转译它，于是它绕过 `_FS_FAILURES` 直接从 `capture_available()` 外泄，违 §A「唯一对外异常」。而它**可从配置到达**——TOML 的基本字符串接受 `\u0000`。修法 MUST 是构造期的**纯字符串检查**（不碰文件系统，§B 不破），MUST NOT 把 `ValueError` 并进 `_FS_FAILURES`。**理由（round 2 更正）**：放宽 `_FS_FAILURES` 会把这个外泄换成观测期的静默「本次观测无结果」——一个可从配置到达的 NUL 于是变成整轮零捕获，且与「SHUD 从没启动」逐字节相同，比外泄更坏。原先写在这里的理由「会吞掉 `_copy_is_intact` 依赖的 `state.parse` 判别信号」**结构上为假**：`_copy_is_intact` 在 `_capture` 的 `try` **之外**调用，`state.parse` 的 `ValueError` 由它自己的局部 `except ValueError` 消费，永远到不了 `_FS_FAILURES`。该假理由源自一条未经核实的 round-1 verifier 笔记，经本 fixture 传播到代码注释与 commit message，round 2 由一个决定性变异体推翻（同时放宽 `_FS_FAILURES` 并删掉两条 NUL 守卫 → 只有两条 NUL 用例因**构造时机**而红，全部截断/撕裂/结构用例仍绿）。保留这条更正记录：一条靠假理由站着的 rung-1 条款会被未来实现方一次 grep 推翻，进而连正确的结论一起丢掉。
 - 构造 **MUST NOT** 触碰文件系统（不建目录、不读源文件）：构造出的 tracker 在 SHUD 尚未启动时也必须是安全的。
 - **调用方前置条件（本模块无法自检，MUST 写进模块 docstring 并列入 Known limits）**：`run_dir` MUST 是规范路径——**其任一祖先分量都不得是符号链接**。`safe_fs` 的每个原语都以 `O_DIRECTORY|O_NOFOLLOW` 逐段打开路径，且 `_anchor_for` 会把 containment root 自己也从 `/` 重新走一遍，所以 `containment_root=run_dir` **并不豁免 run_dir 的祖先**；`/scratch → /mnt/...` 这类 HPC 常规布局会让每一次观测都抛 `SafeFilesystemError`，被 §C 步骤 1 归进「本次观测无结果」，整整一轮零捕获、`observed_header_minutes` 保持为空——与「SHUD 从没启动」逐字节相同。本模块**不得**自行 `resolve()`（构造期 resolve 违本节上一条；惰性 resolve 等于把符号链接根接受下来，正好废掉 `safe_fs` 要守的东西），故这是调用方契约，由作业脚本接线侧（组 8 / 后继 issue）保证并落一条 tracked issue。
 
@@ -1121,7 +1121,7 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 **F. 对 pin 的刻意偏离（此处即全集，逐条写进模块 docstring）**
 
 1. 目标小时来自 `Config.checkpoint_hours` 显式入参，不解析 manifest；pin 的三路 fail-open 过滤（不可解析 `continue`、≤0 与超 horizon 静默丢、重复静默去重）改为构造期 fail closed。**下游可见的副作用**：不再有 horizon 过滤，超出预报时长的小时不会被静默丢弃，而是成为**永久漏采**并原样喂给 #17 的补跑判定——这是有意的（配置错误应当可见），但 #17 的 fixture 需知道它可能收到一个物理上不可能捕获的小时。
-2. `project_name` / `run_dir` 为显式入参，不走 pin `_project_name` 的四路 fallback + 下标兜底。
+2. `project_name` / `run_dir` 为显式入参，不走 pin `_project_name`(:4114) 的四路 fallback + 下标兜底。**连带不抽 `_safe_path_component`(:2987) 与 `_SAFE_PATH_COMPONENT`(:2984)**（清单第 6 行把二者列在「闭包补项（全部必须随抽取搬运）」里，此处即其明示处置，补上 round 2 发现的记录缺口）：pin 的校验集是「非 str / 空 / 前导 `-` / NUL / `/` / `\` / 任意 `..` 子串 / 正则 `^[A-Za-z0-9_.-]+$` 之外」，本模块按 §B 只拒「空 / `/` / `\` / 恰为 `.` 或 `..` / NUL」，即 `-x`、`a b`、`..foo`、控制字符与任意非 ASCII 都被接受。**这是刻意窄化，不是遗漏**：`project_name` 来自版本化配置而非用户输入，且每一次写入都经 `safe_fs` 在 `run_dir` 下做 containment，无遍历或注入路径；pin 的正则还会连合法的非 ASCII 流域名（如 `yd_黄河`）一起拒掉。**后继实现方（#17 / 接线侧）MUST NOT 假定此处仍有 pin 级的名字校验。**
 3. 无轮询循环、无 `sleep` 等待、无轮询间隔配置（连带消掉 pin 的 `0.01` 秒默认）；观测由调用方驱动。**docstring 里 MUST 写作「`sleep` 等待」而不是带点的全名**——G7 的源码机检断言的正是那个带点的全名在整个文件中不出现，写全名会让模块自述与自己的守卫互相打架。
 4. 只接受相对分钟 header，不接受 epoch 形式（fail closed）。
 5. 结构校验用本仓 `state.parse`，不引入 pin 的 `state_ic_structure_complete` 与 `expected_river_count`（归 #9 / 组 8）。
@@ -1238,6 +1238,44 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 - **捕获段的异常收敛（§A「不外泄」在捕获阶段的对偶；把 `_capture` 的 `except _FS_FAILURES` 收窄后 MUST 变红）**：header 已命中之后的某一步 FS 操作失败——例如 `run_dir` 下存在一个名为 `state_checkpoints` 的**普通文件**占位 -> `capture_available()` **不抛任何异常**、该小时保持未捕获。G5 的三条敌意形态全部在 `_read_header_minute` 里就返回了，**没有一条进入 `_capture`**，故捕获段的 `try` 在 round 1 时零见证。
 - **超限源文件（§D 超限处置 + §C 步骤 1「不得用无界读」；把源读、回读、`state.parse` 三处上限同时放开后 MUST 变红）**：一份**结构合法且 > `MAX_STATE_IC_BYTES`** 的源文件 -> 该小时未捕获、无残留副本。三处上限**各自**放开都是语义等价（只有资源放大，无契约可见差异），故本条 MUST 同时放开三处才具判别力；实测生成该源文件在进程内数秒、原码路径 RSS 峰值约 575 MB，成本可接受。
 
+**G9 捕获阶段不变式面清单（round 2 pattern escalation 的类 A 纠正动作；清单本身即产物）**
+
+**不变式（closure prompt）**：捕获阶段的**每一个**复合守卫的**每一个操作数**、每一个异常元组的**每一个成员**、每一个 `is None` 身份判定、每一个传给 `safe_fs` 的关键字实参、以及共享读取器的每一个解析维度，**要么有一个「改坏即变红」的见证，要么有一条书面的等价理由**。「这一段有测试」不算数；「这个操作数有测试」才算。
+
+**为什么是清单重构而不是第三次采样**：round 1 补了三个点；round 2 的两个存活体分别落在 round 1 所钉那个布尔的**另一个操作数**（F1）与那个异常元组的**另一个成员**（F2）；verifier 顺手九个变异体的点查又找出**第三个**存活（`capture_available` 的 `is None` → 真值判定，经典 falsy-zero）。同一形态被两次采样连续漏掉，第三次采样没有理由更好。本仓已有同款先例：#11 的同形补丁打到第三次才发现整轴缺席。
+
+**范围（有界、可穷尽）**：`_capture`、`_copy_is_intact`、`_discard`、`capture_available` 四个函数，加 `_read_header_minute`、`_header_minute_of` 两个共享读取器。**实现方 MUST 在测试文件里落一张结账表**（注释或 docstring 形式均可），逐单元给出「使其变红的用例名」或「等价理由 + 依据」，两者必居其一，不得留空：
+
+| 轴 | 单元 |
+|---|---|
+| 1. 异常元组成员 × except 站点 | `_FS_FAILURES` 的两个成员 × `_capture`/`_discard`/`_read_header_minute` 三站点 = 6 格；另加 `_copy_is_intact` 的 `except ValueError` 与 `_header_minute_of` 的 `except UnicodeDecodeError` |
+| 2. 布尔操作数（**逐操作数**独立） | `_copy_is_intact` 的 header 判定（2）、`_header_minute_of` 的返回判定（2）、`capture_available` 的相邻去重条件（2） |
+| 3. `is None` → 真值判定 | `capture_available` 的 header 判定、`_copy_is_intact` 的、`_header_minute_of` 的 |
+| 4. `safe_fs` 关键字实参 | `containment_root` ×4 站点、`max_bytes` ×2 站点、`missing_ok` ×1 |
+| 5. 共享读取器的解析维度 | 分词（`split()`）、行选择（`lines[0]`）、`splitlines()`、`decode` |
+
+**已知的既有结账**（可直接引用，不必重跑）：round 1 判定三处大小上界**各自单独**放开为等价（只有资源放大，无契约可见差异，故 §G8 第三条要求三处同时放开）、`missing_ok=True→False` 为等价（产生的 `FileNotFoundError` 是 `OSError`，被 `_discard` 自己的 `except` 吞掉）；round 2 判定两处 `containment_root` 变体为等价（目标自构造、不可判别）。轴 5 的「行选择」已作为 cand-14 记入 Known limits，按 DEFER 结账。
+
+**round 2 时已知缺见证的三格**（= F1/F2/F3，MUST 各补见证）：
+
+- 轴 2：`_copy_is_intact` 的 `header_minute is None` 析取。删掉后**回读副本** header 不可读时漏 `TypeError`（`_copy_is_intact` 在 `_capture` 的 `try` **之外**）。三种域内见证：副本落成零字节 / 非 UTF-8 / 非有限 header——一条参数化即可闭合。MUST 以**异常外泄**形态变红。
+- 轴 1：`_FS_FAILURES` 的 `OSError` 半在 `_capture` 与 `_discard` **两站点**均无见证（对照：`_read_header_minute` 两半都有）。**每站点各需一个见证，且失败必须是朴素 `OSError`**：`_capture` 用「源文件在两次读之间被 unlink」（SHUD 的 rename/unlink-in-place，只注入时机不注入错误，与 §G8 第一条同款钩子），`_discard` 用「unlink 抛 `PermissionError`」。把该站点收窄成只接 `SafeFilesystemError` 时 MUST 各自变红。注意现有的两个 RED 单元格由**同一个测试**产出——那是采样的签名，不是扫描。
+- 轴 5：整个 tracker 套的载荷全是空格分隔，而本仓自己的 `producer/tests/cfg_ic_fixtures.py` 写明真实 native `cfg.ic` 是 **Tab 分隔**（`test_cfg_ic.py` 也构造真实 tab 载荷）。`split()` → `split(' ')` 存活；仅有的三处 tab 字节都在「无结果」用例里，变异下**因错误理由通过**。MUST 补一条**成功捕获**路径由 tab 分隔载荷驱动，使全空白分词有正向见证。
+
+**Phase 6.2 强制审计**：本节落地后，由**未参与本 PR 任何 lens** 的独立审计者按上表逐单元复核结账属实，并对随机抽取的若干单元自造变异体验证。审计不通过即视为纠正动作未完成。
+
+**事件后对账清单（round 2 pattern escalation 的类 B 纠正动作，本 issue 起常驻）**：编排者把同一条声明扇出到 fixture / 清单 / PR body / 代码注释 / commit message 五处，而事件改变事实基准时无人重走依赖件——round 2 的五条 record-fidelity FIX_NOW 是同一机制的五个出口，不是五次疏漏。下列事件各触发一次**依赖件重走**：
+
+- **落地任何 pin 符号** -> 重走清单 §1 **全部**行的抽取集与反重复条款，不只本 issue 动过的行（cand-16 正是漏了第 5 行：它仍把已落地的两个 header 符号记为「待落地、归 #9」，会让 #9 再移植一份，恰是本 issue 越界所要防的双权威）
+- **任何代码提交** -> 重走 PR body 的行数、用例数、文件清单、零 diff 声明
+- **任何 fixture 修订** -> 重走 PR body 的 `偏离记录` 与 Known limits
+- **任何 DEFER/DISCARD 裁决** -> fixture 与 PR body 的 Known limits **条数与归属必须一致**（cand-17：fixture 八条、body 六条，漏掉的恰是三条带下游义务的）
+
+另两条常驻纪律：
+
+- **转述即核实**：把任何 reviewer/verifier 的**机制性**声明写进 fixture 成为 MUST/MUST NOT 之前，编排者 MUST 自行验证该机制可达（读控制流或跑一个变异体）。cand-15 的代价是一条 rung-1 条款靠假理由站着。
+- **完备性声明必须可机检**：凡写「此处即全集」「全部必须随抽取搬运」，MUST 配一条按条数或按集合比对的断言。cand-18 与 round 1 的 cand-01 同形——自称完备的枚举其实不完备。
+
 **变异证明要求**（承 issue #11 的方法债，brief 必带）：复制 `producer/` 到**唯一命名**的 scratch 目录时 `rsync --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache'`；**MUST NOT 在 scratch 副本里跑 `uv run`**（会把共享可编辑安装的 `.pth` 重新指回 worktree 源码，全部变异体假存活），用 `uv run --no-project --with pytest` 并显式 `PYTHONPATH=<scratch>/producer/src`；跑前断言 `yd_producer.__file__` 落在 scratch 内；每个变异体之间 `PYTHONDONTWRITEBYTECODE=1` 并清 `__pycache__`；先用一个必然变红的控制变异校准，校准失败如实说并换一个。
 
 **Known limits（round 1 verifier 裁定为 DEFER/DISCARD 的项，逐条记录归属）**：
@@ -1250,6 +1288,7 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 - **不设产物 mode，权限随 umask**（cand-07，CONFIRMED/DISCARD）：命中本 fixture 自己的 rung-1 否定锚点「Auth / permissions：本模块不设 mode」，且 `store/object_store.py` 同形，属仓库级约定而非本 PR 回归。
 - **header 读把整份有界内容 decode + splitlines 只取首行**（cand-05，CONFIRMED/DISCARD）：64 MiB 上界下峰值约 4.7 倍线性放大。`cfg_ic.parse` 在捕获路径上做同样的事、同一个上界，属仓库既有模式；只修轮询侧是化妆。
 - **checksum 取 `copied` 而非 `payload` 在声明域内不可判别**（cand-13，PLAUSIBLE/DISCARD）：原子写 + 私有落点 + 单写者使 `copied == payload` 在每条可达路径上恒成立；真正的部分写会先被 §D 两项校验拦下，走不到 checksum。
+- **epoch 形式 header 的 M4 具体核验钩子**（cand-19，CONFIRMED/FIX_NOW）：偏离 4「只认相对分钟」的正当性**只**建立在时间线证据上——`docs/compute-loop-design.md` 在本 PR 之前就已声明 `cfg.ic.update` 的 header 是模型相对分钟，且 spec 的收窄早于实现提交 26 分钟。它**不**建立在 pin 的行为上：round 2 直读 pin 控制流确认，`capture_available`(:3717-3736) 把 `_header_minute_matches_checkpoint`(:3963-3974) 的**两支都无条件**用在同一个 `<project>.cfg.ic.update` 上，分支注释只是归因不是守卫；而 yd 自己的初态正是 epoch 定戳的（pin `_shift_cfg_ic_time`(:3653) 在求解前把绝对分钟写进 header），所以「SHUD 把初态的时间基带进 update 文件」是**默认生产拓扑**而非异常。**M4 首次真跑 MUST 核验第一份真实 `cfg.ic.update` 的 header 是相对分钟形式**；若为 epoch 形式则每轮永久漏采（fail closed 且响亮，但总量为零），偏离 4 MUST 重新裁决。此处不接受通用的「真实 SHUD 行为归 M4」一句——它不会被解析成这一项具体检查（同类先例：cand-14 已按此标准给了自己的具体钩子）。
 
 **Non-goals（本 issue 明示不做）**：漏采补跑（#17）、轮询循环与作业脚本接线、`state_checkpoints.json` 落盘、绝对 T+12 定戳（#9 重戳 + #13.1 发布）、river 行数等结构检查（#9）、work manifest 契约（组 8）、真实 SHUD 行为（M4）。
 
