@@ -10,7 +10,10 @@ r"""SHUD `cfg.ic` header 行的**时间语义与形状**原语（读侧，任务
 两份 `_as_float` 定义就是两个权威，一旦漂移，「什么算数值 token」在读、移位、校验三侧
 会各说各话。
 
-对 pin 的**刻意偏离**（两条，此处即全集）：
+对 pin 的**刻意偏离**（三条）。完备性由**逐行 diff** 核对得到，不是断言出来的：
+`git show 8ae9b8f2:packages/common/state_qc.py | sed -n '609,727p'` 与本模块自
+`cfg_ic_header_minute_index` 起的正文（剔除逐符号溯源注释）逐行比对，差异**只有**下面
+三条；判定语义零变化。
 
 1. **刻意不移植 `_valid_time_from_header_minute`**（pin `packages/common/state_cli.py:359`，
    归 issue #9）。该函数在 `0 <= m <= horizon` 时把 minute token 解释为**相对** cycle 的
@@ -19,8 +22,16 @@ r"""SHUD `cfg.ic` header 行的**时间语义与形状**原语（读侧，任务
    时间判定」。宽容读法会让一份未重戳的残留 header（如 `720.000000`）在 T=cycle+12h 时被
    判为「对应 T」放行，正是断链的入口。绝对时间比较由 `yd_producer.controller` 自有实现，
    本模块只提供 shape 门与 minute token 提取，**不做任何相对分钟解释**。
-2. **行长换行**：pin 的两处单行列表推导超出本仓 ruff 行宽，按 `state/cfg_ic.py` 的移植
-   先例折行。判定语义逐字不变。
+2. **ruff 行宽折行**（三处，纯排版）：`cfg_ic_header_minute_index` 的 `numeric_indices`
+   列表推导（pin `:620-622`）、`cfg_ic_header_shape` 的 `numeric_values` 列表推导
+   （pin `:695`）与其 `mesh_count` **三元表达式**（pin `:698`）在 pin 里是单行，超出本仓
+   ruff 行宽，按 `state/cfg_ic.py` 的移植先例折行。
+3. **docstring 层面的两类格式差异**（纯排版，`ruff format` 所致）：
+   - `cfg_ic_header_shape` 的 docstring 加了 `r` 前缀，于是 pin 里写作 `23106\\t6` 的转义
+     在此逐字写作 `23106\t6`——**渲染结果与 pin 完全一致**，只是不再二次转义；
+   - pin 在 `cfg_ic_header_minute_index`(`:619`)、`cfg_ic_header_minute_time`(`:635`)、
+     `cfg_ic_header_shape`(`:694`) 三处 docstring 之后各有一个空行，`ruff format` 会删掉
+     （`CfgIcHeaderShape` 的 docstring 与字段之间那个空行不属此类，予以保留）。
 
 本模块 stdlib-only：零 NWM 运行时 import、零数据库/scheduler 依赖、零文件系统写入，
 且**不做任何 IO**（调用方有界读出 header 行并传入已切分的 token）。
@@ -69,7 +80,7 @@ def cfg_ic_header_minute_time(header_tokens: Sequence[str]) -> float | None:
     Uses :func:`cfg_ic_header_minute_index` so the minute-time is read from the
     LAST numeric token regardless of whether a lake count is present.
     """
-    # NWM@8ae9b8f2 packages/common/state_qc.py:629-643（逐字移植）
+    # NWM@8ae9b8f2 packages/common/state_qc.py:629-639（逐字移植）
     index = cfg_ic_header_minute_index(header_tokens)
     if index is None:
         return None

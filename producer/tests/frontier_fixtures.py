@@ -232,6 +232,40 @@ class YdRootBuilder:
         self.written_states.setdefault(source, {})[cycle_text] = None
         return path
 
+    def write_state_at_size(
+        self, cycle_text: str, source: str, *, size_bytes: int
+    ) -> Path:
+        """写一份**恰好 `size_bytes`** 字节的合法状态文件（header 在首行，尾部是空洞）。
+
+        用于钉死「恰好上界」这一侧的分类：上界内的文件按普通文件走三判，与
+        `write_state_oversized`（上界 +1）成对。
+        """
+        path = self._prepare(cycle_text, source)
+        cycle = parse_cycle(cycle_text)
+        head = state_payload(absolute_minute_text(cycle))
+        assert len(head) <= size_bytes
+        with open(path, "wb") as handle:
+            handle.write(head)
+            handle.truncate(size_bytes)
+        self.written_states.setdefault(source, {})[cycle_text] = absolute_minute(cycle)
+        return path
+
+    def write_state_trailing_header(
+        self, cycle_text: str, source: str, *, blank_bytes: int
+    ) -> Path:
+        """`blank_bytes` 个纯换行**在前**、header 行在后的合法状态文件。
+
+        首个非空行要跨越整段空行才能取到，是「首行有界读是否分块」的判别构造：无界读法
+        的峰值会随 `blank_bytes` 线性放大到文件大小的数倍。
+        """
+        path = self._prepare(cycle_text, source)
+        cycle = parse_cycle(cycle_text)
+        with open(path, "wb") as handle:
+            handle.write(b"\n" * blank_bytes)
+            handle.write(state_payload(absolute_minute_text(cycle)))
+        self.written_states.setdefault(source, {})[cycle_text] = absolute_minute(cycle)
+        return path
+
     def write_states_clutter(self, source: str) -> None:
         """`states/<source>/` 下的非法条目：发布临时名、子目录、点文件、非法日期名。"""
         directory = self.states_dir(source)

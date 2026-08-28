@@ -257,8 +257,29 @@ def test_module_documents_the_deliberate_non_port() -> None:
     head = source[: source.index('"""', 3) + 3]
     assert "_valid_time_from_header_minute" in head
     assert "刻意偏离" in head
-    for ordinal in ("\n1. ", "\n2. "):
+    for ordinal in ("\n1. ", "\n2. ", "\n3. "):
         assert head.count(ordinal) == 1, ordinal
-    assert "\n3. " not in head
+    assert "\n4. " not in head
     # 该符号 MUST NOT 出现在模块体里（只允许在模块头的「刻意不移植」说明中出现一次）
     assert source.count("_valid_time_from_header_minute") == 1
+
+
+def test_deviation_list_names_every_formatting_delta_against_the_pin() -> None:
+    """round 1 cand-11：偏离清单曾漏掉三元折行 / `r` 前缀 / docstring 后空行。
+
+    逐条按 `git show 8ae9b8f2:packages/common/state_qc.py` 与本模块正文的**逐行 diff**
+    核对得到（pin `:619`/`:635`/`:694` 三处空行、`:620-622`/`:695`/`:698` 三处折行、
+    `cfg_ic_header_shape` 的 `r` 前缀）；清单少一条就是不成立的完备性声明。
+    """
+    source = pathlib.Path(header_time.__file__).read_text(encoding="utf-8")
+    head = source[: source.index('"""', 3) + 3]
+    for delta in (
+        "numeric_indices",  # pin :620-622 的列表推导折行
+        "numeric_values",  # pin :695 的列表推导折行
+        "mesh_count",  # pin :698 的三元表达式折行
+        "`r` 前缀",  # cfg_ic_header_shape 的 raw docstring
+        "空行",  # pin :619/:635/:694 三处 docstring 后空行被删
+    ):
+        assert delta in head, delta
+    # `r` 前缀那条只有在本模块真的用了 raw docstring 时才成立
+    assert 'r"""Validate the content shape' in source

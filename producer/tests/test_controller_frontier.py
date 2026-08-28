@@ -16,8 +16,13 @@ oracle 纪律：待跑 cycle 的期望值是**手算**的（`DONE` 的最大 cyc
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import os
 import pathlib
+import stat
+import tracemalloc
+from collections.abc import Iterator
 
 import pytest
 from frontier_fixtures import (
@@ -357,6 +362,220 @@ def test_oversized_state_is_refused_without_unbounded_read(
     _assert_stopped(decision, controller.StopReason.STATE_UNREADABLE)
 
 
+def test_state_exactly_at_the_byte_limit_is_still_read(tmp_path: pathlib.Path) -> None:
+    """恰好上界这一侧的分类不变（与「上界 +1」成对，钉死超界判据用的是 `st_size`）。"""
+    builder = YdRootBuilder(tmp_path)
+    builder.write_done(D, "ifs")
+    path = builder.write_state_at_size(T, "ifs", size_bytes=MAX_STATE_IC_BYTES)
+    assert path.stat().st_size == MAX_STATE_IC_BYTES
+    # 稀疏文件上跳过快照比对：摘要要读满 64 MiB，与本条的判别力无关
+    _assert_runnable(_decide(builder, "ifs", _all_complete(), check_writes=False), T)
+
+
+def test_first_line_read_stays_bounded_on_a_large_valid_state(
+    tmp_path: pathlib.Path,
+) -> None:
+    """裁决 4 增补：16 MiB 合法状态的 traced peak 与文件大小同量级，不得是其数倍。
+
+    判别构造是「纯换行在前、header 行在后」：`read(MAX+1)` + `decode()` + `splitlines()`
+    的旧实现在这条上峰值会放大到文件大小的十倍量级（round 1 实测 16 MiB → 168 MiB）。
+    这里取一个**保守**上界（峰值 < 文件大小），分块实现的实测峰值只有百 KiB 量级。
+    """
+    builder = YdRootBuilder(tmp_path)
+    blank_bytes = 16 * 1024 * 1024
+    path = builder.write_state_trailing_header(T, "ifs", blank_bytes=blank_bytes)
+    size = path.stat().st_size
+    assert size > blank_bytes
+
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        line = controller._read_header_line(path, size=size)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert isinstance(line, str)
+    assert line.split()[-1] == absolute_minute_text(parse_cycle(T))
+    assert peak < size, (peak, size)
+
+
+# --- 枚举/探测失败：不存在 ≠ 不可确定（裁决 9） ---
+
+
+def _skip_if_root() -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root 无视 mode 位，`chmod 0o000` 仍可枚举，本用例无判别力")
+
+
+@contextlib.contextmanager
+def _unreadable(path: pathlib.Path) -> Iterator[None]:
+    """把 `path` 临时置为 `chmod 0o000`，退出时**一定**恢复。
+
+    不恢复的话，`snapshot_tree` 的 `rglob` 下降与 pytest 的 tmp 清理都会踩到不可读目录。
+    """
+    original = stat.S_IMODE(path.stat().st_mode)
+    path.chmod(0o000)
+    try:
+        yield
+    finally:
+        path.chmod(original)
+
+
+def _decide_while_unreadable(
+    builder: YdRootBuilder,
+    source: str,
+    raw: RecordingRawComplete,
+    target: pathlib.Path,
+) -> controller.FrontierDecision:
+    """在 `target` 不可读期间调用被测函数，并仍然证明零写入。"""
+    before = snapshot_tree(builder.root)
+    with _unreadable(target):
+        decision = controller.decide_frontier(
+            yd_root=builder.root, source=source, raw_complete=raw
+        )
+    assert snapshot_tree(builder.root) == before
+    return decision
+
+
+def test_unlistable_output_root_stops_instead_of_looking_like_a_fresh_chain(
+    tmp_path: pathlib.Path,
+) -> None:
+    """fail-open 的方向性：`output/` 判空会把前沿倒退到已发布 cycle（裁决 9）。"""
+    _skip_if_root()
+    builder = YdRootBuilder(tmp_path)
+    builder.write_done(D, "ifs")
+    builder.write_state(T, "ifs")
+    builder.write_state(FRESH, "ifs")  # fail-open 时会被当成全新链的起点
+
+    raw = _all_complete()
+    decision = _decide_while_unreadable(builder, "ifs", raw, tmp_path / "output")
+    _assert_stopped(decision, controller.StopReason.DISCOVERY_UNREADABLE)
+    assert str(tmp_path / "output") in decision.detail
+    assert raw.asked == []
+
+
+def test_unreadable_latest_done_cycle_dir_does_not_roll_the_frontier_back(
+    tmp_path: pathlib.Path,
+) -> None:
+    """单个 cycle 目录不可读 -> 停；MUST NOT 悄悄退回更旧的 `DONE`。"""
+    _skip_if_root()
+    builder = YdRootBuilder(tmp_path)
+    builder.write_done("2026082512", "ifs")  # 更旧的 DONE：回退的话会落到它 +12h
+    builder.write_done(D, "ifs")
+    builder.write_state(T, "ifs")
+
+    raw = _all_complete()
+    decision = _decide_while_unreadable(
+        builder, "ifs", raw, tmp_path / "output" / D / "ifs"
+    )
+    _assert_stopped(decision, controller.StopReason.DISCOVERY_UNREADABLE)
+    assert "DONE" in decision.detail
+    assert raw.asked == []
+
+
+def test_unlistable_states_dir_stops_with_discovery_unreadable(
+    tmp_path: pathlib.Path,
+) -> None:
+    """不再是 `NO_INITIAL_STATE`：列不出来与「一份状态都没有」不是同一件事。"""
+    _skip_if_root()
+    builder = YdRootBuilder(tmp_path)
+    builder.write_state(FRESH, "ifs")
+
+    raw = _all_complete()
+    decision = _decide_while_unreadable(builder, "ifs", raw, builder.states_dir("ifs"))
+    _assert_stopped(decision, controller.StopReason.DISCOVERY_UNREADABLE)
+    assert str(builder.states_dir("ifs")) in decision.detail
+    assert raw.asked == []
+
+
+def test_unreadable_states_parent_dir_is_classified_not_raised(
+    tmp_path: pathlib.Path,
+) -> None:
+    """状态**存在性**探测遇 `EACCES` 也 MUST NOT 抛 `PermissionError`（裁决 9）。
+
+    与既有的「状态文件 `chmod 0o000`」用例不同：那条里 `stat()` 仍然成功，失败落在已被
+    guard 的读取处，对本条没有判别力。这里让**父目录**不可读，`os.stat` 自身就失败。
+    """
+    _skip_if_root()
+    builder = YdRootBuilder(tmp_path)
+    builder.write_done(D, "ifs")
+    builder.write_state(T, "ifs")
+
+    raw = _all_complete()
+    decision = _decide_while_unreadable(builder, "ifs", raw, builder.states_dir("ifs"))
+    _assert_stopped(decision, controller.StopReason.DISCOVERY_UNREADABLE)
+    assert str(builder.state_path(T, "ifs")) in decision.detail
+    assert raw.asked == []
+
+
+def test_absent_directories_still_mean_empty_sets(tmp_path: pathlib.Path) -> None:
+    """errno 分流没有把「不存在」一起判成不可读：`output/` 缺 -> 全新链。"""
+    builder = YdRootBuilder(tmp_path)
+    builder.write_state(FRESH, "ifs")
+    assert not (tmp_path / "output").exists()
+    _assert_runnable(_decide(builder, "ifs", _all_complete()), FRESH)
+
+
+def test_absent_states_dir_still_means_no_initial_state(
+    tmp_path: pathlib.Path,
+) -> None:
+    builder = YdRootBuilder(tmp_path)
+    (tmp_path / "output").mkdir()
+    assert not builder.states_dir("ifs").exists()
+    _assert_stopped(
+        _decide(builder, "ifs", _all_complete()),
+        controller.StopReason.NO_INITIAL_STATE,
+    )
+
+
+# --- 可表示性门（裁决 5 增补） ---
+
+#: 10 位、`%Y%m%d%H` 可解析，但 `+12h` 溢出 `datetime` 值域。
+UNREPRESENTABLE = "9999123123"
+
+
+def test_unrepresentable_done_cycle_is_invisible(tmp_path: pathlib.Path) -> None:
+    """`datetime(9999,12,31,23) + 12h` 抛 `OverflowError`：该条目对前沿不可见。"""
+    builder = YdRootBuilder(tmp_path)
+    builder.write_done(D, "ifs")
+    builder.write_state(T, "ifs")
+    raw = _all_complete()
+    baseline = _decide(builder, "ifs", raw)
+
+    builder.write_done(UNREPRESENTABLE, "ifs")
+    polluted = _decide(builder, "ifs", raw)
+
+    _assert_runnable(polluted, T)
+    assert dataclasses.astuple(polluted) == dataclasses.astuple(baseline)
+
+
+def test_unrepresentable_state_name_is_invisible(tmp_path: pathlib.Path) -> None:
+    """`states/` 侧对称：唯一的状态名不可表示 -> 该源没有合法首态。"""
+    builder = YdRootBuilder(tmp_path)
+    builder.write_state(UNREPRESENTABLE, "ifs")
+    _assert_stopped(
+        _decide(builder, "ifs", _all_complete()),
+        controller.StopReason.NO_INITIAL_STATE,
+    )
+
+
+def test_unrepresentable_state_name_does_not_change_a_healthy_verdict(
+    tmp_path: pathlib.Path,
+) -> None:
+    builder = YdRootBuilder(tmp_path)
+    builder.write_done(D, "ifs")
+    builder.write_state(T, "ifs")
+    raw = _all_complete()
+    baseline = _decide(builder, "ifs", raw)
+
+    builder.write_state(UNREPRESENTABLE, "ifs")
+    polluted = _decide(builder, "ifs", raw)
+
+    _assert_runnable(polluted, T)
+    assert dataclasses.astuple(polluted) == dataclasses.astuple(baseline)
+
+
 # --- raw 缺口 ---
 
 
@@ -467,8 +686,10 @@ def test_pseudo_done_entries_fall_back_to_no_initial_state(
 
 
 def test_stop_reason_vocabulary_is_closed() -> None:
+    """裁决 9 起词表由 5 项扩为 6 项：新增 `DISCOVERY_UNREADABLE`。"""
     assert {reason.name for reason in controller.StopReason} == {
         "NO_INITIAL_STATE",
+        "DISCOVERY_UNREADABLE",
         "STATE_MISSING",
         "STATE_UNREADABLE",
         "HEADER_TIME_MISMATCH",
@@ -502,6 +723,40 @@ def test_returned_cycle_is_utc_aware(tmp_path: pathlib.Path) -> None:
     assert decision.cycle is not None
     assert decision.cycle.utcoffset() == shift(FRESH, 0).utcoffset()
     assert decision.cycle.tzinfo is not None
+
+
+def test_decide_frontier_declares_the_raw_complete_input_domain() -> None:
+    """裁决 10：注入的 `raw_complete` 的可接受输入域是**声明的前置条件**，钉在源码里。
+
+    本函数返回的 T 可能带任意可解析的 cycle 小时（裁决 5 刻意如此），而 `rawscan.judge`
+    只对 `config.cycle.hours` 全域——接线方（#26 组 14）不知道这条就会让一个 stray 的
+    18Z 状态名把「停一个源」放大成「整个 tick 崩」。这条断言让后续编辑无法悄悄删掉它。
+    """
+    doc = controller.decide_frontier.__doc__ or ""
+    for phrase in ("raw_complete", "任意可解析", "全域", "ConfigError"):
+        assert phrase in doc, phrase
+
+
+def test_raw_complete_exceptions_are_the_callers_responsibility(
+    tmp_path: pathlib.Path,
+) -> None:
+    """与上一条配对的行为证据：本函数不守卫注入判定，异常原样穿透（归 #26）。"""
+    builder = YdRootBuilder(tmp_path)
+    builder.write_done(D, "ifs")
+    builder.write_state(T, "ifs")
+
+    class _Boom(Exception):
+        pass
+
+    def _raising(_cycle: object) -> bool:
+        raise _Boom("调用方的输入域责任")
+
+    with pytest.raises(_Boom):
+        controller.decide_frontier(
+            yd_root=builder.root,
+            source="ifs",
+            raw_complete=_raising,  # type: ignore[arg-type]
+        )
 
 
 def test_frontier_stride_is_twelve_hours() -> None:
