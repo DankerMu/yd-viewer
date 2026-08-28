@@ -29,7 +29,9 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
+import uuid
 from pathlib import Path
 
 import shapefile
@@ -333,7 +335,16 @@ def build_boundary_geojson(shp_path: str | Path) -> dict:
     if not features:
         raise GeometryError(f"domain 图层没有任何单元，无法合并出边界: {shp_file}")
 
-    merged = unary_union([geom for _, geom in features])
+    # GEOS 会对自相交/拓扑非法的环抛 `shapely.errors.GEOSException`
+    # （`TopologyException: side location conflict ...`）。`read_shapefile` 上游不做
+    # OGC 有效性检查，这类图层经公共 API 完全可达，不转换就会让一个不含任何路径的
+    # 原生异常逃出本模块的「单一公开异常」契约。
+    try:
+        merged = unary_union([geom for _, geom in features])
+    except Exception as exc:
+        raise GeometryError(
+            f"domain 单元合并失败（几何自相交或拓扑非法）: {shp_file}"
+        ) from exc
     if merged.geom_type not in ("Polygon", "MultiPolygon"):
         raise GeometryError(
             f"domain 单元合并结果不是面几何({merged.geom_type}): {shp_file}"
@@ -354,15 +365,18 @@ def build_boundary_geojson(shp_path: str | Path) -> dict:
     return {"type": "FeatureCollection", "features": [feature]}
 
 
-def _rollback_written(written: list[Path]) -> list[Path]:
-    """删除本次已写出的文件，返回**未能删除**的路径。
+def _remove_paths(paths: list[Path]) -> list[Path]:
+    """删除给定路径，返回**未能删除**的那些。
 
-    只接受调用方刚写成功的路径，因此不存在「误删调用方原有文件」的可能；返回残留而
-    不是吞掉删除异常，是为了让「回滚也失败」这条罕见路径同样可被点名，而不是退化成
-    best-effort。
+    只接受**本次调用自己写出的**路径：临时文件，以及已 `os.replace` 到终名的本次产物。
+    终名上若原本存在调用方的同名文件，它在 `os.replace` 时就已被本次产物取代，这里
+    删掉的是本次产物、不做恢复（覆盖语义见 `write_viewer_geojson` 的文档）。
+
+    返回残留而不是吞掉删除异常，是为了让「清理也失败」这条罕见路径同样可被点名，
+    而不是退化成 best-effort。
     """
     residue: list[Path] = []
-    for path in written:
+    for path in paths:
         try:
             path.unlink(missing_ok=True)
         except OSError:
@@ -375,14 +389,21 @@ def write_viewer_geojson(
 ) -> tuple[Path, Path]:
     """把两份 viewer GeoJSON 写入 `out_dir`，返回 `(rivers 路径, boundary 路径)`。
 
-    **无部分产物**，两段都要成立（下游 prepare 会把 scratch 目录整体提交，半份产物
-    会被当成完整产物发布出去）：
+    **无部分产物**，三段都要成立（下游 prepare 会把 scratch 目录整体提交，半份或
+    截断的产物会被当成完整产物发布出去）：
 
     * 构建段：两份文档全部构建并序列化成字符串**成功之后**才开始落盘；
-    * 落盘段：第二份写失败（磁盘满、目标名被占、权限）时**回滚**本次已写出的第一份，
-      使 `out_dir` 内不留本次的任何文件。回滚只删本函数刚写成功的路径，不碰调用方
-      原有的同名文件/目录；回滚自身失败时把残留路径写进消息一并报出，原始 `OSError`
-      仍挂在 `__cause__` 上——不掩盖，也不留「可能残留」的模糊语义。
+    * 落盘段：每份先写到 `out_dir` 内**本次调用专属**的临时名，两份都写完之后才
+      `os.replace` 到终名。写入**中途**失败（ENOSPC/EFBIG 等）只会截断临时文件，
+      终名上永远不会出现半份内容——这正是「记账后删」的朴素回滚做不到的：
+      `write_text` 以 `w` 模式先截断再写，中途失败留下的是一个已存在的坏文件。
+    * 收尾段：任何一步失败都删掉本次创建的临时文件与已提升到终名的文件，使 `out_dir`
+      内不留本次的任何产物；删除自身失败时把残留路径写进消息一并报出，原始异常仍挂在
+      `__cause__` 上——不掩盖，也不留「可能残留」的模糊语义。
+
+    覆盖语义（诚实声明，不做做不到的承诺）：终名上若已存在调用方的同名文件，`os.replace`
+    会原子地替换它，且**不会**在后续回滚中被恢复——回滚只保证「本次产物不残留」，不保证
+    「调用方原文件不丢」。拒绝覆盖检查属 prepare 编排（任务 10.3），本函数不做。
 
     `out_dir` 由调用方给出并按需创建；本函数不解析 `YD_ROOT`、不做拒绝覆盖检查、
     不做提交与 scratch 清理——均属 prepare 编排（任务 10.3）。
@@ -393,20 +414,33 @@ def write_viewer_geojson(
     target = Path(out_dir)
     rivers_out = target / "rivers.geojson"
     boundary_out = target / "boundary.geojson"
-    written: list[Path] = []
+    # 本次调用专属后缀：同一 `out_dir` 上的并发/重复调用不会互相覆盖临时文件。
+    token = f".{os.getpid()}-{uuid.uuid4().hex}.tmp"
+    plan = [(rivers_out, rivers_text), (boundary_out, boundary_text)]
+    temps = [path.with_name(path.name + token) for path, _ in plan]
+    promoted: list[Path] = []
     try:
         target.mkdir(parents=True, exist_ok=True)
-        for path, text in ((rivers_out, rivers_text), (boundary_out, boundary_text)):
-            path.write_text(text, encoding="utf-8")
-            written.append(path)
+        for (_, text), tmp in zip(plan, temps, strict=True):
+            tmp.write_text(text, encoding="utf-8")
+        for (path, _), tmp in zip(plan, temps, strict=True):
+            os.replace(tmp, path)
+            promoted.append(path)
     except OSError as exc:
-        residue = _rollback_written(written)
+        residue = _remove_paths(promoted + temps)
         if residue:
             raise GeometryError(
-                f"viewer GeoJSON 写出失败且回滚未能删除已写出的文件"
+                f"viewer GeoJSON 写出失败且清理未能删除本次产物"
                 f"({'、'.join(str(path) for path in residue)}): {target}"
             ) from exc
         raise GeometryError(
-            f"viewer GeoJSON 写出失败，已回滚本次写出的文件: {target}"
+            f"viewer GeoJSON 写出失败，out_dir 内未留下本次的任何文件: {target}"
         ) from exc
+
+    stray = _remove_paths(temps)
+    if stray:
+        raise GeometryError(
+            f"viewer GeoJSON 已写出但临时文件未能清理"
+            f"({'、'.join(str(path) for path in stray)}): {target}"
+        )
     return rivers_out, boundary_out

@@ -7,11 +7,14 @@ lon/lat 锚点提供，测试断言被测工具能把 Albers 米制坐标还原�
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import pathlib
+import resource
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -23,6 +26,7 @@ from geometry_fixtures import (
     SyntheticBaseline,
     shared_edge_anchors,
     sidecar,
+    write_bowtie_domain_layer,
     write_empty_layer,
     write_layer_with_null_shape,
     write_out_of_domain_layer,
@@ -1116,8 +1120,11 @@ def test_rivers_geojson_missing_index_field_raises(tmp_path) -> None:
     with pytest.raises(GeometryError) as excinfo:
         build_rivers_geojson(shp_path)
 
+    # 断言逐字对应 `geometry.py` 的消息文本，且不含裸数字/单字符——`{shp_file}` 是
+    # pytest 的 `tmp_path`，路径自身的数字或短片段本就能满足松散断言，那样的用例
+    # 在实现把归属信息删光之后仍会是绿的。
     assert str(shp_path) in str(excinfo.value)
-    assert "Index" in str(excinfo.value)
+    assert "缺少 Index 字段" in str(excinfo.value)
 
 
 def test_rivers_geojson_duplicate_index_raises(tmp_path) -> None:
@@ -1129,7 +1136,9 @@ def test_rivers_geojson_duplicate_index_raises(tmp_path) -> None:
         build_rivers_geojson(shp_path)
 
     message = str(excinfo.value)
-    assert "5" in message and "1" in message and "3" in message
+    assert "值 5 重复" in message
+    assert "第 1 条" in message
+    assert "第 3 条" in message
     assert str(shp_path) in message
 
 
@@ -1144,6 +1153,7 @@ def test_rivers_geojson_non_integer_index_raises(tmp_path) -> None:
         build_rivers_geojson(shp_path)
 
     assert str(shp_path) in str(excinfo.value)
+    assert "Index 字段值不是整数" in str(excinfo.value)
 
 
 def test_rivers_geojson_empty_layer_returns_empty_collection(
@@ -1262,7 +1272,7 @@ def test_rivers_geojson_non_finite_coordinate_names_reach_id(tmp_path) -> None:
     with pytest.raises(GeometryError) as excinfo:
         build_rivers_geojson(shp_path)
 
-    assert "7" in str(excinfo.value)
+    assert "reach_id=7" in str(excinfo.value)
 
 
 def test_boundary_geojson_non_finite_coordinate_names_layer(tmp_path) -> None:
@@ -1399,3 +1409,108 @@ def test_write_viewer_geojson_rolls_back_when_second_write_fails(
     # 回滚只删本次写出的路径，调用方原有的占位目录必须原样保留
     assert occupied.is_dir()
     assert list(out_dir.iterdir()) == [occupied]
+
+
+def test_boundary_geojson_self_intersecting_unit_raises_named_error(tmp_path) -> None:
+    """自相交环让 GEOS 抛 `TopologyException`；必须转成点名图层的 `GeometryError`。
+
+    `read_shapefile` 上游不做 OGC 有效性检查，该图层经公共 API 完全可达；不转换就会
+    让一个不含任何路径的原生异常逃出模块的「单一公开异常」契约。
+    """
+    shp_path = write_bowtie_domain_layer(tmp_path / "bowtie.shp")
+
+    with pytest.raises(GeometryError) as excinfo:
+        build_boundary_geojson(shp_path)
+
+    assert str(shp_path) in str(excinfo.value)
+
+
+def test_write_viewer_geojson_self_intersecting_domain_raises_named_error(
+    baseline: SyntheticBaseline, tmp_path
+) -> None:
+    """同一条泄漏面在 `write_viewer_geojson` 上也必须收敛（其 try 只包落盘段）。"""
+    shp_path = write_bowtie_domain_layer(tmp_path / "bowtie.shp")
+    out_dir = tmp_path / "out"
+
+    with pytest.raises(GeometryError) as excinfo:
+        write_viewer_geojson(
+            rivers_shp=baseline.rivers_shp, domain_shp=shp_path, out_dir=out_dir
+        )
+
+    assert str(shp_path) in str(excinfo.value)
+    assert not out_dir.exists() or list(out_dir.iterdir()) == []
+
+
+@contextlib.contextmanager
+def _file_size_limit(max_bytes: int):
+    """把本进程的单文件写出上限压到 `max_bytes`，退出时恢复。
+
+    超限时内核先发 `SIGXFSZ`（默认动作是杀掉进程），故同时把该信号设为忽略，让
+    `write()` 以 `EFBIG` 返回——这样得到的是**写入中途**的真实失败，而不是
+    monkeypatch 掉被测函数自身的写出逻辑。
+
+    POSIX 专用（`resource` / `SIGXFSZ`）。刻意不加 `skipif(win)`：模块顶部的
+    `import resource` 在 Windows 上就已经收集失败，那样的 skip 只是句谎话。本项目的
+    运行面是 node-22 / node-27 与 ubuntu CI，本机开发为 darwin。
+    """
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    previous = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (max_bytes, hard))
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+        signal.signal(signal.SIGXFSZ, previous)
+
+
+#: 默认布局 + `river_count=2` 时两份产物的实测字节数（rivers 600 / boundary 611）。
+#: 限额取在 0 与 600 之间即让**第一份**写到中途失败，取在 600 与 611 之间即让
+#: **第二份**写到中途失败——两个顺序都要证明终名上不留截断产物。
+_MIDWRITE_LIMITS = {"first": 300, "second": 605}
+
+
+@pytest.mark.parametrize("failing", ["first", "second"])
+def test_write_viewer_geojson_midwrite_failure_leaves_no_files(
+    tmp_path, failing: str
+) -> None:
+    """写入**中途**失败（EFBIG）：`out_dir` 内不得留下任何文件，尤其不得留截断的坏 JSON。
+
+    「先写终名、写成功后再记账回滚」的朴素做法在这里必然失败：`write_text` 以 `w`
+    模式先截断再写，中途失败留下的是一个已存在但内容截断的 `rivers.geojson`，且不在
+    回滚账本里——盘上是非法 JSON，消息却声称已回滚。
+    """
+    source = write_synthetic_baseline(tmp_path / "src", river_count=2, unit_count=2)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    with (
+        _file_size_limit(_MIDWRITE_LIMITS[failing]),
+        pytest.raises(GeometryError) as excinfo,
+    ):
+        write_viewer_geojson(
+            rivers_shp=source.rivers_shp,
+            domain_shp=source.domain_shp,
+            out_dir=out_dir,
+        )
+
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert list(out_dir.iterdir()) == []
+
+
+def test_midwrite_limits_actually_bracket_the_two_documents(tmp_path) -> None:
+    """限额常数的自证：`_MIDWRITE_LIMITS` 必须真的把两份产物一前一后夹住。
+
+    没有这条，产物字节数一旦变化，上面的用例会退化成「限额太小，第一份就失败」的
+    单一场景，「第二份中途失败」那条就悄悄不再被覆盖。
+    """
+    source = write_synthetic_baseline(tmp_path / "src", river_count=2, unit_count=2)
+    rivers_out, boundary_out = write_viewer_geojson(
+        rivers_shp=source.rivers_shp,
+        domain_shp=source.domain_shp,
+        out_dir=tmp_path / "sizes",
+    )
+    rivers_size = rivers_out.stat().st_size
+    boundary_size = boundary_out.stat().st_size
+
+    assert 0 < _MIDWRITE_LIMITS["first"] < rivers_size
+    assert rivers_size <= _MIDWRITE_LIMITS["second"] < boundary_size

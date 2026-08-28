@@ -445,3 +445,45 @@ def write_out_of_domain_layer(
         writer.record(index)
     _write_prj(shp_path, albers.to_esri_wkt())
     return shp_path
+
+
+def write_bowtie_domain_layer(
+    shp_path: Path, *, albers: AlbersParams | None = None
+) -> Path:
+    """写一个含**自相交（bowtie）环**的 domain 图层，外加一个不相接的合法方形。
+
+    与 `write_out_of_domain_layer` 同类豁免：直写源 CRS 的原始米制坐标、绕过锚点
+    正向投影与 `METRIC_GUARD`——bowtie 的病态在于环自身的拓扑，不在坐标值，经锚点
+    路径构造不出来。两个要素缺一不可：GEOS 对**单个** bowtie 面通常能自行修复，
+    只有与至少一个其它单元一起 `unary_union` 时才抛 `TopologyException`。
+    本图层只验错误路径与失败归属，不做坐标往返断言。
+    """
+    albers = albers or AlbersParams()
+    shp_path = Path(shp_path)
+    shp_path.parent.mkdir(parents=True, exist_ok=True)
+    bowtie = [
+        (0.0, 3.0e6),
+        (1.0e5, 3.1e6),
+        (1.0e5, 3.0e6),
+        (0.0, 3.1e6),
+        (0.0, 3.0e6),
+    ]
+    square = [
+        (5.0e5, 3.0e6),
+        (5.0e5, 3.1e6),
+        (6.0e5, 3.1e6),
+        (6.0e5, 3.0e6),
+        (5.0e5, 3.0e6),
+    ]
+    with shapefile.Writer(
+        shp=str(shp_path),
+        shx=str(sidecar(shp_path, ".shx")),
+        dbf=str(sidecar(shp_path, ".dbf")),
+        shapeType=shapefile.POLYGON,
+    ) as writer:
+        writer.field(DEFAULT_INDEX_FIELD, *DEFAULT_INDEX_FIELD_SPEC)
+        for index, ring in enumerate([bowtie, square], start=1):
+            writer.poly([ring])
+            writer.record(index)
+    _write_prj(shp_path, albers.to_esri_wkt())
+    return shp_path
