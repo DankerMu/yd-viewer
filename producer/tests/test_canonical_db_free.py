@@ -381,7 +381,7 @@ def _write_ifs_netcdf_raw(store: LocalObjectStore) -> dict[str, Any]:
     }
 
 
-def test_ifs_convert_manifest_is_ready_and_lands_on_one_lowercase_identity(
+def test_ifs_convert_manifest_is_ready_and_uses_lowercase_identity_except_grid_uri(
     tmp_path: Path, no_outbound_sockets: None
 ) -> None:
     """IFS 端到端：完整产物集 MUST 判 `canonical_ready`，并钉住 f003 的三处单位换算。
