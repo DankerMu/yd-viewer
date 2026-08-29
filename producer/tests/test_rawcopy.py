@@ -1336,8 +1336,17 @@ def test_non_utf8_encodable_carried_value_is_refused_before_any_write(
 
     源 manifest 是外部 JSON：`json.load` 接受转义的孤代理 `\\ud800` 并还原成真正的
     孤代理 str，`json.dumps(ensure_ascii=False)` 也照样吐出它，直到写 UTF-8 流才抛
-    `UnicodeEncodeError`。若序列化留在复制之后，结果是「三份副本 + 一个 0 字节
-    raw-manifest.json」——半套产物，且下一次重试会被 `lexists` 预检卡死。
+    `UnicodeEncodeError`。
+
+    序列化前置于复制买到的**不是**「避免半套产物」：`_render_manifest` 自己抛
+    `RawStagingError(kind="source-manifest")`，即便它留在复制之后，写入段的
+    `except RawStagingError` 也会回滚并原样再抛，0 字节 raw-manifest.json 从未被创建、
+    本用例的 `snapshot(work_dir) == {}` 照样成立（round 5 实测）。真实收益是：这段
+    **注定失败**的输入，其失败点留在任何复制之前，于是零写入**不依赖回滚自身成功**
+    ——回滚失败在本仓是被承认的可失败动作，届时残留会让下一次重试被 `lexists` 预检
+    以 `target-exists` 硬拒。位置属性本身由
+    `test_manifest_serialization_call_site_is_inside_the_admission_floor` 判别，本用例
+    判别的是「承接值能否编码」。
     """
     payload = source_manifest_payload("gfs")
     source_entry(payload, LEADS[0], GFS_VARIABLES[0])["metadata"]["grib_short_name"] = (
@@ -2179,16 +2188,22 @@ def test_admission_phase_is_structurally_enclosed_by_one_floor() -> None:
 
     判据取在**范围**上而不是槽位上。只钉 `body[0]` 是 `try`、`body[1]` 是写入期起点
     是不够的：一条准入语句被移到 `body[2]`（仍在任何写入之前）就同时逃出地板**和**
-    AST 派生的探针参数集（实测 21 -> 20），违反 MUST 而全套件全绿。故这里钉两件事：
-    函数体顶层的**完整形状**（多出任何一条语句即红），以及地板 `try` 体的**首尾**
-    语句就是 fixture 具名的准入段两端点（任一端被移出即红）。
+    AST 派生的探针参数集（实测 21 -> 20），违反 MUST 而全套件全绿。故这里钉三件事：
+    函数体顶层的**完整形状**（多出任何一条语句即红）；地板 `try` 体的**首尾**语句就是
+    fixture 具名的准入段两端点（任一端被移出即红）；以及地板 `Try` 的 `orelse` 与
+    `finalbody` **均为空**——端点只钉 `Try.body`，而 `else:` 体抛出的异常按 Python 语义
+    **不被本 try 的 handler 捕获**，把一条准入语句从 `body` 移进同一 `Try` 的 `orelse`
+    时顶层形状与首尾端点都不变（实测全套件绿、探针 21 -> 20），注入的异常却逃出封闭
+    词表。
 
     MUST NOT 改成钉 `len(ADMISSION_INJECTION_TARGETS)`：计数会在每次**合法**新增调用
     点时变红，且它对「语句被移出地板」与「语句被删掉」不可区分——那正是本仓复盘所
     批判的枚举式判别器。
 
     **两条如实登记的残留**（本断言覆盖不到，不粉饰）：
-    - 准入语句被移进**写入段**的 `try`：那里有另一套 handler，是另一个问题；
+    - 准入语句被移进**写入段**的 `try`：那里有另一套 handler，是另一个问题（就
+      `_render_manifest` 这一条而言，该出口由
+      `test_manifest_serialization_call_site_is_inside_the_admission_floor` 单独钉住）；
     - 准入工作被抽成函数、由写入段调用：任何 AST 用例都测不出来。
     """
     body = _stage_raw_body()
@@ -2214,6 +2229,15 @@ def test_admission_phase_is_structurally_enclosed_by_one_floor() -> None:
     last = ast.unparse(node.body[-1])
     assert "verdict.complete" in first, first
     assert "os.path.lexists" in last and "target-exists" in last, last
+    # 覆盖轴：地板的 handler 只覆盖 `Try.body`。`else:` 体里抛出的异常按 Python 语义
+    # 不被本 try 的 handler 捕获，`finally:` 体同理；两者却都在词法上「在 try 内」，
+    # 且都不在 `_admission_call_targets` 的遍历范围里（探针会静默 21 -> 20）。
+    assert node.orelse == [] and node.finalbody == [], (
+        "地板 `Try` 的 orelse/finalbody MUST 为空：这两段虽在 try 内，却**不被本 try 的 "
+        "handler 覆盖**，准入语句挪进去即逃出兜底地板并静默退出 AST 探针参数集；"
+        f"实得 orelse={[ast.unparse(s) for s in node.orelse]} "
+        f"finalbody={[ast.unparse(s) for s in node.finalbody]}"
+    )
 
     kinds = [ast.unparse(handler.type) for handler in node.handlers]
     assert kinds == ["(ConfigError, RawStagingError)", "Exception"], kinds
@@ -2228,6 +2252,61 @@ def test_admission_phase_is_structurally_enclosed_by_one_floor() -> None:
     # 收口器自身不得抛：kind 取自闭合词表，消息拼装走不抛的 `_safe_repr`。
     assert rawcopy_module.ADMISSION_FALLBACK_KIND in rawcopy_module.ERROR_KINDS
     assert "_safe_repr" in source and "!r}" not in source
+
+
+def _render_manifest_call_sites(region: list[ast.stmt]) -> set[int]:
+    """`region` 这几条语句里 `_render_manifest` 全部调用点的 AST 节点身份。
+
+    取 `id()` 而不是计数：本用例要判别的是「调用点落在哪个区域」，计数式判别器
+    （`== 1`、`len(...) == n`）会在每次**合法**新增时变红，且分不清「被移走」与
+    「被删掉」——本仓复盘反复批判的枚举模式。
+    """
+    sites: set[int] = set()
+    for stmt in region:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and _dotted(node.func) == "_render_manifest":
+                sites.add(id(node))
+    return sites
+
+
+def test_manifest_serialization_call_site_is_inside_the_admission_floor() -> None:
+    """本轮 manifest 的序列化调用点 MUST 落在准入段兜底地板的 `Try` **体**之内。
+
+    这是 fixture「序列化 MUST 前置于复制，且 MUST 位于地板 `Try` 体之内」那条的判别器。
+    与顶层形状断言合起来即得到「前置于复制」：地板 `Try` 是函数体第一条语句，一切复制
+    都在其后的写入段 `try` 里。
+
+    **该约束买到的是什么**（原写的理由已被 round 5 实测证伪，勿再复述）：违反它**不会**
+    留下「副本全落地 + 0 字节 manifest」——`_render_manifest` 自己抛
+    `RawStagingError(kind="source-manifest")`，写入段的 `except RawStagingError` 会
+    `written.rollback()` 后原样再抛，0 字节 manifest 从未被创建，`snapshot(work_dir) == {}`
+    仍成立。真实收益是：一段**注定失败**的输入，其失败点留在任何复制之前，于是零写入
+    **不依赖回滚自身成功**——而回滚可能失败是本仓另行承认的事实（失败时留残留，并让
+    下一次重试被 `target-exists` 预检硬拒）。
+
+    杀手变异体（各自 MUST 变红）：
+    - SERIAL：把该调用移进写入段 `try`、复制循环之后；
+    - ORELSE：把该调用移进地板 `Try` 的 `else:` 体（词法在 try 内，语义在 handler 外）。
+    """
+    body = _stage_raw_body()
+    floor = body[0]
+    assert isinstance(floor, ast.Try), (
+        "函数体第一条语句必须是地板 try（结构本身由 "
+        "`test_admission_phase_is_structurally_enclosed_by_one_floor` 断言）"
+    )
+    # 一次解析、同一棵树：两个集合必须来自同一次 `ast.parse`，否则 `id()` 天然不等。
+    inside = _render_manifest_call_sites(floor.body)
+    anywhere = _render_manifest_call_sites(body)
+    assert inside, (
+        "`_render_manifest` 的调用点不在地板 `Try` 体内：序列化已不再前置于复制，"
+        "一段注定失败的输入要到复制之后才失败，零写入转而依赖回滚自身成功；"
+        f"实际找到的调用点区域={'函数体别处' if anywhere else '整个 stage_raw 内都没有'}"
+    )
+    assert anywhere == inside, (
+        "`stage_raw` 里存在落在地板 `Try` 体**之外**的 `_render_manifest` 调用点"
+        "（写入段 `try`、地板的 `orelse`/`finalbody`/handler 都算外部）："
+        f"体内 {len(inside)} 处、全函数 {len(anywhere)} 处"
+    )
 
 
 def test_admission_local_method_calls_are_inside_the_floor() -> None:

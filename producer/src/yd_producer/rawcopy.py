@@ -972,9 +972,18 @@ def _render_manifest(
     序列化必须整体前置到准入期：`entries` 与 `leads` 在复制开始前就已完全确定，而
     序列化本身可能失败——源 manifest 是外部 JSON，`json.load` 会接受转义的孤代理
     （`\\ud800`），`json.dumps(ensure_ascii=False)` 也照样吐出它，直到写 UTF-8 流时
-    才抛 `UnicodeEncodeError`（是 `ValueError`，不是 `OSError`）。留在写入期就意味着
-    「副本全落地 + 一个 0 字节 manifest」这种半套产物。这里先 `encode("utf-8")` 把它
-    变成准入期的 `source-manifest` 拒绝，零写入。
+    才抛 `UnicodeEncodeError`（是 `ValueError`，不是 `OSError`）。这里先 `encode("utf-8")`
+    把它变成准入期的 `source-manifest` 拒绝，零写入。
+
+    前置买到的**不是**「避免『副本全落地 + 一个 0 字节 manifest』的半套产物」——那个
+    后果不会发生（round 5 实测证伪）：本函数自己抛 `RawStagingError`，即便留在写入期，
+    也会被写入段的 `except RawStagingError` 接住、`written.rollback()` 后原样再抛，
+    `_write_manifest` 从不被执行，0 字节 manifest 从未被创建。真实收益是：一段**注定
+    失败**的输入，其失败点留在任何复制之前，于是零写入**不依赖回滚自身成功**——而回滚
+    失败是本模块另行承认的可失败动作（失败时留残留，并让下一次重试被 `lexists` 预检以
+    `target-exists` 硬拒）。位置属性由
+    `test_rawcopy.py::test_manifest_serialization_call_site_is_inside_the_admission_floor`
+    的 AST 断言守住（杀手变异体 SERIAL/ORELSE）。
 
     `ensure_ascii=False` MUST 保留：改成 `True` 会把孤代理转义成 `\\ud800` 六字符、
     编码顺利通过，等于把一个不可编码的值偷渡进产出 manifest。

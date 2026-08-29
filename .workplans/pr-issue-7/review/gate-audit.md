@@ -198,7 +198,7 @@ legacy 行所指的闸门语句在本轮 diff 中**逐字节未变**（`_carried
 | 回滚失败进入外抛异常（tier-1 的 `add_note`） | `stage_raw` | R1d（不挂 note）+ 同上用例 | RED |
 | tier-2 的清理声明**条件化**（清理失败时不得宣称「已清理」） | `stage_raw` | R1b（无条件宣称已清理）+ `test_tier2_message_stops_claiming_cleanup_when_rollback_failed` / R1c（无条件宣称残留）+ `test_successful_rollback_still_reports_a_clean_cleanup` | RED |
 | `_render_manifest` 的 `.encode("utf-8")`（承接值**能否编码**在写入前被判定） | `_render_manifest` | MF1b 改成 `errors="surrogatepass"` + `test_non_utf8_encodable_carried_value_is_refused_before_any_write` | RED |
-| `_render_manifest` **调用点的位置**（序列化前置到准入期地板之内） | `stage_raw` | round-5 补立；见下方勘误 | — |
+| `_render_manifest` **调用点的位置**（序列化前置到准入期地板之内） | `stage_raw` | SERIAL（移进写入段 `try`、复制循环之后）/ ORELSE（移进地板 `Try` 的 `else:`）+ `test_manifest_serialization_call_site_is_inside_the_admission_floor` | RED / RED |
 | `for variable in verdict.expected_variables[lead]`（逐变量扇出，集合相等两方向） | `_build_entries` | M24 漏一条 / M25 多一条 | RED / RED |
 | `local_key=local_key`（entry 的 key 由 yd **自己算**，不照抄源 manifest） | `_build_entries` | MX1（`local_key=source_entry.local_key`）+ `test_full_cycle_copies_files_and_manifest_triples_match` / `test_manifest_json_matches_the_producer_consumer_contract`（源 fixture 带 `nwm-bucket/` 发散前缀） | RED |
 | `work_dir` 在 `raw_root` 之下（析取左半） | `stage_raw` | MF3 去掉该闸门 + `test_work_dir_under_raw_root_is_a_config_error` | RED |
@@ -356,3 +356,37 @@ pytest -k non_utf8_encodable（本行登记的杀手用例）在 SERIAL 下 -> 1
 SERIAL 与 ORELSE 两条，各自 MUST 变红。该行在补立判别器落地并实测变红前记 `—`。
 
 登记人：编排者（本行的错误性质栏出自编排者，非实现者）。
+
+### 位置行的实测（round-5 修复轮补立）
+
+scratch `…/scratchpad/r5fix-issue7/{producer,openspec,docs}`，同一套 profile 措施
+（三个 rsync exclude + 仓根 `openspec/`/`docs/`、副本内 `env -u VIRTUAL_ENV uv sync --frozen
+--python 3.12`（CPython 3.12.12 已确认）、`PYTHONDONTWRITEBYTECODE=1` 且逐轮清
+`__pycache__`、逐轮断言 `yd_producer.rawcopy.__file__` 落在副本内、每个变异体做
+`inspect.getsource` token 断言（基线做**无 token** 断言以捕捉陈旧变异体）、恢复一律 `cp`
+自工作树 + `diff -q`）。
+
+```
+基线（副本）                          : 809 passed, 16 skipped        （模块 129 passed）
+CTL 前（`raw/` -> `rawR5FIXCTL/`）    : 18 failed, 791 passed, 16 skipped
+CTL 后（`raw/` -> `rawR5FIXCTL2/`）   : 18 failed, 791 passed, 16 skipped   （首尾一致）
+
+SERIAL  : 1 failed, 807 passed, 16 skipped   （模块 1 failed / 127 passed）-> 位置测试单独变红
+ORELSE  : 2 failed, 806 passed, 16 skipped   （模块 2 failed / 126 passed）-> 位置测试 + 范围测试同时变红
+FINALLY : 模块 83 failed / 45 passed          （对照：仍红，未转绿）
+DECOY   : 模块 1 failed / 128 passed          -> 只被顶层形状断言拦下，**位置测试保持绿**
+```
+
+**DECOY 保持绿是本行的特异性证据**：它说明位置测试咬住的确实只是「`_render_manifest`
+调用点在不在地板 `Try` 体内」，而不是顺带被别的形状变化打红。若它在 DECOY 下也红，
+本行就无法声称覆盖的是「位置」这一个属性。
+
+**FINALLY 与 round-5 复审记录的 81 failed / 46 passed 不同（本轮 83/45），差额逐项可算平**：
++1 collected 是新增的位置测试；+2 failed 是范围测试（原先在 FINALLY 下通过，现被
+`finalbody` 一钉打红）与位置测试；−1 passed 是范围测试换列。它仍因既有的运行期原因保持红，
+未转绿，差额全部归因于本轮新增的两条断言，不是 harness 漂移。
+
+判别器实现要点（`test_rawcopy.py:2257-2311`）：辅助函数取 `_render_manifest` 各调用点的
+AST 节点**身份**（`id()`）而非条数，断言「地板 `Try` 体内的调用点集合」与「整个函数体内的
+调用点集合」**相等且非空**。集合相等使得调用点移到写入段 `try`、`orelse`、`finalbody`
+或任一 handler 都会破等式，而合法新增不会像计数那样误红——后者正是本 PR 四轮反复失败的枚举模式。
