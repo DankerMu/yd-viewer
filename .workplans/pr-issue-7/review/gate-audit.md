@@ -197,7 +197,8 @@ legacy 行所指的闸门语句在本轮 diff 中**逐字节未变**（`_carried
 | `rollback` 的 `except Exception`（**保证不抛**：它抛出的异常会替换正在外抛的失败） | `_Written._remove` | R1a（收窄回 `except OSError`）+ `test_rollback_failure_is_reported_and_never_replaces_the_staging_error` | RED |
 | 回滚失败进入外抛异常（tier-1 的 `add_note`） | `stage_raw` | R1d（不挂 note）+ 同上用例 | RED |
 | tier-2 的清理声明**条件化**（清理失败时不得宣称「已清理」） | `stage_raw` | R1b（无条件宣称已清理）+ `test_tier2_message_stops_claiming_cleanup_when_rollback_failed` / R1c（无条件宣称残留）+ `test_successful_rollback_still_reports_a_clean_cleanup` | RED |
-| `_render_manifest` 的 `.encode("utf-8")`（序列化前置到准入期） | `_render_manifest` | MF1b 改成 `errors="surrogatepass"` + `test_non_utf8_encodable_carried_value_is_refused_before_any_write` | RED |
+| `_render_manifest` 的 `.encode("utf-8")`（承接值**能否编码**在写入前被判定） | `_render_manifest` | MF1b 改成 `errors="surrogatepass"` + `test_non_utf8_encodable_carried_value_is_refused_before_any_write` | RED |
+| `_render_manifest` **调用点的位置**（序列化前置到准入期地板之内） | `stage_raw` | round-5 补立；见下方勘误 | — |
 | `for variable in verdict.expected_variables[lead]`（逐变量扇出，集合相等两方向） | `_build_entries` | M24 漏一条 / M25 多一条 | RED / RED |
 | `local_key=local_key`（entry 的 key 由 yd **自己算**，不照抄源 manifest） | `_build_entries` | MX1（`local_key=source_entry.local_key`）+ `test_full_cycle_copies_files_and_manifest_triples_match` / `test_manifest_json_matches_the_producer_consumer_contract`（源 fixture 带 `nwm-bucket/` 发散前缀） | RED |
 | `work_dir` 在 `raw_root` 之下（析取左半） | `stage_raw` | MF3 去掉该闸门 + `test_work_dir_under_raw_root_is_a_config_error` | RED |
@@ -330,3 +331,28 @@ fixture 上游——`entry_payload()` 用 yd 应当独立算出的那个值去�
   `except (UnicodeEncodeError, TypeError, ValueError)` 同理（`UnicodeEncodeError`
   冗余于 `ValueError`；`TypeError` 腿不可达——承接值全部来自 `json.load`，恒可序列化，
   登记为死腿）。
+
+## 勘误（round 5 门限）：一处**虚假覆盖登记**
+
+原表中 `_render_manifest` 的 `.encode("utf-8")` 一行，其性质栏写的是「序列化前置到准入期」，
+即**位置**属性；而同行登记的杀手变异体 MF1b 改的是 `errors="surrogatepass"`，测的是
+**能否编码**。两者不是同一个属性：把整个 `_render_manifest` 调用移出准入期地板（移进写入段
+`try`、或移进地板的 `orelse`），MF1b 那条用例照常通过，位置属性无人守。
+
+round 5 实测：
+
+```
+SERIAL 变异体（_render_manifest 移进写入段 try、复制循环之后）
+  -> 807 passed, 16 skipped —— 零红条
+  （808→807 的唯一原因是该调用退出 AST 派生的探针参数集 21→20，而无人断言该损失）
+pytest -k non_utf8_encodable（本行登记的杀手用例）在 SERIAL 下 -> 1 passed
+```
+
+即本行**声明覆盖了一个它并未覆盖的属性**——本仓记录在案的「声明必须配判别器」失效模式，
+这一次出现在审计交付物自身。
+
+处置：原行的性质栏改为其真实覆盖面（能否编码），位置属性另立一行，由 round 5 的补立判别器
+（AST 断言 `_render_manifest` 调用点落在地板 `Try` 体覆盖范围内）承担，其杀手变异体为
+SERIAL 与 ORELSE 两条，各自 MUST 变红。该行在补立判别器落地并实测变红前记 `—`。
+
+登记人：编排者（本行的错误性质栏出自编排者，非实现者）。

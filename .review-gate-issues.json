@@ -95,7 +95,9 @@
       ]
     },
     "7": {
-      "ceilingPrs": [],
+      "ceilingPrs": [
+        65
+      ],
       "gateEntries": 2,
       "closed": []
     }

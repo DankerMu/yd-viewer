@@ -78,11 +78,19 @@
 - **THEN** 拒绝并报错，work 根内不出现任何新增路径
 
 ### Requirement: manifest 语义键承接与 fail-closed
-manifest 的 entry 级语义键（GRIB filter、累积语义）MUST 逐条承接自 NWM 源 manifest，MUST NOT 在本仓发明或以默认值补齐。降水累积语义缺失或越域时 MUST 报错停止。源 manifest MUST 声明其 forecast hours 全集，且该全集 MUST 覆盖本轮预期的全部 lead；本仓产出的 manifest MUST 自行显式写出 forecast hours 相关键，MUST NOT 从源 manifest 转抄、也 MUST NOT 依赖消费端由实际 entry 反推。
+manifest 的 entry 级语义键（GRIB filter、累积语义、时间标记）MUST 逐条承接自 NWM 源 manifest，MUST NOT 在本仓发明或以默认值补齐。降水累积语义缺失或越域时 MUST 报错停止。承接进来的 entry 级时间标记 MUST 与本轮自算的时间一致——`cycle_time` MUST 等于本轮 cycle，`valid_time` MUST 等于本轮 cycle 加该 entry 的 lead；比较 MUST 在**时刻**上做而非文本上做（同一时刻的不同时区写法视为一致）。不一致时 MUST 报错停止，MUST NOT 承接一个与本轮自算值矛盾的时间标记。源 manifest MUST 声明其 forecast hours 全集，且该全集 MUST 覆盖本轮预期的全部 lead；本仓产出的 manifest MUST 自行显式写出 forecast hours 相关键，MUST NOT 从源 manifest 转抄、也 MUST NOT 依赖消费端由实际 entry 反推。
 
 #### Scenario: 源 manifest 不可用
 - **WHEN** 源 manifest 缺失、不可解析，或其 entry 无法覆盖本轮预期的 `(lead, variable)` 全集
 - **THEN** 报错停止，不以空值或推导补齐
+
+#### Scenario: 承接的 entry 时间与本轮自算不一致
+- **WHEN** 源 manifest 某条 entry 的 `cycle_time` 不等于本轮 cycle，或其 `valid_time` 不等于本轮 cycle 加该 entry 的 lead
+- **THEN** 报错停止，work 根内不出现任何新增路径
+
+#### Scenario: 时间一致性按时刻比较而非文本比较
+- **WHEN** 源 manifest 的 entry 时间写成与本轮 cycle 不同的时区偏移，但指向同一时刻
+- **THEN** 视为一致，正常生成 manifest
 
 #### Scenario: 降水累积语义缺失
 - **WHEN** 某条降水变量 entry 的累积类型缺失
