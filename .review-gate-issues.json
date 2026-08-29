@@ -142,6 +142,11 @@
           "rounds": 3
         }
       ]
+    },
+    "20": {
+      "ceilingPrs": [],
+      "gateEntries": 2,
+      "closed": []
     }
   }
 }
