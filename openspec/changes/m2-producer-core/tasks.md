@@ -1605,7 +1605,7 @@ Project profile: yd-viewer
    (a) 清单 `剥离点` 点名的删除/改写；
    (b) import 重映射：`packages.common.object_store` → `yd_producer.store.object_store`、`packages.common.storage` → `yd_producer.store.object_path`、`packages.common.source_identity` → `yd_producer.raw.source_identity`、`packages.common.test_netcdf4` → `netcdf_fixture`、`workers.canonical_converter.converter` → `yd_producer.canonical.converter`（全集以实跑 `grep -n '^from \|^import \|importlib.import_module' ` 收敛，逐个报告）；
    (c) 溯源头部注释（裁决 3）；
-   (d) `uv run ruff format` 重排版 + `ruff check --fix` 的 import 排序。**(d) 是既有先例而非本轮发明**：`producer/src/yd_producer/store/safe_fs.py` 与 pin 相差 226 行、差异全是 88 列换行与溯源头（NWM 用 `line-length=120`，yd 用 ruff 默认 88）。
+   (d) `uv run ruff format` 重排版 + `ruff check --fix` 的**全部**自动修复（**round-1 放宽**：原措辞只写「import 排序」，但 ruff 0.16.4 对 pin 代码还会产出 `UP034` 去括号等 autofix，且留着它们会挂 CI 的 `uv run ruff check .`——即原措辞把一类机械强制、语义惰性的编辑判成了偏离。放宽后仍要求逐条在忠实度证明里点名 autofix 规则码）。**(d) 是既有先例而非本轮发明**：`producer/src/yd_producer/store/safe_fs.py` 与 pin 相差 226 行、差异全是 88 列换行与溯源头（NWM 用 `line-length=120`，yd 用 ruff 默认 88）。
 3. **溯源头部的形式由 `specs/forcing-chain/spec.md`「快照模块可追溯」逐字约束，正反两向共用同一谓词**。三个快照文件各写一条**独立 `#` 注释行**，注释内容**恰为**：
    - `producer/src/yd_producer/canonical/converter.py` → `NWM@8ae9b8f2 workers/canonical_converter/converter.py`
    - `producer/tests/test_canonical_converter.py` → `NWM@8ae9b8f2 tests/test_canonical_converter.py`
@@ -1637,6 +1637,18 @@ Project profile: yd-viewer
 9. **D4 零默认在本文件的落点由 `剥离点` (a)(b)(c)(d) 四条封闭，实现者 MUST NOT 自行发明缺省**。特别是清单 §4 风险 14 已显式声明：在 `config.toml` / `local.toml` 字段落地前（归任务 1.1），7.1 **不得**自行发明缺省。本 issue **MUST NOT 修改** `producer/src/yd_producer/config.py`、`config.toml` schema、`cli.py`，也不出 `specs/cli-config/spec.md` 的 delta——converter 的三个路径字段（`workspace_root`/`object_store_root`/`object_store_prefix`）按 `剥离点`(b) 改为无默认必填 kw-only 构造入参，由调用方（组 8 与任务 14.1）装配，本 PR 内只有测试作为调用方。
 10. **本 PR 不接线任何 CLI、不接线控制器**。`cli.py` 的子命令行为逐字不变；converter 只作为 `yd_producer.canonical` 包的库符号存在。NWM 侧 `workers/canonical_converter/cli.py` 不快照（清单 §1 第 35 行 `剥离点` 在处置 `from_env` 调用点时逐字记为「D5：NWM CLI 不快照」；design.md 的 D5 条目本身讲的是依赖策略，该引用在清单侧即为悬空，本 fixture 不修清单的措辞，只按其实质结论执行——NWM 的 CLI 入口不进快照集）。
 11. **零跨节点、零 NWM 运行时 import**。`yd_producer.canonical` MUST NOT 在运行期 import 任何 `workers.*` / `packages.*`；对 NWM 的访问只发生在**落码期**的只读 `git show`（agent-ops §5），实现者 MUST NOT 在 NWM 工作树里执行任何写操作、MUST NOT 在 NWM checkout 内跑 `uv sync` / `uv run`（agent-ops §7.2 维护窗口硬约束）。
+
+12. **【round-1 新增裁决 · canonical 身份归一】`source_id` MUST 在 `convert_manifest` 入口归一一次，此后全链只用归一值。** 这是 fixture 属主对 round-1 三个 reviewer 独立汇聚、verifier CONFIRMED/FIX_NOW 的 P1（`identity-drift-1`/cand-01）的裁定，实现者不得另行选路。
+    - **缺陷**：`evaluate_canonical_readiness`(:346) 以 `normalize_source_id(source_id)` 过滤行，而 `_canonical_product_result_readiness_row`(:603-620) 与 `_complete_cycle_after_conversion`(:1370) 用**原始** `source_id` 打戳。pin 上 `normalize_source_id("IFS") == "IFS"`，二者一致；yd 在 issue #5 落地的 `raw/source_identity.py` 映射 `"IFS" -> "ifs"`（本 fixture 的 Must-preserve 钉死），于是 IFS 的每一行都被丢弃。实测：完整的 7 变量 x 2 lead IFS 产物集写出全部产物与 catalog，却返回 `status="canonical_incomplete"` 且七个必需变量全部报缺；GFS 不受影响（`normalize("gfs") == "gfs"`）。输入域**现在就存在**：`rawcopy.py:992` 经 `rawscan.py:48` 的 `SOURCE_DIR_NAMES` 当下就发出 `source_id="IFS"` 的 manifest。
+    - **裁定的修法（唯一合法解）**：在 `CanonicalConverter.convert_manifest` 与 `IFSCanonicalConverter.convert_manifest` 两处入口的 `source_id == self.config.source_id` 相等校验**之后**，各插入一行 `source_id = normalize_source_id(source_id)`。
+    - **为什么是这一处而不是别处**：`docs/products-contract.md` §3.2 逐字规定「`source` 固定为小写 `gfs` 或 `ifs`」，而文档优先于实现（项目 CLAUDE.md）。只修 readiness 打戳会让落盘 catalog 行继续带 `"IFS"`，组 8 对 catalog 重跑 readiness 仍看到零行——爆炸半径不变，故**不可取**。入口归一使 object key、catalog key、catalog 行 `source_id`、`canonical_product_id`、readiness 行与过滤、缺失产物记录**同用一个小写身份**，与 products-contract §3.2 一致。canonical 命名空间归 yd 所有；`raw/` 侧的逐源非对称键沿用继承形态，不在本裁决范围内。
+    - **登记为第五类编辑**：这是 `剥离点` 未点名的 pin 源码编辑，按裁决 2 属第五类，由本裁决**显式批准**并同批回填清单第 35 行 `剥离点`。
+    - **附带的 fail-closed 收紧（须在偏离记录写明）**：归一化对未知 source 抛 `ValueError` 而非 `CanonicalConversionError`。相等校验已把取值锁在 `config.source_id` 上，故正常路径不可达；这是可接受的 fail-closed，但**必须记录**，不得静默。
+13. **【round-1 新增裁决 · 快照测试的 IFS 行戳编辑予以批准，但必须去掉其「唯一 IFS oracle」地位】** `producer/tests/test_canonical_converter.py` 把两处 `canonical_rows(source_id=...)` 由 pin 的 `"IFS"` 改成 `"ifs"`，是**未申报的第五类编辑**（verifier CONFIRMED/FIX_NOW，cand-02）。
+    - **不回退**：该用例直调 `evaluate_canonical_readiness` 而不经 `convert_manifest`，故裁决 12 的入口归一救不了它；在 yd 的 `{"IFS": "ifs"}` 归一化下，「逐字忠实」与「用例为绿」不可兼得。回退等于删用例，而清单第 51 行命令保留它。
+    - **批准并登记**：本裁决显式批准该编辑，须同批回填清单第 51 行、写进 PR `偏离记录`、并在忠实度证明里作为具名差异段归类。
+    - **但真正的病根是它曾是仓内唯一的 IFS oracle**——正因如此它把裁决 12 的 P1 盖住了。故 MUST 在 `producer/tests/test_canonical_db_free.py` 内新增一条 **IFS 端到端**用例（按 `rawcopy.py` 实际发出的 `source_id` 构造完整 IFS manifest，断言 `status == "canonical_ready"`），并附**在裁决 12 修法之前变红**的红证明。
+14. **【round-1 新增裁决 · catalog schema 断言】** verifier 在 scratch 副本内把 `_write_product_catalog` 的 `source_version`/`grid_id`/`native_time_resolution`/`native_spatial_resolution` 四个键**全部改名，1337 个测试依然全绿**（控制变异正常变红），确证 catalog schema 零断言（cand-04，CONFIRMED/FIX_NOW，属本 PR 引入行为的覆盖缺口，按 carve-out 不可延期）。MUST 在 `producer/tests/test_canonical_db_free.py` 内钉住 `sorted(payload.keys())` 的 4 个键与 `sorted(row.keys())` 的 16 个键，并补齐上列四个字段的取值断言。**MUST NOT 写进快照文件**（裁决 2）。
 
 Change surface:
 - 新增 `producer/src/yd_producer/canonical/__init__.py`（yd 自撰，空导出或最小 re-export，无溯源头）
@@ -1746,6 +1758,10 @@ Known limits（须走 Phase 8 的 deferral routing：每条配 follow-up issue �
 - **继承的死代码**：裁决 5 登记的 3 处不可达分支 + 2 处 no-op（`_get_existing_product` 后半、`_existing_product_is_current`、`already_done` 状态支、`_upsert_product`、`_update_cycle_status`）与 6 处 ERA5 残面，按裁决 1 保留
 - **继承的矛盾**：`REQUIRED_STANDARD_VARIABLES_BY_SOURCE` 的 `"ERA5"` 键不可达（`normalize_source_id("ERA5")` 抛 `ValueError` 而非 `CanonicalConversionError`）
 - **无产物级回滚**：转换中途失败时已写的 canonical 产物对象留在 object-store（pin 行为，无回滚）
+- **【round-1 补登记】读侧 symlink 不走 no-follow**：`converter.py` 由 `object_store.resolve_path()` 取裸 `Path` 交给 `xr.open_dataset`，而 `resolve_path`(object_store.py:314-326) 只做键归一 + `validate_object_path` + 字符串级容纳，**无 `O_NOFOLLOW`**；`LocalObjectStore` 的其它每一个消费者都走 `*_no_follow(..., containment_root=self.root)`。store 根内 `raw/<source>/<cycle>/<file>` 任一段的 symlink 会被 eccodes/netCDF4 跟随，读到容纳根之外的字节并据以产出 canonical 产物与 catalog。pin 逐字继承（pin `object_store.py:273-285` 的 `resolve_path` 与 yd 逐字符相同），故裁决 1 禁止在本 PR 修。
+  **两点必须写进 follow-up，否则会传播一条陈旧论据**：(a) 「object-store 树只由 `write_bytes_atomic`（no-follow）写入、symlink 须带外植入」对 `raw/` 子树**不成立**——`rawcopy.py:736-737` 把 object-store 根取作 `work_dir`，而 `raw/` 由 `rawcopy.py:893` 自己的 `mkdir` 建立，不经 store；(b) **issue #71 把自身严重性上限建立在「最终消费者经 `object_store.py:190,206,263` 的 `*_no_follow` 读取、故转换器 fail-closed」这一前提上，而本 PR 落地的转换器正是那个消费者且不走那三行**——#71 的 fail-closed 上限自本 PR 起不再成立。
+- **【round-1 补登记】对半可信输入无规模上界**：`load_manifest`(:1213-1216) 与 `grid_definition_uri` 读(:1922) 用无上限的 `read_bytes`，而 store 自带 `MAX_OBJECT_MANIFEST_BYTES = 16MiB`(object_store.py:24) 与 `read_bytes_limited`(:212)，本模块**从不使用**；raw 文件交给 cfgrib/netCDF4 前无 size/stat 检查（模块内 `grep MAX_` 零命中）；`:1502` 把整张格点物化成 Python float 元组，IFS 路径(:2082-2094) 一次持有一小时的全部八个原生变量。
+  **量级按实测写，不用全球网格的数字**：真实 raw 由 NWM 下载器按 `download_bbox = {east:145, north:64, south:8, west:63}` 裁剪，约 329x225 ≈ 74k 点 ≈ **2.4MB/变量、8 变量的 IFS 小时约 19MB**（不是全球 0.25° 的约 265MB）。输入域为**半可信**：自家 NWM 下载器写在共享 NFS 上，非对抗，但跨节点、在 yd 写控制之外、且从不做尺寸校验。三个面在 pin 上皆逐字，裁决 1 禁止在本 PR 修。
 
 Non-goals:
 - direct-grid forcing 生产、work 内临时 registry、SHUD 输入组装（组 8）
