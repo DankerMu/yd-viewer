@@ -39,6 +39,10 @@ from yd_producer.store import safe_fs
 CLEANUP_CLAIM = "根已非全新，重跑 init 前需人工清理 `states/`"
 FRESH_CLAIM = "零写入，根仍是全新根"
 PARTIAL_CLAIM = "可能已被部分写入"
+#: 探测**探到条目**时才成立的措辞；探测自身失败的 hedge 话术 MUST NOT 出现它。
+EXCLUSIVE_CLAIM = "已被排他创建"
+#: 探测自身失败（fail closed）的 hedge 话术。
+HEDGE_CLAIM = "落盘残留无法探测"
 
 # --- 成功路径 ----------------------------------------------------------------
 
@@ -304,6 +308,136 @@ def test_mid_write_io_failure_names_the_possibly_partial_target(
     assert 0 < gfs_target.stat().st_size < len(tree.payloads["gfs"])
 
 
+# --- 收尾判据是**盘上探测**而非 `kind` 代理（round 2 cand-R2-01/-04/-07）-----
+#
+# 下面三行分别钉死探测的三个出口：探到 `FileNotFoundError`（零残留、话术精确）、探到条目
+# （半写、话术点名排他创建）、探测自身失败（fail closed 到 hedge 话术）。载体全是真实的
+# 权限/配额构造，没有任何一处伪造写入结果。
+
+
+def test_open_time_failure_with_zero_residue_reports_a_fresh_root(
+    tmp_path: Path,
+) -> None:
+    """回归行「零残留的 open 期失败 MUST 报全新根」（cand-R2-01 的正向钉死）。
+
+    构造：`states/ifs/` 预置为 `0o500` 的**空目录**，其余是全新有效根。阶段 A 全过（守卫
+    只数普通文件，且 `0o500` 的 `r-x` 足够 `listdir` + `lstat`）；`ensure_directory_no_follow`
+    对已存在的目录是空操作成功；`O_EXCL` 的 `os.open` 因缺 `w` 拿 `EACCES`。终态是**真**
+    零残留——父目录仍带 `x`，故 `lstat(target)` 干净地得 `FileNotFoundError`。
+
+    用 `SafeFilesystemError.kind` 当代理的实现在本行必红：`safe_fs` 把这次 open 失败同样
+    包成 `kind="io"`，于是它对一个从未被创建的 inode 宣称「已被排他创建、可能已被部分
+    写入」，并要求人工清理一个仍然全新的根——两句话都与盘上终态相反。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    blocker_dir = tree.states / "ifs"
+    blocker_dir.mkdir(parents=True)
+    original = blocker_dir.stat().st_mode
+    blocker_dir.chmod(0o500)
+    try:
+        report = tree.run()
+    finally:
+        blocker_dir.chmod(original)
+
+    assert report.refusal is InitRefusal.WRITE_FAILED
+    assert report.written == ()
+    assert FRESH_CLAIM in report.detail
+    assert PARTIAL_CLAIM not in report.detail
+    assert EXCLUSIVE_CLAIM not in report.detail
+    assert CLEANUP_CLAIM not in report.detail
+    # 盘上零普通文件：话术与终态一致，下一次 init 仍可干净重跑。
+    assert all_files(tree.states) == []
+
+
+def test_first_source_mid_write_failure_demands_manual_cleanup(
+    tmp_path: Path,
+) -> None:
+    """回归行「首位 source 的写中途失败 MUST 报需清理」（`or possibly_partial` 唯一判别构造）。
+
+    与上一条 `RLIMIT_FSIZE` 用例的分工：那条让**第二个** source 半写，`written` 非空，故
+    「需清理」由 `written` 这一侧就已成立；本条让**写入序首位**（ifs）半写，`written == ()`，
+    只有析取项 `or 探到半写目标` 能得出「需清理」。把判据削成 `if written:` 的实现在本行
+    必红（实测该变异下全套其余用例仍全绿）。
+    """
+    resource = pytest.importorskip("resource")
+    import signal
+
+    limit = 4096
+    tree = Tree(tmp_path, payloads={"ifs": large_payload(), "gfs": default_payload()})
+    assert len(tree.payloads["gfs"]) < limit < len(tree.payloads["ifs"])
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    previous_handler = signal.getsignal(signal.SIGXFSZ)
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    try:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, hard))
+        try:
+            report = tree.run()
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+    finally:
+        signal.signal(signal.SIGXFSZ, previous_handler)
+
+    ifs_target = tree.state_path("ifs", cycle)
+    assert report.refusal is InitRefusal.WRITE_FAILED
+    assert report.written == ()
+    assert PARTIAL_CLAIM in report.detail
+    assert str(ifs_target) in report.detail
+    assert CLEANUP_CLAIM in report.detail
+    # 盘上真有一份截断文件，根**已非**全新：这句话 MUST NOT 出现。
+    assert FRESH_CLAIM not in report.detail
+    assert ifs_target.is_file()
+    assert 0 < ifs_target.stat().st_size < len(tree.payloads["ifs"])
+    # 首位失败即整体停手：第二个源的目录从未被创建。
+    assert not (tree.states / "gfs").exists()
+
+
+def test_unprobeable_target_fails_closed_with_hedged_wording(
+    tmp_path: Path,
+) -> None:
+    """回归行「新谓词的反向钉死」（cand-R2-07）：探测自身失败 -> fail closed 且话术 hedge。
+
+    构造：`states/ifs/` 预置为 `0o600` 的空目录（有 `rw`、**无 `x`**）。阶段 A 仍全过
+    （`listdir` 只要 `r`，且目录为空故没有子项要 `lstat`）；`ensure_directory_no_follow`
+    以 `O_RDONLY` 打开已存在目录同样只要 `r`；`O_EXCL` 的 `os.open` 缺 `x` 拿 `EACCES`；
+    随后 `lstat(target)` 因路径解析要穿过该目录、同样拿 `EACCES`——不是
+    `FileNotFoundError`，故盘上终态**不可确定**。
+
+    与 `0o500` 那条只差一个 mode 位，方向却相反：没有本行，探测臂只在「探到 / 探不到」两个
+    方向上被钉住，把 `except OSError` 松成 `return None` 的实现会静默复活「零残留」误报。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    blocker_dir = tree.states / "ifs"
+    blocker_dir.mkdir(parents=True)
+    original = blocker_dir.stat().st_mode
+    blocker_dir.chmod(0o600)
+    try:
+        report = tree.run()
+    finally:
+        blocker_dir.chmod(original)
+
+    assert report.refusal is InitRefusal.WRITE_FAILED
+    assert report.written == ()
+    # fail closed：按「可能半写」处理，并因此要求人工清理。
+    assert HEDGE_CLAIM in report.detail
+    assert PARTIAL_CLAIM in report.detail
+    assert CLEANUP_CLAIM in report.detail
+    assert FRESH_CLAIM not in report.detail
+    # 但 MUST NOT 把一个**没被观测到**的排他创建说成事实。
+    assert EXCLUSIVE_CLAIM not in report.detail
+
+
 # --- 负面证据：不跑 SHUD、不写 DONE、不碰 output/ ---------------------------
 
 
@@ -400,15 +534,25 @@ def test_bootstrap_is_not_idempotent_and_refuses_on_second_run(
 
 
 @pytest.mark.parametrize("source", WRITE_ORDER)
+@pytest.mark.parametrize(
+    "make_payload",
+    [default_payload, compat_four_token_payload],
+    ids=["3-token", "4-token-compat"],
+)
 def test_decide_frontier_accepts_the_state_init_writes(
-    tmp_path: Path, source: str
+    tmp_path: Path, source: str, make_payload
 ) -> None:
     """回归行 20：未改动的 `controller.decide_frontier` 判「全新链、待跑 T = 该文件名」。
 
     这是跨 issue 的端到端兼容性回归：#22 的 header 判据是**绝对**时间，重戳写错即
     `HEADER_TIME_MISMATCH`（断链的入口）。
+
+    参数化到 4 token 兼容 header（round 2 rider-A，纯补覆盖）：该形状此前只在**写入侧**被
+    验（`test_four_token_compat_header_is_restamped_byte_faithfully`），从未喂给
+    `decide_frontier`——而 header 的分段解析正是两个 issue 的接缝。
     """
-    tree = Tree(tmp_path)
+    payload = make_payload()
+    tree = Tree(tmp_path, payloads={name: payload for name in WRITE_ORDER})
     cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
     for name in WRITE_ORDER:
         tree.write_cycle(name, cycle)

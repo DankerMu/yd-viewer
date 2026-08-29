@@ -258,8 +258,11 @@ def test_same_day_future_cycle_does_not_win_over_an_earlier_one(
 ) -> None:
     """同一 off-grid `now`：08-26T12Z 与同日 08-27T12Z 并存 -> T 取 08-26T12Z。
 
-    与上一条互补——上一条证明未来 cycle 不被**接受**，本条证明它不被**优先**，即
-    `cycle <= now` 是过滤而不是排序副作用。
+    本条钉死的是**选取序**：候选集升序、取第一个完整 cycle，故更晚的 cycle 不可能夺走首轮。
+    它**不是** `cycle <= now` 过滤器的证据——`_candidate_cycles` 返回 `tuple(sorted(...))`，
+    把该比较整条删掉后 08-26T12Z 仍排在 08-27T12Z 之前，本用例仍绿（实测该变异下唯一转红的
+    是上一条）。过滤器的判别证据由兄弟用例
+    `test_same_day_future_cycle_is_excluded_by_the_now_comparison` 单独承担。
     """
     tree = Tree(tmp_path)
     for source in WRITE_ORDER:

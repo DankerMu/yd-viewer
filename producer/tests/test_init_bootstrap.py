@@ -387,3 +387,73 @@ def test_unstatable_variant_directory_itself_is_not_read_as_missing(
     assert report.refusal is not InitRefusal.VARIANT_MISSING
     assert str(tree.variant_dir("ifs")) in report.detail
     assert all_files(tree.states) == []
+
+
+# --- `_entry_kind` 的 `os.stat` FOLLOW 臂（round 2 cand-R2-05）----------------
+#
+# 上面三条 `0o444` 只行使 `_entry_kind` 的 **`os.lstat`** 臂与 `_is_directory`。条目本身是
+# **symlink** 时 `lstat` 成功（它不是目录，也不需要解析目标），随后的 `os.stat` 才去跟随
+# 链接、才可能拿到 `EACCES`——那条 FOLLOW 臂此前没有任何用例。把它的两条 except 收成
+# `except OSError: return (False, False)` 的实现在下面两行必红：实测该变异下守卫会放行，
+# init 往一个**已持有可达前态**的根上写两份首态，正是裁决 7 禁止的断链。
+# symlink 只是本地的差分手段；NFS 发布根上 `ESTALE`/`EIO` 无需任何 symlink 即可到达同一臂。
+
+
+def test_state_symlink_into_an_unreadable_vault_refuses(tmp_path: Path) -> None:
+    """`states/ifs/<T>.cfg.ic` 是指向 `0o000` 目录内真实前态的 symlink -> `DISCOVERY_UNREADABLE`。"""
+    skip_if_root()
+    tree = Tree(tmp_path)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+    vault = tree.root / "vault"  # 刻意放在 yd_root **之外**：它自身不是守卫的输入
+    vault.mkdir()
+    prior = vault / ("2026082400" + STATE_SUFFIX)
+    prior.write_bytes(b"prior state\n")
+    residual = tree.states / "ifs" / ("2026082400" + STATE_SUFFIX)
+    residual.parent.mkdir(parents=True)
+    residual.symlink_to(prior)
+    before_states = snapshot(tree.states)
+    before_output = snapshot(tree.output)
+
+    with unreadable(vault):
+        report = tree.run()
+
+    assert report.refusal is InitRefusal.DISCOVERY_UNREADABLE
+    assert report.written == ()
+    assert str(residual) in report.detail
+    # `states/` 逐字节不变。此处不能用 `assert_zero_write`：它断言 `states/` 下零普通
+    # 文件，而本构造刻意在那里放了一条**指向**普通文件的 symlink。
+    assert snapshot(tree.states) == before_states
+    assert snapshot(tree.output) == before_output
+    assert list(tree.states.rglob("*")) == [residual.parent, residual]
+
+
+def test_calibration_symlink_into_an_unreadable_vault_refuses(tmp_path: Path) -> None:
+    """兄弟面：`_locate_calibration_state` 同样经 `_entry_kind`，同样必须 fail closed。
+
+    变体顶层唯一的 `.cfg.ic` 换成指向 `0o000` 目录内真实文件的 symlink -> 判
+    `DISCOVERY_UNREADABLE`，**不是** `CALIBRATION_STATE_AMBIGUOUS`（吞掉 `OSError` 的实现
+    会把命中数读成 0，把权限故障说成「prepare 提交形态不对」）。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+    vault = tree.root / "vault"
+    vault.mkdir()
+    prior = vault / ("baseline" + STATE_SUFFIX)
+    prior.write_bytes(tree.payloads["ifs"])
+    calibration = tree.calibration["ifs"]
+    calibration.unlink()
+    calibration.symlink_to(prior)
+    before_states = snapshot(tree.states)
+    before_output = snapshot(tree.output)
+
+    with unreadable(vault):
+        report = tree.run()
+
+    assert report.refusal is InitRefusal.DISCOVERY_UNREADABLE
+    assert report.refusal is not InitRefusal.CALIBRATION_STATE_AMBIGUOUS
+    assert report.written == ()
+    assert str(calibration) in report.detail
+    assert_zero_write(tree, before_states, before_output)

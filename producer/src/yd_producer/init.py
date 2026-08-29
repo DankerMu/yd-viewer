@@ -39,15 +39,37 @@ init-bootstrap/spec.md` 的三条 Requirement（「只在全新根执行」「�
   `safe_fs.write_bytes_no_follow_exclusive` 的 `except OSError` 臂只关 fd 后转抛、**不
   unlink**（与同模块 `atomic_write_bytes_no_follow` 的失败路径不对称），故盘上留下一份
   **header 合法、body 截断**的普通文件；下游 `controller` 只读 header 行，会把它当成合法
-  链起点。本模块因此 MUST 区分 `FileExistsError` 与 `SafeFilesystemError(kind="io")`，
-  后者的 `detail` 点名该目标**可能已被部分写入**、重跑前须一并人工确认——它既不在
-  `written` 里、也不算「前序已落盘」，照类一的话术清理会漏掉它。
+  链起点。`detail` 因此 MUST 点名该目标**可能已被部分写入**、重跑前须一并人工确认——它
+  既不在 `written` 里、也不算「前序已落盘」，照类一的话术清理会漏掉它。
   `safe_fs` 的缺 unlink 与 `controller` 接受截断状态两条缺陷都在本模块的 Must-preserve
   面之外，已另行立案；本模块只负责**把它变成可观测的**。
 
-**收尾话术随 `written` 分支**：`written` 非空才说「根已非全新，重跑 init 前需人工清理
-`states/`」；`written` 为空（如阶段 B 首个 `ensure_directory_no_follow` 就抛 `EACCES`）时
-根仍是全新根，MUST NOT 宣称需要清理，而是把根因放在首位并报「零写入，根仍是全新根」。
+**判据是盘上探测，MUST NOT 用 `SafeFilesystemError.kind` 当代理**（round 2 cand-R2-01
+实测证伪）：`kind == "io"` 与「inode 已被创建」不等价——`write_bytes_no_follow_exclusive`
+的 `except OSError` 臂覆盖整个写入体、**含 `os.open(..., O_CREAT|O_EXCL, ...)` 本身**，父
+目录分量走查（`_open_parent_dir`，在该 `try` 之外）另从自身站点抛出且 `kind` 可为 `"io"`
+或 `"unsafe"`；于是 open 期的 `EACCES`/`EROFS`/`ESTALE`（**盘上零残留**）与真正的写中途
+`ENOSPC` 拿到同一个 `kind`。故捕获写入腿的异常后 MUST 用 no-follow 的 `os.lstat(target)`
+**直接探测目标**（:func:`_probe_partial_residue`）：
+
+- **探到条目** → 判「可能已被部分写入」，话术点名它**已被排他创建**；
+- **`FileNotFoundError`** → 判零残留，MUST NOT 出现任何半写话术（这是**精确**结论而非
+  保守近似：目标不存在就是不存在）；
+- **`lstat` 自身失败**（如目标父目录无 `x`）→ fail closed 到「可能已被部分写入」，但话术
+  MUST **hedge**——点名探测本身失败，MUST NOT 宣称「已被排他创建」。
+
+`FileExistsError`（类一）走**自己的**分支且**先于**该臂捕获，故预置条目永远不会被误认成
+本模块自己的半写产物。`ensure_directory_no_follow` 的失败同样不探测：那条腿上**对 target 的**
+`os.open(..., O_CREAT|O_EXCL, ...)` 从未被调用过（它只开/建目录分量），target 侧零残留
+是结构性事实。
+
+**收尾话术随「`written` 非空 **或** 探到半写目标」这个析取分支**（MUST NOT 退化成单看
+`written`）：任一为真才说「根已非全新，重跑 init 前需人工清理 `states/`」——首个 source 就
+写中途失败时 `written` 为空、盘上却已有一份截断文件，只看 `written` 会报「根仍是全新根」
+而下一次 init 必然 `STATES_NOT_EMPTY`，两条话术直接矛盾。两者皆假（如阶段 B 首个
+`ensure_directory_no_follow` 就抛 `EACCES`，或 `O_EXCL` 的 `os.open` 拿 `EACCES` 而探测
+干净地得 `FileNotFoundError`）时根仍是全新根，MUST NOT 宣称需要清理，而是把根因放在首位
+并报「零写入，根仍是全新根」。
 
 **可见性判据取「宽」，与 `controller` 的前沿可见集刻意不同**：`controller.decide_frontier`
 （issue #22）对不可解析的条目判「不可见」，为的是不让一次崩溃的发布永久砖化该源；本模块
@@ -330,24 +352,50 @@ def _refuse(refusal: InitRefusal, detail: str) -> InitReport:
     return InitReport(written=(), refusal=refusal, detail=detail)
 
 
+def _probe_partial_residue(target: Path) -> str | None:
+    """写入腿失败后**直接探测**目标，返回半写话术；确定零残留时返回 `None`。
+
+    只用 no-follow 的 `os.lstat`：判据必须是「盘上是否真的留下了条目」，而不是
+    `SafeFilesystemError.kind`（它对 open 期失败与写中途失败给出同一个值，见模块头）。
+    探测本身失败时 fail closed 到「可能半写」，但话术点名的是**探测失败**，不是一个未被
+    观测到的排他创建。
+    """
+    try:
+        os.lstat(target)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return (
+            f"{target} 的落盘残留无法探测（{error}）：保守起见按可能已被部分写入处理，"
+            "重跑 init 前须一并人工确认并清理"
+        )
+    return (
+        f"{target} 已被排他创建但写入中途失败，可能已被部分写入"
+        "（header 合法、body 截断），重跑 init 前须一并人工确认并清理"
+    )
+
+
 def _write_failed(
     source: str,
     target: Path,
     written: list[Path],
     error: BaseException,
     *,
-    possibly_partial: bool,
+    partial_note: str | None,
 ) -> InitReport:
-    """阶段 B 的失败收尾。话术随 `written` 与失败类别分支（见模块头）。"""
+    """阶段 B 的失败收尾。
+
+    `partial_note` 是 :func:`_probe_partial_residue` 的探测结论：非 `None` 即「盘上可能
+    留下了半写目标」，其文本已按探测结果（探到 / 探测失败）分好话术。收尾判据是
+    「`written` 非空 **或** `partial_note is not None`」这个析取，MUST NOT 单看 `written`
+    （见模块头）。
+    """
     parts = [f"{source} 的首态写入 {target} 失败：{error}"]
-    if possibly_partial:
-        parts.append(
-            f"{target} 已被排他创建但写入中途失败，可能已被部分写入"
-            "（header 合法、body 截断），重跑 init 前须一并人工确认并清理"
-        )
+    if partial_note is not None:
+        parts.append(partial_note)
     landed = "、".join(str(path) for path in written) or "（无）"
     parts.append(f"已落盘的首态：{landed}（不回滚、不删除）")
-    if written or possibly_partial:
+    if written or partial_note is not None:
         # 半写产物同样让根不再全新，即使它不在 `written` 里。
         parts.append("根已非全新，重跑 init 前需人工清理 `states/`")
     else:
@@ -454,25 +502,28 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
         target = target_dir / (
             frontier[source].strftime(rawscan.CYCLE_DIR_FORMAT) + STATE_SUFFIX
         )
-        # 两次调用**分别** try：`ensure_directory_no_follow` 的 `mkdir` 失败同样被
-        # `safe_fs` 包成 `kind="io"`，合在一个 try 里会让「目标可能被部分写入」这句话套到
-        # 一个从未被 `os.open` 过的路径上（`chmod 0o500 states/` 就是这种终态）。
+        # 两次调用**分别** try：目录腿失败时 `os.open(target...)` 结构性地**从未被调用
+        # 过**，零残留是事实而非推断，故不必也不该去探测目标（`chmod 0o500 states/` 就是
+        # 这种终态）。合在一个 try 里会把写入腿的探测语义套到一条与目标无关的失败上。
         try:
             safe_fs.ensure_directory_no_follow(target_dir)
         except (OSError, safe_fs.SafeFilesystemError) as error:
-            return _write_failed(source, target, written, error, possibly_partial=False)
+            return _write_failed(source, target, written, error, partial_note=None)
         try:
             safe_fs.write_bytes_no_follow_exclusive(target, payloads[source])
         except FileExistsError as error:
-            # 类一：`O_EXCL` 拒绝覆盖，盘上零残留。
-            return _write_failed(source, target, written, error, possibly_partial=False)
+            # 类一：`O_EXCL` 拒绝覆盖。盘上的条目是**别人**预置的，不是本模块的半写产物，
+            # 故本臂 MUST 先于下面的探测臂捕获，且不走探测。
+            return _write_failed(source, target, written, error, partial_note=None)
         except (OSError, safe_fs.SafeFilesystemError) as error:
-            # 类二：`O_EXCL` 已建成文件、`os.write` 中途失败（`safe_fs` 不 unlink）。
-            possibly_partial = (
-                isinstance(error, safe_fs.SafeFilesystemError) and error.kind == "io"
-            )
+            # 写入腿的其余失败：open 期（零残留）与写中途（半写）在异常类型与 `kind` 上
+            # 不可区分，只有盘上探测能分开，见 `_probe_partial_residue`。
             return _write_failed(
-                source, target, written, error, possibly_partial=possibly_partial
+                source,
+                target,
+                written,
+                error,
+                partial_note=_probe_partial_residue(target),
             )
         written.append(target)
 
