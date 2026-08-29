@@ -535,6 +535,14 @@ def test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes(
     monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
     argv = _prepare_argv(tmp_path)
     yd_root = tmp_path.resolve() / "yd"
+
+    # 第一段：干净根。同一份 `argv` 走到生产 builder 绑定，以 `3` 停。这一段是本用例的
+    # 判别力所在——缺了它，把 `EXIT_UNIMPLEMENTED` 并进 `EXIT_GUARD` 仍然全绿。
+    assert _exit_code(argv, env={}) == 3
+
+    capsys.readouterr()  # 排空第一段的 stderr，下面只断言第二段的输出
+
+    # 第二段：终名已存在。同一份 `argv`，只改 `YD_ROOT` 的状态，以 `1` 停。
     (yd_root / "input" / "models" / "yd_gfs").mkdir(parents=True)
 
     assert _exit_code(argv, env={}) == 1

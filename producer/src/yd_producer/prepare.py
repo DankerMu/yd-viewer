@@ -70,11 +70,16 @@ test_published_entries_do_not_inherit_scratch_modes。
 
 **异常契约**：本模块对外只有 `PrepareError` 及其子类 `BuilderUnavailableError`。三处
 外来异常一律包装并保留 `__cause__`——`state.cfg_ic.parse` 的 `ValueError`、
-`geometry.*` 的 `GeometryError`、`store.safe_fs.*` 的 `SafeFilesystemError`。第三处最易
-漏：`SafeFilesystemError` 是 **`RuntimeError` 子类而非 `OSError`**
-（`store/safe_fs.py:11`），`except OSError` 兜不住它（pinned:
-test_unparsable_calibrated_state_refuses_commit、test_geometry_failure_rolls_back_validated_variants、
-test_missing_run_roots_are_refused_before_any_builder_call）。注入 builder 抛出的任何异常
+`geometry.*` 的 `GeometryError`、`store.safe_fs.*` 的 `SafeFilesystemError`。三处各自的
+钉子逐一对应，不通用（pinned: test_unparsable_calibrated_state_refuses_commit 钉
+`ValueError` 那一处、test_geometry_failure_rolls_back_validated_variants 钉
+`GeometryError` 那一处、test_first_commit_failure_leaves_no_new_entries 钉
+`SafeFilesystemError` 那一处）。第三处最易漏：`SafeFilesystemError` 是
+**`RuntimeError` 子类而非 `OSError`**（`store/safe_fs.py:11`），`except OSError` 兜不住
+它——注意 `_wrap_fs` 里紧邻的 `except OSError` 一支由
+test_missing_run_roots_are_refused_before_any_builder_call 钉（见 `_wrap_fs` docstring），
+它钉的**不是**本处这条 `SafeFilesystemError` 通道，删掉
+`except safe_fs.SafeFilesystemError` 后它仍绿。注入 builder 抛出的任何异常
 同样包装（`BuilderUnavailableError` 除外——它必须原样上浮，`cli` 靠它区分退出码 `3`；
 pinned: test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes）。
 
@@ -607,8 +612,13 @@ def _copy_tree_publish(
     源 mode）。属主/权限的进一步收紧归 #24/#25 的发布面。pinned:
     test_published_entries_do_not_inherit_scratch_modes。
 
-    非普通文件（symlink/FIFO/设备）一律拒绝：`safe_fs.stat_no_follow` 对 symlink 直接
-    抛（pinned: test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed），
+    非普通文件（symlink/FIFO/设备）一律拒绝。symlink 那一支由 `safe_fs.stat_no_follow`
+    直接抛（等价变异，不可判别：下游读/列目录原语同为 no-follow——把这里换成跟随
+    symlink 的 `os.stat`，symlink 仍会被 `read_bytes_no_follow` /
+    `list_directory_no_follow` 拒掉，异常类型与 `YD_ROOT` 终态一致，只有消息文本不同；
+    `test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed` 挡在步骤 4
+    `_validate_variant` 的条目集合闸门上，根本到不了这里——那道闸门自己的 pinned 标注在
+    `_validate_variant` 内，不在本处）。
     其余类型在此点名——FIFO/socket/设备那一支**未钉**：只有当 builder 恰以三个必需条目名
     之一产出这类文件时才可达，round-1 已裁定在本阶段真实输入域之外（归 M4，本阶段不
     声明）。
