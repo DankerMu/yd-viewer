@@ -1350,13 +1350,312 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 
 ## 9. checkpoint-tracker：T+12 捕获与补跑
 
-- [ ] 9.1 快照并适配 `cfg.ic.update` 轮询捕获（命中 720 分钟复制 + 分段格式校验；产物保持相对时间头），以模拟覆写序列测试正常/漏采/副本损坏三态
+- [x] 9.1 快照并适配 `cfg.ic.update` 轮询捕获（命中 720 分钟复制 + 分段格式校验；产物保持相对时间头），以模拟覆写序列测试正常/漏采/副本损坏三态
 - [ ] 9.2 快照并适配漏采补跑（同一 Slurm 作业内、同初态同 forcing、END=0.5、末态采纳；注入假 SHUD 调用测试；补跑失败传导整轮失败；控制器提交计数不变）
 
 依赖：组 2（勘察清单定原路径）、组 4（分段校验）、组 8（运行目录形态）
 §13.1 归属：tracker
 Suggested fixture level: compact - 模拟覆写序列与假 SHUD 调用即可确定性重放竞态
 Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保绿
+
+### Issue #16 fixture（任务 9.1）
+
+**落点与边界裁决（先读这条）**：issue 正文写 "Module / Scope: producer 包 `yd_producer.tracker`（捕获）"、"PR Boundary: tracker 模块与测试"。本 issue 落 `producer/src/yd_producer/tracker/`（新包），**并在 `producer/src/yd_producer/state/cfg_ic.py` 增加一个公开的 header 分钟读取函数**。后者是对 PR Boundary 的**一处刻意越界**，理由是硬的：tracker 的轮询判据是「header 的最后一个数值 token 即 minute-time」，这条规则在本仓已经有唯一实现（`cfg_ic._header_counts` 的 `numeric[:-1]` 取法，逐字移植自 pin `packages/common/state_qc.py:574-606`），而 pin 侧该规则的公开出口 `cfg_ic_header_minute_time`(`state_qc.py:629`) 与 `_header_counts` **同文件同规则**。把它在 tracker 里另写一份，就是 `state/__init__.py` docstring 明令禁止的第二份分段/header 逻辑（「MUST 复用 `cfg_ic` 里的分段识别辅助，不得再移植一份 NWM pin 的分段逻辑」），且两份实现漂移时轮询与结构检查会对「哪个 token 是 minute-time」产生分歧——这正是 pin 在 `cfg_ic_header_minute_index` docstring 里写明要避免的失败。故 `state/cfg_ic.py` 的改动限定为**只新增两个逐字移植自同一 pin 文件的函数**（公开 `header_minute_time` + 私有 `_header_minute_index`），既有代码一字不改，不动 `parse`/`render`/`_header_counts`，不引入 #9（任务 4.2–4.4）的结构检查与重戳。
+
+**落点裁决修订 R1（2026-08-28，越界撤回；本条覆盖上一段的越界部分）**：本 PR 在评审期间，`origin/master` 推进到 `0d16ee1`（PR #61，issue #9 state-tools），其中 **issue #22（任务 12.1）已落 `producer/src/yd_producer/state/header_time.py`**，含 `cfg_ic_header_minute_index`(pin `state_qc.py:609`)、`cfg_ic_header_minute_time`(`:629`)、`cfg_ic_header_shape`(`:664`)、`CfgIcHeaderShape`(`:650`)、`_VALID_CFG_IC_HEADER_TOKEN_COUNTS`(`:646`) 五个逐符号移植——**正是本 issue 越界新增的那两个符号**，且落点更宽、更正。裁决据此改为：
+
+- 本 issue **撤回**对 `state/cfg_ic.py` / `state/__init__.py` / `test_cfg_ic.py` 的全部改动，改为**消费** `from yd_producer.state import cfg_ic_header_minute_time`。改动面收回到 issue 正文写死的 "PR Boundary: tracker 模块与测试"，**越界归零**。
+- 上一段那条越界理由（避免「哪个 token 是 minute-time」出现双权威）在新事实下**由消费实现得更彻底**：唯一权威是 `header_time.py`，tracker / `state_qc` / `restamp` 三方共用，正是 master 的 `state/__init__.py` docstring 明令的形态。
+- 语义等价已核对：master 的 `cfg_ic_header_minute_time` 与本 PR 撤回的 `cfg_ic.header_minute_time` 移植自**同一 pin 行段**（`:609-639`），`_as_float` 亦同源；对 §G1 的七个 header 输入逐值相同。
+- **非有限值守卫（`nan`/`inf`）仍留在 tracker 一侧**（`_header_minute_of` 的单一出口）：`header_time` 只做 token 提取，不做值域判定；本 issue 的「非有限即本次观测无结果」是 tracker 的轮询语义，不上移。
+- 由此**作废**：round 2 的 cand-16 / cand-18 对清单 §1 `packages/common/state_qc.py` 行的修订义务（该行已由 #9/#22 在 master 侧写全，本 PR 合并时取 master 侧为权威）；清单 §1「最小测试（cap 5 header）」行**取 master 侧措辞为底，并补一条重述义务**（commit `c24aea6`：`_read_cfg_ic_header_minute` 的规则在 #16/#22 之后被拆成 `header_time.cfg_ic_header_minute_time` 与 tracker 私有的 `_read_header_minute`/`_header_minute_of`，本仓不存在同名可导入符号，落地该行时 MUST 按实际符号名重述配对约束）。**MUST NOT 把该行"还原"回纯 master 措辞**——那会删掉这条义务（round 3 F2 的失败形态）。
+- **搭车修改**：合并 master 时 `.large-file-guard.json` 增加两条 exclude（`producer/tests/test_cfg_ic.py` 1050 行、`producer/tests/test_state_tools_qc.py` 1129 行），二者是 master 上已有的超限文件（PR #61 走服务端合并，不经本地 PreToolUse 钩子），而钩子按暂存集判定，导致 master 向任何分支的合并都会被自己的守卫挡死。拆分超出本 issue 范围，已开 issue #82 跟踪（issue-scribe 核实时另钉出这是**第三次复发**：`3f7d46e`/`f130883` 已因同一原因豁免过 `test_config.py`/`test_geometry.py`/`test_rawscan.py`，豁免清单单调增长而守卫覆盖面单调缩小）；`maxLines` 不动，无任何断言/测试/CI 被削弱。
+
+
+**本 issue 只做 9.1（捕获轮询）**，9.2（漏采补跑）归 issue #17。清单 §1 的第 6/7 行（`runtime.py` → `tracker/checkpoint_tracker.py`、`tests/test_shud_runtime.py` → `tests/test_checkpoint_tracker.py`）同时覆盖捕获与补跑两半，本 issue 只搬捕获半；两行的 `落地状态` 仍必须在本 PR 翻成 `本 issue 落地`——溯源守卫的反向判别器 `test_files_carrying_a_provenance_header_are_marked_landed` 一旦见到带溯源头的目标文件就要求该行标 `本 issue 落地`，留 `待落地` 会直接变红。**翻转 MUST 与文件落地同一个 commit**：正向判别器 `test_landed_snapshot_files_carry_their_provenance_header` 的缺席分支反向同样成立（「落地状态也不得先于文件翻转」），故 fixture 先行的 docs commit 里两行 MUST 仍是 `待落地`，由实现 commit 一并翻转。两行 `备注` 同步补记「本 issue 落捕获半，补跑半归 #17 落进同一文件」，并在 design.md **D9** 记录该分次落地偏离（spec `快照可追溯` Requirement 自带的逃生口：「或 design 中存在显式偏离记录」）。
+
+**改动面**：
+
+- 新增 `producer/src/yd_producer/tracker/__init__.py`、`producer/src/yd_producer/tracker/checkpoint_tracker.py`
+- 新增 `producer/tests/test_checkpoint_tracker.py`
+- **不改动** `producer/src/yd_producer/state/**` 与 `producer/tests/test_cfg_ic.py`（裁决修订 R1：header 分钟读取从 master 的 `state/header_time.py` **消费**，不再自行移植）
+- 修改 `.large-file-guard.json`（合并 master 的搭车修改，见裁决修订 R1）
+- 修改 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md`（§1 第 6/7 行 `落地状态` 与 `备注`；round 3 F1 另作废 `state_cli.py` 行与 cap 5 重戳行的 rekey 面 tracker 半路由）、`design.md`（D9 + 两条补记）、本文件（本 fixture + 勾选 9.1）
+- 修改 `openspec/changes/m2-producer-core/specs/checkpoint-tracker/spec.md`（**收窄运行期 T+12 捕获的 epoch 接受面**——删「（或等价的 T+12 绝对分钟）」并加一段把 epoch 明确划出 tracker）与 `docs/compute-loop-design.md`（§9.2 步骤 3 同步同一条收窄）。**这两处是本 issue 唯一改到 spec / 设计文档正文的地方**：Known limits cand-19 要求 M4 首次真跑核验真实 header 形态，若判定为 epoch 形式则偏离 4 必须重新裁决，届时 MUST 连同这两处一并放宽，不得只改 fixture。
+- **改动面枚举的机检口径**（round 3 Phase 7 P3-1：本枚举曾漏掉上面这两个文件，是 record-fidelity 枚举不完备的第四例）：散文枚举天生不可机检（round 3 Phase 7 P3-1 即由此漏掉两个文件，是 record-fidelity 枚举不完备的第四例），故本节另钉一份**逐字可 diff 的路径全集**：
+
+```text
+.large-file-guard.json
+docs/compute-loop-design.md
+openspec/changes/m2-producer-core/design.md
+openspec/changes/m2-producer-core/nwm-snapshot-inventory.md
+openspec/changes/m2-producer-core/specs/checkpoint-tracker/spec.md
+openspec/changes/m2-producer-core/tasks.md
+producer/src/yd_producer/tracker/__init__.py
+producer/src/yd_producer/tracker/checkpoint_tracker.py
+producer/tests/test_checkpoint_tracker.py
+```
+
+该块 MUST 与 `git diff origin/master --name-only | sort` 逐行相等（9 行）。合并前跑一次 `diff`，不等即视为本节陈旧。上面的散文条目只解释「改了什么、为什么」，**全集以本块为准**。
+- **不改动** `executor.py`、`slurm.py`、`config.py`、`cli.py`、`geometry.py`、`nwm.py`、`rawscan.py`、`store/**`、`raw/**`、`pyproject.toml`、`uv.lock`
+
+**Must-preserve behavior**：
+
+- `producer/tests/test_cfg_ic.py`、`producer/src/yd_producer/state/**` 相对 master **零改动**（裁决修订 R1）：`git diff origin/master -- producer/src/yd_producer/state producer/tests/test_cfg_ic.py` MUST 为空
+- `test_snapshot_provenance.py` 的正反向守卫继续绿（新文件登记进清单、带溯源头、清单行标 `本 issue 落地`）
+- producer 依赖面不变：本 issue 只用 stdlib（`dataclasses`/`hashlib`/`pathlib`/`typing`），`uv sync --frozen` 无 drift
+
+**抽取集（对清单 §1 第 6 行的本 issue 子集，逐符号）**：`_StateCheckpointTracker` 的 `capture_available`(:3717)、`capture_final`(:3737)、`_capture`(:3887)、`missing_hours`(:3919)，加 `_read_cfg_ic_header_minute`(:3618)、`_header_minute_matches_checkpoint`(:3963)。**明示不抽**（全部归 #17 或后继）：`_format_header_minute`(:3634)（pin 里只服务补跑的 `gate_rejected(header=...)` 诊断串，本 issue 无该消息面）、`install_recovered`(:3827)、`record_recovery_outcome`(:3740)、`recovery_outcome_summary`(:3750)、`write_manifest`(:3766)、`_manifest_provenance`(:3793)、`_final_ic_entry`(:3803)、`_state_checkpoint_poll_seconds`(:3952)、`_state_checkpoint_hours`(:3923)、`_forecast_horizon_hours`(:3944)、`_recover_missing_state_checkpoints`(:784)、`_log_recovery_refusal`(:939)、`_clear_recovery_scratch_root`(:2799)、`_shift_cfg_ic_time`(:3653)。不抽 `write_manifest` 的连带效果：pin 的 `_task_outcome_attempt_identity`(:2558) 两处 `SLURM_*` 环境读取（清单第 6 行 D4 段声明为「合法保留项」的那两处）**本 PR 完全不涉及**——本模块零环境读取。
+
+**A. 包与公开面**
+
+- `yd_producer.tracker` 是新包；`tracker/__init__.py` 只做再导出（`CheckpointTracker`、`CapturedCheckpoint`、`TrackerError`），不含逻辑。
+- `checkpoint_tracker.py` 头部第一行块 MUST 含整行溯源注释 `# NWM@8ae9b8f2 workers/shud_runtime/runtime.py`（形式由 `snapshot_provenance_fixtures._MARKER_COMMENT` 唯一定义，行号 ≤ `HEADER_LINE_BUDGET`），并在模块 docstring 里逐条写明下方 §F 的对 pin 偏离。
+- `test_checkpoint_tracker.py` 同样带 `# NWM@8ae9b8f2 tests/test_shud_runtime.py`。
+- `TrackerError(Exception)` 是本模块唯一对外异常类型；MUST NOT 外泄 `OSError`/`SafeFilesystemError`/`ValueError` 给调用方（构造期参数校验除外，见 §B）。
+- **禁区字面量告警（对实现方与测试方都适用）**：`checkpoint_tracker.py` 与 `test_checkpoint_tracker.py` 都是清单登记目标，落地后进 DB-free 扫描集，其中 `psycopg`/`DATABASE_URL`/`scheduler`/`registry`/`journal`/`reservation`/`os.getenv`/`os.environ` 八个串**逐字出现即变红**，注释与 docstring 同样被扫。写 §F 偏离说明与 §D 映射表时用中文表述（「零环境变量读取」「不接调度器数据库」），MUST NOT 写出这些字面量。
+
+**B. `CheckpointTracker` 构造（零内置默认）**
+
+- `CheckpointTracker(*, run_dir: Path, project_name: str, checkpoint_hours: Sequence[int])`，三者**均无默认值**、均 keyword-only。
+- 观测源固定为 `run_dir / f"{project_name}.cfg.ic.update"`（暴露为只读属性 `source_path`）；捕获产物落 `run_dir / "state_checkpoints"`（只读属性 `checkpoint_dir`）。**MUST NOT** 从 manifest 里按四路 fallback 猜 project name（pin `_project_name`(:4114) 的四选一加下标兜底），也 **MUST NOT** 递归搜索其它文件名——文件名由调用方显式给出，猜错就是永远读不到 header。
+- `checkpoint_hours` 的**唯一权威是 `Config.checkpoint_hours`**（`config.toml`，已由 issue #2 落装载器）。本模块 MUST NOT 写死 `12` 或 `720`，MUST NOT 从 manifest 读、MUST NOT 从 forecast horizon 推。
+- 构造期 fail closed（每条各抛 `TrackerError`）：`checkpoint_hours` 为空；含 ≤0 的小时；含重复项；`project_name` 为空或含路径分隔符 / `.` / `..` / **含 NUL 字节**；`run_dir` 的任一分量**含 NUL 字节**。**这是对 pin 的刻意偏离**：pin 的 `_state_checkpoint_hours`(:3923-3941) 对不可解析值 `continue`、对 ≤0 与超 horizon 静默过滤、对重复静默去重——三条都是 fail-open，一个配置笔误会退化成「跑完没有 checkpoint 也不报错」。
+- **NUL 这两条是 rung-1 义务而非洁癖**：`os.stat`/`os.open` 对路径里的 NUL 抛的是 `ValueError` 而**不是** `OSError`，`safe_fs` 也不转译它，于是它绕过 `_FS_FAILURES` 直接从 `capture_available()` 外泄，违 §A「唯一对外异常」。而它**可从配置到达**——TOML 的基本字符串接受 `\u0000`。修法 MUST 是构造期的**纯字符串检查**（不碰文件系统，§B 不破），MUST NOT 把 `ValueError` 并进 `_FS_FAILURES`。**理由（round 2 更正）**：放宽 `_FS_FAILURES` 会把这个外泄换成观测期的静默「本次观测无结果」——一个可从配置到达的 NUL 于是变成整轮零捕获，且与「SHUD 从没启动」逐字节相同，比外泄更坏。原先写在这里的理由「会吞掉 `_copy_is_intact` 依赖的 `state.parse` 判别信号」**结构上为假**：`_copy_is_intact` 在 `_capture` 的 `try` **之外**调用，`state.parse` 的 `ValueError` 由它自己的局部 `except ValueError` 消费，永远到不了 `_FS_FAILURES`。该假理由源自一条未经核实的 round-1 verifier 笔记，经本 fixture 传播到代码注释与 commit message，round 2 由一个决定性变异体推翻（同时放宽 `_FS_FAILURES` 并删掉两条 NUL 守卫 → 只有两条 NUL 用例因**构造时机**而红，全部截断/撕裂/结构用例仍绿）。保留这条更正记录：一条靠假理由站着的 rung-1 条款会被未来实现方一次 grep 推翻，进而连正确的结论一起丢掉。
+- 构造 **MUST NOT** 触碰文件系统（不建目录、不读源文件）：构造出的 tracker 在 SHUD 尚未启动时也必须是安全的。
+- **调用方前置条件（本模块无法自检，MUST 写进模块 docstring 并列入 Known limits）**：`run_dir` MUST 是规范路径——**其任一祖先分量都不得是符号链接**。`safe_fs` 的每个原语都以 `O_DIRECTORY|O_NOFOLLOW` 逐段打开路径，且 `_anchor_for` 会把 containment root 自己也从 `/` 重新走一遍，所以 `containment_root=run_dir` **并不豁免 run_dir 的祖先**；`/scratch → /mnt/...` 这类 HPC 常规布局会让每一次观测都抛 `SafeFilesystemError`，被 §C 步骤 1 归进「本次观测无结果」，整整一轮零捕获、`observed_header_minutes` 保持为空——与「SHUD 从没启动」逐字节相同。本模块**不得**自行 `resolve()`（构造期 resolve 违本节上一条；惰性 resolve 等于把符号链接根接受下来，正好废掉 `safe_fs` 要守的东西），故这是调用方契约，由作业脚本接线侧（组 8 / 后继 issue）保证并落一条 tracked issue。
+
+**C. 观测与捕获（`capture_available()`，单次观测，无 sleep）**
+
+- 签名 `capture_available(self) -> None`；`capture_final(self) -> None` 是它的别名（pin 同名语义：末次观测与常规观测同判据）。
+- **本模块不含轮询循环、不含 `time.sleep`、不读轮询间隔**。「反复观测」由调用方（作业脚本侧，归后继 issue）重复调用 `capture_available()` 实现；测试即以「按序调用 N 次」重放覆写序列。这是对 pin 的刻意偏离，同时消掉 pin `_state_checkpoint_poll_seconds`(:3952) 的 `0.01` 内置默认。
+- 单次观测的步骤，逐条：
+  1. 读 `source_path` 的 header 分钟：文件不存在 / 不是普通文件 / 是符号链接 / 为空 / 非 UTF-8 / 首行不含 minute-time token → **本次观测无结果**，直接返回，MUST NOT 抛错、MUST NOT 记录观测值（SHUD 未启动或正在覆写都会命中这一支）。
+  1b. **非有限的 header 分钟（`nan` / `inf` / `-inf`）MUST 同样判为「本次观测无结果」**，MUST NOT 记进 `observed_header_minutes`。理由是硬的：本仓的 `cfg_ic_header_minute_time`（`state/header_time.py`） 与 pin 一样只做裸 `float()`，而 `float("nan")`/`float("inf")` 都解析成功——这正是 pin 的 `_format_header_minute`(:3634) 把非有限判定放在**第一步**的原因。若让它流下去，`round(nan)` 抛 `ValueError`、`round(inf)` 抛 `OverflowError`，两者都会穿透 `capture_available` 外泄给调用方（违 §A「不外泄」与本步「不抛错」），把一次撕裂读升级成整个 tracker 崩溃；记进观测轨迹同样有害——`nan != nan` 使相邻去重永不生效，轨迹被无限追加。撕裂的 `cfg.ic.update` 首行出现 `nan`/`inf` 是**真实可达**的：SHUD 就地覆写时数值区可能半写。
+  2. 得到 header 分钟 `m` 时记入 `observed_header_minutes`：**仅当与上一个记录值不同才追加**（pin 同款去重，连续同值不重复记）。这是漏采诊断的唯一现场证据。
+  3. 对每个**尚未捕获**的目标小时 `h`：`round(m) == round(h * 60)` 才捕获，否则跳过。
+- **相等判据 MUST 是四舍五入后的精确相等**，MUST NOT 用 `<=`/`>=`/区间/容差。这一条直接对应 spec 的「MUST NOT 以更晚时刻的版本冒充 T+12」：`m=1440` 对 `h=12` MUST NOT 命中。
+- **不接受 epoch 形式的 header**（pin `_header_minute_matches_checkpoint`(:3963) 的第二支）。理由：本 issue 的产物**保持相对时间头**，绝对定戳归 run-controller 发布路径（compute-loop §9.2）；接受 epoch 形式需要 `start_time` 与 `_ensure_utc`，那是 #9 重戳与 #13.1 发布的面。刻意偏离，效果是 fail closed（epoch 形式的 header 一律判为未命中 → 如实报漏采）。
+
+**D. 单次捕获（`_capture`）与副本校验**
+
+- 目标文件名 MUST 为 `f"{project_name}.f{hour:03d}.cfg.ic.update"`（pin 同款；`f012` 三位补零）。
+- 步骤：建 `checkpoint_dir`（`store.safe_fs.ensure_directory_no_follow`，`containment_root=run_dir`）→ 有界读源文件（`read_bytes_limited_no_follow`，上限 `state.MAX_STATE_IC_BYTES`）→ 原子写副本（`atomic_write_bytes_no_follow`，`containment_root=run_dir`）→ **从磁盘回读副本**并做两项校验。
+- **超限源文件的处置**：`read_bytes_limited_no_follow` 在超限时返回 `max_bytes + 1` 字节（截断），随后 `state.parse` 对超限必抛 `ValueError`（`parse` 自带 `len(data) > max_bytes` 判定）→ 走「校验失败」支：删副本、保持未捕获。fail closed，且**不是**靠截断后的内容碰巧解析失败——`parse` 的超限判定是显式的。§C 步骤 1 的 header 读同样走有界读（同上限），不得用无界 `read_bytes_no_follow`。
+- **本模块 MUST NOT 自带任何 no-follow / 原子写 / unlink 原语**，全部复用 `yd_producer.store.safe_fs`（pin 的 `_copy_staged_file_no_follow`/`_write_staged_bytes`/`_read_staged_bytes`/`_ensure_directory`/`_regular_file_exists`/`unlink_no_follow` 一族在本仓已有对应物，逐一映射写进模块 docstring；无对应物的一个都不新造）。
+- 副本的两项校验，**都必须对回读到的字节做**（不得复用写之前那份内存副本——那样校验的是「我读到什么」而不是「盘上是什么」）：
+  1. 副本 header 分钟 `round()` 后仍等于 `h * 60`；
+  2. `yd_producer.state.parse(<副本字节>)` 不抛 `ValueError`（即「可按原生分段格式读取」——spec 场景「捕获副本校验失败不算成功」的判据）。
+- **任一校验失败 → 删除副本（`unlink_no_follow(..., missing_ok=True)`）、该小时保持未捕获、不抛错、正常返回**。语义是「这次撕裂了，下次再来」：SHUD 就地覆写 `cfg.ic.update`，header 已到 720 不代表 body 写完。**后续一次带完整内容的观测 MUST 仍能成功捕获**（撕裂重试，单列一条用例）。
+- 结构检查用 `state.parse` 而不是 pin 的 `state_ic_structure_complete`：后者属任务 4.2（issue #9，未落地）。本 issue **不**引入 river 行数等预期值比对——那需要 `expected_river_count`，来源是 work manifest（组 8，未落地）。刻意偏离，记录在案。
+- 捕获成功 → 写入 `captured[h] = CapturedCheckpoint(...)`；`CapturedCheckpoint` 是 `frozen=True, kw_only=True` dataclass，字段恰为 `lead_hours: int`、`relative_minute: float`、`path: Path`、`source_name: str`、`checksum: str`（`hashlib.sha256` 的 hexdigest，对副本字节）。**`relative_minute` 是目标值 `float(hour * 60)`，不是观测到的 header 值**（pin 的 `targets[h]["relative_minute"]` 同此）：G6 的 `719.6` 用例正是两者分叉处——那次捕获的 `relative_minute` MUST 是 `720.0`。**不含** `valid_time`/`provenance`/`relative_path`（前者需 `start_time`，后两者是补跑与 manifest 的面）。
+- 已捕获的小时在后续观测中 MUST 被跳过（`if hour in captured: continue`）：捕获是**一次性**的，晚到的同值 header MUST NOT 覆盖已捕获副本。
+
+**E. 查询面**
+
+- `captured` -> `Mapping[int, CapturedCheckpoint]`，只读视图（返回 `types.MappingProxyType` 或不可变副本），调用方改不动内部表。
+- `missing_hours()` -> `tuple[int, ...]`，升序，恰为「目标集减去已捕获集」。spec「快速覆盖漏采如实报告」的判据即此：覆写序列跳过 720 时 `missing_hours() == (12,)`。
+- `observed_header_minutes` -> `tuple[float, ...]`，按观测序、相邻去重。
+
+**F. 对 pin 的刻意偏离（此处即全集，逐条写进模块 docstring）**
+
+1. 目标小时来自 `Config.checkpoint_hours` 显式入参，不解析 manifest；pin 的三路 fail-open 过滤（不可解析 `continue`、≤0 与超 horizon 静默丢、重复静默去重）改为构造期 fail closed。**下游可见的副作用**：不再有 horizon 过滤，超出预报时长的小时不会被静默丢弃，而是成为**永久漏采**并原样喂给 #17 的补跑判定——这是有意的（配置错误应当可见），但 #17 的 fixture 需知道它可能收到一个物理上不可能捕获的小时。
+2. `project_name` / `run_dir` 为显式入参，不走 pin `_project_name`(:4114) 的四路 fallback + 下标兜底。**连带不抽 `_safe_path_component`(:2987) 与 `_SAFE_PATH_COMPONENT`(:2984)**（清单第 6 行把二者列在「闭包补项（全部必须随抽取搬运）」里，此处即其明示处置，补上 round 2 发现的记录缺口）：pin 的校验集是「非 str / 空 / 前导 `-` / NUL / `/` / `\` / 任意 `..` 子串 / 正则 `^[A-Za-z0-9_.-]+$` 之外」，本模块按 §B 只拒「空 / `/` / `\` / 恰为 `.` 或 `..` / NUL」，即 `-x`、`a b`、`..foo`、控制字符与任意非 ASCII 都被接受。**这是刻意窄化，不是遗漏**：`project_name` 来自版本化配置而非用户输入，且每一次写入都经 `safe_fs` 在 `run_dir` 下做 containment，无遍历或注入路径；pin 的正则还会连合法的非 ASCII 流域名（如 `yd_黄河`）一起拒掉。**后继实现方（#17 / 接线侧）MUST NOT 假定此处仍有 pin 级的名字校验。**
+3. 无轮询循环、无 `sleep` 等待、无轮询间隔配置（连带消掉 pin 的 `0.01` 秒默认）；观测由调用方驱动。**docstring 里 MUST 写作「`sleep` 等待」而不是带点的全名**——G7 的源码机检断言的正是那个带点的全名在整个文件中不出现，写全名会让模块自述与自己的守卫互相打架。
+4. 只接受相对分钟 header，不接受 epoch 形式（fail closed）。
+5. 结构校验用本仓 `state.parse`，不引入 pin 的 `state_ic_structure_complete` 与 `expected_river_count`（归 #9 / 组 8）。
+6. 不写 `state_checkpoints.json`、不记 recovery outcome、不做 `final_ic` 认领（归 #17 与发布路径）；连带本模块零环境变量读取。
+7. IO 原语全部复用 `store.safe_fs`，不移植 pin 的 staged-IO 族。
+8. 异常类型收敛为单一 `TrackerError`。
+
+（§D 的 `CapturedCheckpoint` 字段裁剪——去掉 pin 的 `valid_time`/`relative_path`/`original_shud_filename`/`checkpoint_filename`/`provenance`——是偏离 6「不写 manifest」的直接后果，不另计一条；「八条即全集」按此口径成立。）
+
+**G. header 分钟读取的落点（裁决修订 R1 后：消费，不移植）**
+
+- tracker MUST `from yd_producer.state import cfg_ic_header_minute_time`（master `state/header_time.py`，pin `state_qc.py:629`），MUST NOT 在本仓任何位置再移植一份「最后一个数值 token 即 minute-time」的实现。这条禁令与 master `state/__init__.py` docstring 对 `state_qc`/`restamp` 下的是同一条。
+- `producer/src/yd_producer/state/**` 与 `producer/tests/test_cfg_ic.py` 在本 PR 相对 master **零改动**（机检见 Must-preserve）。
+- 「非有限 header 分钟即本次观测无结果」的守卫**属 tracker**，实现在 `_header_minute_of` 的单一出口：`header_time` 只提取 token 值，`nan`/`inf` 是合法 float，值域判定是轮询语义而非 header 语义。
+- 本 issue **不**新建 `producer/tests/test_cfg_ic_header.py`（清单 §1「最小测试（cap 5 header）」行仍为 `待落地`，其 `_shift_cfg_ic_time` 重戳用例属 #9 面）。
+
+**Seams under test**（上游声明消费，不重议；**就地声明一处形态差异，不改 design.md**——承 #18/#19 先例）：design.md `Sketch seams under test` 第 5 条写作 `tracker.capture(shud_dir, target_minute) -> CheckpointResult`，本 fixture 落成 `CheckpointTracker(*, run_dir, project_name, checkpoint_hours)` + `capture_available()`。差异有两个来源：目标是**一组**小时（`Config.checkpoint_hours` 是元组）而非单个 `target_minute`；「漏采如实报告」要求跨多次观测**保持状态**（哪些已捕获、观测到过哪些 header），单次纯函数装不下。语义无差异，草图不改。
+
+
+- `CheckpointTracker` 的构造 + `capture_available()` 序列调用（即 issue 正文的「模拟覆写序列」）：以合成 `cfg.ic` 字节按序覆写 `source_path`，逐次调用观测
+- `state.cfg_ic_header_minute_time`（master `state/header_time.py` 的既有面，纯函数；本 issue 只消费，不重测——单元用例归 `producer/tests/test_header_time.py`）
+- `state.parse` 作为副本校验 oracle（既有面，不新测）
+
+**Fixture level: expanded**（override 上游的 `compact`；**本行系补记**——本 fixture 自始按 expanded 作业（完整 risk-pack 表、Review focus 常驻轴、§A–§G9 逐条 Required evidence、§G9 的不变式面清单等同 Invariant Matrix），但一直没把这条分级判定显式写下来，属「偏离必须记录、不得沉默」的漏记，round 3 后补上）。override 理由：改动面正面命中强制 expanded 触发词 `parser`/`format`/`schema`/`field`（header token 布局判定、相对分钟单位、产物文件名形态）与 `path`（全程 no-follow + containment 的文件系统面），并命中 `openspec/project-profile.md` 的 domain 触发词 `cfg.ic`、「状态链 / warm start」、`T+12`、`checkpoint`——与 issue #8/#9/#22 同一条覆写理由链。
+
+**Repair intensity: high**（本模块是 T+12 状态的**唯一来源**，profile 把「断链即整链失效」列为首位风险轴；且它是本仓第一个在 SHUD **就地覆写的同一目录下**读写文件的模块，撕裂读是一等公民。适用 `Invariant Matrix`——本 fixture 以 §G9 不变式面清单落地）。
+
+**Risk packs（selected / not selected 与理由）**：
+
+- Public API / CLI / script entry: selected - `CheckpointTracker` 是 #17 与作业脚本的消费面
+- Config / project setup: selected - `checkpoint_hours` 的权威归属与零默认是核心验收项
+- File IO / path safety / overwrite: **selected** - 本模块读源文件、建目录、原子写副本、失败删副本，且全程在 SHUD 就地覆写的同一目录下；no-follow 与 containment 全部经 `store.safe_fs`
+- Schema / columns / units / field names: selected - header 的「最后一个数值 token 即 minute-time」与相对分钟单位即本模块的 schema，错配直接导致永不命中或冒充命中
+- Auth / permissions / secrets: not selected - 无凭据；产物权限由 `safe_fs` 既有语义决定，本模块不设 mode
+- Concurrency / shared state / ordering: **selected** - 观测的是一个**正在被 SHUD 就地覆写**的文件，撕裂读是本设计的一等公民（校验-删除-重试即为此存在）；tracker 实例内的 `captured`/`observed` 是可变状态，顺序语义（一次性捕获、相邻去重）是契约
+- Resource limits / large input / discovery: selected - 源文件为有界读（`MAX_STATE_IC_BYTES`），无递归发现
+- Legacy compatibility / examples: not selected - 全新模块，仓库内零既有消费者
+- Error handling / rollback / partial outputs: **selected** - 「校验失败即删副本、保持未捕获、可重试」与「漏采如实报告不冒充」都是 fail-closed 判据
+- Release / packaging / dependency compatibility: selected - 只用 stdlib，不得新增依赖
+- Documentation / migration notes: not selected - 无迁移
+- Geospatial / CRS: not selected
+- Time series / forcing / temporal boundaries: **selected** - 相对分钟 ↔ 目标小时的换算、以及「不接受 epoch 形式」是本模块的时间语义分界
+- 状态链 / warm-start 定戳: selected - 捕获产物是 T+12 状态的来源，冒充或漏报直接污染状态链
+- NWM 快照溯源 / DB-free 隔离: **selected** - 本模块是快照件，溯源头与清单行的双向义务、以及零 NWM import / 零数据库连接由既有守卫承担
+
+**Review focus（常驻轴，承 issue #11 三轮硬闸 retro）**：审核方 MUST 逐条核对以下三轴**各自**都有「改坏即变红」的 oracle，缺任一轴即为 finding：
+
+1. **失败路径**：构造期四类拒绝、源文件缺失/空/畸形 header、副本校验失败
+2. **结构属性**：文件名形态、目标目录、`captured` 只读性、`missing_hours` 升序
+3. **捕获阶段的实现级 MUST**（round 1 verifier 的批级结论）：**Required evidence MUST NOT 只沿 spec 的四个 Scenario 反推**——Scenario 只描述**观测层**的输入-结果对，而 §D 把「header 命中 → `captured[h]` 落表」这一段写得最细（回读两项校验**各自**的判别力、异常收敛在捕获段的对偶、有界读、失败即删）。这些只活在 fixture 散文里的实现级 MUST **MUST 逐条过一遍「改坏即变红」的筛子**并落进 Required evidence。round 1 有四条 CONFIRMED 全部落在这一段，且它们不是四次独立疏漏，是同一条枚举流程偏差。
+4. **成功路径的输入归一化**（issue #11 三轮硬闸的直接产物，历史上整轴缺席）：`round()` 的存在（`m=719.6` 命中 `h=12`）、相邻去重（同值连续观测只记一次）、已捕获跳过（第二次同值观测不重写副本）、`f{hour:03d}` 的补零
+
+**Required evidence**（逐条可机检；测试 MUST 覆盖每一条）：
+
+**G1 header 分钟读取（消费面，不重测）**
+
+- 本 issue 对 `cfg_ic_header_minute_time` **不新增单元用例**：它是 master 既有面，用例在 `producer/tests/test_header_time.py`（issue #22 落地）。裁决修订 R1 撤回了原 G1 的七条参数化断言，连同被撤回的移植一起。
+- 保留的义务只有一条，且已由 §G3–§G7 的端到端序列覆盖：tracker 对 3-token 与 4-token（含 lake count）两种 header 形态 MUST 取**最后一个**数值 token；G3 的 `header=360 -> 720 -> 1440` 与 G5 的畸形 header 序列即其见证。
+- **行为保持**：`git diff origin/master -- producer/tests/test_cfg_ic.py producer/src/yd_producer/state` 为空，故 `_header_counts` / `parse` / `render` 的既有行为按 master 全绿为准，本 PR 不触碰。
+
+**G2 构造期 fail closed**
+
+- **参数化**：`checkpoint_hours=()`、`(0,)`、`(-12,)`、`(12, 12)` -> 各抛 `TrackerError`，消息含触发原因的可辨识词
+- **参数化**：`project_name=""`、`"a/b"`、`"a\\b"`、`"."`、`".."`、`"yd\x00evil"` -> 各抛 `TrackerError`（`"a\\b"` 为 Phase 6.2 审计第 3 条补入：复合守卫的反斜杠操作数原先无见证）
+- **参数化（NUL 的两个入口，钉死 §B；去掉任一条 NUL 拒绝后 MUST 变红，且是以 `ValueError` 从 `capture_available()` **外泄**的形态变红，不是断言失败）**：`project_name` 含 NUL；`run_dir` 的某一分量含 NUL -> 各在**构造期**抛 `TrackerError`
+- 合法构造后 `run_dir` 下**零新增条目**（构造不碰文件系统；断言 `list(run_dir.iterdir()) == []`）
+
+**G3 正常捕获（spec 场景「正常捕获」）**
+
+- 覆写序列 `header=360 -> 720 -> 1440`，每步后调一次 `capture_available()`：结束时 `missing_hours() == ()`，`captured[12].lead_hours == 12`、`.relative_minute == 720.0`
+- 捕获副本路径 == `run_dir/"state_checkpoints"/f"{project}.f012.cfg.ic.update"`，且该文件**存在**
+- **副本字节与写入 720 那一版的源字节完全相等**（`read_bytes() == 那一版内容`）——这是「产物保持相对时间头」的判据：副本首行 MUST 仍是 720 的相对分钟头，MUST NOT 被改写成绝对时间
+- `captured[12].checksum` == 该字节串的 `sha256().hexdigest()`
+- 序列继续到 `1440` 后再调观测：`captured[12]` **不变**（同一 path、同一 checksum）
+- **捕获一次性（钉死 `if hour in captured: continue`；去掉该跳过后 MUST 变红）**：在 `720` 成功捕获后，把源文件覆写成**同 header `720` 但 body 已截断**的内容（`state.parse` 必抛的那种）再观测一次 -> `captured[12].checksum` 与副本磁盘字节**逐字节不变**、副本文件**仍存在**、`missing_hours() == ()`。这条不能用「继续到 1440 再观测」代替：`round(1440) != round(720)` 时无论有没有跳过守卫都不会重入 `_capture`，那条用例对该守卫零判别力。缺跳过守卫的真实后果是：第二次同值观测重入 `_capture` → 覆写好副本 → 校验失败 → `unlink` → `captured[12].path` 变成悬空路径，而 `missing_hours()` 仍报空——静默数据丢失伪装成成功
+- `capture_final()` 单独驱动一次 `720` 覆写序列，捕获结果与 `capture_available()` 相同（别名不得被实现成 no-op）。两个 tracker 必然在不同 `run_dir` 下，`path` 绝对路径不可能相等，故逐一比较 `lead_hours`/`relative_minute`/`source_name`/`checksum` 与 `path.name`
+- `observed_header_minutes == (360.0, 720.0, 1440.0)`
+
+**G4 漏采如实报告（spec 场景「覆写跳过 720」）**
+
+- 覆写序列 `header=360 -> 1440`（跳过 720），每步一次观测 -> `missing_hours() == (12,)`、`captured == {}`
+- **冒充守卫**：`1440` 的那次观测 MUST NOT 产生任何 `state_checkpoints/` 下的文件。断言取强的一支——**`checkpoint_dir` 整个不存在**，而不是「不存在或为空」：判据放宽成 `<=` 后 `360` 那一次就会去试捕获、建目录、校验失败删副本，留下一个**空目录**，弱断言对该变异体零判别力。相等判据改成 `<=` 或 `>=` 后本条 MUST 变红
+- `observed_header_minutes == (360.0, 1440.0)`：漏采时观测轨迹仍完整留痕（诊断可定位）
+
+**G5 副本校验失败不算成功（spec 场景「捕获副本校验失败不算成功」）**
+
+- 源文件 header 已是 `720` 但 body 截断/缺分段列头（`state.parse` 必抛 `ValueError` 的合成内容）-> 观测后：`missing_hours() == (12,)`、`captured == {}`、且 `state_checkpoints/` 下**无残留副本**（断言目标文件不存在）
+- **撕裂重试**：紧接上一条，把源文件覆写成同 header `720` 的**完整**内容再观测一次 -> 捕获成功，`missing_hours() == ()`（证明失败不是终态）
+- **「校验对回读字节做」的判别用例**（唯一能把它与「校验内存里那份」区分开的形态）：monkeypatch `safe_fs.atomic_write_bytes_no_follow`，令其落盘**截断**的字节（源文件本身完整）-> 捕获 MUST 失败、副本被删、该小时保持未捕获。改成校验写前的内存副本后本条 MUST 变红
+- 源文件不存在 -> 观测不抛错、`captured == {}`、`observed_header_minutes == ()`
+- 源文件为空 / 首行无数值 token / 非 UTF-8 字节 -> 同上，不抛错、不记观测值
+- **参数化（非有限 header，钉死 §C 步骤 1b；去掉非有限判定后 MUST 变红，且是以 `ValueError`/`OverflowError` 外泄的形态变红）**：首行为 `3988\tnan`、`3988\tinf`、`3988\t-inf` -> 三条各自：观测**不抛任何异常**、`captured == {}`、`observed_header_minutes == ()`
+- **参数化（`safe_fs` 真会抛的三条路径，钉死 §A「不外泄」与 §C 步骤 1 的静默返回）**：`source_path` 是指向合法 `cfg.ic` 的符号链接（`open_file_no_follow` 抛 `SafeFilesystemError`）；`source_path` 是目录；`run_dir` 整个不存在（`_open_parent_dir(create=False)` 抛 `FileNotFoundError`，这是 SHUD 尚未建目录时的真实状态）-> 三条各自：观测**不抛任何异常**、`captured == {}`、`observed_header_minutes == ()`
+
+**G6 成功路径输入归一化（常驻轴）**
+
+- `header=719.6` -> 命中 `h=12`（`round()` 存在的 oracle；去掉 `round()` 后 MUST 变红）
+- 连续两次观测同一 `header=360` -> `observed_header_minutes == (360.0,)`（相邻去重；去掉去重后 MUST 变红）
+- `header=360 -> 720 -> 360` -> `observed_header_minutes == (360.0, 720.0, 360.0)`（**只**去重相邻，非全局去重；改成 `set`/全局去重后 MUST 变红）
+- `checkpoint_hours=(5,)` -> 文件名为 `...f005.cfg.ic.update`（`:03d` 补零的 oracle；改成 `{hour}` 后 MUST 变红）
+
+**G7 结构、只读性与模块自述**
+
+- `captured` 返回值上执行 `__setitem__` MUST 抛（`TypeError`）：内部表不可从外部改写
+- `checkpoint_hours=(24, 12)` -> `missing_hours() == (12, 24)`（升序，与入参书写序无关）
+- `isinstance(tracker.source_path, Path)` 且 `== run_dir / f"{project}.cfg.ic.update"`；`checkpoint_dir == run_dir / "state_checkpoints"`
+- **构造签名结构钉（§B「三者均 keyword-only」；去掉 `__init__` 的 `*` 后 MUST 变红）**：`inspect.signature(CheckpointTracker.__init__).parameters[n].kind is inspect.Parameter.KEYWORD_ONLY`，`n` 取 `run_dir`/`project_name`/`checkpoint_hours` 三者（先例：`producer/tests/test_slurm.py` 承 #10 evidence 的同款断言）
+- **`CapturedCheckpoint` 的 dataclass 形态（§D；`frozen=True→False` 或 `kw_only=True→False` 后各 MUST 变红）**：对已捕获记录赋值抛 `FrozenInstanceError`（`MappingProxyType` 只挡 `__setitem__`，挡不住成员改写，故只读性用例覆盖不到这一半）；位置构造 `CapturedCheckpoint(12, 720.0, path, "s", "c")` 抛 `TypeError`
+- **docstring 自述机检**（precedent：`test_cfg_ic.py:718` 按条数钉死偏离清单）：`checkpoint_tracker.__doc__` 中 §F 的八条偏离**逐条编号存在**（断言 `"\n1. "` … `"\n8. "` 均在，且 `"\n9. "` 不在——「此处即全集」是可机检的声明，不是修辞），且含 §D 要求的 pin→`safe_fs` 原语映射表
+- 源码机检：`checkpoint_tracker.py` 文本中不出现 `time.sleep`（零轮询循环，对应 §F 偏离 3；docstring 按 §F 偏离 3 的措辞约定回避该字面量）。**环境读取一项不写进本文件的断言**：`tracker/` 整个包已由 `test_snapshot_provenance.py` 的 DB-free 扫描覆盖（`FORBIDDEN_SURFACES` 含 `os.getenv`/`os.environ`），本 issue 若在测试里写出这两个字面量，反而会让 `test_checkpoint_tracker.py` **自己**成为扫描集里的命中行而变红——该文件是清单登记目标，扫描集不看 `落地状态`
+
+**G8 捕获阶段的实现级 MUST（round 1 新增；本节整体是「不沿 spec Scenario 反推」那条枚举规则的产物）**
+
+- **源在两次读之间前进（钉死 §D 校验 1，即副本 header 复检；删掉 `_copy_is_intact` 的 header 合取后 MUST 变红）**：`capture_available` 已按 header `720` 命中，但 `_capture` 重读源文件之前源被覆写成**另一份完全合法**的 `1440` 内容 -> 该小时保持未捕获、`state_checkpoints/` 下无该文件。**这条不能用既有回读用例代替**：那条落盘的是**截断**内容，`state.parse` 先抛错，header 合取从来不是判别项。缺它的后果正是 spec 禁止的「以更晚时刻的版本冒充 T+12」——变异后 `f012` 会逐字节持有 1440 的 body 且 `missing_hours()` 报空。
+- **捕获段的异常收敛（§A「不外泄」在捕获阶段的对偶；把 `_capture` 的 `except _FS_FAILURES` 收窄后 MUST 变红）**：header 已命中之后的某一步 FS 操作失败——例如 `run_dir` 下存在一个名为 `state_checkpoints` 的**普通文件**占位 -> `capture_available()` **不抛任何异常**、该小时保持未捕获。G5 的三条敌意形态全部在 `_read_header_minute` 里就返回了，**没有一条进入 `_capture`**，故捕获段的 `try` 在 round 1 时零见证。
+- **超限源文件（§D 超限处置 + §C 步骤 1「不得用无界读」；把源读、回读、`state.parse` 三处上限同时放开后 MUST 变红）**：一份**结构合法且 > `MAX_STATE_IC_BYTES`** 的源文件 -> 该小时未捕获、无残留副本。三处上限**各自**放开都是语义等价（只有资源放大，无契约可见差异），故本条 MUST 同时放开三处才具判别力；实测生成该源文件在进程内数秒、原码路径 RSS 峰值约 575 MB，成本可接受。
+
+**G9 捕获阶段不变式面清单（round 2 pattern escalation 的类 A 纠正动作；清单本身即产物）**
+
+**不变式（closure prompt）**：捕获阶段的**每一个**复合守卫的**每一个操作数**、每一个异常元组的**每一个成员**、每一个 `is None` 身份判定、每一个传给 `safe_fs` 的关键字实参、以及共享读取器的每一个解析维度，**要么有一个「改坏即变红」的见证，要么有一条书面的等价理由**。「这一段有测试」不算数；「这个操作数有测试」才算。
+
+**为什么是清单重构而不是第三次采样**：round 1 补了三个点；round 2 的两个存活体分别落在 round 1 所钉那个布尔的**另一个操作数**（F1）与那个异常元组的**另一个成员**（F2）；verifier 顺手九个变异体的点查又找出**第三个**存活（`capture_available` 的 `is None` → 真值判定，经典 falsy-zero）。同一形态被两次采样连续漏掉，第三次采样没有理由更好。本仓已有同款先例：#11 的同形补丁打到第三次才发现整轴缺席。
+
+**范围（有界、可穷尽）**：`_capture`、`_copy_is_intact`、`_discard`、`capture_available` 四个函数，加 `_read_header_minute`、`_header_minute_of` 两个共享读取器。**实现方 MUST 在测试文件里落一张结账表**（注释或 docstring 形式均可），逐单元给出「使其变红的用例名」或「等价理由 + 依据」，两者必居其一，不得留空：
+
+| 轴 | 单元 |
+|---|---|
+| 1. 异常元组成员 × except 站点 | `_FS_FAILURES` 的两个成员 × `_capture`/`_discard`/`_read_header_minute` 三站点 = 6 格；另加 `_copy_is_intact` 的 `except ValueError` 与 `_header_minute_of` 的 `except UnicodeDecodeError` |
+| 2. 布尔操作数（**逐操作数**独立） | `_copy_is_intact` 的 header 判定（2）、`_header_minute_of` 的返回判定（2）、`capture_available` 的相邻去重条件（2） |
+| 3. `is None` → 真值判定 | `capture_available` 的 header 判定、`_copy_is_intact` 的、`_header_minute_of` 的 |
+| 4. `safe_fs` 关键字实参 | `containment_root` ×**6** 调用点（建目录 / 源读 / 原子写 / 回读 / `unlink` / header 读）、`max_bytes` ×**3** 调用点（源读 / 回读 / header 读）、`missing_ok` ×1。**计数按代码实测，初稿写的 4 与 2 是错的**（round 2 结账时由实现方指出，按「完备性声明必须可机检」纪律更正） |
+| 5. 共享读取器的解析维度 | 分词（`split()`）、行选择（`lines[0]`）、`splitlines()`、`decode`、以及取首行前的 `if not lines` 空表守卫。**`splitlines()` 一格的判定口径**：变异为 `split("\n")` 或 `splitlines(keepends=True)` 均可，两者都因 `str.split()` 吃掉行尾符而等价——写明口径是为了让审计者与实现方对同一格得出同一结论 |
+
+**已知的既有结账**（可直接引用，不必重跑）：round 1 判定三处大小上界**各自单独**放开为等价（只有资源放大，无契约可见差异，故 §G8 第三条要求三处同时放开）、`missing_ok=True→False` 为等价（产生的 `FileNotFoundError` 是 `OSError`，被 `_discard` 自己的 `except` 吞掉）；round 2 判定两处 `containment_root` 变体为等价（目标自构造、不可判别）。轴 5 的「行选择」已作为 cand-14 记入 Known limits，按 DEFER 结账。
+
+**round 2 时已知缺见证的三格**（= F1/F2/F3，MUST 各补见证）：
+
+- 轴 2：`_copy_is_intact` 的 `header_minute is None` 析取。删掉后**回读副本** header 不可读时漏 `TypeError`（`_copy_is_intact` 在 `_capture` 的 `try` **之外**）。三种域内见证：副本落成零字节 / 非 UTF-8 / 非有限 header——一条参数化即可闭合。MUST 以**异常外泄**形态变红。
+- 轴 1：`_FS_FAILURES` 的 `OSError` 半在 `_capture` 与 `_discard` **两站点**均无见证（对照：`_read_header_minute` 两半都有）。**每站点各需一个见证，且失败必须是朴素 `OSError`**：`_capture` 用「源文件在两次读之间被 unlink」（SHUD 的 rename/unlink-in-place，只注入时机不注入错误，与 §G8 第一条同款钩子），`_discard` 用「unlink 抛 `PermissionError`」。把该站点收窄成只接 `SafeFilesystemError` 时 MUST 各自变红。注意现有的两个 RED 单元格由**同一个测试**产出——那是采样的签名，不是扫描。
+- 轴 5：整个 tracker 套的载荷全是空格分隔，而本仓自己的 `producer/tests/cfg_ic_fixtures.py` 写明真实 native `cfg.ic` 是 **Tab 分隔**（`test_cfg_ic.py` 也构造真实 tab 载荷）。`split()` → `split(' ')` 存活；仅有的三处 tab 字节都在「无结果」用例里，变异下**因错误理由通过**。MUST 补一条**成功捕获**路径由 tab 分隔载荷驱动，使全空白分词有正向见证。
+
+**Phase 6.2 强制审计**：本节落地后，由**未参与本 PR 任何 lens** 的独立审计者按上表逐单元复核结账属实，并对随机抽取的若干单元自造变异体验证。审计不通过即视为纠正动作未完成。
+
+**Phase 6.2 审计结论（2026-08-28，独立审计者，57 个变异体，对 head `9322482` 干净树重跑）：不通过，三条 MUST 修复**
+
+1. **轴 4 `max_bytes` 行的结账尾句为假**（`test_checkpoint_tracker.py` 结账表）。表写「三处同时放开 -> `test_oversize_source_is_not_captured`」，但轴 4 的「三处」按本节定义是**源读 / 回读 / header 读**三个 `safe_fs` 关键字实参；审计者实测三处同时 ×100 **全绿**。真正的红是 §G8 第三条那一组：**源读 / 回读 / `state.parse` 自带上限**（`state/cfg_ic.py:313`，不是 `safe_fs` 的 kwarg，不属轴 4 单元；**审计报告与本节初稿都把该行记成 `:166`，实测为 `:313`，`:166` 落在 `CfgIcDocument` 字段声明处，由实现方指出后按实测更正**）。MUST 改成后者措辞并点明 `state.parse` 上限不属轴 4。逐单元记账（三处各自单独放开为等价）经实测属实，只有尾句的交叉引用是假的——这正是本节 cand-15「转述即核实」同形，故判不通过而非 Note。
+2. **结账表的数目对不上**（「完备性声明必须可机检」同形，cand-18 同形）。实现方报「25 格 = 21 见证 + 4 等价」「23 个变异体、21 红 4 绿」；审计者实点为 **19 见证 + 5 等价 + 1 DEFER = 25 行**，且 21+4=25≠23。MUST 按实际重报，并在表头写明计数口径（**按表的行数**，与轴 4「10 个调用点单元按 3 行分组登记」的区别要写出来，否则同一张表有两个总数）。
+3. **轴 2 的兄弟操作数在 `__init__` 一侧漏了一格**（审计者顺手探到，本 issue 内闭合，不外派）：`checkpoint_tracker.py` 的 `"/" in project_name or "\\" in project_name` 复合守卫，第二个操作数**无见证**——删掉后全量套件纯绿。§G2 的参数化 `["", "a/b", ".", ".."]` 没有反斜杠一例。MUST 补 `"a\\b"` 一例（POSIX 下 `\\` 非分隔符，该操作数是对 Windows 的防御性收窄，用户可见影响低，但 closure prompt 的纪律要求它有见证）。同时 MUST 把 `__init__` 的复合守卫纳入结账表——本节原「范围」四函数不含 `__init__`，这是**范围本身的缺口**，如实记为本轮的第三个同形复发点。
+
+**审计核实属实的部分**（不必重跑）：枚举完整性无缺格（审计者独立按五轴穷尽为 32 单元 / 25 行，与表逐一对上）；13 个 RED 见证形态逐条复现（含「`_FS_FAILURES` 两成员各自判别，非共用一条测试」与「删相邻去重前件红 23 条」）；五组等价理由成立，其中 `containment_root` 六处**各自单独**删除审计者补跑了六个变异体（表只给了「六处同时」），六个全绿，结论比表更强。
+
+**审计 Note（不加权，但 MUST 修文字）**：`splitlines()` 等价理由写窄了——对**单独 `\r`（CR-only 行尾）**不成立（`split("\n")` 会把整份文件并成一行，取到的是全文最后一个数值 token）。结论在声明域内（SHUD 于 Linux 写 `\n`）仍成立，MUST 把域写进理由。
+
+**复审范围**：修完只需复核轴 4 那一格（重跑 `a4-maxbytes-*` 三个单站点 + `g8-three-limits`）与新增的 `__init__` 反斜杠格；其余 24 行本次已实测封账。
+
+
+**事件后对账清单（round 2 pattern escalation 的类 B 纠正动作，本 issue 起常驻）**：编排者把同一条声明扇出到 fixture / 清单 / PR body / 代码注释 / commit message 五处，而事件改变事实基准时无人重走依赖件——round 2 的五条 record-fidelity FIX_NOW 是同一机制的五个出口，不是五次疏漏。下列事件各触发一次**依赖件重走**：
+
+- **落地任何 pin 符号** -> 重走清单 §1 **全部**行的抽取集与反重复条款，不只本 issue 动过的行（cand-16 正是漏了第 5 行：它仍把已落地的两个 header 符号记为「待落地、归 #9」，会让 #9 再移植一份，恰是本 issue 越界所要防的双权威）
+- **任何代码提交** -> 重走 PR body 的行数、用例数、文件清单、零 diff 声明
+- **任何 fixture 修订** -> 重走 PR body 的 `偏离记录` 与 Known limits
+- **任何 DEFER/DISCARD 裁决** -> fixture 与 PR body 的 Known limits **条数与归属必须一致**（cand-17：fixture 八条、body 六条，漏掉的恰是三条带下游义务的）
+- **任何清单 / design / spec 修订** -> **重走 fixture 自身**。（round 3 F2 的可命名设计缺陷：上列四条触发器的目标集只有 PR body 与清单，**定义本清单的这份 fixture 不在任何触发器的目标集里**，于是 `c24aea6` 那次清单修订在纸面上不欠 fixture 任何义务，fixture 成了唯一没被对账的站点。）
+
+**触发器 1 的完备性 oracle（round 3 F1 的可命名设计缺陷，本 issue 起常驻）**：「重走**全部**行」此前只以人工断言存在，走一行和走全部行**在纸面上不可区分**——这正是本节自己那条「完备性声明必须可机检」被违反，只是违反发生在**上一层**（对账清单自身就是一条未加机检的完备性声明）。故触发器 1 的执行 MUST 产出一件**可数的产物**：一张**逐行处置表**（清单 §1 的行号 -> 本次重走结论，结论取 `无需改动` / `已改动（改了什么）` / `作废（作废了谁的什么声明）` 三者之一），落在 PR body 或 `.workplans/pr-<n>/` 下。**该表的行数 MUST 等于清单 §1 的数据行数**，口径写死为
+
+```bash
+awk '/^## 1\./,/^## 2\./' openspec/changes/m2-producer-core/nwm-snapshot-inventory.md | grep -c '^| '
+```
+
+减 2（表头行与分隔行）。issue #16 落地时该值为 **29 - 2 = 27**。行数不等即视为触发器 1 未执行。Phase 7 的终审 brief MUST 核这张表存在且行数相等。
+
+另两条常驻纪律：
+
+- **转述即核实**：把任何 reviewer/verifier 的**机制性**声明写进 fixture 成为 MUST/MUST NOT 之前，编排者 MUST 自行验证该机制可达（读控制流或跑一个变异体）。cand-15 的代价是一条 rung-1 条款靠假理由站着。
+- **完备性声明必须可机检**：凡写「此处即全集」「全部必须随抽取搬运」，MUST 配一条按条数或按集合比对的断言。cand-18 与 round 1 的 cand-01 同形——自称完备的枚举其实不完备。
+
+**变异证明要求**（承 issue #11 的方法债，brief 必带）：复制 `producer/` 到**唯一命名**的 scratch 目录时 `rsync --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache'`；**MUST NOT 在 scratch 副本里跑 `uv run`**（会把共享可编辑安装的 `.pth` 重新指回 worktree 源码，全部变异体假存活），用 `uv run --no-project --with pytest` 并显式 `PYTHONPATH=<scratch>/producer/src`；跑前断言 `yd_producer.__file__` 落在 scratch 内；每个变异体之间 `PYTHONDONTWRITEBYTECODE=1` 并清 `__pycache__`；先用一个必然变红的控制变异校准，校准失败如实说并换一个。
+
+**Known limits（round 1 verifier 裁定为 DEFER/DISCARD 的项，逐条记录归属）**：
+
+- **`run_dir` 的祖先若含符号链接则整轮零捕获**（cand-03，CONFIRMED/DEFER）：见 §B 的调用方前置条件。归作业脚本接线侧，另落 tracked issue。fail closed —— `missing_hours()` 仍诚实，漏采会驱动 #17 补跑，同一个 `run_dir` 上再失败即「整轮失败、不写 DONE」，是响亮的控制器边界失败而非静默坏数据。
+- **重启后同 `run_dir` 会删掉已验证副本**（cand-04，CONFIRMED/DEFER #17）：一次性守卫只在**实例内**（`self._captured` 是内存态）。#17 落持久化半时 MUST 显式裁决 `run_dir` 能否跨 attempt 复用——要么禁止复用，要么构造时从 `state_checkpoints/` 回填 `_captured`。
+- **撕裂副本可能停在规范文件名上**（cand-08，PLAUSIBLE/DEFER #17）：`_discard` 的 unlink 失败、或作业在原子写与校验之间被 walltime 杀掉（这个窗口无条件且常规），都会把未验证字节留在 `state_checkpoints/<project>.fNNN.cfg.ic.update`。本模块 API 仍诚实（`captured` 为空）。#17 MUST NOT 把「该文件名存在」当作已验证捕获，只信 `captured` 记录与其 checksum。
+- **去掉预报时长过滤后，物理上不可能的小时会变成永久漏采**（cand-02，PLAUSIBLE/DEFER #17）：`Config` 不做值域校验（归 #32），`checkpoint_hours = [720]` 这类时/分混淆能穿过装载器与本模块构造器。#17 的 fixture MUST 为这类目标定义补跑行为。
+- **`lines[0]` 与 `cfg_ic.parse` 的「首个非空行」对「header 行」的定义分歧**（cand-14，PLAUSIBLE/DEFER M4）：本实现与 pin `_read_cfg_ic_header_minute`(:3618) 逐字一致，且 §C 步骤 1 明文如此，两条现存锚点都支持当前行为。M4 首次真跑时 MUST 核对真实 `cfg.ic.update` 的**第一物理行**就是 header。
+- **不设产物 mode，权限随 umask**（cand-07，CONFIRMED/DISCARD）：命中本 fixture 自己的 rung-1 否定锚点「Auth / permissions：本模块不设 mode」，且 `store/object_store.py` 同形，属仓库级约定而非本 PR 回归。
+- **header 读把整份有界内容 decode + splitlines 只取首行**（cand-05，CONFIRMED/DISCARD）：64 MiB 上界下峰值约 4.7 倍线性放大。`cfg_ic.parse` 在捕获路径上做同样的事、同一个上界，属仓库既有模式；只修轮询侧是化妆。
+- **checksum 取 `copied` 而非 `payload` 在声明域内不可判别**（cand-13，PLAUSIBLE/DISCARD）：原子写 + 私有落点 + 单写者使 `copied == payload` 在每条可达路径上恒成立；真正的部分写会先被 §D 两项校验拦下，走不到 checksum。
+- **相对 `run_dir` 会让实例状态与磁盘状态 fail-open 地错位**（round 3 cand-r3is-01，CONFIRMED/DEFER）：构造期原样存 `Path(run_dir)` 不校验绝对性，而 `safe_fs._expand_path` 对非绝对路径**每次调用**都按当时的 `Path.cwd()` 重新锚定。已实测的失败序列：cwd=A 观测 header 360 → 进程 `chdir` 到 B → 再观测 B 下另一份文件的 720，结果 `missing_hours()` 返回 `()`（声称 A 这一轮的 T+12 已捕获，实际从未捕获），且 `CapturedCheckpoint.path` 是相对路径，换 cwd 即「有记录、无文件」。**与 cand-03 失败方向相反**（那条 fail closed、`missing_hours()` 诚实），故不是重复。归属与 cand-03 **同一条 tracked issue #77**，措辞 MUST 收紧为「`run_dir` MUST 规范：**既绝对、祖先亦无符号链接**」，并注明两者方向相反。本 PR **不加**构造期 `is_absolute()` 守卫：verifier 裁定它超出本 PR 声明的改动面——§B 的构造期拒绝清单是闭合枚举，轴 6 那张刚被 Phase 6.2 独立审计封账的「10 行 = 10 见证」结账表要加第 11 行，须先改 fixture 再动码，而那会重新打开刚关掉的审计。当前不可达于声明域：全仓 `CheckpointTracker` 除模块自身与测试（`tmp_path`，恒绝对）外零调用点，`config.py` 无 `run_dir` 字段，`src/` 内零 `chdir`。
+- **epoch 形式 header 的 M4 具体核验钩子**（cand-19，CONFIRMED/FIX_NOW）：偏离 4「只认相对分钟」的正当性**只**建立在时间线证据上——`docs/compute-loop-design.md` 在本 PR 之前就已声明 `cfg.ic.update` 的 header 是模型相对分钟，且 spec 的收窄早于实现提交 26 分钟。它**不**建立在 pin 的行为上：round 2 直读 pin 控制流确认，`capture_available`(:3717-3736) 把 `_header_minute_matches_checkpoint`(:3963-3974) 的**两支都无条件**用在同一个 `<project>.cfg.ic.update` 上，分支注释只是归因不是守卫；而 yd 自己的初态正是 epoch 定戳的（pin `_shift_cfg_ic_time`(:3653) 在求解前把绝对分钟写进 header），所以「SHUD 把初态的时间基带进 update 文件」是**默认生产拓扑**而非异常。**M4 首次真跑 MUST 核验第一份真实 `cfg.ic.update` 的 header 是相对分钟形式**；若为 epoch 形式则每轮永久漏采（fail closed 且响亮，但总量为零），偏离 4 MUST 重新裁决。此处不接受通用的「真实 SHUD 行为归 M4」一句——它不会被解析成这一项具体检查（同类先例：cand-14 已按此标准给了自己的具体钩子）。
+
+**欠 #17 fixture 的一项显式裁决（round 3 F4，CONFIRMED/P3；本 issue 不替 #17 决定，只把它记成必须先裁的项）**：本 issue 在三处写死「补跑半随 #17 落进**同一个文件**」（本 fixture、design.md D9、清单 §1 cap 6 行），测试模块头的结账表另写「#17 MUST 按同一格式续表」。而 `producer/tests/test_checkpoint_tracker.py` 落地即 **806 行**，`.large-file-guard.json` 的 `maxLines` 为 **1000**、`exclude` 不含该文件，余量 **194 行**。碰撞是被清单自己的闭包清单**强制**的、不是密度估算：cap 6 行把 19 个补跑用例的闭包写死为 8 个 helper 加 13 项模块级常量（pin 上仅 `_FAST_SOLVER_STUB`(L4678)–`_DISTINCTIVE_STAGED_IC`(L5136) 一段就跨约 458 行）并明写「无法手搓等价，必须整体搬运」，实测本文件对 `SOLVER_STUB`/`_write_basins_package`/`install_recovered`/`run_shud`/`recover` 的命中**全为 0**——闭包一行未落，单它就超余量一倍以上，19 个用例本体与续表尚未计入。钩子按暂存集判定，故 #17 的**每一次本地 `git commit`** 都会被 `exit 2` 拒绝。#17 的 fixture MUST 在动码前三选一并写明理由：**(a)** 把测试拆成 `test_checkpoint_tracker.py` + `test_checkpoint_recovery.py` 两个文件，同时修订本 issue 写下的三处「同一个文件」MUST 与清单 cap 6 行；**(b)** 给 `test_checkpoint_tracker.py` 加**第四条** exclude——注意这正是 issue #82 记录在案的「豁免清单单调增长而守卫覆盖面单调缩小」模式的第四次复发，选它必须在 #82 里同步登记；**(c)** 拆分被搬运的闭包（把 13 项常量与 8 个 helper 落进独立 fixture 模块），只在本文件留用例。**MUST NOT 默认走 (b)**。
+
+**Non-goals（本 issue 明示不做）**：漏采补跑（#17）、轮询循环与作业脚本接线、`state_checkpoints.json` 落盘、绝对 T+12 定戳（#9 重戳 + #13.1 发布）、river 行数等结构检查（#9）、work manifest 契约（组 8）、真实 SHUD 行为（M4）。
 
 ## 10. prepare-variants：变体与几何
 
@@ -1786,8 +2085,8 @@ Minimal mergeable slice: atomic - 单一编排函数，拒绝守卫/扫描窗/�
 ## 12. run-controller（一）：前沿发现与锁
 
 - [x] 12.1 实现严格前沿纯函数：`DONE`/状态文件集合 → 每源待跑 T 或停止原因（全新链、D+12h、状态缺失、时间头不对应 T、raw 缺口、缺轮阻塞）
-- [ ] 12.2 实现未提交残留识别与清理重跑判定（保留 T 状态、删更晚状态与半成品）
-- [ ] 12.3 实现非阻塞 flock 封装（持有即跳过、覆盖全生命周期），进程内测试跳过语义
+- [x] 12.2 实现未提交残留识别与清理重跑判定（保留 T 状态、删更晚状态与半成品）
+- [x] 12.3 实现非阻塞 flock 封装（持有即跳过、覆盖全生命周期），进程内测试跳过语义
 
 依赖：组 1、组 4（12.1 时间头校验读分段 header）
 §13.1 归属：控制器（前沿/flock 幂等/raw 缺口）
@@ -1966,6 +2265,152 @@ Review focus:
 - `states/` 与 `output/` 的可见集是否严格按裁决 5（10 位数字**且** `%Y%m%d%H` 可解析）判定，非法条目是否真的不砖化该源
 - 停止原因是否逐类可区分且不以异常逃逸；`OSError`/`UnicodeDecodeError` 是否被吞成分类结果
 - 移植三符号是否与 pin 逐字一致、逐函数带溯源注释、`_as_float` 是否复用 `cfg_ic` 而非重复定义
+
+### Issue #23 fixture（任务 12.2/12.3）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：正面命中 `openspec/project-profile.md` 的 domain expanded-triggers `DONE`、`cycle`、前沿/frontier、状态链 与 `flock`、NFS；且本 issue 是 M2 里**第一处删除 `YD_ROOT` 内路径**的代码——profile 首位风险轴「断链即整链失效」在此从「读错」升级为「删错」）
+Repair intensity: high（12.2 的删除集合直接毗邻状态链；一次多删 T 自己的状态即整链失效且不可逆。适用 `Invariant Matrix`）
+Project profile: yd-viewer
+
+**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：
+
+1. issue #23 的验收标准原文不含 `cron.lock_path` 绝对路径要求；该条由 #32 的裁决在 `tasks.md:166` 路由至本 issue 任务 12.3。本 fixture 消费该路由并按 fail-closed 落地（裁决 8），同批出 `specs/run-controller/spec.md`「并发与锁」的 delta。
+2. issue #22 fixture 裁决 6 把「无 `DONE` 却有多份状态是否算异常」路由至本 issue；本 fixture 裁决 3 给出判定。
+3. issue #59 把「崩溃恢复前置：凭什么断定同源无在途孤儿作业」路由至 **#23 与 #28** 两份 fixture；本 fixture 只对**本 issue 的删除集合**给出边界裁决（裁决 9），完整裁决（含两条候选的取舍）归 #28，理由见该裁决。
+4. `specs/run-controller/spec.md` 的保留清理 Requirement 把「每个删除目标 MUST 先经 `realpath` 确认位于 yd 自己的根内」写成了跨全部删除点的字面 MUST。本 issue 以 `safe_fs` 的 `containment_root` 满足它（裁决 6）：该机制全程 `O_NOFOLLOW` 逐段锚定，消除了「先 `realpath` 再比前缀」在解析与使用之间的 TOCTOU 窗口，故不出 spec delta；`realpath` 字面实现归 13.3 的保留窗清理。**两者不是包含关系，原措辞「严于」不成立**（round 1 containment 批核验推翻，round 2 fixture-accuracy 批更正论据）：按「每个删除目标」= 树内每一个被 unlink 的条目 这一逐条目读法，存在 `containment_root` 放行而字面 `realpath` 拒绝的方向——`remove_tree_allow_symlinks` 会 unlink 半成品树内一个 `realpath` 落在 `YD_ROOT` 外的 symlink 条目（`producer/tests/test_controller_residue.py` 的 `test_symlink_inside_half_product_tree_is_unlinked_not_followed` 钉住：链接被删、目标存活），而「先 `realpath` 再比前缀」会拒删该条目。这是刻意的 fail-safe（unlink link, never traverse：不跟随即不可能进入 NWM raw 根），故不出 spec delta，字面 `realpath` 归 13.3。另有一条方向相反的差异，但它证明的是 `containment_root` **更严**而非更松，MUST NOT 拿它当「不是包含关系」的论据（round 2 核验指出原文正是这么写的，论证方向反了）：`containment_root` 额外要求 root **自身逐段无 symlink**（`safe_fs.py:824-843` 以 `containment_root=None` 从 `/` 重新锚定，逐分量过 `O_NOFOLLOW`），而 `realpath` 语义允许 root 经 symlink 到达。这条额外前置条件是实打实的调用方约束，故裁决 6 增补：传给 `safe_fs` 的 `containment_root` MUST 是 `Path(yd_root).resolve()`，且该前置条件 MUST 写进 `residue.py` 模块头与 `ResiduePlan.yd_root` 的契约。**root 层的 `resolve()` 是容纳机制的前置条件，不是 spec 那条逐目标 `realpath` MUST 的兑现**，两者不得混为一谈。
+5. **`docs/compute-loop-design.md` §10 把残留清理放在步骤 4、raw 扫描放在步骤 5，本 issue 的实现把清理挪到了 raw 扫描之后**（round 1 docs 批核验 CONFIRMED）。机制：裁决 2 以 `FrontierDecision` 不可跑为清理前置，而 `RAW_INCOMPLETE` 也是一个 `stop_reason`，于是「T 的 raw 未齐」会连带跳过清理——但那一刻 T 其实是**已知**的（`controller.py` 把它写进了 `detail`），裁决 2 原先给的理由「不知道 T 就无从定义更晚」对这一支不成立。后果限于磁盘：残留留在 NFS 上直到 raw 补齐，`products-contract.md` §4.3 使 viewer 不读无 `DONE` 的源目录，前沿只认 `DONE`，故不产生错误产物；且集合逐源有界，不增长。**按 docs 优先，§10 是对的，不修订 §10**；持久解法是让 `RAW_INCOMPLETE` 携带 T（`FrontierDecision` 形态变更），归任务 14.1 的 `run_once` 接线一并裁决。此处记录偏离，不在本 issue 改形态。
+
+**核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
+
+1. **判定与执行严格分离，且判定 MUST 零写入**。产出两个符号：一个纯判定函数返回「本源的残留清单」（更晚状态文件列表 + 半成品 cycle 目录列表 + 保留的 T），一个执行函数按该清单删除。理由不是风格：任务 13.2（`## 13. run-controller（二）` 组首）逐字写着「复用 12.2 判定，仅接入失败/重跑路径」——失败路径要的是**判定**而不是删除动作，融成一个函数即让 13.2 无从复用。判定函数与 `decide_frontier` 同姿态：只 `stat` / 列目录，MUST NOT 创建、修改或删除任何路径，以递归树快照证明。
+2. **残留集合的定义域是 NFS 侧、逐源**，对齐 compute-loop §10 步骤 4 与 `specs/run-controller/spec.md`「未提交残留清理重跑」的**删除集合**（步骤**顺序**上的偏离见上方偏离记录第 5 条）：
+   - `states/<source>/` 里 cycle **严格晚于** T 的合法状态文件；
+   - `output/<T>/<source>/` 存在且其下**无 `DONE`** 时，该 source 目录整棵；
+   - **不含** scratch `work/<source>/<T>`（compute-loop §11.3 与 §12 把 work 的删除定为失败收尾与保留清理的动作，归 #26/#28/#13.x），不含 14 天保留窗清理（§12，归 13.3）。
+   输入 T 取 `decide_frontier` 的结论 cycle；`FrontierDecision` 不可跑（带 `stop_reason`）时本源 MUST NOT 进入清理——`FrontierDecision` 在不可跑时不携带 cycle，调用方拿不到 T 就无从定义「更晚」。`RAW_INCOMPLETE` 因此被连带跳过，属已记录偏离（偏离记录第 5 条），不是本裁决的目的。
+   **`source` 的输入域 MUST 在判定入口 fail closed**（round 1 A3 PLAUSIBLE/DEFER，因后果属数据丢失类而在本轮一并落地）：仅校验 `source == decision.source` 不够——空串会让 `output_root / cycle_id(T) / ""` 塌回 `output/<cycle>/`（`Path("/a/b") / ""` 就是 `/a/b`），删除粒度由本源子目录放大为整个 cycle 目录，连同另一源已带 `DONE` 的正式产物一起消失，且 `safe_fs` 帮不上忙（它看到的条目名是一个合法的 10 位 cycle id）。`source` MUST 非空；越界的 source 名 MUST 报错而不是构造路径。
+3. **全新链同样适用，且 T 仍取最早状态文件名**（结清 #22 裁决 6 路由的张力）：该源无任何 `DONE` 时 T = `states/<source>/` 里最早的合法状态，比它更晚的状态一律是残留。理由：init 只写一份首态（`spec.md`「全新链取首态文件名」），多出来的份只可能来自一次中断的首轮发布；按同一条规则删除后重跑 T，与「无 `DONE` 残留必须可干净重跑」一致。MUST NOT 把「无 `DONE` 却有多份状态」判为异常停源——那会让首轮崩溃永久砖化该源。
+4. **`DONE` 的存在性是每个 `output/<cycle>/<source>/` 的删除前置**，MUST 逐源 stat `DONE` 这个普通文件，MUST NOT 以「目录非空」或「有 `yd.rivqdown.dat`」代替（products-contract §4：`DONE` 是唯一完成标志）。删除的粒度是 `output/<cycle>/<source>/`，**不是** `output/<cycle>/`：另一源可能在同一 cycle 目录下已有 `DONE`。父目录 `output/<T>/` 在删完本源子目录后 MUST 保留（是否删空目录归 13.3 的保留清理）。
+   **`DONE(retained)` 存在时整个清单 MUST 为空，不只是半成品那一半**（round 1 chain-destruction 批 A1 CONFIRMED/FIX_NOW，实测）：该闸只在调用方**交来**一个 T 时可达（`decide_frontier` 自己产出的 T 永远不在 `done_cycles` 里），而交来 T 正是任务 13.2 的复用姿态；只挡半成品、不挡状态文件，会在「publish 已写 `states/<T+12>` 与 `DONE(T)`、其后某步失败」时把刚提交的下一环判为残留删掉，前沿随即永久停在 `STATE_MISSING`。这直接违反本 fixture 的 Must-preserve「清理前后对同一棵树调用 `decide_frontier`，T 不变」。故该判据 MUST 提到 `plan_residue` 一层，两类删除共用。
+5. **不可见条目永不删除**。`decide_frontier` 的 cycle 可见集判据（10 位数字且 `%Y%m%d%H` 可解析且 `cycle+12h` 不溢出；`states/` 侧另需 `.cfg.ic` 后缀）在本 issue **原样复用**，MUST 从 `controller` 导入而非重写一份。方向与 #22 裁决 5 相反但同源：那里「不可解析 ⇒ 不可见 ⇒ 不砖化该源」，这里「不可解析 ⇒ 无法判定是否比 T 晚 ⇒ 不删」。只删除能被正面识别为残留的路径，是本 issue 的 fail-closed 形态。
+6. **删除原语一律走 `store/safe_fs.py`，两类路径策略不同且不对称，理由须写进模块头**：
+   - 半成品 `output/<cycle>/<source>/` 用 `remove_tree_allow_symlinks`——该原语的 docstring 逐字说明它就是为「内容按构造不可信的 residue/quarantine 树」而存在，且拒绝 symlink 会「permanently lock the run at the hygiene hook」；本处正是该场景（被杀死的发布尝试留下什么都可能）。
+   - 残留状态文件用 `unlink_no_follow`（遇 symlink 抛 `SafeFilesystemError`）。不对称的理由：`states/<source>/<cycle>.cfg.ic` 只由发布器以「普通文件原子 rename」写入（`spec.md`「NFS 提交顺序与 DONE 语义」步骤 3），该位置出现 symlink 不是崩溃残留而是异常，按 fail-closed 停该源。
+   - 两者都 MUST 传 `containment_root=<YD_ROOT>`，落实 compute-loop §12「清理只允许作用于经确认位于 yd 自己根目录下的对象；不得跟随路径进入 NWM raw 根」。MUST NOT 用 `shutil.rmtree` / 裸 `Path.unlink`。
+   - **测试树 MUST 用 `tmp_path.resolve()` 作 `YD_ROOT`**：`safe_fs._open_directory_no_follow` 会把 `containment_root` **自身的每一个祖先分量**重新过一遍 `O_NOFOLLOW`（issue #77 的证据链，`safe_fs.py:824-843`），而 macOS 的 `/var` 是 symlink，未 resolve 的 `tmp_path` 会得到与被测逻辑无关的红。
+7. **清理失败即停该源，MUST NOT 静默继续**。任一删除抛 `SafeFilesystemError` 时本源本次停止（不重跑、不提交），错误 MUST 指名失败的路径。理由与 #22 裁决 9 同向：删了一半就重跑，等于让下一步在一个既非干净也非完整的树上组装。**幂等**：对已清理干净的树重复调用判定+执行是 no-op（清单为空、零删除、零异常），这是 cron 每小时重入的必需性质。
+8. **`cron.lock_path` 非绝对路径 fail closed，闸门位置在 flock 封装的最前**（消费 #32 经 `tasks.md:166` 的路由）。相对路径与 `~` 前缀两种形态都拒（`Path` **不**展开 `~`：`Path("~/x") / "y"` 得到 `'~/x/y'`），报错 MUST 指名 `cron.lock_path`，且 MUST 在**任何文件系统副作用之前**——否则 cron 的工作目录一变，锁文件就落到另一个路径上，两个实例各持各的锁，互斥静默失效，这正是本条要防的危害。**不选**在 `config.py` 装载期强制：`local.toml` 的其余现场路径字段当前都不做绝对性校验，只为本字段在装载期开一个特例会让 `cli-config` spec 的 MUST 范围与实现不一致（`specs/cli-config/spec.md` 的装载 Requirement 未含路径形态约束）；闸放在唯一的消费点更窄且可测。同批已出 `specs/run-controller/spec.md`「并发与锁」的 delta。
+9. **#59 崩溃恢复前置：本 issue 的删除集合与任何 Slurm 作业的写入集合按构造不相交，故 12.2 不需要在途作业存活确认；完整裁决归 #28**。两个窗口逐一点名：
+   - **窗口 1（进程死亡）**：孤儿作业 12345 的 `--chdir` 是 scratch `work/<source>/<T>`（`--chdir=work_dir` 的绑定在代码侧：`producer/src/yd_producer/slurm.py:133-140`，由 `tasks.md` 的 #11 fixture 与 `producer/tests/test_slurm.py` 逐元素钉住；compute-loop §3.3 / §10 步骤 6 只给出「work 是 scratch 下的一次性隔离单元」这一层，**不含** `--chdir` 字样——round 3 核验更正原引用），它写的全部路径都在 scratch 下。裁决 2 已把 work 排除出本 issue 的删除集合，故「下一 tick 删掉正在被写的 work 目录」这条后果在 12.2 上不可达。NFS 侧的 `output/` 与 `states/` 只由控制器进程写（`spec.md`「NFS 提交顺序与 DONE 语义」的六步全部是控制器动作），而控制器写入被 12.3 的锁覆盖，孤儿的是 Slurm 作业不是控制器。
+   - **窗口 2（已提交但未登记）**：同上——没有任何 job ID 存在，但也没有任何 Slurm 作业会写 NFS 侧路径，故对 12.2 的删除集合同样不可达。
+   - **仍然成立的危害与其落点**：一旦 #28 把 work 的删除接进重跑路径，两个窗口都恢复可达，且窗口 2 按 #59 的构造性不对称无法用 job ID 覆盖。因此 #59 的两条候选（(a) 存活确认 / (b) 见半成品即停等）与 `spec.md`「未提交残留清理重跑」是否需要 delta，**整体归 #28 裁决**，本 issue MUST NOT 替它选。本 issue 的义务是把边界写死在此并在 #59 上留证。
+10. **不接线 `run` CLI**。`cli.py:116` 的 `run` 仍是 `_unimplemented`，接线归任务 14.1（issue #26/#27）。12.3 交付的是一个可复用的上下文管理器 / 包装函数，MUST NOT 修改 `cli.py` 的子命令行为。
+11. **flock 语义钉死**：用 `fcntl.flock(fd, LOCK_EX | LOCK_NB)`，MUST NOT 用 `fcntl.lockf`；释放时 MUST NOT `unlink` 锁文件（删掉后另一实例会在新 inode 上建锁，两个持有者同时成立）；被包裹的可调用对象在跳过分支 MUST NOT 被调用；跳过是**成功**语义（与「跑过了」可区分的返回值，不是异常，不是非零退出）。`fcntl.flock` 的锁挂在 open file description 上，故同一进程内两次独立 `open()` 互相冲突——进程内用例因此是有效判别器。spec 的 Scenario 写的是「另一进程」，任务 12.3 写的是「进程内测试」：等价性由上一句给出，但 MUST 另加一条子进程用例正面覆盖 spec 的字面 WHEN。
+    **进程内跳过用例的第一持有者 MUST 也经同一个封装取得锁，MUST NOT 由测试自己直接 `fcntl.flock`**（fixture 复核实测，darwin 24.6.0）：XNU 把 `flock` 与 `lockf` 并进同一条 lock list，测试自持 `flock` 时封装侧的 `lockf` 仍报 `EAGAIN`，于是 `flock → lockf` 变异体照样走跳过分支、用例保持绿而存活。两侧同经封装则该变异体使两把锁都变成同进程不冲突的 `lockf`，第二次进入会**真执行**，用例变红。这条不是风格：判别器的两端必须同时被变异，否则平台的锁合并语义会把变异体藏住。
+12. **零新增依赖**：`fcntl`、`os`、`pathlib` 全在 stdlib。本 issue MUST NOT 引入 `filelock` 之类的第三方包。
+
+Must-preserve behavior:
+- `decide_frontier` 与 `controller` 现有导出的行为逐字不变（本 issue 只新增符号）；`producer/tests/test_controller_frontier.py` 全套通过（本 PR 只改了其中一处 docstring 措辞 `_done_cycles`→`done_cycles`，无断言变更；`frontier_fixtures.snapshot_tree` 的快照元组增加 `st_mtime_ns` 维度，由零写入证据条目要求）
+- 「前沿只由 `DONE` 推进」——清理动作 MUST NOT 反过来影响 T 的计算：清理前后对同一棵树调用 `decide_frontier`，T 不变（清理后 T 仍是 T，正是「以 T 状态重新组装本轮」在发现层的可证形式）
+- `states/<source>/<T>.cfg.ic` 在任何路径上都不被删除
+- 已带 `DONE` 的 `output/<cycle>/<source>/` 及其 `yd.rivqdown.dat` 在任何路径上都不被删除
+- `store/safe_fs.py` 零改动（本 issue 是它的消费者，不是它的维护者）
+
+Seams under test:
+- 目录树 fixture（`tmp_path.resolve()` 下的合成 `YD_ROOT`），无注入式 fake——删除是真实文件系统动作，记录型 fake 会让「删对了没有」退化为永真式
+- 锁：封装自身持锁 + 同进程第二次进入同一封装（跳过语义；两端同经封装，见裁决 11 末段）+ 一个子进程持锁（spec 字面 WHEN）
+- 时间/cycle：直接构造文件名，不注入时钟
+
+Required evidence:
+- **纯判定零写入**：判定函数调用前后对整棵 `YD_ROOT` 做递归快照（路径、类型、大小、mtime）逐项相等
+- **保留 T**：树含 `DONE(T-12)`、`states/<T>.cfg.ic`、`states/<T+12>.cfg.ic`、无 `DONE` 的 `output/<T>/<source>/`（只含 DAT）-> 清理后 `states/<T>.cfg.ic` 仍在，`states/<T+12>.cfg.ic` 与 `output/<T>/<source>/` 已删，`output/<T-12>/` 整棵未动；再调 `decide_frontier` 仍返回 T
+- **边界方向**：cycle **恰好等于** T 的状态文件永不删（这条是变异体 (a) 的判别器）；cycle 为 `T+12`、`T+24` 的多份更晚状态一次全删
+- **逐源隔离**：IFS 与 GFS 在同一 cycle 上各有更晚状态与半成品，只清 IFS；GFS 侧递归快照不变。`output/<T>/` 父目录在 IFS 子目录删完后仍存在
+- **`DONE` 保护**：`output/<T>/<source>/` 下同时有 `DONE` 与 DAT -> 不在清单内、零删除；把 `DONE` 换成同名**目录**或**断链** symlink -> 按 `DONE` 的普通文件判据视为无 `DONE`（与 `controller.py` 的 `DONE` 判据一致：该处 `os.stat` 跟随 symlink，故指向普通文件的 symlink **算**已完成，此形态刻意不在本用例内），进入清单
+- **空半成品目录**：`output/<T>/<source>/` 存在但为空（mkdir 后即崩）-> 判为半成品并删除
+- **不可见条目不删**：`states/<source>/` 下有 `2026082612.cfg.ic.tmp`、`nine.cfg.ic`、`9999123123.cfg.ic`、`.DS_Store`；`output/` 下有 `stray/`、`.DS_Store` -> 清理后逐个仍在
+- **symlink 策略两侧**：`states/<source>/<T+12>.cfg.ic` 是 symlink -> 停该源并报错指名该路径，链接与其目标都还在；`output/<T>/<source>/` 树内含一个指向 `YD_ROOT` 外的 symlink 条目 -> 该树被删除，链接的**目标**未被删除（unlink link, never traverse）
+- **containment**：`states/<source>/<T+12>.cfg.ic` 是指向 `YD_ROOT` 外普通文件的 symlink 时（上一条）目标存活；另断言判定+执行传入的 `containment_root` 就是 `YD_ROOT`（以越界路径构造的调用被 `safe_fs` 拒绝）
+- **幂等**：同一棵树上连跑两次判定+执行 -> 第二次清单为空、零删除、零异常，树快照与第一次结束时相等；**且 MUST 再执行同一份旧清单对象一次**（不重新判定）-> 同样零删除、零异常。后一步才是变异体 (s) 的判别器（round 3 核验实测：只做前一步时 (s) 存活——重新判定后的空清单让 `execute_residue_plan` 迭代两个空元组，根本走不到 `safe_fs`）
+- **交来的 T 已有 `DONE` 时整个清单为空**（裁决 4 增补）：树含 `DONE(T)`、`output/<T>/<source>/` 半成品、**以及 `states/<T+12>.cfg.ic`**，以直接构造的 `FrontierDecision(cycle=T)` 调用 -> `state_files` 与 `half_product_dirs` **都**为空、零删除；随后 `decide_frontier` 仍返回 T+12 且可跑。既有的同姿态用例只放了半成品而没放 `states/<T+12>`，恰好绕开了这条
+- **`containment_root` 就是 `YD_ROOT`**（两个独立判别器，缺一不可）：其一，`plan_residue` 产出的 `plan.yd_root` 等于 `Path(传入的 YD_ROOT).resolve()`——传入值已是实路径时即等于它本身，经 symlink 到达时等于解析后的实路径（见下一条用例）；把它改成 `root.parent` 会静默放宽容纳域而现有用例全绿；其二，越界的手搓 plan **只带 `state_files`、`half_product_dirs` 为空**时执行仍被拒（现有越界用例走的是半成品那条臂，状态文件那条臂的 `containment_root` 掉了也不会红）
+- **`YD_ROOT` 经 symlink 到达时清理仍成功**（裁决 6 增补）：以 `link -> real` 构造根并把未 resolve 的 `link/yd` 传给 `plan_residue` -> 判定与执行都成功，删除结果与直接用 `real/yd` 一致。这条钉住「判定侧跟随 symlink 而执行侧对 symlink 致命」的不对称
+- **`source` 输入域**（裁决 2 增补）：`source=""` -> 报错，且 `output/<cycle>/` 与另一源的 `DONE` 产物零改动
+- **`source` 输入域 MUST 逐合取项各有判别器**（round 2；上一条只跑 `""`，闸里其余两项无判别器）：同一条用例参数化跑 `["", ".", "..", "a/b", "ifs/"]` 五个形态，每个都断言抛 `ValueError`、树的递归快照不变、另一源的 `DONE` 产物仍在。映射逐条不可省——`""` 只被 `not source` 挡；`"."` 与 `".."` 只被**显式点名集**挡（`Path("..").name` 就是 `".."`，`Path(".").name` 是空串只属 pathlib 的顺带效果，MUST NOT 依赖）；`"a/b"` 与 `"ifs/"` 只被单分量判据挡
+- **`..` 条目名的拒绝 MUST 有消费者侧的钉子**（round 2；`store/safe_fs.py` 零改动，故义务落在本 issue 的用例里）：手搓一份 `half_product_dirs` 含 `output/<T>/..` 的 `ResiduePlan` -> `execute_residue_plan` 抛 `SafeFilesystemError` 且 `kind == "unsafe"`，执行前后 `YD_ROOT` 递归快照逐字节相等、另一源的 `DONE` 产物仍在。理由：该保证由 `safe_fs.remove_tree_allow_symlinks` 首行的 `_reject_unsafe_entry_name` 独家承载，仓内无用例钉住它
+- **`ResiduePlan.empty` 的半成品臂 MUST 有判别器**（round 2）：树为 `DONE(D)` + `states/<source>/<T>.cfg.ic` + **空的** `output/<T>/<source>/` -> `plan.state_files == ()`、`plan.half_product_dirs` 非空、`plan.empty is False`。两个断言缺一不可：没有 `state_files == ()` 这条前提，用例对 `return not self.state_files` 没有判别力
+- **执行序 MUST 有判别器**（round 2）：模块头逐字钉死「先半成品树、后更晚状态」。判别树为 `states/<source>/<T+12>.cfg.ic` 是指向 `YD_ROOT` 外普通文件的 symlink + 同时存在半成品树 -> 抛 `SafeFilesystemError` 之后半成品目录**已不存在**、symlink 与其目标都还在。两种顺序都抛，只有钉死的顺序会先删半成品
+- **半成品位置不是目录时不删**（裁决 6 的类型判据）：`output/<T>/<source>` 分别是 symlink、普通文件、FIFO 三种形态 -> 三者都不入清单，执行后条目仍在
+- **判定侧的 fail-closed 收敛**：`chmod 0o000` 掉 `states/<source>/` -> `plan_residue` 抛 `ResidueError`，MUST NOT 返回空清单（空清单会让残留留在树上被下一轮当成正常产物）
+- **锁的竞争/真错分流**：monkeypatch `fcntl.flock` 抛 `PermissionError(EACCES)` -> 异常向外传播，MUST NOT 变成 `acquired=False`，且被包裹的可调用对象零调用
+- **不可跑源不清理**：`FrontierDecision` 带 `stop_reason`（如 `STATE_MISSING`）时该源零删除
+- **全新链**：无任何 `DONE`、`states/` 有 `T`、`T+12` 两份 -> T 取最早、`T+12` 被删（裁决 3）
+- **锁：持有即跳过**：同进程第一个 fd 持锁，第二次进入包装 -> 立即返回跳过结果、被包裹的可调用对象零调用、进程不阻塞（用例带超时）
+- **锁：子进程持有**（spec 字面 WHEN）：子进程持锁期间父进程进入包装 -> 同上
+- **锁：释放后可再取**：第一次正常退出后第二次进入 -> 真正执行；锁文件在释放后**仍存在**（不 unlink）
+- **锁：异常路径也释放**：被包裹的可调用对象抛异常 -> 异常向外传播且锁已释放（同棵树第二次进入能拿到锁）
+- **非绝对锁路径**：`"yd.lock"` 与 `"~/yd.lock"` 两种形态 -> 抛错且消息含 `cron.lock_path`；断言 cwd 下与 `Path.home()` 下**都没有**新建锁文件，且被包裹的可调用对象零调用（spec Scenario 逐字要求「不执行发现」；副作用先于闸门是本条要杀的形态）
+- 预登记变异体（(a)–(af) 共 32 条，此处刻意写全数；(t)–(aa) 由 round 1 核验门追加，(ab)–(af) 由 round 2 核验门追加），每条 MUST 被上列用例杀死（跑法见 `openspec/project-profile.md` 的 Mutation-testing hazards，用 `uv run python -m pytest`）：
+  (a) 「更晚」判据 `>` 改 `>=` -> 保留 T 用例变红；
+  (b) 逐源过滤去掉（对 `states/` 全域比较）-> 逐源隔离用例变红；
+  (c) `DONE` 存在性判据改为「目录非空」-> `DONE` 保护用例变红；
+  (d) 可见集门去掉（不可解析文件名也参与比较/删除）-> 不可见条目用例变红；
+  (e) 判定函数里顺手删除（判定与执行融合）-> 零写入快照用例变红；
+  (f) 删除粒度由 `output/<cycle>/<source>/` 放大到 `output/<cycle>/` -> 逐源隔离用例变红；
+  (g) `remove_tree_allow_symlinks` 换成 `rmtree_no_follow` -> 半成品树含 symlink 的用例变红（该变异体正是原语 docstring 说的 permanent lock）；
+  (h) `unlink_no_follow` 换成 `Path.unlink` -> symlink 状态文件用例变红（目标被删或未停源）；
+  (i) 去掉 `containment_root` 参数 -> containment 用例变红；
+  (j) `fcntl.flock` 改 `fcntl.lockf` -> 持有即跳过（进程内）用例变红；
+  (k) 去掉 `LOCK_NB` -> 持有即跳过用例超时变红（用例 MUST 自带超时，否则测试自身挂死）；
+  (l) 跳过分支仍调用被包裹对象 -> 零调用断言变红；
+  (m) 释放时 `unlink` 锁文件 -> 「释放后锁文件仍在」用例变红；
+  (n) 绝对路径闸移到 `open()` 之后 -> 「拒绝后无锁文件」用例变红；
+  (o) 绝对性判据改为 `Path(p).expanduser().is_absolute()`（展开后再判，`~/yd.lock` 被判为绝对而放行）-> `~/yd.lock` 用例变红。**MUST NOT** 用「只查开头 `/`」当这条的变异体：POSIX 下 `os.path.isabs(s)` 对 str 就是 `s.startswith("/")`，二者对 `~/yd.lock` 同为 `False`，那是等价变异体；
+  (p) 忽略 `FrontierDecision.stop_reason` 照常清理 -> 不可跑源用例变红；
+  (q) 全新链的 T 取 `max(states)` 而非 `min(states)` -> 全新链用例变红；
+  (r) 空目录不判为半成品（以「目录非空」为半成品判据）-> 空半成品目录用例变红；
+  (s) 删除调用不带 `missing_ok` / 执行前不重新判定 -> 幂等用例第二次抛 `FileNotFoundError` 变红；
+  (t) `DONE(retained)` 闸只留在半成品那一半（回到 round 1 前的形态）-> 「交来的 T 已有 `DONE`」用例变红；
+  (u) `plan.yd_root` 由 `root` 改为 `root.parent` -> `containment_root` 判别器之一变红；
+  (v) 状态文件删除调用**单独**去掉 `containment_root` -> `containment_root` 判别器之二变红（半成品那条臂不变，故必须两个判别器都在）；
+  (w) 去掉 `Path(yd_root).resolve()` -> symlink 根用例变红；
+  (x) 去掉 `source` 非空校验 -> `source=""` 用例变红；
+  (y) 去掉半成品的 `S_ISDIR` 类型判据 -> symlink/普通文件/FIFO 三形态用例变红；
+  (z) `plan_residue` 把 `DiscoveryUnreadableError` 吞成空清单而不抛 `ResidueError` -> `chmod 0o000` 用例变红；
+  (aa) `except BlockingIOError` 放宽为 `except OSError` -> `PermissionError` 用例变红（该变异体在 round 1 实测存活，全套 993 绿）
+  (ab) `source` 闸去掉 `.` / `..` 的显式点名（回到只有 `not source` 与单分量两项）-> `source=".."` 参数用例变红（`Path("..").name` 就是 `".."`，单分量判据放行它，清单随即是 `output/<T>/..`——整棵 `output/`；该变异体在 round 2 实测存活，全套 1003 绿）；
+  (ac) 整道 `source` 闸退化成 `if not source:`（点名集与单分量两项一并去掉）-> `source` 参数用例的 `"."` / `".."` / `"a/b"` / `"ifs/"` 四腿变红（round 2 实测存活：此前该用例只跑 `""`，其余两项无判别器）；
+  (ad) `safe_fs.remove_tree_allow_symlinks` 首行的 `_reject_unsafe_entry_name(name)` 删除（**变异只在 scratch 副本内做**，`store/safe_fs.py` 仓内零改动）-> `..` 条目名用例变红。这条登记的是**消费者侧依赖**：`..` 清单不会真删到 `output/` 是由该行独家承载的，而仓内此前无任何用例钉住它（round 2 实测：删掉该行后全套 1003 绿，且 `..` 清单会真的删掉另一源已提交的 `DONE` 产物）；
+  (ae) `ResiduePlan.empty` 退化成 `return not self.state_files`（丢掉半成品那条臂）-> 半成品独臂清单用例变红（round 2 实测存活：既有断言用的树两臂要么同空、要么同非空；`empty` 是公开 API 且 13.2 只消费清单不执行，按它分支的调用方会静默跳过真实半成品）；
+  (af) `execute_residue_plan` 的两个删除循环对调（先状态、后半成品）-> 执行序用例变红（round 2 实测存活。判别树：`states/<source>/<T+12>.cfg.ic` 是 symlink + 同时有半成品树；两种顺序都抛 `SafeFilesystemError`，但钉死的顺序在抛之前已把半成品删掉，对调后半成品每 tick 原地不动）
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+
+Known limits（合并时按此验收，不得按「Scenario 全绿」验收）:
+- **变异体 (z) 在 root 身份下不可杀**（round 2 核验裁为 DISCARD，记录而不改用例）：(z) 的唯一判别器 `test_unreadable_states_dir_raises_residue_error` 以 `_skip_if_root()` 自跳过——root 无视 mode 位，`chmod 0o000` 仍可枚举，用例在该身份下本就无判别力。故以 root 跑变异证明时 (z) 必然「存活」，那是身份造成的假阳性而不是覆盖缺口。CI 跑的是 GitHub 托管的 `ubuntu-latest`（非 root），(z) 在每个 PR 上都被杀死；本地以 root 复现变异批次时 MUST 换非 root 身份，MUST NOT 因此去掉那道 skip（去掉只会把用例变成恒真的空转）。
+- spec 的 Scenario「崩溃残留恢复」后半句「以 T 状态重新组装本轮」依赖 `run_once`（任务 14.1，issue #26/#27）。本 issue 只能让**删除**半句变绿，重组半句以「清理后 `decide_frontier` 仍返回 T」这一发现层可证形式代替（见 Must-preserve）。该 Scenario 的完整验收归 14.1。
+
+Non-goals:
+- scratch `work/<source>/<T>` 的删除与孤儿 Slurm 作业存活确认（裁决 9）：归 #28；#59 的两条候选取舍不在本 issue
+- 发布顺序、`DONE` 写入、`DONE` 成功后的旧状态清理（任务 13.1，issue #24）
+- 14 天保留窗清理与 `realpath` 圈定 yd 根（任务 13.3，issue #25）：本 issue 的 containment 用 `safe_fs` 的 `containment_root`，不实现保留窗
+- `run_once` 编排、把锁接进 `cli.py run`（任务 14.1）
+- 状态读路径 stat->open 的 TOCTOU / FIFO 阻塞（issue #63）：本 issue 是该问题的**放大器**（卡死进程持锁 -> 后续 cycle 持续跳过），但加固的三处读路径均不在本 issue 的改动面；毗邻、已跟踪、刻意不动
+- `run_dir` 符号链接祖先致零捕获（issue #77）：面在 checkpoint-tracker 接线，本 issue 只在**测试树**上按同一机制用 `tmp_path.resolve()`（裁决 6 末条），不改 `safe_fs` 也不改 tracker
+- `cron.lock_path` 在 `config.py` 装载期的绝对性校验（裁决 8 明确不选）
+- 真实 NFS/Slurm 行为、数值正确性：归 M4
+
+Review focus:
+- 12.2 的删除集合是否**严格**等于「更晚状态 + 无 `DONE` 的本源半成品目录」——多一类（work、`output/<cycle>/` 父目录、其它源、不可见条目）或少一类都是缺陷
+- 「更晚」的边界方向：T 自己是否可能进入删除集合（任何 `>=`、任何以文件名字符串而非解析后 cycle 比较的写法都要当作缺陷查）
+- 判定函数是否真的零写入（递归树快照是唯一判别条），13.2 是否真的能只复用判定
+- symlink 两侧策略是否按裁决 6 落地且理由写进模块头；有没有出现 `shutil.rmtree` / 裸 `Path.unlink` / 缺 `containment_root`
+- 跳过语义是否与「跑过了」可区分，跳过分支是否真的零副作用；异常路径是否仍释放锁
+- 绝对路径闸是否真的先于任何文件系统副作用（看调用顺序，不看注释）
+- 有没有越界落地 #24 的发布动作、#25 的保留清理或 #28 的 work 删除（含"顺手先放着"的死代码）
 
 ## 13. run-controller（二）：发布、失败与清理
 
