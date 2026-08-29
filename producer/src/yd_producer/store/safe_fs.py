@@ -276,8 +276,16 @@ def write_bytes_no_follow_exclusive(
     content: bytes,
     *,
     containment_root: Path | None = None,
+    mode: int | None = None,
 ) -> Path:
-    """Create a file without following symlinked parents or targets, failing if it exists."""
+    """Create a file without following symlinked parents or targets, failing if it exists.
+
+    ``mode`` mirrors :func:`atomic_write_bytes_no_follow` exactly: it is passed to
+    ``os.open`` and then re-applied with ``fchmod`` so the landed bits are not
+    weakened by the ambient umask (a publisher needs a cross-uid-readable file on
+    NFS even on a umask-0077 host).  ``mode=None`` keeps the historical behaviour
+    byte for byte: the hard-coded ``0o666`` open mode and no ``fchmod`` at all.
+    """
 
     target = _expand_path(path)
     parent_fd, parent_path = _open_parent_dir(
@@ -286,7 +294,11 @@ def write_bytes_no_follow_exclusive(
     file_fd: int | None = None
     try:
         _verify_fd_matches_path(parent_fd, parent_path)
-        file_fd = os.open(target.name, _FILE_FLAGS, 0o666, dir_fd=parent_fd)
+        file_fd = os.open(
+            target.name, _FILE_FLAGS, 0o666 if mode is None else mode, dir_fd=parent_fd
+        )
+        if mode is not None:
+            os.fchmod(file_fd, mode)
         view = memoryview(content)
         while view:
             written = os.write(file_fd, view)
