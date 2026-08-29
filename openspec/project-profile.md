@@ -70,3 +70,10 @@ Domain expanded-triggers:
 - `.prj`、CRS、投影、GeoJSON
 - `Slurm`、`sbatch`/`sacct`、`flock`、NFS
 - NWM 快照 / snapshot 溯源
+
+Orchestration hazards（由 PR #38/#40 的终局记录回灌，写进对应 brief）:
+- **scratch 副本会静默绑回仓库 venv**：在仓外 scratch 副本里跑 `uv run pytest` 会经继承的 `VIRTUAL_ENV` 重新解析到本仓 `.venv`，加载**未变异**的源码，于是每个变异体都"存活"。副本内必须 `env -u VIRTUAL_ENV uv sync --frozen`，并对已 import 的模块做 `inspect.getsource` 变异标记断言。
+- **grep 式闸门枚举看不见值传播闸门**：按 `if/elif/except/and/or` 关键字枚举守卫会漏掉 `status = path.stat()`、`open(path, "rb")`、`SOURCE_DIR_NAMES[source]` 这类**由取值本身承担判别**的闸门（PR #38 round 5 实测漏掉约 10 个、其中 2 个无判别力）。要求完整枚举时用 AST 遍历全部可执行语句，不用 grep。
+- **并行 reviewer 不得共用同一 worktree**：PR #40 round 4 三个 reviewer 在同一 worktree 内各跑变异实验，互相覆写，一个测试文件中途丢了 36 行。凡 brief 允许跑变异实验，必须指定唯一命名的私有 scratch 副本（含 issue/round 标识）并断言 `yd_producer.__file__` 落在副本内。
+- **本地套件永远看不见 merge-ref-only 的 CI 红**：CI 构建 PR 的 merge ref，分支本身不构建；master 在一次 run 内可能移动多次。Phase 8 冻结前应对 `origin/master` 的合并结果跑一次本地套件。
+- **声明必须配判别器**：凡写下「只增加/不解除」「等价或更强」「已覆盖」「每一/全部/恰好」这类完整性断言，先构造证明它的变异体；双向声明要两个方向各一个判别器。本仓已有多处此类断言被事后证伪。

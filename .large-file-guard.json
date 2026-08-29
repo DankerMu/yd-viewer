@@ -6,6 +6,8 @@
     "producer/tests/test_cfg_ic.py",
     "producer/tests/test_config.py",
     "producer/tests/test_geometry.py",
+    "producer/tests/test_prepare.py",
+    "producer/tests/test_rawcopy.py",
     "producer/tests/test_rawscan.py",
     "producer/tests/test_state_tools_qc.py"
   ]

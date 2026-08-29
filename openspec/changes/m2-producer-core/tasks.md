@@ -172,7 +172,7 @@ Non-goals:
 - **不做 `local.toml` 路径的绝对路径形态校验**：schema 把这些字段标注为 `<绝对路径>`，但装载器只校验其为 `str`。这条**不被上一行覆盖**——相对路径与 `~` 的危害不是"不存在"，而是被正常创建、正常打开却落在错的地方，使用点的存在性检查永远不报警（实测 `Path("~/x") / "y"` → `'~/x/y'`，`~` 不展开）。最尖锐的是 `cron.lock_path`：cron 以 cwd=`$HOME` 调 `run`、人工补跑在 checkout 目录走同一入口，相对路径会让两边 `flock` 拿到两个不同的锁文件，`specs/run-controller/spec.md:60` 的互斥静默失效，两个 controller 同时进入发布段（违反 agent-ops §8.4）。归属：`cron.lock_path` 归 **#23** task 12.3 的 flock 封装；`yd_root`/`scratch_root` 归各自写入面；裁决记录在 **#32**（若决定统一在装载期强制，按文档优先原则先改 `specs/cli-config/spec.md:19` 扩大 MUST 范围再动码）
 - **不提交版本化 `producer/config.toml` 生产实例**：`raw.ifs`/`raw.gfs` 的变量名、bundle 文件模式与 GFS f000 具体取值出自 compute-loop §7.1 所称"NWM adapter 的当前事实"，由 issue #4 勘察与 issue #6 完整性判定确立，此刻不可知；本 issue 只钉 schema，测试全部用内联 TOML。生产实例落库已路由为 issue #29（`Depends on #2, #6`），并已挂入 epic #1 依赖图。
 - 不提交 `local.toml.example`：compute-loop §5 明确 `local.toml` 不入库，现场值由实施方创建（agent-ops）
-- **不做值域校验**：装载器只校验存在性与类型（spec cli-config 把 fail-closed MUST 限定为"任何必需字段缺失或类型错误"）。以下经 round 1 审核确认存在、但按 verifier 裁决 DEFER，本 issue 明确不做，归属逐条具名于 **issue #32**：`raw.*.variables`/`bundles`/`lead_hours` 的空列表拒绝（归 #6 task 3.1——空集会让"所有预期文件存在才算完整"恒真）；`variants.*` 的相对性校验（归 #20 task 10.3——绝对路径会让 `Path(yd_root) / variants.gfs` 静默丢弃 `yd_root`，使覆盖守卫检查的目录与实际写入目录分叉）；`cycle.hours ⊆ {0,12}`（归 #6 task 3.1，fail-closed 下游闸门）；`forecast_days` 与 `reach_count` 的正数约束（归 #24 task 13.1，DONE 前行数/列数校验）；`len(checkpoint_hours) == 1` 与 `output_interval_minutes` 的正数约束（**两项均为零归属项**，需 #32 裁决；建议同法由 #29 以生产实例钉死 `[12]` / `60` 并断言）；`lead_hours` 全集覆盖 0–168h 且与 `forecast_days*24` 一致（本 amendment 新增 `lead_hours` 后才存在，#32 原文早于该字段，已补入其验收标准）
+- **不做值域校验**：装载器只校验存在性与类型（spec cli-config 把 fail-closed MUST 限定为"任何必需字段缺失或类型错误"）。以下经 round 1 审核确认存在、但按 verifier 裁决 DEFER，本 issue 明确不做，归属逐条具名于 **issue #32**：`raw.*.variables`/`bundles`/`lead_hours` 的空列表拒绝（归 #6 task 3.1——空集会让"所有预期文件存在才算完整"恒真）；`variants.*` 的相对性校验（归 #20 task 10.3——绝对路径会让 `Path(yd_root) / variants.gfs` 静默丢弃 `yd_root`，使覆盖守卫检查的目录与实际写入目录分叉）；`cycle.hours ⊆ {0,12}`（归 #6 task 3.1，fail-closed 下游闸门）；`forecast_days` 与 `reach_count` 的正数约束（归 #24 task 13.1，DONE 前行数/列数校验）；`len(checkpoint_hours) == 1` 与 `output_interval_minutes` 的正数约束（**两项均为零归属项**，需 #32 裁决；建议同法由 #29 以生产实例钉死 `[12]` / `60` 并断言）；`lead_hours` 全集覆盖 0–168h 且与 `forecast_days*24` 一致（本 amendment 新增 `lead_hours` 后才存在，#32 原文早于该字段，已补入其验收标准）；`raw.<source>.variables` 的**单射性**（重复变量不报错，会让任务 3.2 的 manifest 产出重数 >1 的 `(lead, variable, local_key)` 三元组，而 spec `raw-scan` :58 的集合相等断言是集合式的、对重数天然失明；`lead_hours` 轴的对称闸门已在 `rawscan._expected_leads` 落地，`bundles` 轴由 `_reject_collisions` 守，唯独本轴无守卫。本条原为**零归属项**——issue #7 round 1 verifier CONFIRMED/DEFER 时本账本完全没有它——现已具名为 **issue #72**，仍需 #32 裁决认领。禁止静默去重：那等于替运维发明一份他没写的配置）
 - **不做 `LocalConfig.slurm` 的只读化**：fixture 于本块「TOML key schema」下方逐字钉死"以映射（`dict[str, str | int]`）暴露"，改为只读映射需先修订该钉死标注，归 **issue #31**（其中记录了一处关键更正：`MappingProxyType` 自身不可哈希，不能顺带解决 `hash(LocalConfig)` 与 `hash(Config)` 的不对称）
 
 Review focus:
@@ -606,6 +606,249 @@ Review focus:
 - 空列表/取值域校验的 `ConfigError.path` 是否为完整点分路径，断言是否用 `excinfo.value.path ==` 而非子串探测（组 1 已裁定子串探测无判别力）
 - 是否引入 stdlib 之外的依赖，或运行时 import NWM
 - 预期文件集是否严格由 `lead_hours × bundles` 构造，而非列目录后过滤
+
+### Issue #7 fixture（任务 3.2）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：改动面命中**强制** expanded 触发词 `file output`/`path`/`temp`/`writer`/`schema`/`format`——本任务写文件、定 JSON 契约；profile 的 domain expanded-trigger `raw manifest`/`forcing`/`cycle` 同样命中。另据 PR #38 终局回灌的上游 sizing-retro：唯一 oracle 是合成 fixture 的任务不应默认 compact）
+Repair intensity: high（File IO / path safety / overwrite；producer→converter 的产物契约边界）
+Project profile: yd-viewer
+
+Risk packs（逐条 selected / not selected）:
+- Public API / CLI / script entry: not selected —— 本 issue 只交付库函数，CLI 接线归组 12
+- Config / project setup: selected —— `raw.<source>.variables`/`lead_hours` 决定扇出与复制集；取值域校验已由 3.1 承担，本 issue 只消费
+- File IO / path safety / overwrite: **selected（主风险面）** —— 只读 NWM 原件 + 写 work 副本；containment、不覆盖、不跟随 symlink、部分失败清理
+- Schema / columns / units / field names: **selected** —— `raw-manifest.json` 是 producer→converter 的产物契约（entry 6 键 + `idx_selector` + manifest 级四键）
+- Auth / permissions / secrets: not selected —— 无凭据面；NWM 原件的权限失败已由 3.1 归入 `unreadable_files`，本 issue 只在 `complete=True` 后运行
+- Concurrency / shared state / ordering: selected —— 扫描→复制窗口的 TOCTOU（本 issue 收敛复制期的一半，残余归组 12）
+- Resource limits / large input / discovery: not selected —— 复制集由 `expected_files` 有界钉死（57 lead × bundles），不做目录发现
+- Legacy compatibility / examples: selected —— manifest MUST 与 pin 的 `DownloadManifest.as_dict()` 同形，否则 converter 读不了
+- Error handling / rollback / partial outputs: **selected** —— fail-closed 的零写入拒绝与部分复制失败的清理
+- Release / packaging / dependency compatibility: not selected —— 本 issue 只用 stdlib，不新增任何依赖（判别器是 `uv sync --frozen` 无漂移）
+- Documentation / migration notes: not selected —— 无面向用户的行为变更；契约细则落在本 fixture 与 spec delta
+- Domain：Time series / forcing / temporal boundaries: **selected** —— lead 全集承接与 APCP 累积语义的 fail-closed
+- Domain：NWM 快照溯源与 DB-free 隔离: selected —— 承接 pin 语义、禁运行时 NWM import 与 DB 连接
+- Domain：Geospatial / CRS: not selected —— 本 issue 不解析 GRIB 内容，不触及投影
+- Domain：状态链 / warm-start: not selected —— 与 cfg.ic 状态面无交集
+
+Change surface:
+- 新增 `producer/src/yd_producer/rawcopy.py`（复制 + manifest 生成）
+- 新增 `producer/tests/test_rawcopy.py`
+- `rawscan.py` **仅**允许把 bundle 文件名渲染面提升为可复用（薄公开包装 + `__all__` 登记，不改任何既有公开行为），理由见下方复制语义的 containment 段；这是本 issue 触碰该文件的唯一例外，且 MUST 作为偏离上报
+- 不触碰 `config.py`、CLI 入口、`store/`、`raw/manifest.py`——本 issue 只**消费** `ScanVerdict` 与 `DownloadManifest`/`ManifestEntry` 数据结构，不改其定义
+
+Must preserve:
+- **不新增任何依赖**：`producer/pyproject.toml` 现有 7 个依赖（cfgrib/eccodeslib/numpy/pyproj/pyshp/shapely/xarray），本 issue 只用 stdlib，判别器是 `uv sync --frozen` 无 lock drift。（本行原写作「`dependencies = []`」，系从 #6 fixture 转抄的过期事实，由 issue #7 的实现者证伪并更正——#6 fixture 的同一行同样过期，归 follow-up）
+- `rawscan.judge` 的公开面与 `ScanVerdict` 五字段形态逐字不变（由 #6 的 fixture 钉死）
+- `raw/manifest.py` 的 `ManifestEntry`/`DownloadManifest` 语义与 `as_dict()` 键序——它们是 NWM pin 的字节等价面，本 issue 只构造实例，不改类
+- 现有全部 producer 测试继续通过
+
+#### Seam（本 fixture 钉死）
+
+```python
+def stage_raw(
+    verdict: ScanVerdict,      # rawscan.judge 的返回；MUST complete=True，否则拒绝
+    raw_root: str | os.PathLike[str],  # 与 judge 同一入参（源根）
+    work_dir: str | os.PathLike[str],  # 本轮 work/<source>/<cycle>/ 根
+    source: str,               # "ifs" | "gfs"
+    cycle: datetime,           # 与 judge 同一入参（tz-aware UTC 整点）
+    config: Config,
+) -> StagedRaw
+```
+
+`StagedRaw`（frozen dataclass）字段：
+
+- `manifest_path: Path` —— 落盘的 `<work_dir>/raw-manifest.json` 绝对路径
+- `copied_files: tuple[Path, ...]` —— 副本绝对路径，与 `verdict.expected_files` **同序同长**
+- `entries: tuple[ManifestEntry, ...]` —— 写进 manifest 的 entry，按 (lead 升序, `variables` 声明序)
+
+失败一律抛 `RawStagingError`（本 issue 新增，`Exception` 子类），带**闭合词表**的 `kind` 字段，供调用方与测试机检；MUST NOT 外泄裸 `OSError`/`KeyError`/`json.JSONDecodeError`。词表恰好九项：
+
+| `kind` | 触发 |
+|---|---|
+| `incomplete-verdict` | `verdict.complete is False` |
+| `unsupported-layout` | `len(bundles) != 1`（见下方单 bundle 约束） |
+| `source-symlink` | 源侧 bundle 路径或其祖先段是 symlink |
+| `source-manifest` | **归属规则（不是穷举清单，勿再写触发条数）**：凡因果落在「源 manifest 这份外部 JSON 的内容或形态」上的失败，一律归本 kind。已实现的触发含但不限于：文件缺失/不可解析/`forecast_hours` 缺失或形态错/覆盖不全/顶层非 Mapping/entry `metadata` 非 Mapping 或六键缺一/entry `variable` 非字符串/`forecast_hour` 会被 `int()` 有损归一/`(forecast_hour, variable)` 重复键/本轮 manifest 序列化失败/**准入段兜底地板收敛的任何非词表异常**（`ADMISSION_FALLBACK_KIND`）。本行**有意不写条数**——该计数已在 round 1/2/3 连续三轮失实（每次都是新增闸门未回灌到计数上），改以归属规则表述后不再有可失实的数 |
+| `verdict-mismatch` | **归属规则**：凡因果落在「`verdict` 与本次调用形参不同源」上的失败，一律归本 kind。已实现的触发：① 由形参重新构造的源路径与 `verdict.expected_files` 不一致（含相对 `raw_root` 的处置，见下方复制语义）；② `verdict.expected_variables` 的 lead 集合与由形参重构的 lead 集合**不相等**（单向包含不够，见下方三元组契约）；③ 某个 lead 的变量集不是 `tuple`/`list`（`str` 可迭代，会被逐字符扇出成变量名，静默产出全错的 manifest）。另有一条不可达防御腿（`_reject_symlinks` 的 `relative_to` `ValueError`）登记在 gate-audit 死腿桶。原文列的第 ④ 条「形参与 verdict 不同源」不是独立路径，而是 ①②③ 的因果表述（三处消息里都逐字带着它），已删——round 3 verifier CONFIRMED |
+| `accumulation-metadata` | R4B2 的三条 APCP fail-closed 中任一条不成立 |
+| `source-mutated` | 复制前后源 `lstat` 元组不一致 |
+| `target-exists` | 目标副本路径已存在 |
+| `copy-failed` | 复制期的其它 IO 失败（权限、ENOSPC 等） |
+
+`ConfigError` 的分工（round 2 修订）：取值域校验仍归 `rawscan`，本 issue 不重复；但**形参之间的关系**与**形参自身的形态**由本模块自守，同样抛 `ConfigError`、**不占**上表九项 kind 名额——语义是「调用写错了」而非「本轮环境不满足前置」。已授权的形参守卫：`source` 词表、`cycle` 的 tz-aware 与整点、空 `lead_hours`，以及 `raw_root` 与 `work_dir` 互相包含（后者由 round-1 verifier 指名要求，守 `docs/compute-loop-design.md` §4.1 的「NWM 树零写入」硬约束；其判定 MUST 经 `resolve()` 归一并辅以 inode 身份比对，纯词法比较会被大小写别名、`..` 段与根 symlink 三种形态绕过——round 2 实测）。上表九项 kind 一项也不归 `ConfigError`。每个 `kind` MUST 各有一个具名用例并各有一个杀手变异体（把该分支删掉/改成放行即变红）。
+
+**`(lead, variable, file)` 三元组契约（#6 round 1 cand-05 路由到本 issue 的 seam）**：本 issue 在此确立该键关系，形态为
+`(entry.forecast_hour, entry.variable, entry.local_key)`。同一 (lead, bundle) 的**全部变量 entry 共享同一个 `local_key`**（pin 的逐变量扇出，`NWM@8ae9b8f2 gfs_adapter.py:611-636`：外层 hour 算一次 `local_key`，内层逐变量产 entry）。三元组的完整性由下式定义并 MUST 被断言：
+`{(lead, var) for lead, vars in verdict.expected_variables.items() for var in vars}` 与 `{(e.forecast_hour, e.variable) for e in entries}` **相等**（不是包含）。
+
+**单 bundle 约束（fail closed）**：上式只在「一个 lead 恰好对应一个物理文件」时有定义。`RawSourceConfig.bundles` 是元组、允许多模式（#6 的 fixture 就行使了两个模式），此时 `entries` 是 lead × variables 而 `copied_files` 是 lead × bundles，**变量落在哪个 bundle 无处可查**——`config` 不携带 variable→bundle 映射，`ScanVerdict` 也不提供。故 `stage_raw` MUST 在任何写入之前检查 `len(config.raw.<source>.bundles) == 1`，否则以 `kind="unsupported-layout"` 拒绝。这不是把 3.1 的能力砍掉：3.1 的判定对多 bundle 完全有效（它只需要文件在不在），是 manifest 侧的语义在多 bundle 下不存在。pin 侧同源事实：bundle 文件名逐 hour 只产一个（`gfs_adapter.py:1878-1880`、`ifs_adapter.py:1688-1690`），多 bundle 是 yd 的 config 允许而 pin 上不存在的形态。放开该约束需要先在 `config` 里长出 variable→bundle 映射——归 **#29 / #32**，本 issue 不发明。
+
+消费 `ScanVerdict` 的两条 #6 交接约定：`ScanVerdict` 是持有可变 `dict` 的 frozen dataclass，`hash()` 抛 `TypeError`——MUST NOT 放进 set 或用作 dict key；`ScanVerdict` 不提供三元组，故上式是本 issue 自己从 `expected_files` 与 `expected_variables` 交叉构造的。
+
+#### 落盘布局与 `local_key` 形态（pin 事实转录）
+
+`entry.local_key` 在 pin 上**不是文件系统路径而是 object-store key**（§3.1 记有 IFS 的 `local_key` 逐字使用该默认值，以及 `packages/common/object_store.py` 的 `normalize_object_key`(L44-75) 与 `resolve_path`(L273-285) 均不做大小写归一）。**「消费端把 `local_key` 交给 `resolve_path` 解析」这一步不作 pin 断言**——§3.1 无任何一行记载该调用路径，而本仓唯一可核的 pin 桥就是 §3.1（round 2 verifier CONFIRMED/FIX_NOW；此前两版分别引 `converter.py:1460` 与「§3.1 实有的事实」，前者不存在于 §3.1，后者换了引用却没换命题）。承重结论改由**本仓自身**给出，不依赖任何 pin 事实：`store/object_store.py` 的 `LocalObjectStore` 每一条访问面都走 `self.resolve_path(key)`（`:156`/`:186`/`:204`/`:215`/`:233`/`:246`/`:261`/`:306`，定义在 `:314`），其根取 `work_dir`。故本 issue 逐字沿用 pin 的 key 形态并让 object-store 根落在 work 内：
+
+- `local_key = f"raw/{存储身份}/{YYYYMMDDHH}/{bundle 文件名}"`（`gfs_adapter.py:615`）
+- object-store 根 = `work_dir`；于是 `resolve_path` 结果为 `<work_dir>/raw/<存储身份>/<YYYYMMDDHH>/<bundle>`，**位于 `work/raw/` 之下**，满足 spec 的「entry 路径 MUST 只引用 `work/raw/` 临时副本」
+- 存储身份逐源非对称，复用 `rawscan.SOURCE_DIR_NAMES`（`ifs -> "IFS"`、`gfs -> "gfs"`），MUST NOT 另抄一份字面量
+- `remote_url` 沿用源 manifest 对应 entry 的值；源 manifest 不可用时整轮 fail closed，MUST NOT 以 `""` 占位（见 fail-closed 段）
+- `expected_checksum`、`expected_size_bytes`、`manifest_uri` 三者 MUST 落 `None`，逐条理由 MUST 写进实现注释：前两者在 pin 的**构建期**同样是 `None`（下载期才可能有值），yd 复制的是已落盘的字节、无独立 oracle，写进去等于制造一个无人校验的声明；`manifest_uri` 留空的理由**不依赖任何 pin 事实**（§3.1 未记载该字段，故本仓不就它作 pin 声明；原文的「pin 上是 object-store URI（`ifs_adapter.py:667` 一带）」无 §3.1 支撑，已删——同上 verifier 裁定）：yd 的 manifest 落在 `<work_dir>/raw-manifest.json`，不是 object-store 对象，写一个 `file://` 路径等于发明一个本仓不持有的身份
+
+#### 源 manifest 承接（不发明语义）
+
+pin 在 raw cycle 目录内落盘 `manifest.json`（GFS `_persist_manifest_metadata` L1599-1609 调用点 L774；IFS 于 `ifs_adapter.py:667` 构建期一次性写入）。yd MUST **读取** `<raw_root>/<存储身份>/<YYYYMMDDHH>/manifest.json` 并从中承接 entry 级语义，MUST NOT 在 yd 侧发明：
+
+- `grib_short_name`、`cfgrib_filter_by_keys`、`logical_remote_url`、`cycle_time`、`valid_time`、`bundle` —— pin 构建期写的 6 键，逐条承接
+- **累积语义**：pin 下载期把 `IdxSelection.as_metadata()`（键 `step_range`/`accumulation_type`/`idx_record_number`/`selector_warning`）按变量收进**复数** `idx_selectors`（`gfs_adapter.py:1070`），**只有单变量 bundle 才另写单数 `idx_selector`**（L1071-1072）。消费端 `_apcp_selector_metadata`(converter L677) **只读单数键**。yd 的扇出是逐变量的，故每条 entry 的单数键有唯一定义：`idx_selector = 源 manifest 的 idx_selectors[variable]`。两个键都落盘（复数保持与 pin 同形），MUST NOT 只落复数键。
+
+源 manifest 缺失/不可解析/其 entry 集合无法覆盖本轮 (lead, variable) 全集 —— 一律 fail closed，不得以空值或推导补齐。
+
+#### fail-closed 契约（勘察清单 §3.1「APCP 累积元数据的 fail-closed 要求（R4B2）」逐条落地）
+
+1. 凡 `variable == "apcp"` 的 entry，其 `idx_selector.accumulation_type`（或别名 `accumulation_policy`）MUST 存在且取值 ∈ `{"cumulative_since_cycle", "interval_bucket"}`；取 `"interval_bucket"` 时 `step_range`（或别名 `stepRange`）MUST 一并存在。缺失或越域即报错停止。
+2. MUST NOT 继承 pin converter L1726 的 `or "cumulative_since_cycle"` 静默默认；MUST NOT 依赖 converter L678「`idx_selector` 不是 Mapping 就回退到 entry metadata 顶层」这条兜底——yd 的落盘位置固定为**单数 `idx_selector` 子 Mapping**，平铺到顶层不作为 yd 的落盘约定。
+3. manifest 级 forecast hours 键分两侧，MUST NOT 混为一谈：
+   - **源侧（读）**：源 manifest MUST 带 `forecast_hours` 且其值 MUST 是 list，缺失或非 list 即 `kind="source-manifest"` 报错。只此一键强制——它是 converter `_configured_forecast_hours`(L1611-1622) 唯一读的键，缺了会回落到 L1622 的 `sorted({entry["forecast_hour"]})`，用「实际有的」当「应该有的」，完整性检查恒为真。**`requested_forecast_hours` MUST NOT 对源侧强制**：IFS 在 pin 上从不写该键（见勘察清单 §3.1「R4B2 的作用域与可用性」段），对它强制会让每个 IFS cycle 无条件失败。
+   - **yd 侧（写）**：yd 自产的 `raw-manifest.json` 的 manifest 级 metadata **四键全写**，取值由 yd 自己确定而不从源 manifest 抄：`forecast_hours == requested_forecast_hours == sorted(verdict.expected_variables)`（即本轮 `lead_hours` 全集；yd 不做 pin 那种 requested/effective 的裁剪，两者相等是本 issue 的形态），`first_/last_forecast_hour` 取其 min/max。
+   - **两侧的一致性检查**：`set(源 manifest 的 forecast_hours) ⊇ set(yd 的 forecast_hours)` MUST 成立，否则 `kind="source-manifest"` 报错——源 manifest 没声明的小时，yd 不能凭副本存在就声明它齐全。反向不要求（源可以比 yd 要的多）。
+4. 本 fixture 实测的 pin 事实（限定 R4B2 的作用域，MUST 写进实现注释）：`IFS_VARIABLES = ("2t","2d","10u","10v","tp","sp","ssr","str")`（`ifs_adapter.py:47`）**不含 `apcp`**，且 IFS 侧全文无 `idx_selector`——故第 1 条只对 GFS 产生约束。IFS 的降水变量是 `tp`、且同为累积量，但 pin 未给 IFS 任何累积元数据，本 issue **不为 IFS 发明**该语义（见 Non-goals 与 Known limits）。
+5. 已知运行期后果（MUST 记入 PR 已知限制）：pin 只在**云镜像**下载路径注入 `idx_selectors`（`_download_cloud_mirror` L1068-1072）；NOMADS 直连路径（`_download_with_retries`）不注入。故一个经 NOMADS 下载的 GFS cycle 会在本 issue 的第 1 条上 fail closed、整轮拒绝。这是 R4B2 要求的方向（宁停勿错），不是缺陷；运行期若命中需以运维决策而非放宽本闸门处理。
+
+#### 复制语义
+
+- 复制集 **恰好** `verdict.expected_files`，一个不多一个不少；`verdict.complete is False` -> 拒绝，且**不得写任何文件**（含不得建目录、不得写半个 manifest）
+- 复制**前后**对每个源文件取 `os.lstat`，比对 `(st_size, st_mtime_ns, st_ino, st_mode)`；任何一项变化即报错。这同时是「源不可变」的证据与扫描→复制窗口 TOCTOU 的收敛点（残余 TOCTOU 归组 12 控制器，见 Non-goals）
+- **源侧 symlink 一律拒绝**（`kind="source-symlink"`）：对每个源 bundle 路径，MUST 逐段 `lstat` 检查——路径自身或 `<raw_root>` 之下的任一祖先段是 symlink 即拒绝，MUST NOT 跟随。这里刻意**比 3.1 更严**：`rawscan._check` 走 `is_file()` 语义、跟随 symlink（`rawscan.py:255-274`），故 `judge` 可能对一个 symlinked bundle 返回 `complete=True`；而本 issue 钉死的源不可变取证是 `os.lstat`（看链本身、不看目标），两者叠加会在「MUST NOT 跟随 symlink」这句话正下方留一个洞：链的元组不变而目标被换掉，取证照样通过。收口方式是拒绝而不是改用 `os.stat`——`stat` 版本要再补目标的 containment 检查与第二个 TOCTOU 窗口，复杂度换不来收益（NWM 经 object store 的 `write_bytes_atomic` 落盘，raw 树内出现 symlink 属异常形态）。该不对称是**有意的**，MUST 写进实现注释：3.1 判「NWM 说它在」，3.2 判「yd 愿意复制它并为其身份背书」
+- 复制 MUST NOT 写、删、改、重命名 NWM 原件的任何路径（compute-loop §4.1 硬约束）
+- 源路径 containment：每个源 bundle 路径 MUST 由 `raw_root`/`SOURCE_DIR_NAMES[source]`/cycle 紧凑戳/bundle 文件名**重新构造**，并与 `verdict.expected_files` 的对应项逐字相等；MUST NOT 直接信任 `expected_files` 里的路径——形参与 verdict 由不同调用点提供，不一致即 `kind="verdict-mismatch"` 报错（调用序错误）。三条落地约束，缺一即该检查要么误报要么无判别力：
+  - **绝对化必须与 `judge` 同法**：`judge` 接受相对 `raw_root` 并以 `Path.cwd()` 提升（`rawscan.py:370-386`，#6 为此钉了一条 Regression row），故 `expected_files` 恒为绝对路径。重新构造 MUST 走同一次提升（相对 `raw_root` 先 `Path.cwd() / root`），否则一个**合法**调用会被本检查误拒。收口方式只有这一种：**必须与 `judge` 同法提升**。曾考虑的等价方案「要求 `raw_root` 绝对、相对即拒绝」已排除——下方 Regression rows 钉了一条「合法的相对 `raw_root` 调用 -> 正常产出」，那正是本检查没有误拒的唯一判别器，拒绝相对路径会让该行不可满足。提升逻辑 MUST 写进实现注释。
+  - **bundle 文件名 MUST 复用 `rawscan` 的渲染路径**，MUST NOT 在本模块重抄一份模式校验/渲染规则。理由与 `SOURCE_DIR_NAMES` 同：第二份字面量会让两处对同一模式给出不同结果，而本检查恰恰以「两处相等」为判据——自己抄一份等于让检查比对自己，判别力归零。`rawscan` 的 `_render`/`_validate_pattern` 目前是私有的；实现者 MUST 在**不改变 `rawscan` 既有公开行为**的前提下把渲染面提升为可复用（最小改动：加一个薄公开包装并在 `__all__` 登记），这是本 issue 允许触碰 `rawscan.py` 的**唯一**例外，且 MUST 作为偏离逐条上报。
+  - 该检查 MUST 有自己的 `kind` 与自己的具名用例，MUST NOT 折进 `source-manifest`——后者按归属规则收纳一整族源侧失败（见上方 kind 表），把它折进去就意味着删掉 containment 检查也不会有任何用例变红（本仓记录在案的「声明必须配判别器」失效模式）。
+- 目标目录不存在则创建；目标已存在同名文件 -> 报错停止，MUST NOT 覆盖（work 是一次性隔离单元，同名存在意味着调用序错误）
+- 部分失败（第 k 个文件复制失败）-> 报错，并把本轮已写入的 work 侧路径清理干净（不留半套 raw），MUST NOT 让 `raw-manifest.json` 与实际副本不一致
+- 副本与 manifest MUST 全部落在 `work_dir` 之下；`YD_ROOT` 模拟根内 MUST 不出现任何 raw 副本
+
+#### Invariant Matrix
+
+Governing invariant: **本轮 manifest 声明的每一条 (lead, variable) 都对应一个已落在 `work/raw/` 之下的真实副本，其语义键逐字承接自源 manifest；三者中任何一项不成立时，整个 staging 以异常终止且不留任何部分产物。**
+
+Source-of-truth identity/contract: `(entry.forecast_hour, entry.variable, entry.local_key)` 三元组，及其 `idx_selector` 累积语义子 Mapping
+
+Surfaces:
+- Producers: `rawcopy.stage_raw`（唯一写面）
+- Validators/preflight: `verdict.complete` 闸门、源 manifest 解析与覆盖检查、R4B2 fail-closed 检查、复制前后 lstat 比对
+- Storage/cache/query: `<work_dir>/raw/<存储身份>/<cycle>/` 副本树、`<work_dir>/raw-manifest.json`
+- Public routes/entrypoints: none —— CLI 接线归组 12 控制器（本 issue 只交付库函数）
+- Frontend/downstream consumers: 任务 7.1 canonical converter（经 `local_key` + `object_store.resolve_path` 与 `idx_selector` 消费）
+- Failure paths/rollback/stale state: 部分复制失败的 work 侧清理；`complete=False` 与 fail-closed 的零写入拒绝
+- Evidence/audit/readiness: `StagedRaw` 返回值、`raw-manifest.json` 自身
+
+Regression rows:
+- `stage_raw` + 完整 verdict + 带完整 `idx_selectors` 的源 manifest -> 副本齐全、manifest 三元组集合与 `expected_variables` 相等、entry 路径全部解析到 `work/raw/` 之下
+- `stage_raw` + `complete=False` 的 verdict -> `kind="incomplete-verdict"`，且 `work_dir` 下零新增路径
+- `stage_raw` + 源 manifest 缺 apcp 的 `accumulation_type` -> `kind="accumulation-metadata"`，且 `work_dir` 下零新增路径（不落半个 manifest）
+- `stage_raw` + 源 manifest 的 `accumulation_type` 取域外值（如 `"unknown"`）-> `kind="accumulation-metadata"`（不静默降级成 cumulative）
+- `stage_raw` + `accumulation_type == "interval_bucket"` 但缺 `step_range` -> `kind="accumulation-metadata"`
+- `stage_raw` + 源 manifest 缺 manifest 级 `forecast_hours` -> `kind="source-manifest"`
+- `stage_raw` + 源 manifest 某条 entry 的 `cycle_time` 不等于本轮 cycle -> `kind="source-manifest"`，零写入（round 5 补立：承接的时间标记与本轮自算不一致时 fail closed）
+- `stage_raw` + 源 manifest 某条 entry 的 `valid_time` 不等于 cycle + 该 entry 的 lead -> `kind="source-manifest"`，零写入
+- `stage_raw` + 源 manifest 的 entry 时间写成另一时区偏移但指向同一时刻（如 `-05:00`）-> **正常产出**（该行是上两行的对照：只有它能证明时间闸门比的是**时刻**而不是文本；删掉它，上两行仍可由一个逐字文本比较满足）
+- `stage_raw` + 第 k 个源文件在复制中途被替换（lstat 前后不一致）-> `kind="source-mutated"`，work 侧不留半套副本
+- `stage_raw` + `raw_root` 形参指向另一个根（与 verdict 由不同调用点产生）-> `kind="verdict-mismatch"`，零写入
+- `stage_raw` + **相对** `raw_root` 且与 verdict 同源（合法调用）-> 正常产出（该行是上一行的对照：只有它能证明 containment 检查没有把合法的相对路径调用一并误拒）
+- `stage_raw` + 目标路径已存在同名文件 -> `kind="target-exists"`，MUST NOT 覆盖
+- `stage_raw` + `len(bundles) == 2` 的合法配置 -> `kind="unsupported-layout"`，零写入（多 bundle 下 variable→bundle 无定义）
+- `stage_raw` + 源 bundle 路径本身是 symlink（指向同根内的真实文件）-> `kind="source-symlink"`，零写入；**同一 fixture 下 `judge` 返回 `complete=True`**（钉死 3.1/3.2 的有意不对称）
+- `stage_raw` + cycle 目录段是 symlink -> `kind="source-symlink"`，零写入（祖先段检查，不只查叶子）
+- `stage_raw` + 第 k 个文件复制时目标不可写（权限/ENOSPC）-> `kind="copy-failed"`，work 侧不留半套副本（与 `source-mutated` 分属两条清理路径，各自具名）
+- `stage_raw` + 源 manifest 的 `forecast_hours` 不覆盖本轮某个 lead -> `kind="source-manifest"`，零写入
+- `stage_raw` + 源 manifest 缺 `requested_forecast_hours`（IFS 的 pin 形态）-> **正常产出**，yd 自己写该键 = `lead_hours` 全集（钉死「不对源侧强制」）
+- 产出的 `raw-manifest.json`（正向 schema 断言）-> `DownloadManifest.from_dict(json.load(...))` roundtrip 成功；`source_id == SOURCE_DIR_NAMES[source]`（逐源大小写非对称，本仓已记录的 CONFIRMED/FIX_NOW 陷阱）；每条 entry 的 `metadata` 含且仅含承接的 6 键加 `idx_selector`/`idx_selectors`（**IFS 源两个 idx 键均不出现**——pin 侧 IFS 无累积语义，写空 Mapping 等于发明一个「查过了、是空的」的声明；该断言对 IFS 是「两键缺席」而非「两键为空」）；`idx_selector` 是该变量的 Mapping 而非被整个 `idx_selectors` 塞进去；manifest 级四键齐全且 `forecast_hours == requested_forecast_hours == sorted(expected_variables)`；`expected_checksum`/`expected_size_bytes`/`manifest_uri` 三者均为 `None`
+- `stage_raw` + IFS 源（无 apcp、无 idx_selectors）-> 正常产出，R4B2 第 1 条不触发（作用域证据）
+- `stage_raw` + GFS `f000_special` 生效 -> lead 0 的 entry 变量集等于 `verdict.expected_variables[0]`，且 lead 0 的**文件**仍在副本集内（f000 只削变量集不削文件集）
+- 源文件树（不变的兄弟面）-> 全部 `lstat` 元组在调用前后逐字相等；NWM 根下零新增/删除/改名
+- `YD_ROOT` 模拟根（不变的下游消费面）-> 调用前后内容相等
+
+#### Boundary-surface checklist
+
+- Shared helper roots: `rawscan.SOURCE_DIR_NAMES`（复用不复制）、`raw/manifest.py` 的两个 dataclass（构造不改类）
+- Public entrypoints: none（组 12 接线）
+- Read surfaces: NWM raw 树（只读）、源 `manifest.json`
+- Write/delete/overwrite surfaces: `<work_dir>` 内副本与 manifest；失败清理路径
+- Staging/publish/rollback surfaces: 本 issue 全在 work 内，不触 `YD_ROOT` 发布面
+- Producer/consumer evidence boundaries: `raw-manifest.json` ↔ 任务 7.1 converter
+- Stale-state/idempotency boundaries: 目标同名存在即拒绝（不覆盖、不续跑）
+- Unchanged downstream consumers: `rawscan` 的既有全部用例、`test_manifest.py` 的 pin 快照用例
+
+#### Required evidence（`cd producer && uv run pytest`）
+
+上方 Regression rows 的**每一行**对应一个具名 pytest 用例，且该用例 MUST 由一个能证伪它的变异体验证过（"有一个用例指向它"不构成覆盖）。另加：
+
+- **承接/自算可区分谓词（round 3 门限的纠正动作，MUST 作为一次穷尽清扫兑现，不是逐条打补丁）**：凡产出 `raw-manifest.json` 里的**每一个字段**（manifest 级与 entry 级，含 `metadata` 的每个子键），合成源 manifest 里的对应值 MUST 被偏移，使「承接自源」与「由 yd 自算」两种实现产出不同结果；每一处发散 MUST 由一个变红的变异体证明。该谓词在测试侧以一条自检用例落地。
+  - **定义域勘误（round 4 门限）**：本条原写作「凡测试**对产出 manifest 断言的**每一个值」。那个定义域是错的——它把「未被任何用例断言的承接值」结构性地排除在谓词之外，于是谓词再穷尽执行也发现不了它们，而交付当天就有两个实例（复数键 `idx_selectors` 的**值**从未被断言，整份伪造它的变异体全套件绿；`grib_short_name` 同样在清扫表外）。判别器的**定义域**取错，与判别器取在表象轴上是同一类错误，且这一处是编排者自己写进 fixture 的。定义域改为「产出 manifest 的每一个字段」后，「有没有用例断言过它」不再影响它是否受谓词约束。
+  - **类边界（有意排除，勿"修"）**：`forecast_hour` 与 `variable` 允许与源侧重合——它们是 `_index_source_entries` 的查找键，偏移它们会破坏查找关系本身而不是判别实现。这两项 MUST 在清扫表里显式标注为排除项并写明理由。
+  - 立此谓词的原因：该失效类在 round 1 找到 1 条腿、round 2 找到 6 条、round 3 又找到 2 条。逐轮清点是搜索，不是闭合；有了可复核的谓词才谈得上闭合条件。
+- **序列化前置于复制**：本轮 manifest 的序列化（`_render_manifest`）MUST 排在任何复制之前，且 MUST 位于准入段兜底地板的 `Try` 体之内。
+  - **判别器（round 5 门限补立）**：MUST 有一条由 AST 断言 `_render_manifest` 的调用点落在地板 `Try` 体覆盖范围内的用例；杀手变异体是把该调用移出地板——移进写入段 `try`（SERIAL）、或移进地板的 `orelse`（ORELSE）——二者 MUST 各自变红。MUST NOT 以「编码严格性」类变异体（如改 `errors="surrogatepass"`）充当本条的杀手变异体：那测的是**能否编码**，不是**位置**。
+  - **理由勘误（round 5 门限）**：本条原称违反它「会留下『副本全落地 + 0 字节 manifest』的半套产物」。**该后果不会发生**，round 5 实测证伪：`_render_manifest` 自己抛 `RawStagingError(kind="source-manifest")`，被写入段的 `except RawStagingError` 接住后 `written.rollback()` 再抛，0 字节 manifest 从未被创建，`snapshot(work_dir) == {}` 仍成立（SERIAL 变异体下 `test_rawcopy.py` 该用例照常通过）。真实代价是：序列化后置把一段**注定失败**的输入的失败点推到复制之后，此时零写入转而依赖**回滚自身成功**，而回滚失败是本 fixture 另行承认的可失败动作。约束成立，原写的理由不成立；`test_rawcopy.py` 中复述该理由的 docstring MUST 一并订正。
+  - （沿革：该约束原写在 kind 表 `source-manifest` 行的括注里，round 4 改写该行时被编排者一并删去；round 4 恢复时未配判别器，round 5 实测 SERIAL 变异体全套件 807 绿、零红条。两处都是编排者的疏漏。）
+- **准入段兜底地板**：`stage_raw` 的准入段（形参守卫直到 `target-exists` 预检）MUST 整体位于**函数体第一条语句**的 `try` 内，任何非 `{ConfigError, RawStagingError}` 的异常 MUST 被收敛成 `RawStagingError`，`kind` 取 `ADMISSION_FALLBACK_KIND = "source-manifest"`（本行即该取值的钉死处）。**该取值是位置轴上的一条显式例外，不是因果规则的一个实例**：地板按**位置**兜住准入段的一切非词表异常，而 `source-manifest` 的归属规则是**因果**的；两者定义域不同，准入段 21 个注入点里多数（路径归一、containment、`target-exists` 预检等）与源 manifest 无因果关系。选既有 kind 而非扩表，是因为九项词表由本 fixture 钉死且其判别力问题已归 #76；代价是调用方无法凭 kind 区分「上游清单坏了」与「yd 准入段自身出错」，此限制 MUST 出现在 Known limits。（勘误：本行原称该取值「因果落在源侧外部 JSON，与该 kind 的归属规则一致」——被它自己的判别器证伪，round 4 CONFIRMED。）`BaseException` MUST NOT 被改写。判别器 MUST 是**由地板 try 体的 AST 派生**的参数化逃逸探针（新调用点自动入列），**外加三条范围断言**：钉 `stage_raw` 顶层语句形状为 `[Try, Assign, Try, Return]`；钉地板 `Try` 体的**首尾语句**为准入段的具名端点（`verdict.complete` 检查 … `target-exists` 预检）；并钉地板 `Try` 的 `orelse` 与 `finalbody` **均为空**。
+  - **判别器勘误（round 4 门限）**：本条原要求的是「一条断言地板确实是 `body[0]`、写入段是 `body[1]` 的结构用例」。那条判别器**在证明上无法执行同一 bullet 里的 MUST**：把一条准入语句移到 `body[2]` 即违反 MUST，而该断言满足、全套件绿，且该语句**自我退出**探针参数集（21→20）而无人断言该损失。范围必须钉在**端点**上而不是槽位上。
+  - **覆盖轴勘误（round 5 门限）**：端点断言仍不够——它只钉 `Try.body`，而 `try/except/else` 的 `else:` 体中抛出的异常**不被本 try 的 handler 捕获**（Python 语义）。把一条准入语句从 `body` 移进同一 `Try` 的 `orelse`：顶层形状不变、首尾端点不变、全套件 807 绿、该语句自我退出探针参数集（21→20），而注入的 `RecursionError` **逃出封闭词表**——即违反本 bullet 的第二个合取项。这与 round 4 的 M1 是同一类错误换了个位置：轴从「槽位」换到了「端点」，却没有换到**覆盖**本身。故补第三条范围断言，`finalbody` 一并钉空（把语句放进 `finally` 虽会红 81 条，但不能靠副作用兜底）。MUST NOT 改为钉 `len(ADMISSION_INJECTION_TARGETS)`——计数会在每次合法新增时变红，正是本 PR 四轮反复失败的枚举模式
+- 源不可变的取证 MUST 是 `os.lstat` 全元组比对（size/mtime_ns/ino/mode），MUST NOT 只比对内容——只比内容抓不到 mtime 被改
+- 三元组完整性 MUST 断言**集合相等**，MUST NOT 断言包含；两个方向各需一个杀手变异体（漏一条 entry / 多一条 entry）
+- 零写入拒绝的取证 MUST 是调用前后对 `work_dir` 做递归快照比对，MUST NOT 只断言 `manifest_path` 不存在
+- 变异实验按 profile 的 "Mutation-testing hazards" 与 "Orchestration hazards" 两节执行：唯一命名的私有 scratch 副本、`rsync --exclude='.venv'`、`env -u VIRTUAL_ENV uv sync --frozen`、`PYTHONDONTWRITEBYTECODE=1` 且逐变异体清 `__pycache__`、断言 `yd_producer.__file__` 落在副本内、先跑一个必然变红的控制变异校准
+- 闸门枚举 MUST 用 **AST 遍历全部可执行语句**（不用 grep——grep 看不见 `status = path.stat()` 这类值传播闸门），逐条落进「表内」或「死腿登记」两桶，审计表作为交付物落盘到 `.workplans/pr-<N>/review/`
+- DB-free 隔离检查（**刻意不写成「禁区 grep：」**：该前缀是组 2 词表声明集的唯一锚，`test_snapshot_provenance.py::test_forbidden_surfaces_match_the_declared_grep` 断言全文恰有一条，第二条会把那条判别器打红）：`grep -rnE 'psycopg|DATABASE_URL|scheduler|registry|reservation' producer/src/yd_producer/rawcopy.py` -> 零命中
+- `cd producer && uv sync --frozen` -> 无 lock drift（「不新增依赖」是 Must-preserve 项，本条是它的判别器）
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+
+#### Non-goals
+
+- canonical 转换、forcing 组装（组 6/7/8）——本 issue 只产出 manifest 与副本
+- CLI/控制器接线、前沿推进、work 目录生命周期管理（组 12）——本 issue 只交付库函数，调用序由控制器负责
+- **扫描→复制窗口的残余 TOCTOU**：本 issue 以复制前后 lstat 比对收敛「复制期间源被改」这一半；「judge 判完整之后、stage 调用之前源被删」属调用方时效性，归组 12
+- **不为 IFS 发明累积语义**：pin 侧 IFS 无 `idx_selectors`、`IFS_VARIABLES` 无 `apcp`，R4B2 只约束 GFS。IFS 的 `tp`/`ssr`/`str` 同为累积量但 pin 未给元数据——在 yd 侧补一套等于发明语义，明确不做，记为已知限制并路由 follow-up
+- 不实现第二套下载器、不在 NWM 缺件时代为补齐（compute-loop §4.1）
+- 不做 GRIB 内容校验（归 M4 receipt）——"可读"只到能发起读为止
+- 不改 `rawscan.py`：若实现中发现 `ScanVerdict` 形态不够用，记为偏离并上报，MUST NOT 顺手改 #6 已合入的契约
+
+#### Known limits（MUST 出现在 PR 已知限制，逐条带 follow-up issue 或不落 issue 的一行理由）
+
+- NOMADS 下载路径的 GFS cycle 会在 R4B2 上整轮 fail closed（上方 fail-closed 第 5 条）
+- IFS 累积语义缺口（上方 Non-goals 第 4 条）
+- `work_dir` 的创建/清理生命周期归组 12，本 issue 只保证自己不留半套
+- 目标侧**无**逐段 symlink 拒绝：`work_dir` 之下的链段会让副本物理落在 work 树之外（源侧有 `_reject_symlinks` 逐段 `os.lstat`，目标侧的 `_ensure_dir` 用跟随 symlink 的 `exists()` 探测）。round 1 verifier CONFIRMED/DEFER，承重理由只有一条：它与「work 是全新单次目录」这条组 12 的契约是同一个设计决策、应一起落地。（勘误：本行原以「下游 `object_store` 的 `*_no_follow` 已实测 fail-closed」作降级理由。该观察本身为真，但**用错了侧**——`rawcopy` 全文不经 `object_store`，写侧四个原语 `mkdir(parents=True)`/`os.open`/`unlink`/`rmdir` 全是裸的、都跟随父目录链，读侧的 no-follow 撑不起写侧降级。round 2 verifier CONFIRMED/FIX_NOW。）severity 维持 minor，依据是写侧爆炸半径有界（work 为一次性隔离单元）。follow-up：**issue #71**
+- `raw.<source>.variables` 轴无单射性闸门，重复变量会产出重数 >1 的三元组（本 issue 的集合相等断言对重数失明）。归配置取值域，follow-up：**issue #72**（并已补入任务 2.x 的取值域归属账本）
+- 多 bundle 配置（`len(bundles) != 1`）在 staging 侧不受支持，需 config 长出 variable→bundle 映射后才能放开（上方单 bundle 约束）
+- 源侧 symlink 一律拒绝，与 3.1 的 `is_file()` 跟随语义有意不对称（上方复制语义）
+- **源 `manifest.json` 叶子段自身不查 symlink，本 issue 有意排除**：symlink MUST 的作用域由上方复制语义逐字限定为「每个源 **bundle 路径**」，Regression rows 有链 bundle 行与链 cycle 目录行、无叶子行。该叶子的**全部祖先段**已被 bundle 走查覆盖，故缺口仅限「叶子自身是链」这一形态。round 1 verifier REFUTED、round 2 复现机制为真后仍维持 REFUTED（无绑定文本归属，verifier 不以翻转判决来裁定范围）。若后续要收口，属 fixture 修订而非实现缺陷
+- **地板兜底 kind 无法与真实源侧失败区分**：`ADMISSION_FALLBACK_KIND = "source-manifest"` 让准入段的任何非词表异常都以该 kind 外抛，而准入段多数注入点（路径归一、containment、`target-exists` 预检）与源 manifest 无因果关系。后果是组 12 控制器按 kind 分流时，无法区分「上游 NWM 清单坏了、该 cycle 不可用」与「yd 准入段自身出了未预期的错」——两者运维处置不同。不扩第十项是因为九项词表由本 fixture 钉死、其判别力问题已归 **#76**；本条随该 issue 一并裁决。
+- **目标侧 symlink containment 的 inode 判据在 CI 上无判别器**：唯一支撑用例在大小写敏感卷（CI 的 ubuntu-latest/ext4）上必然自跳过，而无特权的无条件 seam 级判别器不可构造。补救属 CI 作业面或 fixture 作用域，不是「补一个用例」。follow-up：**issue #89**
+- **九项闭合 kind 词表本身无判别器**：九个 kind 各有具名用例与杀手变异体，但测试从不 import `ERROR_KINDS`，加入第十项的变异体在 747 passed 全绿下存活（round 2 实测，同环境控制变异体 13 failed，harness 已校准）。今日无运行期影响故判 DEFER，但本模块最强的 oracle 锚（逐字钉死的闭合集）目前不设防。follow-up：**issue #76**
+- **产出 manifest 不拒 `NaN`/`Infinity`**：`json.dumps` 默认 `allow_nan=True`，源侧若带非标准 JSON 字面量会原样穿过序列化闸门，严格解析器读不了（round 2 实测）。判 DEFER 的依据是唯一具名契约边界未断——pin 侧 converter 用 `json.load`，默认同样接受。加固成本为一个实参 `allow_nan=False`（抛的 `ValueError` 直接落进现有 except、kind 仍为 `source-manifest`）。follow-up：**issue #75**
+- **六键逐字承接后无内部一致性核对**：`grib_short_name` 与 `cfgrib_filter_by_keys["shortName"]` 在 pin 上同源同值（`nwm-snapshot-inventory.md:109`），yd 两者都逐字承接却从不核对二者相等，故源侧改动其一即产出一份自相矛盾的 `raw-manifest.json` 而 staging 照常成功（round 5 实测复现）。消费端 `_cfgrib_backend_kwargs` 优先取 `cfgrib_filter_by_keys`（`:110`），converter 会静默读错 GRIB 变量——该后果由 §3.1 转录**推理**得出、未实跑（converter 属任务 7.1，不在本 PR）。判 DEFER 的依据：两个操作数均逐字承接，治理不变式的「承接」合取项**未破**，矛盾是继承而非 yd 制造，弱于 round 5 修掉的 entry 时间闸门（那一处矛盾的是 yd **自算**的字段）；且该承接循环先于本轮存在，`d6a8733` 未改动它。follow-up：**issue #99**
+- **entry 时间闸门依赖「pin 侧 `valid_time` = cycle + forecast_hour」这一算法**：§3.1 只记录了六键的存在与注入时机，未记录该算法；支撑证据是本仓逐字副本 `raw/manifest.py:51-52` 的 `valid_time_for`（§3.1:45 将该文件登记为转录）。若 pin 对**区间累积**变量另按区间端点写 `valid_time`，本闸门会对每一个 cycle 硬拒；而按上方「地板兜底 kind」一条，组 12 无法凭 kind 把它与「yd 自身出错」区分开。不落 issue 的理由：该形态在 pin 当前源码上不成立，属 pin 演进时才需重估的假设，本条即其登记点。
+
+#### Review focus
+
+- 三元组完整性是否断言的是**集合相等**而非包含，两个方向是否各有杀手变异体
+- 零写入拒绝是否真的零写入（含目录），取证是否为递归快照比对
+- `local_key` 是否为 object-store key 形态而非绝对文件系统路径，`resolve_path` 后是否确实落在 `work/raw/` 之下
+- `idx_selector` 是否从复数键**按变量**取，而非把整个 `idx_selectors` 塞进单数键
+- R4B2 的域检查是否覆盖别名（`accumulation_policy`/`stepRange`），且是否**没有**引入 `or "cumulative_since_cycle"` 之类的默认
+- 是否出现按 `source == "gfs"` 的硬分支（应由 `variable == "apcp"` 与配置驱动）
+- 存储身份是否复用 `rawscan.SOURCE_DIR_NAMES` 而非另抄字面量
+- 源不可变断言是否含 mtime_ns 与 ino（只比内容不算）
+- 单 bundle 约束是否在**任何写入之前**短路，且是否真的以 `len(bundles)` 判而非以「渲染出几个文件名」间接判
+- symlink 检查是否覆盖**祖先段**而不只是叶子；拒绝是否发生在复制之前
+- 源侧是否只对 `forecast_hours` 强制、`requested_forecast_hours` 确实**不**强制（IFS 用例是这条的判别器）
+- 九个 `kind` 是否各有具名用例与杀手变异体；是否有裸 `OSError`/`KeyError`/`JSONDecodeError` 从 `stage_raw` 穿出
+- 是否引入 stdlib 之外的依赖，或运行时 import NWM
 
 ## 4. state-tools：cfg.ic 工具链
 
