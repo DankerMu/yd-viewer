@@ -48,6 +48,12 @@ reach_count = 3988              # products-contract §5.1；run-controller spec 
 # NWM@8ae9b8f2 workers/mapping_builder/cli.py —— 版本化快照事实，非现场值（归属裁决见 #32）
 nwm_mapping_builder_module = "workers.mapping_builder.cli"
 
+# NWM@8ae9b8f2 workers/mapping_builder/cli.py:602 的 `grid_id` —— 同属版本化快照事实
+# （字段随任务 10.3 / #20 加入；生产取值归 #29 的生产实例复核）
+[nwm_canonical_grid_id]
+gfs = "<GFS canonical grid id>"
+ifs = "<IFS canonical grid id>"
+
 [cycle]
 hours = [0, 12]                 # 仅接受 00Z/12Z（compute-loop §7.1）
 
@@ -1655,7 +1661,7 @@ awk '/^## 1\./,/^## 2\./' openspec/changes/m2-producer-core/nwm-snapshot-invento
 
 - [x] 10.1 引入几何依赖（pyshp/pyproj/shapely）并 `uv lock`，构造带自定义 Albers `.prj` 的合成 shapefile 基线 fixture，实现 `.prj` 解析与重投影工具，CI 绿
 - [x] 10.2 实现 `rivers.geojson`（`reach_id`=DBF Index、数量一致）与 `boundary.geojson`（单元合并边界）生成，落点 `input/viewer/`
-- [ ] 10.3 实现 prepare 编排：拒绝覆盖检查 → 薄外壳按源两次调用 builder（记录型假 builder 断言两次入参 source/grid 不同、输出分别落 `yd_gfs`/`yd_ifs`）→ 变体 reach 数等于 `reach_count` 校验 → 提交到 `input/models/` 与 `input/viewer/` → scratch 清理
+- [x] 10.3 实现 prepare 编排：拒绝覆盖检查 → 薄外壳按源两次调用 builder（记录型假 builder 断言两次入参 source/grid 不同、输出分别落 `yd_gfs`/`yd_ifs`）→ 变体 reach 数等于 `reach_count` 校验 → 提交到 `input/models/` 与 `input/viewer/` → scratch 清理
 
 依赖：组 1（薄外壳、`reach_count`）
 §13.1 归属：prepare
@@ -1889,6 +1895,183 @@ Review focus:
 - 环向转换是否显式实现（`unary_union` 实测输出为顺时针，未转换即违反 RFC 7946）
 - 是否越界实现了 10.3 的编排、覆盖检查或 `YD_ROOT` 解析
 - 生成器新增能力是否仍与 `yd_producer.geometry` 独立、是否改动了 #18 的默认布局与默认 DBF 字段定义
+
+### Issue #20 fixture（任务 10.3）
+
+Fixture level: expanded
+Upstream suggested level: expanded（agree）
+Repair intensity: **high** —— 拒绝覆盖、目录级提交/回滚、scratch 删除三面同时落在写/删/发布语义上，属 `phase-flow` Phase 0.5 的 high 触发词全集（file IO / path safety、publish/delete/rollback、数据丢失）。fixture level 不因此上抬（`expanded` 已是本 change 的上限档），但 Invariant Matrix 与边界面清单为硬门禁
+Project profile: yd-viewer
+
+Change surface:
+- 新增 `producer/src/yd_producer/prepare.py`：`run_prepare` 编排、`VariantBuildRequest`、`PrepareError`、生产 builder 绑定、变体终名解析函数
+- 扩展 `producer/src/yd_producer/config.py`：新增必需字段 `nwm_canonical_grid_id`（表，含 `gfs`/`ifs` 两个 `str`），与既有 `nwm_mapping_builder_module` 同纪律——只校验存在性与类型
+- 扩展 `producer/src/yd_producer/cli.py`：`prepare` 子命令新增必需参数 `--baseline`；`prepare()` 由退出码 `3` 的未实现分支改为真实委托 `prepare.run_prepare`；`main` 的异常兜底新增 `PrepareError`
+- 扩展 `producer/tests/cli_fixtures.py`（`config.toml` 生成器补新字段；`nwm_canonical_grid_id.gfs`/`.ifs` MUST 取**两个不同值**，否则「两次 `grid_id` 不同」这条断言退化成永真式——同 `cli_fixtures.py:10-12` 对 `nwm_mapping_builder_module` 的既有纪律）、`producer/tests/test_config.py`、`producer/tests/test_cli.py`、`producer/tests/test_rawscan.py`（`test_rawscan.py:75` 直接构造 `Config`，新增必需字段后须补齐）
+- 新增 `producer/tests/prepare_fixtures.py`（合成基线包 + 记录型假 builder）与 `producer/tests/test_prepare.py`
+- 复用不改：`geometry.write_viewer_geojson`、`state/cfg_ic.parse`、`store/safe_fs.*`、`nwm.check_interpreter`/`invoke_mapping_builder`
+- scratch -> `YD_ROOT` staging 的树复制目前 `safe_fs` 无对应原语；新增的复制逻辑 MUST 按发布权限新建条目（不继承源 mode/属主），并只落在 `prepare.py` 内（不扩 `safe_fs` 的公共面，那是 #24/#25 发布面的归属）
+- 不新增依赖、`producer/uv.lock` 不变；不触碰 forcing/controller/rawscan/executor/slurm
+
+Must preserve:
+- `geometry.py` 四个 10.1 函数与三个 10.2 函数的签名与失败契约（`GeometryError` 仍是该模块唯一公开异常）不变；`write_viewer_geojson` 的 `out_dir` 语义不变——本 issue **消费**它写 `YD_ROOT` 内 staging（见 `run_prepare` 步骤 6），不改它
+- `state/cfg_ic.parse` 的字节保真契约与异常类型不变（本 issue 只读 `river.row_count`）
+- `cli.py` 既有退出码约定：`2` argparse 用法错误、`1` 守卫/配置失败、`3` 分阶段未实现；`DATABASE_URL` 守卫仍是 `main()` 的第一件事、先于 `parse_args`；`--config`/`--local` 仍 `Path.resolve()` 后交装载器
+- `init`/`run` 两个子命令的参数集合不变（`--baseline` 只加在 `prepare`）
+- `config.py` 的 stdlib 中立性与"零内置默认"；新字段是**必需**字段，故 issue #2/#3/#30 遗留的全部 `Config` 构造点（测试 fixture、`cli_fixtures.py`）必须同步补齐并继续全绿
+- CI 四个 job 全绿
+
+Must add/change:
+- `cli.py`：`prepare` 子命令加 `--baseline`（`required=True`、`type=Path`），与 `--config`/`--local` 同纪律 `resolve()` 后传下游；`init`/`run` 不加
+- `prepare.variant_targets(local, config) -> dict[str, Path]`：**唯一**的变体终名来源，拒绝覆盖检查与提交写入 MUST 都走它（#32 记录的守卫/写入面分叉在此消除）
+  - 值取自 `config.variants.gfs`/`.ifs`，形态为 `Path(local.yd_root) / <relative>`
+  - 相对性 fail-closed：`variants.*` 为绝对路径、或规范化后逃出 `yd_root`（含 `..`）-> `PrepareError` 点名该字段与该值
+  - **两两互异 fail-closed**：`variant_targets` ∪ `viewer_targets` 的四个终名 MUST 两两不同，且任一变体终名 MUST NOT 是另一终名的祖先。`config.toml` 里把 `variants.gfs` 与 `variants.ifs` 抄成同一值（装载器只校验存在性与类型，不拦）会让两个终名重合：`lexists` 守卫全过（两者都不存在）、`gfs` 提交成功、第二次 rename 撞 `ENOTEMPTY`，`YD_ROOT` 停在"只有一个变体"的半提交态——这是普通配置笔误就能触发的、直接违反总不变量的路径，必须在任何写入之前拦下
+- `prepare.viewer_targets(local) -> dict[str, Path]`：`input/viewer/rivers.geojson` 与 `boundary.geojson`（products-contract §2 的字面量落点，非配置驱动）
+- `prepare.VariantBuildRequest`（frozen dataclass）：`source_id: str`、`grid_id: str`、`baseline_root: Path`、`variant_root: Path`
+  - 字段形态是**消费上游契约、不重新协商**：`source_id` 与 `grid_id` 逐字对应 pin `NWM@8ae9b8f2 workers/mapping_builder/cli.py:601-602` 的 `build_direct_grid_variant` 同名关键字参数
+  - `source_id` 取值走既有 `raw/source_identity.normalize_source_id` 的 `"gfs"`/`"ifs"`；`grid_id` 取自 `config.nwm_canonical_grid_id`
+- `prepare.run_prepare(*, local, config, baseline_root, builder=<生产绑定>) -> PrepareReport`，严格按序：
+  1. **拒绝覆盖**：四个终名（两变体目录 + 两 GeoJSON）任一 `lexists` 即 `PrepareError`，此时 MUST NOT 创建 scratch、MUST NOT 调 builder
+  2. 在 `local.scratch_root` 下建**本次运行专属**工作目录（名字含 pid + 随机 token，避免并发/重跑互相覆写）
+  3. 对 `("gfs","ifs")` 各建一个**此前不存在**的 `variant_root` 子目录，各调 `builder(request)` 一次
+  4. **产物校验**（逐变体）：`variant_root` 存在且为目录；率定末态 `cfg.ic` 可 `cfg_ic.parse`；`doc.river` 非 `None`（`Section | None` —— 缺 river 段 MUST 判失败，MUST NOT 当 0 条）；`doc.river.row_count == config.reach_count`；目录内无 `.tmp` 后缀或其它未预期残留条目
+  5. **搬运到 `YD_ROOT` 内 staging**：在 `YD_ROOT` 之内建本次专属 staging 位置，把校验通过的两棵变体树按**发布权限新建条目**的方式复制进去（MUST NOT `cp -a`/`copytree(copy2)` 把计算节点 uid/gid/mode 带进 NFS，agent-ops §10）
+  6. **GeoJSON 直接落 staging**：`geometry.write_viewer_geojson` 的 `out_dir` 取该 `YD_ROOT` 内 staging 位置，两份 GeoJSON **不经 scratch**（唯一落点，无第二处 staging）。staging 位置 MUST NOT 落在 `input/viewer/` 之内——products-contract §2 只允许该目录存在两个文件，把 staging 建在里面等于让 viewer 看见中间态
+  7. **提交**：四个终名逐个 rename 提交（`safe_fs.rename_entry_no_follow`），源为 staging 内条目——**同文件系统**；顺序钉死为「两变体 → rivers → boundary」
+  8. **清理**：无论成败，scratch 工作目录与 `YD_ROOT` 内 staging 位置一并删除；提交阶段失败时**同时**删除本次为提交而新建的父目录（仅限本次新建的），使 `YD_ROOT` 回到执行前的条目集合
+
+  > **为什么不是"scratch 目录直接 rename 到 `YD_ROOT`"**（PR #50 路由过来的审计建议的字面形态）：生产上 `yd_root` 在 NFS（`/ghdc/data/yd`，agent-ops §4.1）而 `scratch_root` 在本地盘（`/scratch/.../yd-loop/`，agent-ops §4.2）——两棵真不同的树（`producer/tests/test_cli.py:220-222` 已就此立过约定），而 `safe_fs.rename_entry_no_follow` 明写 `EXDEV` 是硬错误、**刻意没有** fallback copy 路径（`store/safe_fs.py:630-631`）。直接 rename 会在本地测试（两根同在 `tmp_path`）全绿而在现场必然失败。本协议与控制器发布面的既有做法同构：agent-ops §8.4「DAT 复制到 NFS 临时文件并在 NFS 内 rename」
+- 异常与退出码（两级，**不得合并**）：`prepare.PrepareError` 是本模块公开异常**基类**，`cli.main` 捕获后走退出码 `1`（fail-closed 校验拒绝）；`prepare.BuilderUnavailableError(PrepareError)` 专表"生产 builder 绑定尚未可用"，`cli.main` 先于基类捕获它并走退出码 `3`（与既有"分阶段未实现"约定一致）。两者可区分是硬要求——把"配置/产物不合法"与"这条路还没通"报成同一个码，运维无从判断该改配置还是该等 M4。
+  - **外来异常一律包装**，源恰为三处（此即全集）：`cfg_ic.parse` 的 `ValueError`、`geometry.*` 的 `GeometryError`、`safe_fs.*` 的 `SafeFilesystemError`。第三处最易漏：`rename_entry_no_follow` 把 `renameat` 的 `OSError` 包成 `SafeFilesystemError`，而后者是 **`RuntimeError` 子类而非 `OSError`**（`store/safe_fs.py:11`），`except OSError` 兜不住它；`cli.main` 只捕 `ConfigError`（`cli.py:186`），逃逸即打 traceback 而非干净退出 `1`。包装 MUST 保留 `__cause__`
+- **生产 builder 绑定 fail-closed**：默认 builder 在**发起任何子进程之前**抛出指名归属的失败（`cli` 侧映射为退出码 `3`，与既有"分阶段未实现"约定一致）。理由是对 pin 的只读取证，不是未做：
+  - `workers/mapping_builder/cli.py` 的 argparse `main` 在 pin 上只解析 `--package-path` 并输出 resolution JSON，**不驱动 build**（其 docstring 明写 SUB-5 未落地），故 `-m workers.mapping_builder.cli` 形态不足以产出变体——这正是 `tasks.md` 组 8 已记入 #32 的待确认项，本 issue 以取证结清
+  - 唯一能建变体的是 `build_direct_grid_variant`，它是 **programmatic-only** 且需调用方预先算好约 24 个关键字参数（`grid_snapshot_loader`/`snapshot_cells`/`grid_snapshot_reference`/`approvals`/`rollback_target`/`distance_qa`/`capacity_report`/`proj_crs_database_version` 等），其中多项来自 NWM grid registry；而 yd MUST NOT 在运行时 import NWM（D6 / agent-ops §7.2），故真实调用需要 NWM 侧另加 driver，归 M4
+  - 该绑定 MUST NOT 静默成功、MUST NOT 先起子进程再失败（后者会拿到退出码 0 的 resolution JSON，随后在 reach 校验处报出一条**归属谎报**的错误）
+- `config.py`：`nwm_canonical_grid_id` 表 -> `CanonicalGridConfig(gfs: str, ifs: str)`，走既有 `_require_table`/`_require_str`，缺失或类型错即 `ConfigError` 并指明字段名
+
+Seams under test:
+- `prepare.run_prepare(*, local, config, baseline_root, builder) -> PrepareReport`（合成 `YD_ROOT`/scratch 目录树 + 记录型假 builder）——本 issue 的主 seam，spec prepare-variants 五类 Scenario 全部在此行使
+- `prepare.variant_targets(local, config) -> dict[str, Path]`（纯函数）——守卫/写入同源与相对性校验的最细边界
+- `cli.main(argv, env) -> int`（design.md seam 6，进程内）——`--baseline` 必需性与 `prepare` 委托形态；委托目标以注入 fake 替换，不牵连业务模块
+- 上游 seam 缺口同 #18/#19：design.md 5 条主干 seam 不含 prepare 编排层；本 fixture 就地声明，不改 design.md
+
+测试 oracle（禁止用被测实现自判）:
+- **假 builder 是记录型 + 可编排**：记录每次调用的 `VariantBuildRequest`，并按测试给定的剧本在 `variant_root` 内写出合成变体（率定末态 `cfg.ic` 的 river 段行数可编排、可额外留 `.tmp`、可整个不建目录）
+- 合成率定末态 `cfg.ic` 复用既有 `producer/tests/cfg_ic_fixtures.py` 的原生分段生成器，**不在本 issue 手写第二套格式**——reach 数的期望值由生成器写入的 river 行数给定
+- 合成基线 GIS 复用 `producer/tests/geometry_fixtures.py`（10.1/10.2 已钉死的锚点纪律）；GeoJSON 内容正确性归 10.2 的既有用例，本 issue 只断言**落点、数量与提交/清理语义**
+- "无新写入"一律以**执行前后 `YD_ROOT` 全树快照（相对路径 + 文件字节）逐一比对**断言，不用"某个特定文件不存在"这种单点探测——单点探测对"写到别处去了"的实现恒真
+- 基线包内部布局与变体内率定末态的文件名是**本 fixture 定义的合成约定**，以 `prepare.py` 的共享常量/函数暴露给 11.1 消费；真实布局的核实归 M4（tasks.md 组 10 已记：真实外部基线模型包的读取与其现场路径属 M4）
+
+Required evidence（每条 input -> expected output）:
+- 干净 `YD_ROOT` + 合法合成基线 -> 退出成功；`YD_ROOT` **全树条目集合**等于「执行前 ∪ 恰好四个终名及其必要父目录」——即**无 staging 残留、无多余目录**（单点探测 `input/models/`、`input/viewer/` 各有几个条目对"staging 留在 `YD_ROOT` 顶层"恒真，故此处必须走全树）；`input/viewer/` 下**恰有** `rivers.geojson` 与 `boundary.geojson` 两个条目；`scratch_root` 下无任何残留条目
+- 同一次成功运行 -> 假 builder 恰被调用 2 次；两次 `source_id` 分别为 `"gfs"`/`"ifs"`、两次 `grid_id` 取自 config 且互不相等；两次 `variant_root` 互不相同、**调用当时为空且由本次运行新建**（编排在调用 builder 前建目录，故「调用前不存在」只能指「不是上一次运行的遗留」——该性质由「两次运行取不同 scratch/staging 名」的用例行使）、均在 `scratch_root` 之下；两次 `baseline_root` 相同
+- 成功运行 -> 两变体的水文参数文件（假 builder 从同一基线复制）字节一致（同源）；两变体的 binding 文件字节不同（不共用）
+- `YD_ROOT/input/models/yd_gfs` 预先存在 -> `PrepareError`；全树快照与执行前完全一致；`scratch_root` 无新条目；builder 调用次数 **0**
+- `YD_ROOT/input/viewer/rivers.geojson` 预先存在且内容已知 -> `PrepareError`；该文件字节与执行前**逐字节相等**；`input/models/` 无新目录；builder 调用次数 **0**（PR #50 路由过来的 CONFIRMED 发现在此结清）
+- `input/viewer/boundary.geojson` 预先存在（rivers 不存在）-> 同上，同样 0 次调用
+- `config.variants.gfs` 为绝对路径 -> `PrepareError` 点名 `variants.gfs` 与该值；该绝对路径下与 `YD_ROOT` 均无写入；builder 调用次数 0
+- `config.variants.gfs` 含 `..` 且规范化后逃出 `yd_root` -> 同上
+- **守卫/写入同源判别性证据**：把 `variants.gfs` 改成非默认相对值（如 `models/alt_gfs`），预先在**该新路径**上放一个同名目录 -> 必须被拒绝（守卫跟着 config 走，而非钉死字面量 `input/models/yd_gfs`）；反向：字面量 `input/models/yd_gfs` 存在但 config 指向别处 -> 提交落在 config 指定处
+- 假 builder 产出的变体 river 段行数 ≠ `reach_count` -> `PrepareError` 点名该 source、期望值与实际值；`YD_ROOT` 全树快照与执行前一致；`scratch_root` 无残留
+- 假 builder 产出的率定末态 `cfg.ic` **无 river 段** -> `PrepareError`（消息区分于"数量不符"）；MUST NOT 判为 0 条；`YD_ROOT` 无新写入
+- 假 builder 在 `variant_root` 内留下一个 `.tmp` 文件（其余合法）-> `PrepareError` 点名该残留条目；`input/models/` 下无任何变体目录
+- 假 builder 对 `ifs` 抛异常（`gfs` 已成功建好）-> `PrepareError`；`YD_ROOT` 全树快照与执行前一致（**`gfs` 变体不得被提交**）；`scratch_root` 无残留
+- **失败路径清理**：上述每一条失败用例都断言 `scratch_root` 下无本次工作目录
+- 假 builder 产出的变体率定末态 `cfg.ic` **不可解析**（截断/非 UTF-8）-> `PrepareError`（`cfg_ic.parse` 的 `ValueError` MUST NOT 逃逸出 `prepare`）；`YD_ROOT` 全树快照与执行前一致
+- 假 builder 返回但**根本没建** `variant_root` -> `PrepareError` 点名该 source；`YD_ROOT` 无新写入；scratch 已清
+- `write_viewer_geojson` 抛 `GeometryError`（注入损坏的 domain 图层）-> `PrepareError`（`GeometryError` MUST NOT 逃逸）；`YD_ROOT` 全树逐字节不变（**两个变体已校验通过也不得提交**）；scratch 与 staging 均已清
+- `variants.gfs == variants.ifs` -> `PrepareError` 点名两字段；builder 调用次数 **0**；`YD_ROOT` 全树逐字节不变
+- **终名互为祖先**：`variants.gfs = "input/models/a"`、`variants.ifs = "input/models/a/b"` -> 在任何写入与任何 builder 调用之前即 `PrepareError` 点名两字段；builder 调用次数 **0**；`YD_ROOT` 全树逐字节不变。两个 `lexists` 守卫与步骤 4 的产物校验都不会发现它，而提交后 `ifs` 变体会躺在已提交的 `gfs` 变体**目录内部**
+- staging 位置不在 `input/viewer/` 之内（断言 staging 的实际路径），且成功后该位置已不存在
+- **同文件系统判别性证据**：成功路径下断言每次 rename 的源与终名 `os.stat().st_dev` 相等，且源位于 `yd_root` 之内——把 staging 放回 scratch 的实现在这条上必红（生产 `EXDEV`，本地两根同盘时不会自己暴露）
+- **提交中途失败**：注入令首次终名 rename 失败的探针 -> `PrepareError`（`SafeFilesystemError` MUST NOT 逃逸；它是 `RuntimeError` 子类，`except OSError` 兜不住）；`YD_ROOT` 的**条目集合**与执行前相同（本次为提交新建的父目录与 staging 均已回滚）；scratch 已清
+- 不注入 builder（走生产绑定）-> `BuilderUnavailableError`，消息指名归属（承接它的任务号，或在无编号任务时指名承接阶段）；注入的 `runner`/`subprocess` 探针调用次数 **0**（在起子进程之前就停）；`YD_ROOT` 无写入；`scratch_root` 无残留
+- `main(["prepare", ...])` 走生产 builder 绑定 -> 退出码 **`3`**；同一组参数下由 `PrepareError` 拒绝（如 reach 数不符）-> 退出码 **`1`**（两码可区分是断言点）
+- `main(["prepare", "--config", ..., "--local", ...])` 缺 `--baseline` -> `SystemExit(2)`；注入的配置装载 fake 与 `run_prepare` fake 调用次数均为 0
+- `main(["prepare", ..., "--baseline", <path>])` 且注入成功的 `run_prepare` fake -> 退出码 0，fake 收到的 `baseline_root` 是 `Path.resolve()` 后的绝对路径
+- `main(["prepare", ...])` 且注入抛 `PrepareError` 的 fake -> 退出码 `1`，stderr 含该消息
+- **清理证据必须到达运维（round-2 verified，cand-r2-A1/A2）**：`main(["prepare", ...])` 走生产绑定且两个删除原语均注入失败 -> 退出码仍 `3`，stderr **同时**含 `BuilderUnavailableError` 消息与注入的清理失败文本，且不含 `Traceback`（`str(exc)` 不含 `__notes__`，只断退出码的用例对本条恒绿）；注入返回带非空 `cleanup_warnings` 报告的 `run_prepare` fake -> 退出码 `0` 且 stderr 含每条告警
+- **异常类边界必须被钉死（round-2 verified，cand-r2-B1）**：三条判别性用例——(a) 回滚的**最后**一个清理步骤抛 `KeyboardInterrupt` -> 该 `KeyboardInterrupt` 上抛（`except BaseException` 变异体在此必红）；(b) 清理步骤内 `prepare.os.close` 抛裸 `OSError` -> 其余步骤仍执行、上抛的仍是原始 `PrepareError`、该 `OSError` 进 `__notes__`（`except PrepareError` 变异体在此必红；注意经 `rmtree_no_follow` 注入的 `OSError` 被 `_wrap_fs` 翻译，杀不掉该变异体）；(c) builder 抛 `KeyboardInterrupt` -> 回滚完成后原样上抛（回滚边界收窄为 `except Exception` 的变异体在此必红）。全套注入面此前只有 `SafeFilesystemError`，它被 `_wrap_fs` 翻译成 `PrepareError`，令三种异常类选择塌缩到同一条路径
+- **散文声明的行为契约必须逐条可判别（round-3 verified，cand-r3-1/-2；Review Failure Retro 形状 depth 的闭合动作）**：`prepare.py` 与 `cli.py` 中每一条带 `MUST`/`MUST NOT`/`刻意`/`钉死`/`不做…兜底` 的散文条款，MUST 就地注明钉住它的测试 id，或显式标注「等价变异/不可判别」或「归 M4，不在本阶段声明」。逐条补测不构成闭合——round-2 的修复提交自己又造出了 round-3 的 UNPINNED 条款。具体证据行：`main` 的退出码 **1** 分支同样渲染 `__notes__`（注入抛带 note 的 `PrepareError` 的 `run_prepare` fake -> 退出码 1、stderr 含 note 文本、不含 `Traceback`；note 文本 MUST NOT 是 `str(exc)` 的子串，否则 `_fail` 单独即可满足、变异体存活）；`prepare.py` 模块头 I1 段落 MUST NOT 声称 `cli` 只打印 `str(exc)`（该句已被 `f124f4b` 证伪）
+- `main(["init", ...])` / `main(["run", ...])` 带 `--baseline` -> `SystemExit(2)`（该参数只属 prepare）
+- `build_parser()` 的 `prepare` 子 parser 必需参数集合恰为 `{--config, --local, --baseline}`；`init`/`run` 恰为 `{--config, --local}`
+- `DATABASE_URL` 存在时 `["prepare", ..., "--baseline", ...]` -> 退出码 `1`，stderr 指名该变量且**不含其值**，`run_prepare` fake 调用次数 0（既有守卫不因新参数而位移）
+- `config.toml` 缺 `nwm_canonical_grid_id` -> `ConfigError` 指明字段名；缺 `nwm_canonical_grid_id.ifs` -> `ConfigError` 指明 `nwm_canonical_grid_id.ifs`；该键为非表类型 / 其值为非 `str` -> `ConfigError` 指明类型
+- `cd producer && uv run pytest` -> 退出码 0（既有全部用例继续通过）
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 无 lock drift
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+- CI 四个 job 绿
+
+Invariant Matrix:
+- Governing invariant: `prepare` 对 `YD_ROOT` 的效果 MUST 是**全有或全无**——要么四个终名（两变体 + 两 GeoJSON）全部由本次运行新建，要么 `YD_ROOT` 回到执行前的条目集合且**既有内容逐字节不变**（本次为提交新建的父目录与 staging 属本次条目，失败时 MUST 一并回滚）；任何既有条目 MUST NOT 被覆盖或删除；无论成败 scratch 工作目录与 staging MUST 被删除。唯一已接受的例外是四个终名 rename 之间的进程被杀窗口（见 Failure paths 行）
+- Source-of-truth identity/contract: 变体终名由 `variant_targets(local, config)` 单点计算（`local.yd_root` + `config.variants.*`）；GeoJSON 终名由 products-contract §2 字面量给定；reach 身份由变体率定末态 `cfg.ic` 的 river 段行数对 `config.reach_count`
+- Producers: `prepare.run_prepare`、注入的 `builder`、`geometry.write_viewer_geojson`
+- Validators/preflight: 四终名 `lexists` 拒绝覆盖检查；`variants.*` 相对性校验；`cfg_ic.parse` + river 段存在性 + 行数校验；scratch 目录内容精确集合校验
+- Storage/cache/query: `YD_ROOT/input/models/{yd_gfs,yd_ifs}`、`YD_ROOT/input/viewer/{rivers,boundary}.geojson`、`scratch_root/<本次专属>`
+- Public routes/entrypoints: `yd-producer prepare --config --local --baseline`（`cli.main` seam 6）
+- Frontend/downstream consumers: viewer 读 `input/viewer/`（products-contract §2/§6）；`init`（11.1）读变体内同源率定末态；`run`（组 12–14）读变体
+- Failure paths/rollback/stale state: 拒绝覆盖在任何写入之前；builder 失败/校验失败一律不提交任何变体；提交阶段失败回滚本次新建的父目录与 staging；`finally` 清 scratch 与 staging；**已接受残留**：四个终名的 rename 逐个原子，但四者之间没有跨名事务，进程在其间被 SIGKILL（或 NFS `ESTALE`）会留下部分提交的 `YD_ROOT`——在无跨目录事务的 POSIX 文件系统上不可消解。提交顺序钉死为「两变体 → rivers → boundary」，这是 **best-effort 的排序偏好，不是对 viewer 的就绪保证**：`products-contract` §2/§6 没有为 `input/viewer/` 定义任何就绪标记（不同于 `output/` 的 `DONE`，§4），本 issue 也不发明一个。就绪标记的取舍与崩溃后的人工恢复程序路由为 follow-up issue（见 Non-goals）
+- Evidence/audit/readiness: `producer/tests/test_prepare.py` 的全树快照比对用例组；`prepare_fixtures.py` 的记录型假 builder 调用记录
+- Regression rows:
+  - 干净根 + 合法基线 -> 四个终名全部新建，scratch 清空，builder 恰 2 次且 source/grid 各异
+  - 四个终名任一预先存在 -> 拒绝，`YD_ROOT` 全树逐字节不变，builder 0 次
+  - `ifs` builder 抛异常（`gfs` 已建好）-> `YD_ROOT` 全树逐字节不变（部分成功不得提交），scratch 清空
+  - `variants.gfs` 为绝对路径 / 逃逸路径 -> 拒绝，两处均无写入
+  - `variants.gfs == variants.ifs` -> 任何写入之前拒绝，builder 0 次
+  - 提交阶段首次 rename 失败 -> `YD_ROOT` 条目集合与执行前相同（含回滚本次新建的父目录/staging）
+  - 每次终名 rename 的源与终名同 `st_dev` 且源在 `yd_root` 内 -> 恒真（生产 NFS/scratch 跨设备的判别式）
+  - 未改动的同级消费者：`cli` 的 `init`/`run` 守卫与退出码用例、`geometry`/`cfg_ic`/`safe_fs` 既有用例 -> 全部继续通过
+
+Boundary surfaces（high 强度必填）:
+- 共享 helper 根：`store/safe_fs.*`（复用，MUST NOT 在 `prepare.py` 里另写一套 fs 原语；**唯一豁免**是 scratch -> staging 的树复制——`safe_fs` 公共面确无 copy 原语，故它按 Must add/change 只落在 `prepare.py` 内，不算越界）、`geometry.write_viewer_geojson`、`state/cfg_ic.parse`、`raw/source_identity.normalize_source_id`
+- 公共入口：`cli.build_parser`/`cli.main`
+- 读面：基线包、变体内率定末态 `cfg.ic`
+- 写/删/覆盖面：`YD_ROOT/input/models/*`、`YD_ROOT/input/viewer/*`、`YD_ROOT` 内本次 staging、`scratch_root/<本次专属>`（删除面恰为后两者 + 提交失败时本次新建的父目录）
+- staging/发布/回滚面：scratch 工作目录（builder 产出）-> `YD_ROOT` 内本次专属 staging（按发布权限新建）-> 四个终名的同盘 rename 提交；回滚面含本次新建的父目录与 staging
+- 生产者/消费者证据边界：viewer 的 `input/viewer/` 契约（products-contract §2/§6）；11.1 消费变体内率定末态
+- 陈旧态/幂等边界：重跑必须被拒绝覆盖挡住（prepare 不幂等、无 `--force`，compute-loop §6.1）
+- 未改动的下游消费者：`init`/`run` 入口、`controller`、`rawscan`
+
+Risk packs considered (core):
+- Public API / CLI / script entry: selected - 新增 CLI 参数与新公开模块，11.1/12–14 的消费契约
+- Config / project setup: selected - 新增必需 config 字段；`variants.*` 相对性 fail-closed 闸门
+- File IO / path safety / overwrite: selected - 本 issue 的核心面
+- Schema / columns / units / field names: selected - `VariantBuildRequest` 字段名对 NWM `build_direct_grid_variant` 的同名参数；`nwm_canonical_grid_id` 的 TOML 键名
+- Auth / permissions / secrets: not selected - 无凭据；权限/属主归 #24/#25 的发布面
+- Concurrency / shared state / ordering: selected - 提交顺序、scratch 目录唯一性、并发/重跑不得互相覆写
+- Resource limits / large input / discovery: not selected - 一次性操作，3988 河段/7891 单元量级
+- Legacy compatibility / examples: selected - 新增**必需** config 字段会打断全部既有 `Config` 构造点
+- Error handling / rollback / partial outputs: selected - 部分成功不得提交、失败必清 scratch
+- Release / packaging / dependency compatibility: not selected - 零新增依赖、lock 不变
+- Documentation / migration notes: selected - `--baseline`、`nwm_canonical_grid_id`、变体路径相对性三处已先行改 docs 并 push（`3e9239d`、`37dae4a`）
+
+Domain packs (from active profile):
+- Geospatial / CRS / shapefile sidecars: selected - 消费 10.1/10.2 的几何链，落点归本 issue
+- Time series / forcing / temporal boundaries: not selected - prepare 无 cycle/时间面
+- 状态链 / warm-start 定戳一致性: selected - 变体内率定末态是状态链的**起点**，本 issue 决定它被不被提交；重戳属 11.1
+- NWM 快照溯源与 DB-free 隔离: selected - prepare 是全仓唯一进入 NWM 活动环境的路径；生产 builder 绑定 MUST 不 import NWM、不起数据库连接、不隐式起子进程
+
+Non-goals:
+- **真实 NWM builder 调用**（issue 正文 Out of Scope，M4）：`build_direct_grid_variant` 的约 24 个关键字参数与 NWM 侧 driver 归 M4；本 issue 交付编排与 fail-closed 绑定，并以对 pin 的只读取证结清 `tasks.md` 组 8 记入 #32 的「`-m ...cli` 是否足够」待确认项
+- 真实外部基线模型包的现场布局与读取（M4）；本 issue 的基线包内部布局是合成约定
+- `init` 的首态建链与率定末态重戳（11.1）
+- `nwm_canonical_grid_id` 的**生产取值**（归 #29 的生产实例复核，与 `reach_count=3988`、`checkpoint_hours=[12]` 同批）
+- 变体内容的数值/映射正确性（mapping-builder 的职责，M4 oracle）
+- 提交的属主/权限（uid/gid/mode 不继承 scratch）——归 #24/#25 的发布面
+- 四个终名之间的 SIGKILL/`ESTALE` 窗口：是否给 `input/viewer/` 定义就绪标记（products-contract 契约变更，需先改文档），以及 `prepare` 半提交后的人工恢复程序（`prepare` 无 `--force` 且四名任一存在即拒绝，故半提交态目前无文档化出路）——已接受残留，路由为 follow-up issue **#78**
+
+Review focus:
+- 拒绝覆盖是否**在任何 scratch 写入与任何 builder 调用之前**，且覆盖**全部四个**终名而非只有两个变体目录
+- 守卫路径与提交路径是否真的同源（改 `variants.*` 的判别性用例是否存在），还是各写了一遍字面量
+- 部分成功是否会漏出：`ifs` 失败时 `gfs` 变体是否可能已被提交
+- 失败与成功两条路径是否都清 scratch（`finally` 而非只在成功分支）
+- `doc.river is None` 是否被当成 0 条 reach（`Section | None`，`reach_count` 恰为 0 的配置下会静默通过）
+- 生产 builder 绑定是否在起子进程**之前**失败；有没有偷偷用 `-m ...cli` 冒充真实构建
+- 是否复用 `safe_fs` 原语，还是在 `prepare.py` 里另写了一套 fs 操作
+- "无新写入"的断言是全树快照还是单点探测
+- 新增必需 config 字段后，既有 `Config` 构造点是否全部补齐且未被改成带默认值
 
 ## 11. init-bootstrap：首态建链
 

@@ -396,8 +396,8 @@ def write_viewer_geojson(
 ) -> tuple[Path, Path]:
     """把两份 viewer GeoJSON 写入 `out_dir`，返回 `(rivers 路径, boundary 路径)`。
 
-    **无部分产物**，三段都要成立（下游 prepare 会把 scratch 目录整体提交，半份或
-    截断的产物会被当成完整产物发布出去）：
+    **无部分产物**，三段都要成立（下游 prepare 把 `out_dir` 设在 `YD_ROOT` 内本次专属
+    staging 位置，随后逐个终名 rename 提交，半份或截断的产物会被当成完整产物提交出去）：
 
     * 构建段：两份文档全部构建并序列化成字符串**成功之后**才开始落盘；
     * 落盘段：每份先写到 `out_dir` 内**本次调用专属**的临时名，两份都写完之后才

@@ -13,11 +13,14 @@
 """
 
 import argparse
+from pathlib import Path
 
 import pytest
 from cli_fixtures import write_config, write_fake_interpreter, write_local
 
 from yd_producer import cli, nwm
+from yd_producer import prepare as prepare_module
+from yd_producer.config import load_config, load_local
 
 # --- 记录型 fake -------------------------------------------------------------
 
@@ -49,6 +52,9 @@ def _fake_everything(monkeypatch) -> dict[str, Recorder]:
         "run": Recorder(result=0),
         "load_config": Recorder(result=object()),
         "load_local": Recorder(result=object()),
+        # `prepare` 的委托目标（issue #20）。它与 `prepare` 同时被换成 fake 是刻意的：
+        # 两层各自承担一条负面证据——守卫拒绝时**两层**都必须零调用。
+        "run_prepare": Recorder(result=None),
     }
     for name, fake in fakes.items():
         monkeypatch.setattr(cli, name, fake)
@@ -65,10 +71,26 @@ def _exit_code(argv, env):
         return exc.code
 
 
-def _argv(command, tmp_path, **local_kwargs):
+def _argv(command, tmp_path, *, baseline=None, **local_kwargs):
+    """齐备 argv。`prepare` 额外带必需的 `--baseline`（`init`/`run` 不带）。
+
+    `yd_root`/`scratch_root` 一并建出来：`prepare.run_prepare` 的步骤 0 预检要求两个运行
+    根都是**已存在**的目录（打错一个字就凭空造出影子根、还返回成功，是 issue #20 复核里
+    确认的失效）。这是 arrange 侧的新前置条件，本文件的断言一条未动——`init`/`run` 不经
+    该预检，对它们是惰性的。
+    """
     config_path = write_config(tmp_path)
     local_path = write_local(tmp_path, **local_kwargs)
-    return [command, "--config", str(config_path), "--local", str(local_path)]
+    local = load_local(local_path, load_config(config_path))
+    Path(local.yd_root).mkdir(parents=True, exist_ok=True)
+    Path(local.scratch_root).mkdir(parents=True, exist_ok=True)
+    argv = [command, "--config", str(config_path), "--local", str(local_path)]
+    if command == "prepare":
+        argv += [
+            "--baseline",
+            str(tmp_path / "baseline" if baseline is None else baseline),
+        ]
+    return argv
 
 
 # --- 三入口枚举 --------------------------------------------------------------
@@ -88,6 +110,36 @@ def test_parser_registers_exactly_three_subcommands():
 
     assert len(actions) == 1
     assert set(actions[0].choices) == {"prepare", "init", "run"}
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("prepare", {"--config", "--local", "--baseline"}),
+        ("init", {"--config", "--local"}),
+        ("run", {"--config", "--local"}),
+    ],
+)
+def test_required_option_sets_per_subcommand(command, expected):
+    """`--baseline` 只属 `prepare`（compute-loop §6.1）。
+
+    断言取 argparse 注册表的**必需**选项集合而非 help 文本：`init`/`run` 那两条是判别性
+    的负面证据——把 `--baseline` 加到公共循环里时，只测 `prepare` 的实现照样绿。
+    """
+    actions = [
+        action
+        for action in cli.build_parser()._actions
+        if isinstance(action, argparse._SubParsersAction)
+    ]
+    parser = actions[0].choices[command]
+    required = {
+        option
+        for action in parser._actions
+        if action.required
+        for option in action.option_strings
+    }
+
+    assert required == expected
 
 
 def test_help_exits_zero(capsys):
@@ -131,6 +183,34 @@ def test_missing_required_option_exits_two(monkeypatch, capsys, tmp_path, missin
     assert missing in err
     assert fakes["load_config"].count == 0
     assert fakes["run"].count == 0
+
+
+def test_prepare_without_baseline_exits_two(monkeypatch, capsys, tmp_path):
+    """spec cli-config「prepare 的基线包路径必需」：不装载配置、不执行任何业务逻辑。"""
+    fakes = _fake_everything(monkeypatch)
+    argv = _argv("prepare", tmp_path)
+    index = argv.index("--baseline")
+    del argv[index : index + 2]
+
+    assert _exit_code(argv, env={}) == 2
+
+    assert "--baseline" in capsys.readouterr().err
+    assert fakes["load_config"].count == 0
+    assert fakes["prepare"].count == 0
+    assert fakes["run_prepare"].count == 0
+
+
+@pytest.mark.parametrize("command", ["init", "run"])
+def test_baseline_is_rejected_on_other_subcommands(
+    monkeypatch, capsys, tmp_path, command
+):
+    fakes = _fake_everything(monkeypatch)
+    argv = _argv(command, tmp_path) + ["--baseline", str(tmp_path / "baseline")]
+
+    assert _exit_code(argv, env={}) == 2
+
+    capsys.readouterr()
+    assert all(fake.count == 0 for fake in fakes.values())
 
 
 # --- DATABASE_URL 守卫（agent-ops §2.2）--------------------------------------
@@ -339,24 +419,260 @@ def test_prepare_stops_when_interpreter_not_executable(monkeypatch, capsys, tmp_
     assert runner.count == 0
 
 
-def test_prepare_with_executable_interpreter_reaches_staged_unimplemented(
-    monkeypatch, capsys, tmp_path
-):
-    """正控制：可执行解释器下越过预检进入未实现分支——排除"预检恒失败"的实现。
+# --- prepare 的委托与两级退出码（issue #20）---------------------------------
 
-    预检不代替调用：本 issue 的 `prepare` 不实际调用 mapping-builder，故薄外壳零调用。
-    """
-    runner = Recorder(result=None)
-    monkeypatch.setattr(nwm, "invoke_mapping_builder", runner)
+
+def _prepare_argv(tmp_path, **kwargs):
+    """带可执行假解释器的 `prepare` argv：越过预检后进入真正的编排委托。"""
     script = write_fake_interpreter(
         tmp_path.resolve() / "fake-python", tmp_path.resolve() / "record.json"
     )
-    argv = _argv("prepare", tmp_path, python=script)
+    return _argv("prepare", tmp_path, python=script, **kwargs)
 
+
+def test_prepare_with_executable_interpreter_reaches_production_builder_binding(
+    monkeypatch, capsys, tmp_path
+):
+    """正控制：可执行解释器下越过预检，进入生产 builder 绑定并以退出码 `3` 停。
+
+    预检不代替调用：绑定在**发起任何子进程之前**失败，故薄外壳零调用。
+    """
+    runner = Recorder(result=None)
+    monkeypatch.setattr(nwm, "invoke_mapping_builder", runner)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
+
+    err = capsys.readouterr().err
+    assert prepare_module.BUILDER_OWNER in err  # 指名归属
+    # 归属断言取字面量：只断言模块常量出现在消息里是自指的（把常量置空并删掉归属子句
+    # 仍然全绿），测不出"消息里到底有没有指名归属"。
+    assert "归属 M4" in err
+    assert "Traceback" not in err
+    assert runner.count == 0
+
+
+def test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code(
+    monkeypatch, capsys, tmp_path
+):
+    """清理失败 MUST NOT 把退出码 `3` 降级成 `1`（issue #20 复核 cand-02）。
+
+    这是今天唯一生产可达的那一支：`cli` 传的就是生产 `default_builder`，绑定抛
+    `BuilderUnavailableError` 之后清理 scratch；清理失败若替换掉正在传播的异常，`main`
+    的 `except BuilderUnavailableError` 就不再匹配，运维拿到 `1` 会去改一份没问题的配置。
+    """
+    monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
+
+    def refuse(*args, **kwargs):
+        raise prepare_module.safe_fs.SafeFilesystemError(
+            "injected cleanup failure", kind="io"
+        )
+
+    # 两个删除原语一起注入：编排改用哪一个来清 scratch 都不影响本用例要钉的性质。
+    monkeypatch.setattr(prepare_module.safe_fs, "remove_tree_allow_symlinks", refuse)
+    monkeypatch.setattr(prepare_module.safe_fs, "rmtree_no_follow", refuse)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
+
+    err = capsys.readouterr().err
+    assert "归属 M4" in err
+    assert "Traceback" not in err
+
+
+def test_cleanup_failure_text_reaches_stderr_on_the_failure_path(
+    monkeypatch, capsys, tmp_path
+):
+    """清理失败的**文本**必须到达运维，不只是退出码（cand-r2-A1）。
+
+    上一条用例只断言退出码没被降级，对"证据是否可见"恒绿：`str(exc)` 不含
+    `__notes__`，而 `prepare` 的回滚失败只以 `add_note` 附在原始异常上。渲染缺失时
+    `YD_ROOT`/scratch 里的残留在 agent-ops §8.1 的 receipt 上没有任何痕迹。
+    """
+    monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
+
+    def refuse(*args, **kwargs):
+        raise prepare_module.safe_fs.SafeFilesystemError(
+            "injected cleanup failure", kind="io"
+        )
+
+    monkeypatch.setattr(prepare_module.safe_fs, "remove_tree_allow_symlinks", refuse)
+    monkeypatch.setattr(prepare_module.safe_fs, "rmtree_no_follow", refuse)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
+
+    err = capsys.readouterr().err
+    assert "归属 M4" in err  # 原始异常还在，没被清理失败顶掉
+    assert "injected cleanup failure" in err  # 清理失败也在
+    assert "Traceback" not in err
+
+
+def test_success_path_cleanup_warnings_reach_stderr_without_changing_the_exit_code(
+    monkeypatch, capsys, tmp_path
+):
+    """成功路径的 `cleanup_warnings` 必须打出来，且退出码仍为 `0`（cand-r2-A2）。
+
+    告警说的是"四个终名都提交了，但 staging/scratch 还有残留"。升格成失败会让重跑撞上
+    拒绝覆盖守卫；丢掉则运维不知道有中间态留在 `YD_ROOT` 里。
+    """
+    warnings = ("残留 staging：/x/.prepare-staging-1", "残留 scratch：/y/prepare-1")
+    fake = Recorder(
+        result=prepare_module.PrepareReport(
+            variants={},
+            rivers_geojson=tmp_path / "rivers.geojson",
+            boundary_geojson=tmp_path / "boundary.geojson",
+            cleanup_warnings=warnings,
+        )
+    )
+    monkeypatch.setattr(cli, "run_prepare", fake)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 0
+
+    err = capsys.readouterr().err
+    for warning in warnings:
+        assert warning in err
+
+
+def test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes(
+    monkeypatch, capsys, tmp_path
+):
+    """同一组参数：干净根 -> `3`（这条路还没通）；终名已存在 -> `1`（拒绝执行）。
+
+    两码可区分是硬要求——合并成一个码，运维无从判断该改配置还是该等 M4。
+    """
+    monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
+    argv = _prepare_argv(tmp_path)
+    yd_root = tmp_path.resolve() / "yd"
+
+    # 第一段：干净根。同一份 `argv` 走到生产 builder 绑定，以 `3` 停。这一段是本用例的
+    # 判别力所在——缺了它，把 `EXIT_UNIMPLEMENTED` 并进 `EXIT_GUARD` 仍然全绿。
     assert _exit_code(argv, env={}) == 3
 
-    assert "10.3" in capsys.readouterr().err
-    assert runner.count == 0
+    capsys.readouterr()  # 排空第一段的 stderr，下面只断言第二段的输出
+
+    # 第二段：终名已存在。同一份 `argv`，只改 `YD_ROOT` 的状态，以 `1` 停。
+    (yd_root / "input" / "models" / "yd_gfs").mkdir(parents=True)
+
+    assert _exit_code(argv, env={}) == 1
+
+    err = capsys.readouterr().err
+    assert str(yd_root / "input" / "models" / "yd_gfs") in err
+    assert "Traceback" not in err
+
+
+def test_prepare_delegates_resolved_baseline_path(monkeypatch, tmp_path):
+    """`--baseline` 与 `--config`/`--local` 同纪律：`Path.resolve()` 后再传下游。
+
+    fake 返回一份**真** `PrepareReport`（而不是 `None`）：入口层要读它的
+    `cleanup_warnings`，而 `cli.prepare` 刻意不做 `None` 兜底——兜底会把坏掉的委托伪装
+    成成功。这里的报告清理干净，故本用例对 stderr 保持沉默。
+    """
+    fake = Recorder(
+        result=prepare_module.PrepareReport(
+            variants={},
+            rivers_geojson=tmp_path / "rivers.geojson",
+            boundary_geojson=tmp_path / "boundary.geojson",
+        )
+    )
+    monkeypatch.setattr(cli, "run_prepare", fake)
+    monkeypatch.chdir(tmp_path)
+    argv = _prepare_argv(tmp_path, baseline="baseline")
+
+    assert _exit_code(argv, env={}) == 0
+
+    assert fake.count == 1
+    assert fake.calls[0][1]["baseline_root"] == (tmp_path / "baseline").resolve()
+
+
+def test_prepare_error_becomes_exit_one(monkeypatch, capsys, tmp_path):
+    def raising(**kwargs):
+        raise prepare_module.PrepareError("变体 reach 数与 reach_count 不符")
+
+    monkeypatch.setattr(cli, "run_prepare", raising)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 1
+
+    err = capsys.readouterr().err
+    assert "变体 reach 数与 reach_count 不符" in err
+    assert "Traceback" not in err
+
+
+def test_cleanup_note_reaches_stderr_on_the_exit_one_path(
+    monkeypatch, capsys, tmp_path
+):
+    """退出码 `1` 的失败路径同样渲染 `__notes__`（cand-r3-1）。
+
+    spec cli-config「prepare 的清理告警与残留证据 MUST 到达运维」的失败路径子句没有退出
+    码限定，但此前只有 `BuilderUnavailableError`（退出码 `3`）那一支被钉住：删掉
+    `except PrepareError` 分支里的 `_print_notes(exc)` 全套仍然全绿。M4 之后这一支才是主
+    要残留路径——提交阶段失败叠加清理失败即退出码 `1` 且 `YD_ROOT`/scratch 有残留。
+
+    note 文本与 `str(exc)` **刻意无公共子串**：note 若是异常消息的子串，`_fail(str(exc))`
+    单独就能满足断言，删掉 `_print_notes` 照样绿，用例不具判别性。
+    """
+
+    def raising(**kwargs):
+        exc = prepare_module.PrepareError("提交失败：变体 rename 撞上既有条目")
+        exc.add_note("回滚/清理未完成：injected rollback residue")
+        raise exc
+
+    monkeypatch.setattr(cli, "run_prepare", raising)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 1
+
+    err = capsys.readouterr().err
+    assert "提交失败：变体 rename 撞上既有条目" in err  # 原始异常消息
+    assert "injected rollback residue" in err  # notes 被渲染
+    assert "Traceback" not in err
+
+
+def test_a_none_report_is_never_reported_as_success(monkeypatch, tmp_path):
+    """委托返回 `None` 时 MUST NOT 报成成功（`cli.prepare` 的"报告不做 `None` 兜底"）。
+
+    断言里两个部件都是承重的，别"化简"掉：
+
+    - `except BaseException: rc = "escaped"` 用的是**哨兵**而不是 `None`。逃逸与"返回
+      `None`"是两种不同的结局，收敛成同一个值会漏掉一整类兜底变异体；
+    - `rc is not None` 钉的正是那一类：`if report is not None: ... return 0` 之后**穿透**
+      到函数末尾的变异体让 `main()` 返回 `None`，在真实边界 `sys.exit(main())` 上就是
+      `sys.exit(None)`、进程退出码 `0`——恰恰是本条契约要禁的"坏掉的委托被报成成功"。
+      只写 `rc != 0` 时该变异体存活。
+
+    本用例不点名任何异常类：钉的是"不得报成成功"这条契约，不是当前实现偶然抛出的
+    `AttributeError`。两种同样正确的替代实现（抛 `PrepareError` 走退出码 `1`、或以退出码
+    `2` 显式报错）下它都仍绿。附带记录：这条路径今天以未被三个 handler 接住的异常收场，
+    故控制台入口上会打出 traceback，见 `cli._print_notes` 的 docstring。
+    """
+    monkeypatch.setattr(cli, "run_prepare", Recorder(result=None))
+
+    try:
+        rc = cli.main(_prepare_argv(tmp_path), env={})
+    except SystemExit as exc:  # 必须排在 BaseException 之前
+        rc = exc.code
+    except BaseException:  # noqa: BLE001 - 见 docstring：结局分三类，逃逸是其中一类
+        rc = "escaped"  # 哨兵：逃逸当然不是成功，但也不是"返回 None"
+
+    assert rc != 0 and rc is not None
+
+
+@pytest.mark.parametrize("command", ["prepare", "init", "run"])
+def test_dispatch_resolves_delegates_at_call_time(monkeypatch, tmp_path, command):
+    """三个委托目标 MUST 以**模块级名字**在调用时解析，而非导入时冻结进 dict。
+
+    判别性：本文件其余注入用例对这三个名字只断言 `count == 0`，那是恒真的负面证据——把
+    `main` 的派发改成导入时冻结的 dict 之后，`monkeypatch` 装上的 fake 根本不会被查到，
+    真实委托目标照跑，而 `count == 0` 依旧成立（实测该变异体全套 1061 passed 存活）。
+    唯一能判别的是"打了桩的那一支确实被调用了一次"这条**正面**证据。
+
+    仍在 seam 6 边界之内：三支全部换成记录型 fake，本用例只观察派发去向与退出码透传，
+    不行使任何业务体。
+    """
+    fakes = {name: Recorder(result=0) for name in ("prepare", "init", "run")}
+    for name, fake in fakes.items():
+        monkeypatch.setattr(cli, name, fake)
+
+    assert _exit_code(_argv(command, tmp_path), env={}) == 0
+
+    assert fakes[command].count == 1
+    assert [name for name, fake in fakes.items() if fake.count] == [command]
 
 
 def test_init_reaches_the_real_business_body(capsys, tmp_path):
