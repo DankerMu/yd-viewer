@@ -3,37 +3,59 @@
 权威：compute-loop §6.1、products-contract §2/§6、spec `prepare-variants`、
 tasks.md「Issue #20 fixture（任务 10.3）」。
 
+**契约标注约定**（本模块与 `cli` 通用）：凡以散文声明的行为选择（带 `MUST` / `MUST NOT` /
+`刻意` / `钉死` / `不做…兜底`）都就地标注它的判别性证据——`（pinned: <test id>）` 指出把该
+选择改回去时会变红的用例；确实无法判别的标 `（等价变异，不可判别：<理由>）`；本阶段不声明
+的标 `（归 M4/<issue>，本阶段不声明）`。审查因此是一次 grep，而不是一次全套变异扫描。
+
 **总不变量（全有或全无）**：本模块对 `YD_ROOT` 的效果要么是「四个终名（两个变体目录 +
 两份 GeoJSON）全部由本次运行新建」，要么是「`YD_ROOT` 回到执行前的条目集合，既有内容
 逐字节不变」。任何既有条目 MUST NOT 被覆盖或删除；无论成败，scratch 工作目录与
-`YD_ROOT` 内 staging 位置都在返回前删除。唯一已接受的残留是四个终名 rename 之间进程被
-SIGKILL（或 NFS `ESTALE`）的窗口——POSIX 没有跨目录事务，无法消解；提交顺序钉死为
-「两变体 → rivers → boundary」是 best-effort 的排序偏好，**不是**对 viewer 的就绪保证
-（products-contract §2/§6 没有为 `input/viewer/` 定义就绪标记，本模块也不发明一个；
-就绪标记与崩溃后的人工恢复程序路由为 follow-up issue #78）。
+`YD_ROOT` 内 staging 位置都在返回前删除（pinned:
+test_success_commits_exactly_four_targets_and_leaves_no_residue、
+test_first_commit_failure_leaves_no_new_entries、
+test_late_commit_failure_rolls_back_already_committed_targets）。唯一已接受的残留是四个
+终名 rename 之间进程被 SIGKILL（或 NFS `ESTALE`）的窗口——POSIX 没有跨目录事务，无法
+消解；提交顺序钉死为「两变体 → rivers → boundary」（pinned:
+test_every_commit_renames_within_yd_root_on_one_device）是 best-effort 的排序偏好，
+**不是**对 viewer 的就绪保证（products-contract §2/§6 没有为 `input/viewer/` 定义就绪
+标记，本模块也不发明一个；就绪标记与崩溃后的人工恢复程序路由为 follow-up issue #78——
+非行为声明，归 #78，本阶段不声明）。
 
 **清理/回滚不变量（I1）**：任何一步清理或回滚 MUST NOT 取消其余步骤，也 MUST NOT 替换、
-掩盖或降级正在传播的异常，更 MUST NOT 把一次已完成的提交报成失败。故清理不是裸序列：
+掩盖或降级正在传播的异常，更 MUST NOT 把一次已完成的提交报成失败（pinned:
+test_one_failing_rollback_step_does_not_cancel_the_others、
+test_scratch_cleanup_failure_does_not_gate_the_staging_cleanup）。故清理不是裸序列：
 每步各自独立执行（`_run_cleanup_steps`），失败被**收集**——失败路径上作为 `add_note`
 附到原始异常上（`BuilderUnavailableError` 因此仍是 `BuilderUnavailableError`，退出码 `3`
-不被降级成 `1`），成功路径上作为 `PrepareReport.cleanup_warnings` 返回（已提交就是已提交，
-清理残留不改变这个事实；`cli` 只打印 `str(exc)`，故这些告警对 CLI 不可见，是本模块公开
-返回值上的证据面）。
+不被降级成 `1`；pinned: test_builder_unavailable_survives_a_cleanup_failure），成功路径上
+作为 `PrepareReport.cleanup_warnings` 返回（已提交就是已提交，清理残留不改变这个事实；
+pinned: test_success_survives_a_staging_cleanup_failure）。两条证据面都由 `cli` 渲染到
+stderr 且都不改退出码（spec `cli-config`「prepare 的清理告警与残留证据 MUST 到达运维」；
+pinned: test_cleanup_failure_text_reaches_stderr_on_the_failure_path、
+test_cleanup_note_reaches_stderr_on_the_exit_one_path、
+test_success_path_cleanup_warnings_reach_stderr_without_changing_the_exit_code）。
 
 **本次条目登记不变量（I2）**：`YD_ROOT` 内每一个本次运行创建的条目，MUST 在它可能落盘
 **之前**就被登记为本次条目（`_ensure_directory` 先 `created.extend` 再建目录——
-`safe_fs.ensure_directory_no_follow` 逐层创建且没有 unwind，登记在后会漏掉半条链）；
+`safe_fs.ensure_directory_no_follow` 逐层创建且没有 unwind，登记在后会漏掉半条链；
+pinned: test_mid_chain_directory_creation_failure_leaves_no_new_entries）；
 回滚只删本次创建的条目，且**父目录一律非递归**（`_remove_created_directory` 走 `rmdir`
-语义）：单次运行下这些目录在回滚时可证为空，行为不变；而并发写入者落进来的内容会让
-`rmdir` 响亮地失败，而不是被静默递归删掉。
+语义；pinned: test_rollback_never_recursively_deletes_a_shared_parent）：单次运行下这些
+目录在回滚时可证为空，行为不变；而并发写入者落进来的内容会让 `rmdir` 响亮地失败，而不是
+被静默递归删掉。
 
 **同一路径拼写不变量（I3）**：拒绝覆盖守卫 `os.path.lexists` 看的路径、`geometry` 写的
 路径、`safe_fs` 操作的路径 MUST 是同一个文件系统对象。`safe_fs._expand_path` 会
 `expanduser()` 而另外两者不会，故 `yd_root = "~/yd"` 会让守卫看 `./~/yd` 而删除落在真实
 `$HOME/yd`。闸门在 `run_prepare` 入口（步骤 1 之前）：`local.yd_root` 与
 `local.scratch_root` MUST 是绝对路径（这一条同时拒掉 `~` 与任何相对拼写）且 MUST 是**已
-存在**的目录（`safe_fs.verify_directory_no_follow` 顺带拒掉 symlink 组件）。装载器那边
-不加校验：`specs/cli-config/spec.md` 把它钉死为只做存在性与类型检查。
+存在**的目录（`safe_fs.verify_directory_no_follow` 顺带拒掉 symlink 组件）。pinned:
+test_non_absolute_run_roots_are_refused_before_any_builder_call、
+test_tilde_run_root_never_touches_the_real_home、
+test_missing_run_roots_are_refused_before_any_builder_call、
+test_symlinked_run_root_is_refused。装载器那边不加校验：`specs/cli-config/spec.md` 把它
+钉死为只做存在性与类型检查（该句是对装载层规范的转述，不是本模块的行为选择）。
 
 **为什么不是「scratch 目录直接 rename 到 `YD_ROOT`」**：生产上 `yd_root` 在 NFS
 （`/ghdc/data/yd`，agent-ops §4.1）而 `scratch_root` 在本地盘（`/scratch/.../yd-loop/`，
@@ -42,13 +64,19 @@ agent-ops §4.2）——两棵真不同文件系统的树，而 `safe_fs.rename_
 rename 会在本地测试（两根同在 `tmp_path`）全绿而在现场必然失败。故搬运分两段：scratch
 -> `YD_ROOT` 内本次专属 staging（按发布权限**新建**条目，不继承计算节点 uid/gid/mode，
 agent-ops §10），再由 staging 同盘 rename 到终名。与控制器发布面同构（agent-ops §8.4）。
+pinned: test_commit_survives_a_filesystem_that_refuses_cross_device_rename、
+test_every_commit_renames_within_yd_root_on_one_device、
+test_published_entries_do_not_inherit_scratch_modes。
 
 **异常契约**：本模块对外只有 `PrepareError` 及其子类 `BuilderUnavailableError`。三处
 外来异常一律包装并保留 `__cause__`——`state.cfg_ic.parse` 的 `ValueError`、
 `geometry.*` 的 `GeometryError`、`store.safe_fs.*` 的 `SafeFilesystemError`。第三处最易
 漏：`SafeFilesystemError` 是 **`RuntimeError` 子类而非 `OSError`**
-（`store/safe_fs.py:11`），`except OSError` 兜不住它。注入 builder 抛出的任何异常同样
-包装（`BuilderUnavailableError` 除外——它必须原样上浮，`cli` 靠它区分退出码 `3`）。
+（`store/safe_fs.py:11`），`except OSError` 兜不住它（pinned:
+test_unparsable_calibrated_state_refuses_commit、test_geometry_failure_rolls_back_validated_variants、
+test_missing_run_roots_are_refused_before_any_builder_call）。注入 builder 抛出的任何异常
+同样包装（`BuilderUnavailableError` 除外——它必须原样上浮，`cli` 靠它区分退出码 `3`；
+pinned: test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes）。
 
 **文件系统原语**：一律复用 `store.safe_fs`，本模块不另写一套。**恰有两处豁免**，两处的
 理由同源——`safe_fs` 的公共面确无对应原语，而扩它属 #24/#25 发布面的归属：
@@ -56,12 +84,17 @@ agent-ops §10），再由 staging 同盘 rename 到终名。与控制器发布�
 1. `_copy_tree_publish`（无 copy 原语）——树复制只落在本模块内，且仍由 `safe_fs` 的
    no-follow 原语逐条构成；
 2. `_remove_created_directory`（无非递归删目录原语）——父目录的撤回 MUST 是 `rmdir`
-   语义而非 `rmtree`（见下 I2），目录本身仍经 `safe_fs.open_directory_no_follow` 逐层
-   no-follow 打开，`os.rmdir` 只在那个 fd 上按条目名执行。
+   语义而非 `rmtree`（见下 I2；pinned:
+   test_rollback_never_recursively_deletes_a_shared_parent），目录本身仍经
+   `safe_fs.open_directory_no_follow` 逐层 no-follow 打开，`os.rmdir` 只在那个 fd 上按
+   条目名执行。
+
+「恰有两处豁免」这一条本身是代码组织约束、不是行为选择（等价变异，不可判别：多写一处
+豁免不改变任何可观测行为）。
 
 **合成约定**：基线包内部布局（`BASELINE_*`）与变体内文件名（`VARIANT_*`）是本 issue 的
 fixture 定义的合成约定，以模块常量暴露给 11.1 消费；真实外部基线模型包的现场布局与读取
-归 M4（tasks.md 组 10）。
+归 M4（tasks.md 组 10）——现场布局归 M4，本阶段不声明。
 """
 
 from __future__ import annotations
@@ -104,6 +137,8 @@ __all__ = [
 ]
 
 #: 两个 source 的处理与**提交顺序**（钉死；见模块头的排序偏好说明）。
+#: pinned: test_builder_called_once_per_source_with_distinct_inputs、
+#: test_every_commit_renames_within_yd_root_on_one_device
 SOURCE_IDS = ("gfs", "ifs")
 
 #: 基线包内部布局（合成约定，真实布局归 M4）
@@ -116,6 +151,7 @@ VARIANT_CALIBRATED_STATE_NAME = "yd.cfg.ic"
 VARIANT_HYDRO_PARAM_NAME = "yd.para"
 VARIANT_BINDING_NAME = "yd.binding"
 #: 变体目录**恰**应含有的条目集合：多一条（含 `.tmp` 残留）或少一条都拒绝提交
+#: pinned: test_scratch_residue_refuses_commit、test_missing_variant_entry_refuses_commit
 VARIANT_REQUIRED_ENTRIES = frozenset(
     {VARIANT_CALIBRATED_STATE_NAME, VARIANT_HYDRO_PARAM_NAME, VARIANT_BINDING_NAME}
 )
@@ -131,6 +167,8 @@ _VIEWER_RELATIVE_DIR = Path("input") / "viewer"
 #: `input/viewer/` 是 products-contract §2 钉死的「恰两个文件」目录，`output/` 是同一类
 #: 的 viewer 读取面（§2/§7）。变体终名落进去只是普通配置笔误，但既有的两两互异 /
 #: 互为祖先闸门都拦不住它——变体目录是两个 GeoJSON 的**兄弟**。
+#: pinned: test_variant_target_on_the_viewer_read_surface_is_refused、
+#: test_output_subtree_variant_target_is_refused
 _VARIANT_FORBIDDEN_RELATIVE_DIRS = (
     _VIEWER_RELATIVE_DIR,
     Path("output"),
@@ -138,11 +176,14 @@ _VARIANT_FORBIDDEN_RELATIVE_DIRS = (
 
 #: 本次运行专属 staging 在 `YD_ROOT` 下的目录名前缀（**不**落在 `input/viewer/` 之内：
 #: products-contract §2 只允许该目录存在两个文件，把 staging 建在里面等于让 viewer 看见
-#: 中间态）。
+#: 中间态）。pinned: test_every_commit_renames_within_yd_root_on_one_device、
+#: test_success_survives_a_staging_cleanup_failure（把前缀挪进 `input/viewer/` 两条都变红）
 _STAGING_PREFIX = ".yd-prepare-staging"
 _SCRATCH_PREFIX = "prepare"
 
 #: 发布归属：真实 builder 绑定所需的 NWM 侧 driver 归此阶段（见 `default_builder`）。
+#: 消息必须**指名**归属（不是自指地断言常量出现过）；pinned:
+#: test_production_binding_names_its_owner_with_a_literal（断言字面量 "归属 M4"）
 BUILDER_OWNER = "M4（node-22 真计算，docs/design.md §10）"
 
 
@@ -154,7 +195,9 @@ class BuilderUnavailableError(PrepareError):
     """生产 builder 绑定尚未可用；`cli.main` 先于基类捕获它并走退出码 `3`。
 
     与基类**不得合并**：把"配置/产物不合法"（改配置能修）与"这条路还没通"（等 M4）
-    报成同一个码，运维无从判断该做哪一件。
+    报成同一个码，运维无从判断该做哪一件（pinned:
+    test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes、
+    test_builder_unavailable_is_a_prepare_error_subclass）。
     """
 
 
@@ -165,7 +208,10 @@ class VariantBuildRequest:
     字段形态是**消费上游契约、不重新协商**：`source_id` 与 `grid_id` 逐字对应 pin
     `NWM@8ae9b8f2 workers/mapping_builder/cli.py:601-602` 的 `build_direct_grid_variant`
     同名关键字参数。`source_id` 取值走 `raw.source_identity.normalize_source_id` 的
-    `"gfs"`/`"ifs"`；`grid_id` 取自 `config.nwm_canonical_grid_id`。
+    `"gfs"`/`"ifs"`；`grid_id` 取自 `config.nwm_canonical_grid_id`（pinned:
+    test_grid_ids_follow_config_not_a_hardcoded_literal、
+    test_builder_called_once_per_source_with_distinct_inputs）。「字段名逐字对应 pin」这一
+    半是对上游取证的转述（等价变异，不可判别：本仓运行时 MUST NOT import NWM，无从对拍）。
     """
 
     source_id: str
@@ -181,7 +227,9 @@ class PrepareReport:
     `cleanup_warnings` 是**成功之后**的清理失败（scratch 工作目录或 `YD_ROOT` 内 staging
     没删掉）。它 MUST NOT 被升格成异常：四个终名都已提交，把它抛出去会让运维看到退出码
     `1`，而重跑又被拒绝覆盖守卫挡住（`prepare` 无 `--force`），一次成功的运行就此变成
-    死局。故这里是返回值上的证据面，不是失败信号；空元组表示清理干净。
+    死局。故这里是返回值上的证据面，不是失败信号；空元组表示清理干净（pinned:
+    test_success_survives_a_staging_cleanup_failure、
+    test_success_reports_no_cleanup_warnings_when_cleanup_is_clean）。
     """
 
     variants: Mapping[str, Path]
@@ -215,7 +263,10 @@ def calibrated_state_path(variant_root: Path | str) -> Path:
 
 
 def viewer_targets(local: LocalConfig) -> dict[str, Path]:
-    """两份 viewer GeoJSON 的终名：products-contract §2 的字面量落点，非配置驱动。"""
+    """两份 viewer GeoJSON 的终名：products-contract §2 的字面量落点，非配置驱动。
+
+    pinned: test_viewer_targets_are_the_contract_literals。
+    """
     root = Path(local.yd_root)
     return {
         key: root / _VIEWER_RELATIVE_DIR / name
@@ -236,6 +287,10 @@ def _resolve_variant_relative(field: str, value: str, yd_root: Path) -> Path:
     MUST 拒绝执行」，而只查规范化结果会放行 `input/../input/models/yd_gfs` 这类词法上
     含 `..`、折叠后又落回根内的值。`variants.*` 没有任何需要 `..` 的正当理由，收紧到
     组件级判据让规范文本与实现同时为真，且仍是纯词法、仍在任何写入之前。
+
+    pinned: test_absolute_variant_path_is_refused、test_escaping_variant_path_is_refused、
+    test_any_pardir_component_in_a_variant_path_is_refused（第三条含"折叠后落回根内"那一
+    例，把判据换成规范化后判定即变红）。
     """
     if not value:
         raise PrepareError(f"配置项 `{field}` 不得为空")
@@ -282,6 +337,15 @@ def variant_targets(local: LocalConfig, config: Config) -> dict[str, Path]:
        `ENOTEMPTY`，`YD_ROOT` 停在"只有一个变体"的半提交态——直接违反总不变量。互为祖先
        同理：两个 `lexists` 与产物校验都发现不了，而提交后 `ifs` 变体会躺在已提交的
        `gfs` 变体**目录内部**。
+
+    pinned：单一来源 test_variant_targets_is_the_single_source_of_final_names、
+    test_overwrite_guard_follows_config_not_the_default_literal、
+    test_commit_lands_where_config_points_not_at_the_default_literal；闸门 2
+    test_variant_target_on_the_viewer_read_surface_is_refused、
+    test_output_subtree_variant_target_is_refused；闸门 3
+    test_identical_variant_paths_are_refused_before_any_write、
+    test_nested_variant_paths_are_refused_before_any_write、
+    test_variant_ancestor_of_viewer_directory_is_refused。
     """
     yd_root = Path(local.yd_root)
     targets = {
@@ -341,7 +405,10 @@ def default_builder(request: VariantBuildRequest) -> None:
 
     因此本绑定 MUST NOT 静默成功、MUST NOT 先起子进程再失败——后者会拿到退出码 0 的
     resolution JSON，随后在 reach 校验处报出一条**归属谎报**的错误（"reach 数不符"，
-    而真因是"这条路还没通"）。
+    而真因是"这条路还没通"）。pinned:
+    test_production_builder_binding_fails_before_any_subprocess（`subprocess.run`/`Popen`
+    与 `nwm.invoke_mapping_builder` 三处探针的调用列表必须为空）、
+    test_production_binding_names_its_owner_with_a_literal。
     """
     raise BuilderUnavailableError(
         f"生产 mapping-builder 绑定尚未可用，归属 {BUILDER_OWNER}："
@@ -370,12 +437,14 @@ def _ensure_directory(
     链中途失败（`EDQUOT`/`EACCES`/`ENOSPC`）会留下已建好的前几层。登记在创建之后，那几层
     就永远不在 `created` 里，回滚够不着它们——`YD_ROOT` 回不到执行前的条目集合。故先
     `created.extend` 再建：多登记一个"其实没建成"的条目是无害的（回滚对不存在的条目是
-    无操作），少登记一个已建成的条目则直接破坏总不变量。
+    无操作），少登记一个已建成的条目则直接破坏总不变量（pinned:
+    test_mid_chain_directory_creation_failure_leaves_no_new_entries）。
 
     `lower_bound` 给向上探测**封底**：没有下界时，`yd_root` 打错一个字（或 NFS 瞬时未
     挂载）会让循环一路探到 `/`，把整条不存在的祖先链当成"本次新建"，随后
     `ensure_directory_no_follow` 真把整个影子根造出来并**返回成功**，产物提交进一棵
-    viewer 永远读不到的树（agent-ops §4.1）。下界不存在即硬失败，不代造。
+    viewer 永远读不到的树（agent-ops §4.1）。下界不存在即硬失败，不代造（pinned:
+    test_probe_loop_refuses_to_rebuild_a_vanished_run_root）。
     """
     missing: list[Path] = []
     probe = path
@@ -400,7 +469,10 @@ def _wrap_fs(action, message: str):
     `SafeFilesystemError` 是 `RuntimeError` 子类而非 `OSError`（`safe_fs.py:11`），
     `except OSError` 兜不住它；`cli.main` 只捕 `ConfigError` 与本模块的 `PrepareError`，
     逃逸即打 traceback 而非干净退出。`OSError` 一并收下：`safe_fs` 的少数路径
-    （`FileNotFoundError`、`FileExistsError`）刻意原样上抛。
+    （`FileNotFoundError`、`FileExistsError`）刻意原样上抛（pinned:
+    test_first_commit_failure_leaves_no_new_entries 钉 `SafeFilesystemError` 那一支、
+    test_missing_run_roots_are_refused_before_any_builder_call 钉 `OSError` 那一支——删掉
+    `except OSError` 后者变红）。
     """
     try:
         return action()
@@ -416,10 +488,12 @@ def _remove_tree(path: Path) -> None:
     只用于**本次新建**的条目——它们在执行前都不存在（四个终名由 `lexists` 守卫证实），
     故树内不可能有既有内容被误删。这里刻意保留 `rmtree_no_follow` 的**拒绝 symlink**
     策略：`YD_ROOT` 内的这些树由本模块逐条新建，出现 symlink 是**篡改证据**，不该被
-    默默清掉。builder 产出的 scratch 树是相反的情形，见 `_remove_scratch_tree`。
+    默默清掉。builder 产出的 scratch 树是相反的情形，见 `_remove_scratch_tree`（两条策略
+    的分工 pinned: test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed）。
 
     失败抛 `PrepareError`，由 `_run_cleanup_steps` 收集——MUST NOT 直接从清理位置逃逸
-    （那会取消其余清理步骤、并替换掉正在传播的原始异常，见模块头 I1）。
+    （那会取消其余清理步骤、并替换掉正在传播的原始异常，见模块头 I1；pinned:
+    test_one_failing_rollback_step_does_not_cancel_the_others）。
     """
     _wrap_fs(
         lambda: safe_fs.rmtree_no_follow(path, missing_ok=True),
@@ -436,6 +510,8 @@ def _remove_scratch_tree(path: Path) -> None:
     （`safe_fs.py` 的 `Refusing to remove symlink tree entry`），于是 scratch 树被永久搁浅，
     而"变体含未预期条目"这条真因还被清理错误盖住。该原语的 docstring 把自己的适用范围
     钉死为正是这一类"内容按构造不可信的残留树"，且从不跟随 symlink（unlink 链接本身）。
+    pinned: test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed（改用
+    `rmtree_no_follow` 即变红：scratch 树被搁浅）。
     """
     _wrap_fs(
         lambda: safe_fs.remove_tree_allow_symlinks(
@@ -453,7 +529,13 @@ def _remove_created_directory(path: Path) -> None:
     `prepare` 全程不持锁，四个 `lexists` 守卫到提交循环之间的窗口有整个 builder 运行时长。
     单次运行下这些目录在回滚时可证为空（本次产物已先被撤回），故 `rmdir` 语义与递归删除
     行为完全一致；一旦不空，`ENOTEMPTY` 是一次**响亮的失败**（收进清理失败附到原始异常
-    上），而不是一次静默的数据删除。
+    上），而不是一次静默的数据删除（pinned:
+    test_rollback_never_recursively_deletes_a_shared_parent）。
+
+    「父目录已消失即无操作」那一支（`except FileNotFoundError: return`）**未钉**，归
+    round-2 记录项：`safe_fs.open_directory_no_follow` 的 docstring 并不承诺缺失父目录一定
+    以裸 `FileNotFoundError` 形态出现，在该形态被上游钉死之前，为它写用例等于把当前实现
+    细节当契约。本阶段不声明。
 
     `os.rmdir` 走父目录 fd，父目录本身用 `safe_fs.open_directory_no_follow` 打开——路径
     逐层 no-follow，与本模块其余文件系统操作同纪律。
@@ -487,6 +569,12 @@ def _run_cleanup_steps(steps: Iterable[Callable[[], None]]) -> list[str]:
     （`os.close`/`os.rmdir`）同样会取消后续步骤，那正是本函数要消除的形态。
     `BaseException`（`KeyboardInterrupt`/`SystemExit`）不收——那是进程要停，属模块头
     已声明的"被杀窗口"，不该被清理循环吞掉。
+
+    三条边界各自钉死（round-2 cand-r2-B1）：每步互不取消 pinned:
+    test_one_failing_rollback_step_does_not_cancel_the_others；不收 `BaseException`
+    pinned: test_keyboard_interrupt_in_a_cleanup_step_is_not_swallowed；收的是 `Exception`
+    而非 `PrepareError` pinned:
+    test_untranslated_oserror_in_a_cleanup_step_does_not_cancel_the_rest。
     """
     failures: list[str] = []
     for step in steps:
@@ -507,10 +595,14 @@ def _copy_tree_publish(
     由控制器按发布权限创建」）。这里每个条目都是**新建**的：目录走
     `safe_fs.ensure_directory_no_follow`（显式 0o755），普通文件走
     `safe_fs.write_bytes_no_follow_exclusive`（新建，落地权限由本进程 umask 决定，不读
-    源 mode）。属主/权限的进一步收紧归 #24/#25 的发布面。
+    源 mode）。属主/权限的进一步收紧归 #24/#25 的发布面。pinned:
+    test_published_entries_do_not_inherit_scratch_modes。
 
     非普通文件（symlink/FIFO/设备）一律拒绝：`safe_fs.stat_no_follow` 对 symlink 直接
-    抛，其余类型在此点名。
+    抛（pinned: test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed），
+    其余类型在此点名——FIFO/socket/设备那一支**未钉**：只有当 builder 恰以三个必需条目名
+    之一产出这类文件时才可达，round-1 已裁定在本阶段真实输入域之外（归 M4，本阶段不
+    声明）。
     """
     _ensure_directory(destination, created, lower_bound=lower_bound)
     names = _wrap_fs(
@@ -544,7 +636,11 @@ def _copy_tree_publish(
 
 
 def _validate_variant(source: str, variant_root: Path, config: Config) -> None:
-    """逐变体的提交前校验；任一条不成立即 `PrepareError`，一个变体都不提交。"""
+    """逐变体的提交前校验；任一条不成立即 `PrepareError`，一个变体都不提交。
+
+    「一个都不提交」pinned: test_partial_success_commits_nothing（`ifs` 失败时 `gfs` 也不
+    落地）、test_reach_count_mismatch_refuses_commit、test_missing_variant_root_refuses_commit。
+    """
     if not variant_root.is_dir():
         raise PrepareError(
             f"builder 未在 {source} 的 variant_root 产出目录：{variant_root}"
@@ -560,6 +656,9 @@ def _validate_variant(source: str, variant_root: Path, config: Config) -> None:
     if unexpected:
         # `.tmp` 残留是最常见的一种，但判据是"恰为预期集合"而非"没有 .tmp"：按后缀
         # 挑剔等于给未来每一种残留形态留一个洞。
+        # pinned: test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed
+        # （残留条目不带 `.tmp` 后缀，把判据窄化成按后缀挑剔即变红）、
+        # test_scratch_residue_refuses_commit、test_missing_variant_entry_refuses_commit
         raise PrepareError(
             f"{source} 变体目录含未预期条目，拒绝提交："
             + "、".join(unexpected)
@@ -579,6 +678,7 @@ def _validate_variant(source: str, variant_root: Path, config: Config) -> None:
     except ValueError as exc:
         # `cfg_ic.parse` 把 OSError/UnicodeDecodeError 都收敛成 ValueError，故这一条
         # 兜住全部解析侧失败；MUST NOT 让它逃出本模块。
+        # pinned: test_unparsable_calibrated_state_refuses_commit
         raise PrepareError(
             f"{source} 变体的率定末态不可解析：{state_path}（{exc}）"
         ) from exc
@@ -586,6 +686,8 @@ def _validate_variant(source: str, variant_root: Path, config: Config) -> None:
     if document.river is None:
         # `CfgIcDocument.river` 是 `Section | None`。把 `None` 当成"0 条 reach"会在
         # `reach_count == 0` 的配置下静默通过——缺 river 段是结构性缺陷，不是一个数量。
+        # pinned: test_missing_river_section_is_not_treated_as_zero_reaches
+        # （`reach_count == 0` 的判别性用例）、test_missing_river_section_refuses_commit
         raise PrepareError(
             f"{source} 变体的率定末态没有 river 段（不是 0 条河段，是缺段）：{state_path}"
         )
@@ -615,6 +717,11 @@ def _verify_root(field_name: str, value: Path | str) -> Path:
 
     校验落在这里而不是装载器：`specs/cli-config/spec.md` 把 `local.toml` 的装载钉死为
     只做存在性与类型检查，往 `config.py` 里加文件系统探测会越过那条规范。
+
+    pinned: test_non_absolute_run_roots_are_refused_before_any_builder_call、
+    test_tilde_run_root_never_touches_the_real_home（真 `$HOME` 不被触碰）、
+    test_missing_run_roots_are_refused_before_any_builder_call、
+    test_symlinked_run_root_is_refused。
     """
     path = Path(value)
     if not path.is_absolute():
@@ -638,6 +745,10 @@ def _refuse_existing_targets(
     是裸 `renameat`（没有 `RENAME_NOREPLACE`），期间落到终名上的既有文件会被**静默替换**
     且运行报成功。第二次探测把窗口从"整个构建时长"压到"探测到 rename 之间的微秒级"。
     POSIX 没有可移植的 `RENAME_NOREPLACE`，剩下的窗口不可消解，本模块也不假装消解。
+
+    pinned: test_target_appearing_after_the_first_guard_is_refused_before_commit（删掉第二
+    次探测即变红）、test_existing_variant_directory_is_refused、
+    test_existing_viewer_geojson_is_refused_byte_for_byte。
     """
     for label, target in labelled_targets:
         if os.path.lexists(target):
@@ -659,9 +770,12 @@ def run_prepare(
     0. **运行根预检**：`local.yd_root` 与 `local.scratch_root` MUST 是绝对路径且是已存在
        的目录（见 `_verify_root`；I3）；
     1. **拒绝覆盖**：四个终名任一 `lexists` 即 `PrepareError`；此时 MUST NOT 创建
-       scratch、MUST NOT 调 builder（`prepare` 不幂等、无 `--force`，compute-loop §6.1）；
+       scratch、MUST NOT 调 builder（`prepare` 不幂等、无 `--force`，compute-loop §6.1；
+       pinned: test_existing_variant_directory_is_refused、
+       test_existing_viewer_geojson_is_refused_byte_for_byte——两者都断言 builder 零调用）；
     2. 在 `local.scratch_root` 下建本次运行专属工作目录（名字含 pid + 随机 token，
-       避免并发/重跑互相覆写）；
+       避免并发/重跑互相覆写；pinned:
+       test_two_runs_get_distinct_scratch_and_staging_names——常量 token 变异即变红）；
     3. 对 `("gfs", "ifs")` 各建一个此前不存在的 `variant_root`，各调 `builder` 一次；
     4. 逐变体产物校验（目录存在、条目集合精确、率定末态可解析、river 段存在且行数等于
        `config.reach_count`）；
@@ -678,9 +792,15 @@ def run_prepare(
     `BuilderUnavailableError` 被降级成 `PrepareError`，`cli` 的退出码 `3` 变成 `1`。故
     分成 `except` / `else` 两条显式路径：清理步骤各自独立执行、失败被收集，失败路径上
     以 `add_note` 附到原始异常（`raise` 裸重抛，异常对象与 traceback 都不动），成功路径上
-    进 `PrepareReport.cleanup_warnings`。清理顺序也钉死为「先 `YD_ROOT` 内 staging、后
-    本地 scratch」：前者承载不变量（留在 `YD_ROOT` 里就是 viewer 能看见的中间态），后者
-    只是一次性本地垃圾，不该反过来卡住前者。
+    进 `PrepareReport.cleanup_warnings`（pinned:
+    test_success_survives_a_staging_cleanup_failure 钉成功路径不被清理失败翻成失败、
+    test_builder_unavailable_survives_a_cleanup_failure 钉失败路径异常类不被降级、
+    test_keyboard_interrupt_from_the_builder_still_rolls_back 钉这里收的是 `BaseException`
+    而非 `Exception`）。清理顺序也钉死为「先 `YD_ROOT` 内 staging、后本地 scratch」：前者
+    承载不变量（留在 `YD_ROOT` 里就是 viewer 能看见的中间态），后者只是一次性本地垃圾，
+    不该反过来卡住前者（等价变异，不可判别：两步互不取消，交换次序不改变任何可观测结果；
+    round-2 已裁定，另见 test_scratch_cleanup_failure_does_not_gate_the_staging_cleanup 钉
+    住"不互相卡住"这一半）。
     """
     # 步骤 0：运行根预检（在任何路径拼接、任何写入、任何 builder 调用之前）。
     yd_root = _verify_root("yd_root", local.yd_root)
@@ -719,6 +839,11 @@ def run_prepare(
                 builder(request)
             except BuilderUnavailableError:
                 # 归属信息就在这条异常里，重新包装会把退出码 3 降级成 1。
+                # 等价变异，不可判别：删掉本分支后紧邻的 `except PrepareError: raise`
+                # 照样把子类原样上浮，可观测行为完全相同（本分支只是把意图写明）。
+                # "不重新包装"这条性质本身由
+                # test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes
+                # 与 test_production_builder_binding_fails_before_any_subprocess 钉住。
                 raise
             except PrepareError:
                 raise
@@ -736,6 +861,8 @@ def run_prepare(
         for source in SOURCE_IDS:
             # staging 内按 source 命名而非按终名叶名：两个终名允许同叶名不同父目录
             # （`a/yd` 与 `b/yd`），照终名命名会在 staging 里撞成一个。
+            # pinned: test_each_final_name_receives_its_own_source_content
+            # （内容按终名对应；两次 staging 复制的源对调即变红）
             _copy_tree_publish(
                 requests[source].variant_root,
                 models_staging / source,
@@ -744,6 +871,9 @@ def run_prepare(
             )
 
         # 步骤 6：GeoJSON 直接落 staging（唯一落点，不经 scratch）。
+        # pinned: test_geojson_feature_counts_match_the_baseline、
+        # test_geometry_failure_rolls_back_validated_variants（`GeometryError` 必须被包装
+        # 成 `PrepareError` 且两个已校验变体一个都不提交）
         _ensure_directory(viewer_staging, created, lower_bound=yd_root)
         try:
             write_viewer_geojson(
@@ -756,6 +886,8 @@ def run_prepare(
 
         # 步骤 7：提交前把四个终名再探一次（TOCTOU 窄化），随后逐个同盘 rename 提交，
         # 顺序「两变体 → rivers → boundary」。
+        # pinned: test_target_appearing_after_the_first_guard_is_refused_before_commit
+        # （复探）、test_every_commit_renames_within_yd_root_on_one_device（顺序与同盘）
         _refuse_existing_targets(labelled_targets, phase="提交前复探")
         plan: list[tuple[Path, str, Path]] = [
             (models_staging, source, variants[source]) for source in SOURCE_IDS
@@ -784,6 +916,11 @@ def run_prepare(
         # 每一步互不取消，失败**收集**而非抛出：抛出会取消其余撤回步骤，并把原始异常
         # （可能是 `BuilderUnavailableError`）替换成一条清理错误。失败以 `add_note` 附
         # 在原始异常上——`raise` 是裸重抛，异常类型、`__cause__` 与 traceback 都不动。
+        # pinned: test_late_commit_failure_rolls_back_already_committed_targets（撤回顺序
+        # 与完整性）、test_one_failing_rollback_step_does_not_cancel_the_others（互不取消）、
+        # test_builder_unavailable_survives_a_cleanup_failure（异常类不被替换）、
+        # test_keyboard_interrupt_from_the_builder_still_rolls_back（这里收的是
+        # `BaseException`；改成 `Exception` 即变红）
         failures = _run_cleanup_steps(
             [partial(_remove_tree, target) for target in reversed(committed)]
             + [partial(_remove_tree, staging_root)]
@@ -799,6 +936,9 @@ def run_prepare(
     else:
         # 步骤 8（成功侧）：只清 staging 与 scratch。失败不升格为异常——四个终名都已
         # 提交，报成失败会让重跑撞上拒绝覆盖守卫（无 `--force`），把一次成功变成死局。
+        # pinned: test_success_survives_a_staging_cleanup_failure、
+        # test_success_reports_no_cleanup_warnings_when_cleanup_is_clean、
+        # test_scratch_cleanup_failure_does_not_gate_the_staging_cleanup
         warnings = _run_cleanup_steps(
             [
                 partial(_remove_tree, staging_root),

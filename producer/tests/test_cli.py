@@ -581,6 +581,57 @@ def test_prepare_error_becomes_exit_one(monkeypatch, capsys, tmp_path):
     assert "Traceback" not in err
 
 
+def test_cleanup_note_reaches_stderr_on_the_exit_one_path(
+    monkeypatch, capsys, tmp_path
+):
+    """退出码 `1` 的失败路径同样渲染 `__notes__`（cand-r3-1）。
+
+    spec cli-config「prepare 的清理告警与残留证据 MUST 到达运维」的失败路径子句没有退出
+    码限定，但此前只有 `BuilderUnavailableError`（退出码 `3`）那一支被钉住：删掉
+    `except PrepareError` 分支里的 `_print_notes(exc)` 全套仍然全绿。M4 之后这一支才是主
+    要残留路径——提交阶段失败叠加清理失败即退出码 `1` 且 `YD_ROOT`/scratch 有残留。
+
+    note 文本与 `str(exc)` **刻意无公共子串**：note 若是异常消息的子串，`_fail(str(exc))`
+    单独就能满足断言，删掉 `_print_notes` 照样绿，用例不具判别性。
+    """
+
+    def raising(**kwargs):
+        exc = prepare_module.PrepareError("提交失败：变体 rename 撞上既有条目")
+        exc.add_note("回滚/清理未完成：injected rollback residue")
+        raise exc
+
+    monkeypatch.setattr(cli, "run_prepare", raising)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 1
+
+    err = capsys.readouterr().err
+    assert "提交失败：变体 rename 撞上既有条目" in err  # 原始异常消息
+    assert "injected rollback residue" in err  # notes 被渲染
+    assert "Traceback" not in err
+
+
+@pytest.mark.parametrize("command", ["prepare", "init", "run"])
+def test_dispatch_resolves_delegates_at_call_time(monkeypatch, tmp_path, command):
+    """三个委托目标 MUST 以**模块级名字**在调用时解析，而非导入时冻结进 dict。
+
+    判别性：本文件其余注入用例对这三个名字只断言 `count == 0`，那是恒真的负面证据——把
+    `main` 的派发改成导入时冻结的 dict 之后，`monkeypatch` 装上的 fake 根本不会被查到，
+    真实委托目标照跑，而 `count == 0` 依旧成立（实测该变异体全套 1061 passed 存活）。
+    唯一能判别的是"打了桩的那一支确实被调用了一次"这条**正面**证据。
+
+    仍在 seam 6 边界之内：三支全部换成记录型 fake，本用例只观察派发去向与退出码透传，
+    不行使任何业务体。
+    """
+    fakes = {name: Recorder(result=0) for name in ("prepare", "init", "run")}
+    for name, fake in fakes.items():
+        monkeypatch.setattr(cli, name, fake)
+
+    assert _exit_code(_argv(command, tmp_path), env={}) == 0
+
+    assert fakes[command].count == 1
+    assert [name for name, fake in fakes.items() if fake.count] == [command]
+
+
 def test_init_reaches_staged_unimplemented(capsys, tmp_path):
     """正控制：`init` 在守卫全过后同样退出 3 并指名归属任务号。"""
     assert _exit_code(_argv("init", tmp_path), env={}) == 3
