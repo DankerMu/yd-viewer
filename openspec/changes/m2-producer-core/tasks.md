@@ -777,10 +777,12 @@ Regression rows:
 
 上方 Regression rows 的**每一行**对应一个具名 pytest 用例，且该用例 MUST 由一个能证伪它的变异体验证过（"有一个用例指向它"不构成覆盖）。另加：
 
-- **承接/自算可区分谓词（round 3 门限的纠正动作，MUST 作为一次穷尽清扫兑现，不是逐条打补丁）**：凡测试对产出 `raw-manifest.json` 断言的**每一个**值，合成源 manifest 里的对应值 MUST 被偏移，使「承接自源」与「由 yd 自算」两种实现产出不同结果；每一处发散 MUST 由一个变红的变异体证明。该谓词在测试侧以一条自检用例落地（对断言面逐项比对源侧值是否发散），新增断言值时 MUST 同步扩充它。
+- **承接/自算可区分谓词（round 3 门限的纠正动作，MUST 作为一次穷尽清扫兑现，不是逐条打补丁）**：凡产出 `raw-manifest.json` 里的**每一个字段**（manifest 级与 entry 级，含 `metadata` 的每个子键），合成源 manifest 里的对应值 MUST 被偏移，使「承接自源」与「由 yd 自算」两种实现产出不同结果；每一处发散 MUST 由一个变红的变异体证明。该谓词在测试侧以一条自检用例落地。
+  - **定义域勘误（round 4 门限）**：本条原写作「凡测试**对产出 manifest 断言的**每一个值」。那个定义域是错的——它把「未被任何用例断言的承接值」结构性地排除在谓词之外，于是谓词再穷尽执行也发现不了它们，而交付当天就有两个实例（复数键 `idx_selectors` 的**值**从未被断言，整份伪造它的变异体全套件绿；`grib_short_name` 同样在清扫表外）。判别器的**定义域**取错，与判别器取在表象轴上是同一类错误，且这一处是编排者自己写进 fixture 的。定义域改为「产出 manifest 的每一个字段」后，「有没有用例断言过它」不再影响它是否受谓词约束。
   - **类边界（有意排除，勿"修"）**：`forecast_hour` 与 `variable` 允许与源侧重合——它们是 `_index_source_entries` 的查找键，偏移它们会破坏查找关系本身而不是判别实现。这两项 MUST 在清扫表里显式标注为排除项并写明理由。
   - 立此谓词的原因：该失效类在 round 1 找到 1 条腿、round 2 找到 6 条、round 3 又找到 2 条。逐轮清点是搜索，不是闭合；有了可复核的谓词才谈得上闭合条件。
-- **准入段兜底地板**：`stage_raw` 的准入段（形参守卫直到 `target-exists` 预检）MUST 整体位于**函数体第一条语句**的 `try` 内，任何非 `{ConfigError, RawStagingError}` 的异常 MUST 被收敛成 `RawStagingError`，`kind` 取 `ADMISSION_FALLBACK_KIND = "source-manifest"`（因果落在源侧外部 JSON，与该 kind 的归属规则一致；本行即该取值的钉死处）。`BaseException` MUST NOT 被改写。判别器 MUST 是**由地板 try 体的 AST 派生**的参数化逃逸探针（新调用点自动入列），外加一条断言地板确实是 `body[0]`、写入段是 `body[1]` 的结构用例——逐个异常类型加用例不构成该项覆盖，那正是 round 1/2/3 反复失败的枚举模式
+- **序列化前置于复制**：本轮 manifest 的序列化 MUST 排在任何复制之前（承接值不可编码时才能做到零写入拒绝，否则会留下「副本全落地 + 0 字节 manifest」的半套产物）。（勘误：该约束原写在 kind 表 `source-manifest` 行的括注里，round 4 改写该行时被编排者一并删去，而 fixture 全文再无第二处落点。）
+- **准入段兜底地板**：`stage_raw` 的准入段（形参守卫直到 `target-exists` 预检）MUST 整体位于**函数体第一条语句**的 `try` 内，任何非 `{ConfigError, RawStagingError}` 的异常 MUST 被收敛成 `RawStagingError`，`kind` 取 `ADMISSION_FALLBACK_KIND = "source-manifest"`（本行即该取值的钉死处）。**该取值是位置轴上的一条显式例外，不是因果规则的一个实例**：地板按**位置**兜住准入段的一切非词表异常，而 `source-manifest` 的归属规则是**因果**的；两者定义域不同，准入段 21 个注入点里多数（路径归一、containment、`target-exists` 预检等）与源 manifest 无因果关系。选既有 kind 而非扩表，是因为九项词表由本 fixture 钉死且其判别力问题已归 #76；代价是调用方无法凭 kind 区分「上游清单坏了」与「yd 准入段自身出错」，此限制 MUST 出现在 Known limits。（勘误：本行原称该取值「因果落在源侧外部 JSON，与该 kind 的归属规则一致」——被它自己的判别器证伪，round 4 CONFIRMED。）`BaseException` MUST NOT 被改写。判别器 MUST 是**由地板 try 体的 AST 派生**的参数化逃逸探针（新调用点自动入列），**外加两条范围断言**：钉 `stage_raw` 顶层语句形状为 `[Try, Assign, Try, Return]`，并钉地板 `Try` 体的**首尾语句**为准入段的具名端点（`verdict.complete` 检查 … `target-exists` 预检）。  - **判别器勘误（round 4 门限）**：本条原要求的是「一条断言地板确实是 `body[0]`、写入段是 `body[1]` 的结构用例」。那条判别器**在证明上无法执行同一 bullet 里的 MUST**：把一条准入语句移到 `body[2]` 即违反 MUST，而该断言满足、全套件绿，且该语句**自我退出**探针参数集（21→20）而无人断言该损失。范围必须钉在**端点**上而不是槽位上。MUST NOT 改为钉 `len(ADMISSION_INJECTION_TARGETS)`——计数会在每次合法新增时变红，正是本 PR 四轮反复失败的枚举模式
 - 源不可变的取证 MUST 是 `os.lstat` 全元组比对（size/mtime_ns/ino/mode），MUST NOT 只比对内容——只比内容抓不到 mtime 被改
 - 三元组完整性 MUST 断言**集合相等**，MUST NOT 断言包含；两个方向各需一个杀手变异体（漏一条 entry / 多一条 entry）
 - 零写入拒绝的取证 MUST 是调用前后对 `work_dir` 做递归快照比对，MUST NOT 只断言 `manifest_path` 不存在
@@ -811,6 +813,8 @@ Regression rows:
 - 多 bundle 配置（`len(bundles) != 1`）在 staging 侧不受支持，需 config 长出 variable→bundle 映射后才能放开（上方单 bundle 约束）
 - 源侧 symlink 一律拒绝，与 3.1 的 `is_file()` 跟随语义有意不对称（上方复制语义）
 - **源 `manifest.json` 叶子段自身不查 symlink，本 issue 有意排除**：symlink MUST 的作用域由上方复制语义逐字限定为「每个源 **bundle 路径**」，Regression rows 有链 bundle 行与链 cycle 目录行、无叶子行。该叶子的**全部祖先段**已被 bundle 走查覆盖，故缺口仅限「叶子自身是链」这一形态。round 1 verifier REFUTED、round 2 复现机制为真后仍维持 REFUTED（无绑定文本归属，verifier 不以翻转判决来裁定范围）。若后续要收口，属 fixture 修订而非实现缺陷
+- **地板兜底 kind 无法与真实源侧失败区分**：`ADMISSION_FALLBACK_KIND = "source-manifest"` 让准入段的任何非词表异常都以该 kind 外抛，而准入段多数注入点（路径归一、containment、`target-exists` 预检）与源 manifest 无因果关系。后果是组 12 控制器按 kind 分流时，无法区分「上游 NWM 清单坏了、该 cycle 不可用」与「yd 准入段自身出了未预期的错」——两者运维处置不同。不扩第十项是因为九项词表由本 fixture 钉死、其判别力问题已归 **#76**；本条随该 issue 一并裁决。
+- **目标侧 symlink containment 的 inode 判据在 CI 上无判别器**：唯一支撑用例在大小写敏感卷（CI 的 ubuntu-latest/ext4）上必然自跳过，而无特权的无条件 seam 级判别器不可构造。补救属 CI 作业面或 fixture 作用域，不是「补一个用例」。follow-up：**issue #89**
 - **九项闭合 kind 词表本身无判别器**：九个 kind 各有具名用例与杀手变异体，但测试从不 import `ERROR_KINDS`，加入第十项的变异体在 747 passed 全绿下存活（round 2 实测，同环境控制变异体 13 failed，harness 已校准）。今日无运行期影响故判 DEFER，但本模块最强的 oracle 锚（逐字钉死的闭合集）目前不设防。follow-up：**issue #76**
 - **产出 manifest 不拒 `NaN`/`Infinity`**：`json.dumps` 默认 `allow_nan=True`，源侧若带非标准 JSON 字面量会原样穿过序列化闸门，严格解析器读不了（round 2 实测）。判 DEFER 的依据是唯一具名契约边界未断——pin 侧 converter 用 `json.load`，默认同样接受。加固成本为一个实参 `allow_nan=False`（抛的 `ValueError` 直接落进现有 except、kind 仍为 `source-manifest`）。follow-up：**issue #75**
 
