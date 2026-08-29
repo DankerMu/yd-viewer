@@ -22,9 +22,8 @@ test_database_url_guard_wins_before_parsing、test_run_rejects_missing_states_di
   test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code；后两条同时钉住
   `except BuilderUnavailableError` 必须先于 `except PrepareError`）。「归属**任务号**」
   这一措辞对 `prepare` 已由 33edb44 放宽为「无编号任务时指名承接阶段」（本模块此处的
-  措辞滞后，不在本轮改动范围；`init`/`run` 两支仍是任务号，pinned:
-  test_init_reaches_staged_unimplemented、
-  test_run_with_non_empty_states_reaches_staged_unimplemented）。
+  措辞滞后，不在本轮改动范围；`init` 自任务 11.1 落地后已不再走此码，`run` 一支仍是
+  任务号，pinned: test_run_with_non_empty_states_reaches_staged_unimplemented）。
 
 **守卫位置**：`DATABASE_URL` 检查是 `main()` 的第一件事，先于 `parse_args` 与任何配置
 装载（agent-ops §2.2 把"不连 NWM 数据库"列为硬约束，环境本身有缺陷时最 fail-closed 的
@@ -60,11 +59,11 @@ from pathlib import Path
 
 from yd_producer import nwm
 from yd_producer.config import Config, ConfigError, LocalConfig, load_config, load_local
-from yd_producer.prepare import BuilderUnavailableError, PrepareError, run_prepare
 
 # 只导入 `bootstrap` 这一个符号：`from yd_producer import init` 会用模块对象遮蔽本模块
 # 的 `init()` 委托目标，`main` 的按名解析随即失效。
 from yd_producer.init import bootstrap
+from yd_producer.prepare import BuilderUnavailableError, PrepareError, run_prepare
 
 __all__ = ["build_parser", "main"]
 

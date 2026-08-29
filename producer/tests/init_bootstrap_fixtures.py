@@ -40,6 +40,7 @@ from cfg_ic_fixtures import (
 
 from yd_producer import init
 from yd_producer.config import (
+    CanonicalGridConfig,
     Config,
     CronLocal,
     CycleConfig,
@@ -109,6 +110,10 @@ def make_config(
         checkpoint_hours=(12,),
         reach_count=3988,
         nwm_mapping_builder_module="workers.mapping_builder.cli",
+        # issue #20 新增的必需字段；init 不读它，但 `Config` 零默认值，缺它即构造失败。
+        nwm_canonical_grid_id=CanonicalGridConfig(
+            gfs="fixture-grid-gfs", ifs="fixture-grid-ifs"
+        ),
         cycle=CycleConfig(hours=tuple(cycle_hours)),
         variants=VariantsConfig(gfs=names["gfs"], ifs=names["ifs"]),
         raw=RawConfig(
