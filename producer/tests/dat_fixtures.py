@@ -98,14 +98,6 @@ def expected_v2_size(*, nc: int, rows: int) -> int:
     return FIXED_HEADER_BYTES + FLOAT64_BYTES * nc + rows * (nc + 1) * FLOAT64_BYTES
 
 
-def write_dat(path: Path, payload: bytes, *, mode: int | None = None) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(payload)
-    if mode is not None:
-        path.chmod(mode)
-    return path
-
-
 def write_sparse_dat(
     path: Path, *, nc: int, rows: int, header_text: str = DEFAULT_HEADER_TEXT
 ) -> Path:

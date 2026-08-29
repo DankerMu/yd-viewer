@@ -31,7 +31,7 @@ import struct
 import tracemalloc
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from cfg_ic_fixtures import build_cfg_ic, build_cfg_ic_rows
@@ -152,7 +152,7 @@ def build_scene(
     checkpoint = scratch / "out" / "checkpoint.cfg.ic"
     if checkpoint_payload is None:
         checkpoint_payload = build_cfg_ic(
-            mesh_count=3, river_count=2, minute=RELATIVE_MINUTE
+            mesh_count=3, river_count=REACH_COUNT, minute=RELATIVE_MINUTE
         ).payload
     checkpoint.write_bytes(checkpoint_payload)
 
@@ -280,6 +280,14 @@ def test_successful_round_lands_five_terminal_names(tmp_path: Path) -> None:
     assert dat.read_bytes() == scene.dat.read_bytes()
     assert done.read_bytes() == b""
     assert state.exists()
+    # 精确目录快照：`products-contract.md` §4.5「不写 status.json / meta.json」，且
+    # 逐名存在性断言放行任何多余条目（含泄漏的 `.tmp`）。
+    assert sorted(
+        p.name for p in (scene.root / "output" / T_TEXT / SOURCE).iterdir()
+    ) == [
+        "DONE",
+        "yd.rivqdown.dat",
+    ]
     assert sorted(p.name for p in (scene.root / "states" / SOURCE).iterdir()) == [
         f"{T_TEXT}.cfg.ic",
         f"{T_PLUS_12}.cfg.ic",
@@ -824,13 +832,14 @@ def test_published_files_do_not_inherit_scratch_mode(
 def test_publish_directories_are_traversable(
     tmp_path: Path, strict_umask: None
 ) -> None:
-    """裁决 8 的目录侧：`output/` 三级都放宽到 0o755，且放宽面既不外溢也不递归。"""
+    """裁决 8 的目录侧：一棵**不含 `output/`** 的根上，三级都放宽到 0o755，且不外溢。
+
+    这棵根刻意不带历史 cycle 目录：`output/` 一旦被预置（哪怕只是为了放一个历史
+    `output/<T-12>/`），它就不再是本次自建的层级，按订正后的裁决 8 就**不该**被本模块改
+    mode。放宽面对历史目录、`states/`、`logs/` 的不外溢由
+    `test_preexisting_output_levels_keep_their_mode` 把守。
+    """
     scene = build_scene(tmp_path, create_output_root=False)
-    builder = YdRootBuilder(scene.root)
-    builder.write_done(T_MINUS_12, SOURCE)
-    historic = scene.root / "output" / T_MINUS_12
-    historic.chmod(0o700)
-    (historic / SOURCE).chmod(0o700)
     states_dir = scene.root / "states" / SOURCE
     logs_dir = scene.root / "logs"
     root_mode = _mode(scene.root)
@@ -839,12 +848,10 @@ def test_publish_directories_are_traversable(
 
     publish.publish(scene.make_inputs())
 
-    assert _mode(scene.root / "output") == 0o755
-    assert _mode(scene.root / "output" / T_TEXT) == 0o755
-    assert _mode(scene.root / "output" / T_TEXT / SOURCE) == 0o755
-    # 放宽面不外溢、不递归
-    assert _mode(historic) == 0o700
-    assert _mode(historic / SOURCE) == 0o700
+    assert _mode(scene.root / "output") & 0o777 == 0o755
+    assert _mode(scene.root / "output" / T_TEXT) & 0o777 == 0o755
+    assert _mode(scene.root / "output" / T_TEXT / SOURCE) & 0o777 == 0o755
+    # 放宽面不外溢
     assert _mode(scene.root) == root_mode
     assert _mode(states_dir) == states_mode
     assert _mode(logs_dir) == logs_mode
@@ -1085,3 +1092,470 @@ def test_state_symlink_still_refused_by_safe_fs(tmp_path: Path) -> None:
 
     with pytest.raises(SafeFilesystemError, match="Refusing to unlink symlink"):
         safe_fs.unlink_no_follow(link, containment_root=root)
+
+
+# --- 错误域收口（round 1 pattern escalation：error-domain-leak） ---
+
+
+def test_unreadable_scratch_dat_converges_to_publish_error(tmp_path: Path) -> None:
+    """`chmod 0o000` 的 scratch DAT：`open_file_no_follow` 裸抛的 `PermissionError`
+    MUST 被收敛（变异体 (ah) 的判别器之一）。
+
+    `SafeFilesystemError` 是 `RuntimeError` 而不是 `OSError`，故两个都要列——只列前者时
+    EACCES/EIO 直接穿透 `check_publish_contract` 的声明错误域。
+    """
+    scene = build_scene(tmp_path)
+    scene.dat.chmod(0o000)
+    before = snapshot_tree(scene.root)
+
+    with pytest.raises(publish.PublishError, match="读取失败"):
+        publish.check_publish_contract(scene.make_inputs())
+    with pytest.raises(publish.PublishError, match="读取失败"):
+        publish.publish(scene.make_inputs())
+
+    _assert_unchanged(before, scene)
+
+
+def test_column_table_read_error_converges_to_publish_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第二趟有界读（列编号表）自己的收敛臂（变异体 (ah) 的第二个判别器）。
+
+    构造的是 `stat_no_follow` 与有界读之间的 ENOENT 竞态：头部读成功之后 DAT 被移走。
+    只收窄 `_check_dat` 那一处的变异体靠上一条用例杀不掉。
+    """
+    scene = build_scene(tmp_path)
+    real_read = publish.read_bytes_limited_no_follow
+    calls: list[int] = []
+
+    def flaky(path, *, max_bytes, **kwargs):  # type: ignore[no-untyped-def]
+        if Path(path) == scene.dat:
+            calls.append(max_bytes)
+            if len(calls) == 2:
+                raise FileNotFoundError(2, "No such file or directory", str(path))
+        return real_read(path, max_bytes=max_bytes, **kwargs)
+
+    monkeypatch.setattr(publish, "read_bytes_limited_no_follow", flaky)
+    before = snapshot_tree(scene.root)
+
+    with pytest.raises(publish.PublishError, match="读取失败"):
+        publish.publish(scene.make_inputs())
+
+    assert len(calls) == 2
+    _assert_unchanged(before, scene)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        SafeFilesystemError("Failed to create DONE: [Errno 5] Input/output error"),
+        OSError(5, "Input/output error"),
+    ],
+    ids=["safe_fs", "bare_oserror"],
+)
+def test_done_landed_then_create_fails_is_cleanup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """`DONE` 已在盘、`_create_done` 仍抛错 -> `PublishCleanupError`（变异体 (ag)）。
+
+    真实域触发点是 `store/safe_fs.py:294-301`：`O_EXCL` 的 `os.open` 之后还有 `fchmod`
+    与 `os.fsync`（NFS 上的 EIO/ENOSPC/EDQUOT），失败臂只关 fd、不 unlink，于是文件对
+    node-27 已经可见而调用方看到的却是「创建失败」。此处把那道窄缝原样重放：先让真实原语
+    把 `DONE` 建出来，再抛错。
+    """
+    scene = build_scene(tmp_path, old_state_cycles=(T_MINUS_12,))
+    real_exclusive = publish.write_bytes_no_follow_exclusive
+
+    def exploding(path, content, **kwargs):  # type: ignore[no-untyped-def]
+        real_exclusive(path, content, **kwargs)
+        raise error
+
+    monkeypatch.setattr(publish, "write_bytes_no_follow_exclusive", exploding)
+
+    with pytest.raises(publish.PublishCleanupError) as excinfo:
+        publish.publish(scene.make_inputs())
+
+    source_dir = scene.root / "output" / T_TEXT / SOURCE
+    done = source_dir / "DONE"
+    assert excinfo.value.done_path == done
+    assert done.is_file()
+    assert (source_dir / "yd.rivqdown.dat").read_bytes() == scene.dat.read_bytes()
+    assert (scene.root / "states" / SOURCE / f"{T_PLUS_12}.cfg.ic").exists()
+
+
+def test_create_done_failure_without_done_on_disk_is_publish_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """反向配重：`DONE` **不在盘**时同一类错误必须仍是 `PublishError`。
+
+    缺了这条，「一律抛 `PublishCleanupError`」也能让上一条全绿，而那会把一个没有 `DONE`
+    的半成品报成已完成轮。
+    """
+    scene = build_scene(tmp_path)
+
+    def exploding(path, content, **kwargs):  # type: ignore[no-untyped-def]
+        raise SafeFilesystemError("Failed to create DONE: [Errno 28] No space left")
+
+    monkeypatch.setattr(publish, "write_bytes_no_follow_exclusive", exploding)
+
+    with pytest.raises(publish.PublishError, match="创建失败"):
+        publish.publish(scene.make_inputs())
+
+    assert not (scene.root / "output" / T_TEXT / SOURCE / "DONE").exists()
+
+
+def test_state_listing_unreadable_after_done_is_cleanup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """步骤 6 的 `DiscoveryUnreadableError` 臂（round 1 cand-09）。
+
+    `controller.DiscoveryUnreadableError` **不是** `OSError` 的子类，故它是那条 `except`
+    元组里唯一一个靠 symlink 形态的旧状态测不到的成员：symlink 走的是 `unlink_no_follow`
+    的 `SafeFilesystemError`。`chmod 0o000` 的 `states/` 不是可用触发器——步骤 4 的状态写入
+    会先失败。
+    """
+    scene = build_scene(tmp_path, old_state_cycles=(T_MINUS_12,))
+
+    def unreadable(directory):  # type: ignore[no-untyped-def]
+        raise controller.DiscoveryUnreadableError(f"目录 {directory} 无法枚举（EIO）")
+
+    monkeypatch.setattr(publish, "visible_state_cycles", unreadable)
+
+    with pytest.raises(publish.PublishCleanupError) as excinfo:
+        publish.publish(scene.make_inputs())
+
+    source_dir = scene.root / "output" / T_TEXT / SOURCE
+    done = source_dir / "DONE"
+    assert excinfo.value.done_path == done
+    assert done.is_file()
+    assert (source_dir / "yd.rivqdown.dat").read_bytes() == scene.dat.read_bytes()
+    assert (scene.root / "states" / SOURCE / f"{T_PLUS_12}.cfg.ic").exists()
+    assert scene.work_dir.exists()
+
+
+@pytest.mark.parametrize("dangling", [True, False], ids=["dangling", "to_real_file"])
+def test_merged_log_symlink_rejects(tmp_path: Path, dangling: bool) -> None:
+    """`merged_log` 是 symlink（断链与指向真实非空文件各一）-> `PublishError`。
+
+    裁决 4 逐字写了四形态含 symlink。目录与 FIFO 的 `lstat` 是**成功**的（失败发生在其后的
+    `S_ISREG`），不存在走 `FileNotFoundError` 臂，故 `stat_no_follow` 抛
+    `SafeFilesystemError` 的那条臂只有本用例能执行到。
+    """
+    scene = build_scene(tmp_path, log_bytes=None)
+    if dangling:
+        scene.log.symlink_to(scene.scratch / "out" / "nowhere.log")
+    else:
+        real = scene.scratch / "out" / "real.log"
+        real.write_bytes(b"job 4242 stdout\n")
+        scene.log.symlink_to(real)
+    before = snapshot_tree(scene.root)
+
+    with pytest.raises(publish.PublishError, match="不可用"):
+        publish.publish(scene.make_inputs())
+
+    _assert_unchanged(before, scene)
+
+
+# --- 权限：放宽面只覆盖本次自建的层级（round 1 cand-02） ---
+
+
+def test_preexisting_output_levels_keep_their_mode(
+    tmp_path: Path, strict_umask: None
+) -> None:
+    """预置为 `0o2750` 的 `output/` 与 `output/<T>/`：mode 逐位不变、setgid 存活。
+
+    `docs/agent-ops.md` §10 把「共享组 + 目录 setgid」列为**首选**做法，故这是现场的正常
+    形态而不是异形输入。无条件 `fchmod(0o755)` 既把一棵刻意收紧的树开成 world `r-x`
+    （变异体 (ai)），又清掉 setgid、让其后新建的条目不再继承共享 gid（变异体 (aj)）。
+    """
+    scene = build_scene(tmp_path, create_output_root=False)
+    builder = YdRootBuilder(scene.root)
+    builder.write_done(T_MINUS_12, SOURCE)
+    historic = scene.root / "output" / T_MINUS_12
+    (historic / SOURCE).chmod(0o700)
+    historic.chmod(0o700)
+    output_root = scene.root / "output"
+    cycle_dir = output_root / T_TEXT
+    cycle_dir.mkdir(parents=True)
+    output_root.chmod(0o2750)
+    cycle_dir.chmod(0o2750)
+    assert _mode(output_root) == 0o2750
+
+    publish.publish(scene.make_inputs())
+
+    assert _mode(output_root) == 0o2750
+    assert _mode(cycle_dir) == 0o2750
+    # 放宽面不递归：历史 cycle 目录不被 walk（变异体 (ab)）。
+    assert _mode(historic) == 0o700
+    assert _mode(historic / SOURCE) == 0o700
+    assert _mode(output_root) & stat.S_ISGID
+    assert _mode(cycle_dir) & stat.S_ISGID
+    # 本次自建的只有最后一级：它被放宽，且从父目录继承来的高位被保留。
+    source_dir = cycle_dir / SOURCE
+    assert _mode(source_dir) & 0o777 == 0o755
+    assert (source_dir / "DONE").is_file()
+
+
+# --- 状态结构闸传权威计数（round 1 cand-04） ---
+
+
+def test_truncated_river_section_is_refused(tmp_path: Path) -> None:
+    """river 段行数少于 `reach_count` 的 checkpoint -> `PublishError`（变异体 (ak)）。
+
+    这正是 `state_qc.py:474-481` 点名的形态：tracker 在 SHUD 非原子改写 `cfg.ic.update`
+    期间捕获到一份 river 段只写了一半的文件。不传 `expected_river_count` 时
+    `_check_row_counts` 对每一类都跳过，它照样拿到 `DONE`，而 `residue.plan_residue` 在
+    `DONE(T)` 存在时清单整体为空——下游无人复检。
+    """
+    scene = build_scene(
+        tmp_path,
+        checkpoint_payload=build_cfg_ic(
+            mesh_count=3, river_count=REACH_COUNT - 6, minute=RELATIVE_MINUTE
+        ).payload,
+    )
+    before = snapshot_tree(scene.root)
+
+    with pytest.raises(publish.PublishError, match="结构不完整"):
+        publish.publish(scene.make_inputs())
+
+    _assert_unchanged(before, scene)
+
+
+# --- 整读长度复核（round 1 cand-08） ---
+
+
+def test_dat_changed_between_check_and_copy_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """整读得到的字节数与校验时的 `st_size` 不符 -> 拒且不写 `DONE`（变异体 (al)）。
+
+    校验读的是发布前那一刻的 `st_size`，步骤 3 的整读是另一次独立 open；scratch 树按裁决 6
+    「按构造不可信」，滞留/重投的作业写入会让落地的 DAT 带上一条从未被校验过的半行尾巴。
+    """
+    scene = build_scene(tmp_path)
+    real_read = publish.read_bytes_no_follow
+
+    def grown(path, **kwargs):  # type: ignore[no-untyped-def]
+        return real_read(path, **kwargs) + b"\x00" * FLOAT64_BYTES
+
+    monkeypatch.setattr(publish, "read_bytes_no_follow", grown)
+
+    with pytest.raises(publish.PublishError, match="在契约检查之后被改动"):
+        publish.publish(scene.make_inputs())
+
+    source_dir = scene.root / "output" / T_TEXT / SOURCE
+    assert not (source_dir / "DONE").exists()
+    assert not (source_dir / "yd.rivqdown.dat").exists()
+    assert scene.work_dir.exists()
+
+
+# --- scratch 侧的一条 symlink 策略（round 1 cand-05 / cand-06） ---
+
+
+def test_checkpoint_symlink_out_of_scratch_is_refused(tmp_path: Path) -> None:
+    """指向 scratch 树外的 checkpoint symlink -> `PublishError`（变异体 (am)）。
+
+    `state.parse(Path)` 走的是 `cfg_ic.py:504-513` 的裸 `open()`，**跟随** symlink：那份
+    外来文件会被重戳成正式的 `<T+12>.cfg.ic`，而同样构造在 `scratch_dat` 上是被拒的。
+    改为 no-follow 有界读后两侧对称。
+    """
+    scene = build_scene(tmp_path)
+    foreign = tmp_path.resolve() / "elsewhere" / "foreign.cfg.ic"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(
+        build_cfg_ic(
+            mesh_count=5, river_count=REACH_COUNT, minute=RELATIVE_MINUTE
+        ).payload
+    )
+    scene.checkpoint.unlink()
+    scene.checkpoint.symlink_to(foreign)
+    before = snapshot_tree(scene.root)
+
+    with pytest.raises(publish.PublishError, match="读取失败"):
+        publish.publish(scene.make_inputs())
+
+    _assert_unchanged(before, scene)
+    assert foreign.exists()
+
+
+def test_publish_succeeds_when_scratch_is_reached_through_symlink(
+    tmp_path: Path,
+) -> None:
+    """scratch 的**祖先**是 symlink 时整轮照常完成（变异体 (an)）。
+
+    `/scratch -> /mnt/scratch` 这类现场布局下，未解析祖先会让 `safe_fs` 的逐分量
+    `O_NOFOLLOW` 在 `DONE` 之前就拒掉每一轮；而只有 work 一条腿走 symlink 时更糟：产物全部
+    落地、步骤 7 抛 `PublishCleanupError`，每个成功轮都留一个孤儿 work。故 `work_root` 与
+    `work_dir` MUST 一起解析。
+    """
+    scene = build_scene(tmp_path, old_state_cycles=(T_MINUS_12,))
+    base = tmp_path.resolve()
+    slink = base / "slink"
+    slink.symlink_to(base, target_is_directory=True)
+    via = slink / "scratch"
+
+    result = publish.publish(
+        scene.make_inputs(
+            scratch_dat=via / "out" / "yd.rivqdown.dat",
+            scratch_checkpoint=via / "out" / "checkpoint.cfg.ic",
+            merged_log=via / "out" / "merged.log",
+            work_dir=via / "work" / SOURCE / T_TEXT,
+            work_root=via / "work",
+        )
+    )
+
+    assert (scene.root / "output" / T_TEXT / SOURCE / "DONE").is_file()
+    assert result.removed_work_dir == scene.work_dir
+    assert not scene.work_dir.exists()
+    assert (scene.work_root / SOURCE / T_MINUS_12).exists()
+
+
+# --- cycle 时区归一（round 1 cand-11） ---
+
+
+def test_aware_non_utc_cycle_lands_on_the_utc_paths(tmp_path: Path) -> None:
+    """`+08:00` 的 20 时 == `2026082612`Z：产物 MUST 落在 UTC 的两条路径上。
+
+    往返自检对这条**没有**判别力：`replace(tzinfo=UTC)` 把它变成 `2026-08-26 20:00Z`，
+    那同样是一个可被 `parse_cycle_id` 认回的整点 cycle——只是错的那个。故断言必须落在
+    真实路径上。
+    """
+    scene = build_scene(tmp_path)
+    cycle = datetime(2026, 8, 26, 20, tzinfo=timezone(timedelta(hours=8)))
+    assert cycle == parse_cycle(T_TEXT)
+
+    result = publish.publish(scene.make_inputs(cycle=cycle))
+
+    assert result.cycle == parse_cycle(T_TEXT)
+    assert (scene.root / "output" / T_TEXT / SOURCE / "DONE").is_file()
+    assert (scene.root / "states" / SOURCE / f"{T_PLUS_12}.cfg.ic").is_file()
+    assert not (scene.root / "output" / "2026082620").exists()
+
+
+# --- `nc` 的有限整数判据（round 1 cand-12） ---
+
+
+@pytest.mark.parametrize(
+    ("label", "packed_nc"),
+    [("NaN", float("nan")), ("非整数", 8.5)],
+)
+def test_non_integral_column_count_rejects(
+    tmp_path: Path, label: str, packed_nc: float
+) -> None:
+    """`nc` 打包成 `NaN` / `8.5` -> `PublishError`（裁决 4 逐字「有限、整数值」）。
+
+    判据删掉后 `int(8.5) == 8` 会通过 `nc != reach_count` 与整条大小算术，`DONE` 落在一份
+    畸形 DAT 上；`int(nan)` 则抛一个裸 `ValueError` 穿透 `check_publish_contract`。
+    字节手术打在 offset 1032（`nc` 的 float64 槽位）。
+    """
+    payload = bytearray(build_dat_bytes(nc=REACH_COUNT, rows=EXPECTED_ROWS))
+    offset = TEXT_HEADER_BYTES + FLOAT64_BYTES
+    payload[offset : offset + FLOAT64_BYTES] = struct.pack("<d", packed_nc)
+    scene = build_scene(tmp_path, dat_payload=bytes(payload))
+    before = snapshot_tree(scene.root)
+
+    with pytest.raises(publish.PublishError, match="不是有限整数值"):
+        publish.publish(scene.make_inputs())
+
+    _assert_unchanged(before, scene)
+
+
+# --- 连续两轮：上一轮没删净的旧状态由下一轮步骤 6 收（round 1 cand-13） ---
+
+
+def _second_round_inputs(scene: Scene) -> publish.PublishInputs:
+    """T+12 那一轮的 scratch 产出（DAT 与日志复用，checkpoint 重新构造）。"""
+    out = scene.scratch / "out2"
+    out.mkdir(parents=True, exist_ok=True)
+    dat = out / "yd.rivqdown.dat"
+    dat.write_bytes(build_dat_bytes(nc=REACH_COUNT, rows=EXPECTED_ROWS))
+    checkpoint = out / "checkpoint.cfg.ic"
+    checkpoint.write_bytes(
+        build_cfg_ic(
+            mesh_count=3, river_count=REACH_COUNT, minute=RELATIVE_MINUTE
+        ).payload
+    )
+    log = out / "merged.log"
+    log.write_bytes(b"job 4243 stdout\n")
+    work_dir = scene.work_root / SOURCE / T_PLUS_12
+    (work_dir / "canonical").mkdir(parents=True, exist_ok=True)
+    return scene.make_inputs(
+        cycle=parse_cycle(T_PLUS_12),
+        scratch_dat=dat,
+        scratch_checkpoint=checkpoint,
+        merged_log=log,
+        work_dir=work_dir,
+    )
+
+
+def test_next_round_reclaims_states_the_previous_round_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invariant Matrix 的 Failure-paths 行：没删净的旧状态由**下一轮的步骤 6** 收。
+
+    第一轮以 `PublishCleanupError` 收尾（步骤 6 的枚举失败），留下 T-24 / T-12 两份**普通
+    文件**残留——这正是那一行成立所需的形态；本套件既有的清理失败用例留下的是 symlink，
+    下一轮的 `unlink_no_follow` 会再次拒绝它，故它不能验证这条。
+    """
+    scene = build_scene(tmp_path, old_state_cycles=(T_MINUS_24, T_MINUS_12))
+    states = scene.root / "states" / SOURCE
+
+    with monkeypatch.context() as patched:
+
+        def unreadable(directory):  # type: ignore[no-untyped-def]
+            raise controller.DiscoveryUnreadableError(f"{directory} 无法枚举（EIO）")
+
+        patched.setattr(publish, "visible_state_cycles", unreadable)
+        with pytest.raises(publish.PublishCleanupError):
+            publish.publish(scene.make_inputs())
+
+    assert sorted(p.name for p in states.iterdir()) == [
+        f"{T_MINUS_24}.cfg.ic",
+        f"{T_MINUS_12}.cfg.ic",
+        f"{T_TEXT}.cfg.ic",
+        f"{T_PLUS_12}.cfg.ic",
+    ]
+    for name in (T_MINUS_24, T_MINUS_12):
+        assert (states / f"{name}.cfg.ic").is_file()
+
+    publish.publish(_second_round_inputs(scene))
+
+    assert sorted(p.name for p in states.iterdir()) == [
+        f"{T_PLUS_12}.cfg.ic",
+        f"{T_PLUS_24}.cfg.ic",
+    ]
+    assert (scene.root / "output" / T_PLUS_12 / SOURCE / "DONE").is_file()
+
+
+def test_widening_preserves_inherited_setgid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strict_umask: None
+) -> None:
+    """自建层级从父目录**继承**到的 setgid 在放宽时必须存活（变异体 (aj)）。
+
+    平台注记：Linux 的 `mkdir` 会把父目录的 `S_ISGID` 继承给新建子目录，这正是
+    `docs/agent-ops.md` §10「共享组 + 目录 setgid」在 node-22 上的落地方式；macOS
+    （本套件的开发平台）**不**继承（实测父 `0o2750` -> 子 `0o755`），故这里在
+    `ensure_directory_no_follow` 的模块内绑定处补上那一步继承，把生产平台的形态搬到断言
+    面前。不这么做，「`fchmod` 写整个 mode 字」这个缺陷在本平台上没有任何判别器。
+    """
+    scene = build_scene(tmp_path, create_output_root=False)
+    real_ensure = publish.ensure_directory_no_follow
+    levels = (
+        scene.root / "output",
+        scene.root / "output" / T_TEXT,
+        scene.root / "output" / T_TEXT / SOURCE,
+    )
+
+    def inheriting(directory, **kwargs):  # type: ignore[no-untyped-def]
+        result = real_ensure(directory, **kwargs)
+        for level in levels:
+            if level.is_dir():
+                level.chmod(_mode(level) | stat.S_ISGID)
+        return result
+
+    monkeypatch.setattr(publish, "ensure_directory_no_follow", inheriting)
+
+    publish.publish(scene.make_inputs())
+
+    for level in levels:
+        assert _mode(level) == 0o2755, level

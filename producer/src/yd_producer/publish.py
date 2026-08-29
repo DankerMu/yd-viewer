@@ -33,6 +33,33 @@ r"""NFS 发布器：一轮成功计算的正式提交（任务 13.1，issue #24�
 两棵子树的全部路径都由该已解析值派生；scratch work 侧的容纳根由调用方显式交来
 （`work_root`），MUST NOT 由 `work_dir` 的父链反推。
 
+**scratch 侧的 symlink 策略只有一条（裁决 14）：入口解析祖先、保留叶子**。
+:class:`PublishInputs` 的五个 scratch 字段（`scratch_dat`、`scratch_checkpoint`、
+`merged_log`、`work_dir`、`work_root`）在 `__post_init__` 里各自做一次
+`path.parent.resolve() / path.name`（`work_root` 是容纳根，整条 `resolve()`）。两条理由
+各钉一半：
+
+* **祖先必须解析**——`containment_root=None` 时 `safe_fs._anchor_for` 从 `/` 起把每一个
+  祖先分量过 `O_NOFOLLOW`，故 `/scratch -> /mnt/scratch` 这类现场布局会让每一轮在
+  `DONE` 之前就失败；而只有 work 一条腿走 symlink 时更糟：产物全部落地、步骤 7 抛
+  :class:`PublishCleanupError`，每个成功轮都留一个无人回收的孤儿 work。
+* **叶子必须保留**——整条 `resolve()` 会把一个指向 scratch 树外的 `scratch_checkpoint`
+  symlink 悄悄解析成它的目标，那份外来文件就会被重戳成正式的 `<T+12>.cfg.ic`。叶子
+  留在原样，`safe_fs` 的 `O_NOFOLLOW` 才能当场拒掉它。
+
+`work_root` 与 `work_dir` MUST **一起**解析：`_relative_parts_under_root` 是纯词法
+`relative_to`，只解析其中一个会让 containment 判定当场断裂，制造出一个每轮必现的新
+:class:`PublishCleanupError`。
+
+错误域不变量：`check_publish_contract` 与 `publish` 的公共边界上，逃出的异常 MUST 恰好是
+:class:`PublishError`（本轮未完成）或 :class:`PublishCleanupError`（本轮已完成），
+「已完成」的判据是 **`DONE` 在盘上存在**而不是「`_create_done` 返回了」。故本模块 MUST NOT
+假定 `safe_fs` 把一切失败都包成 `SafeFilesystemError`：`open_file_no_follow` 对非 `ELOOP`
+的 `OSError` 与 `FileNotFoundError` 是**裸抛**（`store/safe_fs.py:340-341,349-355`），
+`stat_no_follow` 对 symlink 抛 `SafeFilesystemError`（它是 `RuntimeError` 而**不是**
+`OSError`），`controller.DiscoveryUnreadableError` 两者都不是。每一处收敛点因此都同时列
+`SafeFilesystemError` 与 `OSError`（需要专门消息的 `FileNotFoundError` 排在前面）。
+
 正式文件按发布权限创建（`docs/agent-ops.md` §10：不把计算节点的 uid/gid/模式带进 NFS，
 由控制器按发布权限创建）：落地方式一律是「读字节 -> 新建文件写入」，文件位
 :data:`PUBLISH_FILE_MODE`，`output` 子树上本次自建的每一级目录随后显式放宽到
@@ -67,6 +94,7 @@ from yd_producer.controller import (
     visible_state_cycles,
 )
 from yd_producer.state import (
+    MAX_STATE_IC_BYTES,
     cfg_ic_header_minute_time,
     parse,
     render,
@@ -166,27 +194,44 @@ def _normalize_cycle(cycle: datetime) -> datetime:
     return normalized
 
 
+def _resolved_ancestors(path: Path) -> Path:
+    """解析祖先、保留叶子（模块头的 scratch 侧 symlink 策略）。
+
+    MUST NOT 退化成整条 `Path.resolve()`：那会把一个指向 scratch 树外的 symlink 叶子解析
+    成它的目标，`safe_fs` 的 `O_NOFOLLOW` 就再也看不见那一节 symlink。
+    """
+    target = Path(path)
+    return target.parent.resolve() / target.name
+
+
 @dataclass(frozen=True)
 class PublishInputs:
     """一轮发布的**全部**输入。发布器零发现：这里没有的东西，发布器不去找。
 
     `yd_root` 在入口一次性 `resolve()`，结果落在 :attr:`root`；`output/` 与 `states/` 的
     全部路径都由 :attr:`root` 派生（见模块头的 `containment_root` 前置条件）。
+
+    scratch 侧的五个字段在入口按「解析祖先、保留叶子」就地归一（模块头的 symlink 策略），
+    故调用方**不必**先自行 `resolve()`，但也不能指望本类保留原始字面路径。
     """
 
     yd_root: Path
     source: str
     #: 待跑 T。
     cycle: datetime
-    #: 作业产出的 DAT（scratch 侧）。
+    #: 作业产出的 DAT（scratch 侧）。入口解析祖先、保留叶子：叶子是 symlink 时被 `safe_fs`
+    #: 当场拒掉。
     scratch_dat: Path
-    #: tracker 捕获的 T+12 checkpoint（scratch 侧，**未重戳**）。
+    #: tracker 捕获的 T+12 checkpoint（scratch 侧，**未重戳**）。同样解析祖先、保留叶子——
+    #: 它是唯一会变成正式 NFS 产物的 scratch 输入，叶子被解析就等于放行树外文件。
     scratch_checkpoint: Path
-    #: 本轮合并 stdout/stderr。
+    #: 本轮合并 stdout/stderr。入口解析祖先、保留叶子。
     merged_log: Path
-    #: 本轮 scratch `work/<source>/<T>`。
+    #: 本轮 scratch `work/<source>/<T>`。入口解析祖先、保留叶子，且 MUST 与 `work_root`
+    #: **一起**解析（词法 containment 判定）。
     work_dir: Path
-    #: work 删除的容纳根（scratch work 根）。MUST 由调用方显式交来，不由 `work_dir` 反推。
+    #: work 删除的容纳根（scratch work 根）。MUST 由调用方显式交来，不由 `work_dir` 反推；
+    #: 作为容纳根整条 `resolve()`。
     work_root: Path
     #: 期望行数 = `config.forecast_days * 24`。
     expected_rows: int
@@ -202,6 +247,9 @@ class PublishInputs:
         _require_path_component(self.source, label="source")
         object.__setattr__(self, "cycle", _normalize_cycle(self.cycle))
         object.__setattr__(self, "root", Path(self.yd_root).resolve())
+        for name in ("scratch_dat", "scratch_checkpoint", "merged_log", "work_dir"):
+            object.__setattr__(self, name, _resolved_ancestors(getattr(self, name)))
+        object.__setattr__(self, "work_root", Path(self.work_root).resolve())
 
     @property
     def next_cycle(self) -> datetime:
@@ -272,13 +320,16 @@ def _check_done_absent(inputs: PublishInputs) -> None:
     `docs/products-contract.md` §4.4 逐字「重复运行看到 `DONE` 时视为已完成，不覆盖正式
     产物」。任何类型的条目（普通文件、目录、symlink）都算「存在」——symlink 形态下
     `stat_no_follow` 抛的是 `SafeFilesystemError`，此处必须收敛为 `PublishError`，不得穿透。
+
+    探测本身失败（EACCES/EIO 这类裸 `OSError`）同样收敛为 `PublishError` 并 fail closed：
+    此刻 `DONE` 尚未写，「未完成」是唯一正确的对外语义。
     """
     done = inputs.done_path
     try:
         info = _stat_or_none(done, containment_root=inputs.root)
-    except SafeFilesystemError as error:
+    except (SafeFilesystemError, OSError) as error:
         raise PublishError(
-            f"{done} 已存在且形态不合法（{error}）；本轮不覆盖"
+            f"{done} 已存在或无法确认不存在（{error}）；本轮不覆盖正式产物"
         ) from error
     if info is not None:
         raise PublishError(
@@ -293,7 +344,7 @@ def _check_merged_log(inputs: PublishInputs) -> None:
         info = stat_no_follow(log)
     except FileNotFoundError as error:
         raise PublishError(f"合并日志 {log} 不存在") from error
-    except SafeFilesystemError as error:
+    except (SafeFilesystemError, OSError) as error:
         raise PublishError(f"合并日志 {log} 不可用（{error}）") from error
     if not stat.S_ISREG(info.st_mode):
         raise PublishError(f"合并日志 {log} 不是普通文件（st_mode={info.st_mode:#o}）")
@@ -308,14 +359,16 @@ def _read_dat_head(inputs: PublishInputs) -> tuple[int, int]:
         info = stat_no_follow(dat)
     except FileNotFoundError as error:
         raise PublishError(f"DAT {dat} 不存在") from error
-    except SafeFilesystemError as error:
+    except (SafeFilesystemError, OSError) as error:
         raise PublishError(f"DAT {dat} 不可用（{error}）") from error
     if not stat.S_ISREG(info.st_mode):
         raise PublishError(f"DAT {dat} 不是普通文件（st_mode={info.st_mode:#o}）")
 
     try:
         head = read_bytes_limited_no_follow(dat, max_bytes=DAT_FIXED_HEADER_BYTES)
-    except SafeFilesystemError as error:
+    except (SafeFilesystemError, OSError) as error:
+        # `SafeFilesystemError` 是 `RuntimeError`，两个都要列：`open_file_no_follow` 对
+        # EACCES/EIO 与 `stat` 到 open 之间被删掉的 ENOENT 竞态都是裸抛 `OSError`。
         raise PublishError(f"DAT {dat} 读取失败（{error}）") from error
     if len(head) < DAT_FIXED_HEADER_BYTES:
         raise PublishError(
@@ -353,11 +406,14 @@ def _check_v2_text_header(text_header: bytes, *, dat: Path) -> None:
         raise PublishError(f"DAT {dat} 非 v2：1024 字节文本头含非可打印 ASCII 字节")
 
 
-def _check_dat(inputs: PublishInputs) -> None:
-    """v2 布局 + 列数 + 行数。行数判据是**恰好相等**：残行一律拒绝。
+def _check_dat(inputs: PublishInputs) -> int:
+    """v2 布局 + 列数 + 行数，交回**校验通过的字节数**。行数判据是**恰好相等**：残行一律拒绝。
 
     `docs/products-contract.md` §5.1 逐字「不规定残行修复」；`rSHUD/R/readout.R:41` 对残行
     只 `message` 不报错，那份宽容不得进入 producer 的写 `DONE` 闸。
+
+    交回 `expected_size` 是给步骤 3 用的：整读是另一次独立 open，与本次 `st_size` 之间
+    scratch 上若有滞留/重投的作业写入，落地的就是一份从未被校验过的字节（裁决 12）。
     """
     dat = inputs.scratch_dat
     nc, size = _read_dat_head(inputs)
@@ -370,7 +426,7 @@ def _check_dat(inputs: PublishInputs) -> None:
     table_end = DAT_FIXED_HEADER_BYTES + _FLOAT64_BYTES * nc
     try:
         table = read_bytes_limited_no_follow(dat, max_bytes=table_end)
-    except SafeFilesystemError as error:
+    except (SafeFilesystemError, OSError) as error:
         raise PublishError(f"DAT {dat} 读取失败（{error}）") from error
     if len(table) < table_end:
         raise PublishError(
@@ -383,21 +439,32 @@ def _check_dat(inputs: PublishInputs) -> None:
             f"DAT {dat} 的数据区字节数不符：期望 {inputs.expected_rows} 行"
             f"（共 {expected_size} 字节），实得 {size} 字节；残行一律拒绝"
         )
+    return expected_size
 
 
 def _restamped_bytes(inputs: PublishInputs) -> bytes:
     """步骤 1：读 checkpoint、重戳到绝对 T+12，返回**内存中**的字节。
 
     MUST NOT 回写 scratch 原文件：那是失败路径要回收的证据。
+
+    读法是 **no-follow 有界读**后再解析 `bytes`（裁决 14(a)）：`state.parse(Path)` 走的是
+    `state/cfg_ic.py:504-513` 刻意保留的裸 `open()`，它**跟随** symlink，于是一份指向
+    scratch 树外的 checkpoint symlink 会被重戳成正式的 `<T+12>.cfg.ic`——而同样构造在
+    `scratch_dat` 上是被拒的。`parse` 的 `bytes` 分支保留 `MAX_STATE_IC_BYTES` 尺寸闸
+    （`read_bytes_limited_no_follow` 多读一个哨兵字节，超界因此可判）。
     """
     checkpoint = inputs.scratch_checkpoint
     try:
-        doc = parse(checkpoint)
+        raw = read_bytes_limited_no_follow(checkpoint, max_bytes=MAX_STATE_IC_BYTES)
+    except (SafeFilesystemError, OSError) as error:
+        raise PublishError(f"checkpoint {checkpoint} 读取失败（{error}）") from error
+    try:
+        doc = parse(raw)
     except (ValueError, OSError) as error:
         raise PublishError(f"checkpoint {checkpoint} 无法解析（{error}）") from error
     try:
         restamped = restamp_to_absolute_time(doc, inputs.next_cycle)
-    except ValueError as error:
+    except (ValueError, OverflowError, OSError) as error:
         raise PublishError(
             f"checkpoint {checkpoint} 无法重戳到 T+12（{error}）"
         ) from error
@@ -411,10 +478,24 @@ def _check_restamped_state(payload: bytes, inputs: PublishInputs) -> None:
     时间判据与 `controller._classify_state` 逐字同构：header 的分钟时标 `round()` 后必须
     等于 `round((T+12).timestamp()/60)`，**相对分钟一律不接受**。写出去的那份状态，正是
     下一轮前沿闸门要读的那份。
+
+    结构判据 MUST 传**权威计数** `expected_river_count=reach_count`：不传时
+    `state_qc._check_row_counts` 对每一类都 `if expected is None: continue`，唯一还生效的
+    只剩「分段存在」，于是一份 river 段被截断的 checkpoint（tracker 在 SHUD 非原子改写
+    `cfg.ic.update` 期间捕获，正是 `state_qc.py:474-481` 点名的形态）照样拿到 `DONE`，
+    下一轮从中毒 IC 起跑且下游无人复检。
     """
-    if not state_ic_structure_complete(payload):
-        raise PublishError("重戳后的 T+12 状态结构不完整，无法按分段格式读取")
-    doc = parse(payload)
+    if not state_ic_structure_complete(
+        payload, expected_river_count=inputs.reach_count
+    ):
+        raise PublishError(
+            f"重戳后的 T+12 状态结构不完整（river 段期望 {inputs.reach_count} 行），"
+            "无法按分段格式读取"
+        )
+    try:
+        doc = parse(payload)
+    except ValueError as error:  # pragma: no cover - 结构闸已先行拒绝
+        raise PublishError(f"重戳后的 T+12 状态无法解析（{error}）") from error
     tokens = doc.lines[doc.header_index].split()
     observed = cfg_ic_header_minute_time(tokens)
     expected_minute = round(inputs.next_cycle.timestamp() / 60)
@@ -445,18 +526,18 @@ def _check_positive_expectations(inputs: PublishInputs) -> None:
         )
 
 
-def _check_and_restamp(inputs: PublishInputs) -> bytes:
-    """DONE 前的全部契约检查，返回重戳后的状态字节。**零写入**。
+def _check_and_restamp(inputs: PublishInputs) -> tuple[bytes, int]:
+    """DONE 前的全部契约检查，返回（重戳后的状态字节，DAT 的合法字节数）。**零写入**。
 
     次序固定：期望值正数闸（不读文件）-> 重戳（步骤 1）-> DAT/状态/日志/`DONE` 前置。
     """
     _check_positive_expectations(inputs)
     payload = _restamped_bytes(inputs)
-    _check_dat(inputs)
+    dat_size = _check_dat(inputs)
     _check_restamped_state(payload, inputs)
     _check_merged_log(inputs)
     _check_done_absent(inputs)
-    return payload
+    return payload, dat_size
 
 
 def check_publish_contract(inputs: PublishInputs) -> None:
@@ -465,24 +546,29 @@ def check_publish_contract(inputs: PublishInputs) -> None:
     通过时返回 `None`；任一判据不满足抛 :class:`PublishError`。只读 scratch 侧的 DAT /
     checkpoint / 合并日志，外加 NFS 侧 `DONE(T)` 的不存在前置。
     """
-    _check_and_restamp(inputs)
+    _check_and_restamp(inputs)  # 交回值只有 `publish` 用得上（裁决 12 的长度复核）
 
 
 # --- 提交 ---
 
 
 def _widen_publish_dir(directory: Path, *, root: Path) -> None:
-    """把本次自建的发布目录放宽到 :data:`PUBLISH_DIR_MODE`。
+    """把**本次自建**的发布目录放宽到 :data:`PUBLISH_DIR_MODE`。
 
     `ensure_directory_no_follow` 逐字拒绝放宽（`store/safe_fs.py:107-131`：「the umask may
     further restrict a safe_fs directory, it may never loosen it」），故 umask 0o077 的现场
     它落地即 0o700。放宽方式是 fd 绑定的（`open_directory_no_follow` + `os.fchmod`），不用
     跟随 symlink 的路径式写法；原语交回的是裸 fd，必须在 `finally` 里关掉。
-    对已合规的目录重复放宽是幂等的。
+
+    高位（`S_ISGID`/sticky）MUST 保留：`chmod` 写的是整个 mode 字，直接写 `0o755` 会清掉
+    setgid，其后在该目录下新建的每一个条目都不再继承共享 gid，运维手动 `chmod g+s` 的补救
+    每轮都被抹掉（`docs/agent-ops.md` §10 把共享组 + setgid 列为**首选**做法）。自建目录同样
+    可能从父目录继承到 setgid，故这条对「只放宽自建层级」的调用点也是必需的。
     """
     fd = open_directory_no_follow(directory, containment_root=root)
     try:
-        os.fchmod(fd, PUBLISH_DIR_MODE)
+        high_bits = stat.S_IMODE(os.fstat(fd).st_mode) & ~0o777
+        os.fchmod(fd, high_bits | PUBLISH_DIR_MODE)
     finally:
         os.close(fd)
 
@@ -493,24 +579,56 @@ def _prepare_output_dir(inputs: PublishInputs) -> None:
     `output/` 这一级在全新根上同样由本发布器补建（任务 11.1 的 init 只写 `states/`）。
     umask 0o077 下漏掉它，node-27 连 `output/` 都穿不进去，下面两级的 0o755 全部白设。
     逐级、非递归：不 walk 历史 cycle 目录，不触碰 `states/`、`logs/` 或 `YD_ROOT` 自身。
+
+    **先 stat 再决定**（裁决 8）：放宽面严格等于「本次调用之前**不存在**的层级」。已存在的
+    层级一律不动——现场按 `docs/agent-ops.md` §10 把 `output/` 设成 `2750`（共享组 +
+    setgid）时，无条件 `fchmod(0o755)` 既把一棵刻意收紧的树开成 world `r-x`，又清掉
+    setgid，两者都不是「放宽」。
     """
     root = inputs.root
-    ensure_directory_no_follow(inputs.source_output_dir, containment_root=root)
-    for directory in (
+    levels = (
         inputs.output_root,
         inputs.cycle_output_dir,
         inputs.source_output_dir,
-    ):
+    )
+    self_created = [
+        directory for directory in levels if not _entry_exists(directory, root=root)
+    ]
+    ensure_directory_no_follow(inputs.source_output_dir, containment_root=root)
+    for directory in self_created:
         _widen_publish_dir(directory, root=root)
 
 
-def _publish_dat(inputs: PublishInputs) -> None:
+def _entry_exists(path: Path, *, root: Path) -> bool:
+    """本次发布**之前**该路径上是否已有条目。
+
+    symlink 形态（`stat_no_follow` 抛 `SafeFilesystemError`）算「已存在」：既然不是本次
+    自建的，就不该被本模块改 mode——后续的 `ensure_directory_no_follow` 会按它自己的策略
+    拒掉它。探测失败（裸 `OSError`）同样算「已存在」，方向上偏保守（不动别人的 mode）。
+    """
+    try:
+        return _stat_or_none(path, containment_root=root) is not None
+    except (SafeFilesystemError, OSError):
+        return True
+
+
+def _publish_dat(inputs: PublishInputs, expected_size: int) -> None:
     """步骤 3：整读 scratch DAT，按发布权限新建写入并在同目录内原子 rename 为终名。
 
     整读的上界已由 `_check_dat` 钉死的 `st_size` 等式约束（先证明大小合法，再整读）。
     落地方式是「读字节 -> 新建文件写入」，故 scratch 侧的 uid/gid/mode 一概不随产物过来。
+
+    整读之后**复核长度**（裁决 12）：校验读的是发布前那一刻的 `st_size`，整读是另一次独立
+    open，两者之间 scratch 上若有滞留/重投的作业写入，落地的就是一份带半行尾巴、从未被校验
+    过的 DAT，而 `DONE` 会把它封成正式产物。零额外 IO。用 `PublishError` 而不是 `assert`：
+    `assert` 在 `-O` 下整条消失。
     """
     payload = read_bytes_no_follow(inputs.scratch_dat)
+    if len(payload) != expected_size:
+        raise PublishError(
+            f"DAT {inputs.scratch_dat} 在契约检查之后被改动：整读得 {len(payload)} 字节，"
+            f"校验时是 {expected_size} 字节；不发布未被校验的字节"
+        )
     atomic_write_bytes_no_follow(
         inputs.dat_path,
         payload,
@@ -541,6 +659,27 @@ def _create_done(inputs: PublishInputs) -> None:
         containment_root=inputs.root,
         mode=PUBLISH_FILE_MODE,
     )
+
+
+def _done_is_on_disk(inputs: PublishInputs) -> bool:
+    """`DONE` 是否**已在盘上**——这是「本轮已完成」的判据，不是「`_create_done` 返回了」。
+
+    `write_bytes_no_follow_exclusive` 在 `O_EXCL` 的 `os.open` 之后还有两步会失败
+    （`fchmod`、以及真实域里的 `os.fsync` EIO/ENOSPC/EDQUOT，`store/safe_fs.py:294-301`），
+    而它的失败臂只关 fd、**不 unlink**（那是原语的既有行为，本 issue MUST NOT 改它：加
+    unlink 会改变既有 `mode=None` 调用方的失败路径）。于是文件可能已经对 node-27 可见，
+    错误却是「创建失败」。故失败后 MUST 复探：在盘即 :class:`PublishCleanupError`。
+
+    任何条目（含 symlink、目录）都算「在盘」——viewer 与 `decide_frontier` 判的就是条目
+    存在与否。复探本身失败时返回 `False`（收敛为 `PublishError`）：不能凭一次失败的探测
+    宣布本轮已完成。
+    """
+    try:
+        return _stat_or_none(inputs.done_path, containment_root=inputs.root) is not None
+    except SafeFilesystemError:
+        return True
+    except OSError:
+        return False
 
 
 def _stale_state_files(inputs: PublishInputs) -> tuple[Path, ...]:
@@ -596,23 +735,23 @@ def _remove_work(inputs: PublishInputs) -> None:
 def publish(inputs: PublishInputs) -> PublishResult:
     """按模块头的七步序提交一轮成功计算。
 
+    公共边界上逃出的异常恰好是下面两个之一（模块头的错误域不变量），判据是 **`DONE` 在盘
+    上存在**而不是「哪一步抛的错」。
+
     Raises:
-        PublishError: 契约检查拒绝（NFS 侧零字节变更），或步骤 3–5 中途失败（不回滚，留
-            无 `DONE` 的半成品）。两种形态都表示**本轮未完成**。
-        PublishCleanupError: `DONE` 已写成之后的旧状态 / work 清理失败。本轮**已完成**，
-            调用方 MUST NOT 触发失败侧回收。
+        PublishError: 契约检查拒绝（NFS 侧零字节变更），或步骤 3–5 中途失败且 `DONE` 不在
+            盘（不回滚，留无 `DONE` 的半成品）。两种形态都表示**本轮未完成**。
+        PublishCleanupError: `DONE` 已在盘之后的任何失败——含步骤 5 自身在 `O_EXCL` 创建
+            成功、其后 `fchmod`/`fsync` 失败的那道窄缝，以及步骤 6/7 的旧状态 / work 清理
+            失败。本轮**已完成**，调用方 MUST NOT 触发失败侧回收。
     """
-    payload = _check_and_restamp(inputs)
+    payload, dat_size = _check_and_restamp(inputs)
 
     try:
         _prepare_output_dir(inputs)
-        _publish_dat(inputs)
+        _publish_dat(inputs, dat_size)
         _publish_state(payload, inputs)
-    except SafeFilesystemError as error:
-        raise PublishError(
-            f"发布 {inputs.source}/{cycle_id(inputs.cycle)} 失败：{error}"
-        ) from error
-    except OSError as error:
+    except (SafeFilesystemError, OSError) as error:
         raise PublishError(
             f"发布 {inputs.source}/{cycle_id(inputs.cycle)} 失败：{error}"
         ) from error
@@ -620,12 +759,17 @@ def publish(inputs: PublishInputs) -> PublishResult:
     try:
         _create_done(inputs)
     except FileExistsError as error:
+        # 这条臂意味着**另一个写者**建了它（`O_EXCL` 的语义），不是本轮完成：不覆盖，
+        # 按未完成收敛。
         raise PublishError(
             f"{inputs.done_path} 在契约检查之后被并发创建：本轮不覆盖正式产物"
         ) from error
-    except SafeFilesystemError as error:
-        raise PublishError(f"{inputs.done_path} 创建失败：{error}") from error
-    except OSError as error:
+    except (SafeFilesystemError, OSError) as error:
+        if _done_is_on_disk(inputs):
+            raise PublishCleanupError(
+                f"{inputs.done_path} 已在盘（本轮完成），但创建过程未正常收尾：{error}",
+                done_path=inputs.done_path,
+            ) from error
         raise PublishError(f"{inputs.done_path} 创建失败：{error}") from error
 
     # --- 以下是 `DONE` 之后：本轮已完成，失败一律 `PublishCleanupError` ---
