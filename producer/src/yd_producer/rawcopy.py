@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from yd_producer.config import Config, ConfigError, RawSourceConfig
-from yd_producer.raw.manifest import DownloadManifest, ManifestEntry
+from yd_producer.raw.manifest import DownloadManifest, ManifestEntry, parse_cycle_time
 from yd_producer.rawscan import (
     CYCLE_DIR_FORMAT,
     SOURCE_DIR_NAMES,
@@ -55,9 +55,11 @@ SOURCE_MANIFEST_FILENAME = "manifest.json"
 # entry 级 `metadata` 的承接键，恰好 pin 构建期自写的 6 个
 # （NWM@8ae9b8f2 gfs_adapter.py:623-634；ifs_adapter.py 同形）。逐条承接，缺一即
 # fail closed——本仓 MUST NOT 发明其中任何一个的值。
+ENTRY_CYCLE_TIME_KEY = "cycle_time"
+ENTRY_VALID_TIME_KEY = "valid_time"
 ENTRY_METADATA_KEYS: tuple[str, ...] = (
-    "cycle_time",
-    "valid_time",
+    ENTRY_CYCLE_TIME_KEY,
+    ENTRY_VALID_TIME_KEY,
     "bundle",
     "grib_short_name",
     "cfgrib_filter_by_keys",
@@ -421,7 +423,10 @@ def _reject_lossy_forecast_hours(payload: Mapping[str, Any], path: Path) -> None
 
     判据取「`int()` 是否有损」而不是枚举 `float`/`str`/`bool`：严格要求 `int` 且
     排除 `bool`（`bool` 是 `int` 子类，`int(True) == 1`）。`3.0` 也拒——它同样让
-    「源里写的」与「yd 读到的」不是同一个值，且 pin 侧从不产出浮点 lead。
+    「源里写的」与「yd 读到的」不是同一个值。（§3.1 **没有**记载该字段的值类型，故
+    此处不作任何 pin 行为断言；本仓逐字副本 `raw/manifest.py` 的
+    `generate_segmented_forecast_hours` 返回 `list[int]`，这是本仓侧的旁证而不是
+    pin 事实——闸门的理由是「有损归一改变取值」本身，不依赖源侧写什么。）
     """
     entries = payload.get("entries")
     if not isinstance(entries, list):
@@ -550,10 +555,87 @@ def _index_source_entries(
     return index
 
 
+def _entry_instant(value: Any, *, key: str, lead: int, variable: str) -> datetime:
+    """把承接来的 entry 时间解析成**时刻**；不可解析即 fail closed。
+
+    走本仓 `raw/manifest.py` 的 `parse_cycle_time`（与 manifest 级 `cycle_time` 同一
+    个解析器），故比较的是时刻而不是文本：`…Z`、`…+00:00`、`…-05:00` 是同一时刻的
+    三种合法 ISO-8601 写法，源侧写哪种不受本仓约束。**逐字承接的仍是原文本**，本函数
+    只用于核对，不改写落盘值。
+    该解析器把**不带偏移**的写法按 UTC 解释（`ensure_utc`，`raw/manifest.py:12-16`）：
+    这是本仓既有约定，此处沿用而不另立一套 —— 是选择，不是遗漏。
+    """
+    try:
+        return parse_cycle_time(value)
+    except (AttributeError, ValueError) as exc:
+        # 两个分量各自可达、各自有判别器：非字符串（`json.load` 会产出 `int`/`list`/
+        # `None`）在 `value.strip()` 上抛 `AttributeError`，不合 ISO-8601 的字符串在
+        # `fromisoformat`/`strptime` 上抛 `ValueError`。**不列 `TypeError`**：从
+        # `json.load` 的输出里没有一条路径能走到它（要走到需要 `bytes`），列进来就是
+        # 一条没有判别器的腿；真出现时准入地板仍会兜住，只是给泛化诊断。
+        raise RawStagingError(
+            f"源 manifest 的 (lead={lead}, variable={variable!r}) entry 的 `{key}` "
+            f"不是可解析的时刻，实际 {type(value).__name__} {_safe_repr(value)}",
+            "source-manifest",
+        ) from exc
+
+
+def _check_carried_times(
+    carried: Mapping[str, Any], *, cycle: datetime, lead: int, variable: str
+) -> None:
+    """承接来的 entry 时间 MUST 对应它被归档到的 (cycle, lead) 槽位。
+
+    承接是逐字的，但「逐字承接一个与本轮槽位不符的时刻」会让产出物**自相矛盾**：
+    manifest 级 `cycle_time` 由 yd 自算（= 形参 `cycle`，`_render_manifest`），而
+    entry 级的两个时间来自源 manifest；源侧若填的是另一轮的时间，落盘的
+    `raw-manifest.json` 就会在 manifest 级声明一个 cycle、在每条 entry 上声明另一个，
+    且全部 lead 共用同一个 `valid_time`。这份不一致 yd 从自己的入参就能判出来，
+    故 fail closed 而不是把它写进产物。
+    （**不**在此声称下游 converter 如何使用 `valid_time`：勘察清单 §3.1 没有记载
+    converter 读 entry 级 `valid_time` 的任何一行，可锚定的危害只是产物自相矛盾。）
+
+    两个分量各自独立判：`cycle_time` 对应本轮 cycle，`valid_time` 对应 cycle + lead。
+    """
+    expected_cycle = cycle.astimezone(UTC)
+    declared_cycle = _entry_instant(
+        carried[ENTRY_CYCLE_TIME_KEY],
+        key=ENTRY_CYCLE_TIME_KEY,
+        lead=lead,
+        variable=variable,
+    )
+    if declared_cycle != expected_cycle:
+        raise RawStagingError(
+            f"源 manifest 的 (lead={lead}, variable={variable!r}) entry 的 "
+            f"`{ENTRY_CYCLE_TIME_KEY}` {_safe_repr(carried[ENTRY_CYCLE_TIME_KEY])} "
+            f"不是本轮 cycle {expected_cycle.isoformat()}；承接一个别轮的时刻会让"
+            "产出 manifest 在 manifest 级与 entry 级声明两个不同的 cycle",
+            "source-manifest",
+        )
+    expected_valid = expected_cycle + timedelta(hours=lead)
+    declared_valid = _entry_instant(
+        carried[ENTRY_VALID_TIME_KEY],
+        key=ENTRY_VALID_TIME_KEY,
+        lead=lead,
+        variable=variable,
+    )
+    if declared_valid != expected_valid:
+        raise RawStagingError(
+            f"源 manifest 的 (lead={lead}, variable={variable!r}) entry 的 "
+            f"`{ENTRY_VALID_TIME_KEY}` {_safe_repr(carried[ENTRY_VALID_TIME_KEY])} "
+            f"不是 cycle + lead = {expected_valid.isoformat()}；该 entry 被归档在 "
+            f"lead {lead} 的槽位上",
+            "source-manifest",
+        )
+
+
 def _carried_metadata(
-    source_entry: ManifestEntry, lead: int, variable: str
+    source_entry: ManifestEntry, lead: int, variable: str, cycle: datetime
 ) -> dict[str, Any]:
-    """从源 entry 逐条承接语义键；本仓 MUST NOT 发明其中任何一个。"""
+    """从源 entry 逐条承接语义键；本仓 MUST NOT 发明其中任何一个。
+
+    「不发明」不等于「不核对」：两个时间键另由 `_check_carried_times` 与本 entry 被
+    归档到的 (cycle, lead) 槽位对账，落盘的仍是源侧原值。
+    """
     metadata = source_entry.metadata
     if not isinstance(metadata, Mapping):
         raise RawStagingError(
@@ -569,6 +651,7 @@ def _carried_metadata(
                 "source-manifest",
             )
         carried[key] = metadata[key]
+    _check_carried_times(carried, cycle=cycle, lead=lead, variable=variable)
 
     selectors = metadata.get(IDX_SELECTORS_KEY)
     if isinstance(selectors, Mapping):
@@ -687,7 +770,7 @@ def _build_entries(
                     "其 entry 集合无法覆盖本轮预期的 (lead, variable) 全集",
                     "source-manifest",
                 )
-            metadata = _carried_metadata(source_entry, lead, variable)
+            metadata = _carried_metadata(source_entry, lead, variable, cycle)
             _check_accumulation(metadata, lead, variable)
             entries.append(
                 ManifestEntry(

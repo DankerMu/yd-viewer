@@ -73,6 +73,12 @@ SHORT_NAMES = {
 MANIFEST_NAME = "raw-manifest.json"
 SOURCE_MANIFEST_NAME = "manifest.json"
 
+# 两条**诊断消息**的片段。准入地板与各消费点自己的闸门给出的 kind 相同
+# （都是 `source-manifest`），于是「这条失败由哪一级诊断」只能判在消息上：闸门给具名
+# 诊断，地板给泛化兜底。逐字写死，MUST NOT 从被测模块 import。
+STRUCTURE_MESSAGE = "结构不合 NWM DownloadManifest 形态"
+FLOOR_MESSAGE = "准入期出现未预期的异常"
+
 # entry metadata 的六个承接键（NWM@8ae9b8f2 gfs_adapter.py:623-634）。
 CARRIED_KEYS = (
     "cycle_time",
@@ -189,6 +195,14 @@ LOGICAL_REMOTE_HOST = "https://example.invalid/"
 #   entry，于是「按 verdict 扇出」与「把源 entry 列表照搬」条数相同。
 # - `SOURCE_ENTRY_ORDER_REVERSED`：entry **顺序**是 lead 升序 × variables 声明序，
 #   源侧原先恰好同序，于是「照抄源顺序」不可判别。
+# - `SOURCE_SHORT_NAME_TOKEN`（round-4 复审补）：`grib_short_name` 的源侧取值原先就是
+#   标准别名（`tmp2m -> "2t"`），而那正是一个「按变量名查标准别名表自算」的实现会写
+#   的值；两侧重合，`CARRIED_KEYS` 循环退化成恒真式（实测：把 fixture 的别名表改成
+#   恒等映射后全套件仍全绿）。源侧加一个不可由任何别名表推导的后缀。
+# - `SOURCE_IDX_TOKEN`（round-4 复审补）：复数 `idx_selectors` 此前只被断言过**键集**，
+#   而键集可由 config 的变量表推导；把每个变量的 selector 整份伪造成空 Mapping（一个
+#   字节都不承接）的实现全套件全绿。源侧每个 selector 里加一个不可推导的分量，并在
+#   清扫里断言**取值**逐字承接。
 SOURCE_CHECKSUM = (
     "sha256:0000000000000000000000000000000000000000000000000000000000c0ffee"
 )
@@ -198,6 +212,9 @@ SOURCE_BUNDLE_TOKEN = "pin-build-8ae9b8f2"
 SOURCE_CFGRIB_TOKEN = "pin-filter-8ae9b8f2"
 SOURCE_EXTRA_VARIABLE = "sfcwind"
 SOURCE_ENTRY_ORDER_REVERSED = True
+SOURCE_SHORT_NAME_TOKEN = "@pin-8ae9b8f2"
+SOURCE_IDX_TOKEN_KEY = "idx_source_token"
+SOURCE_IDX_TOKEN = "pin-idx-8ae9b8f2"
 
 
 def source_iso(moment: datetime) -> str:
@@ -206,17 +223,23 @@ def source_iso(moment: datetime) -> str:
 
 
 def selector_for(variable: str, lead: int) -> dict[str, Any]:
-    """合成的 `IdxSelection.as_metadata()` 四键（NWM@8ae9b8f2 :248-258）。"""
+    """合成的 `IdxSelection.as_metadata()` 四键（NWM@8ae9b8f2 :248-258）。
+
+    另带一个**不可推导**的分量 `SOURCE_IDX_TOKEN_KEY`：没有它，「逐字承接复数键」与
+    「按 config 的变量表现造一份 selector」在断言下同值。
+    """
     return {
         "step_range": f"{max(lead - 3, 0)}-{lead}",
         "accumulation_type": "interval_bucket",
         "idx_record_number": 7 + lead,
         "selector_warning": None,
+        SOURCE_IDX_TOKEN_KEY: SOURCE_IDX_TOKEN,
     }
 
 
 def entry_payload(source: str, lead: int, variable: str) -> dict[str, Any]:
-    short_name = SHORT_NAMES[variable]
+    # 源侧 short name 带一个不可由任何别名表推导的后缀：见 `SOURCE_SHORT_NAME_TOKEN`。
+    short_name = SHORT_NAMES[variable] + SOURCE_SHORT_NAME_TOKEN
     segment = f"{DIR_SEGMENTS[source]}/{CYCLE_DIR}/"
     remote = SOURCE_REMOTE_HOST + segment
     logical = LOGICAL_REMOTE_HOST + segment
@@ -725,6 +748,146 @@ def test_missing_carried_metadata_key_fails_closed(tmp_path: Path) -> None:
     expect_kind(excinfo, "source-manifest")
 
 
+# --- Row：承接来的 entry 时间与 (cycle, lead) 槽位的一致性 --------------------
+#
+# 承接是逐字的，但一条「时间属于另一轮」的源 entry 若被照单全收，产出的
+# `raw-manifest.json` 会在 manifest 级声明一个 cycle（yd 自算）、在每条 entry 上声明
+# 另一个，且全部 lead 共用同一个 `valid_time`——一份自相矛盾的落盘产物，而这份矛盾
+# yd 从自己的入参就能判出来。下面四条按**分量**取判别器：`cycle_time` 分量、
+# `valid_time` 分量、解析腿各一条，外加一条证明比较取在**时刻**而不是文本上的绿用例。
+
+
+def _retime_entries(
+    payload: dict[str, Any],
+    *,
+    cycle_time=None,
+    valid_time=None,
+) -> None:
+    """把每条源 entry 的两个时间键改写成给定值（可调用则按 lead 取值）。"""
+    for entry in payload["entries"]:
+        lead = entry["forecast_hour"]
+        if cycle_time is not None:
+            entry["metadata"]["cycle_time"] = (
+                cycle_time(lead) if callable(cycle_time) else cycle_time
+            )
+        if valid_time is not None:
+            entry["metadata"]["valid_time"] = (
+                valid_time(lead) if callable(valid_time) else valid_time
+            )
+
+
+def test_entries_labelled_with_another_cycle_are_refused(tmp_path: Path) -> None:
+    """整份源 manifest 的 entry 时间属于另一轮 -> 拒绝，零写入。
+
+    这是 round-4 的复现输入：staging 原本**成功**，产出 manifest 的 manifest 级
+    `cycle_time` 是本轮、每条 entry 是 2019 年那轮，且三个 lead 的 `valid_time` 相同。
+    """
+    payload = source_manifest_payload("gfs")
+    other_cycle = datetime(2019, 7, 4, 18, tzinfo=UTC)
+    _retime_entries(
+        payload,
+        cycle_time=source_iso(other_cycle),
+        valid_time=source_iso(other_cycle + timedelta(hours=3)),
+    )
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert snapshot(work_dir) == {}
+
+
+def test_entry_cycle_time_alone_off_by_one_cycle_is_refused(tmp_path: Path) -> None:
+    """`cycle_time` **分量**的判别器：只有它错、`valid_time` 全部正确。"""
+    payload = source_manifest_payload("gfs")
+    _retime_entries(payload, cycle_time=source_iso(CYCLE - timedelta(hours=6)))
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert "cycle_time" in str(excinfo.value)
+    assert snapshot(work_dir) == {}
+
+
+def test_entry_valid_time_alone_not_matching_the_lead_is_refused(
+    tmp_path: Path,
+) -> None:
+    """`valid_time` **分量**的判别器：`cycle_time` 全部正确，`valid_time` 恒等于
+    cycle（即 round-4 复现里「所有 lead 同一个 valid_time」那半边）。
+
+    lead 0 上它恰好是对的，判别力来自 lead 3/6——故本用例同时证明该分量是**逐 lead**
+    判的，不是只看一条。
+    """
+    payload = source_manifest_payload("gfs")
+    _retime_entries(payload, valid_time=source_iso(CYCLE))
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert "valid_time" in str(excinfo.value)
+    assert snapshot(work_dir) == {}
+
+
+@pytest.mark.parametrize(
+    ("bad_value", "leg"),
+    [
+        # `json.load` 会产出的非字符串形态：`parse_cycle_time` 在 `.strip()` 上抛
+        # `AttributeError`。
+        (20260304, "AttributeError"),
+        # 字符串但不是 ISO-8601：在 `fromisoformat` 上抛 `ValueError`。
+        ("not-a-time", "ValueError"),
+    ],
+)
+def test_unparseable_entry_time_is_refused_by_the_entry_time_gate(
+    tmp_path: Path, bad_value: Any, leg: str
+) -> None:
+    """解析腿的判别器：不可解析的时间由**本闸门**以具名消息拒，不是掉进准入地板。
+
+    地板对二者给出同一个 kind，故判别器取在**消息**上：闸门说「不是可解析的时刻」，
+    地板说「准入期出现未预期的异常」。去掉解析腿就只剩后者。
+    `except (AttributeError, ValueError)` 是复合闸门，故**两个分量各一行参数**：
+    只收窄到其中一个，另一行就会红。
+    """
+    payload = source_manifest_payload("gfs")
+    _retime_entries(payload, cycle_time=bad_value)
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert "不是可解析的时刻" in str(excinfo.value), leg
+    assert "准入期出现未预期的异常" not in str(excinfo.value)
+    assert snapshot(work_dir) == {}
+
+
+def test_entry_times_written_in_another_offset_stage_normally(tmp_path: Path) -> None:
+    """一致性核对取在**时刻**上，不是文本上：源侧用 `-05:00` 写同一批时刻 ->
+    正常产出，且落盘值仍是源侧那串**原文本**（承接是逐字的，核对不改写）。
+
+    这是「按字符串比 `cycle.isoformat()`」这种退化实现的判别器：那样写会把一份
+    完全正确的源 manifest 拒掉。
+    """
+
+    def offset_iso(moment: datetime) -> str:
+        return moment.astimezone(timezone(timedelta(hours=-5))).isoformat()
+
+    payload = source_manifest_payload("gfs")
+    _retime_entries(
+        payload,
+        cycle_time=offset_iso(CYCLE),
+        valid_time=lambda lead: offset_iso(CYCLE + timedelta(hours=lead)),
+    )
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    result = staged(raw_root, work_dir)
+    produced = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert produced["cycle_time"] == CYCLE_ISO  # manifest 级仍由 yd 自算
+    for entry in produced["entries"]:
+        metadata = entry["metadata"]
+        assert metadata["cycle_time"] == offset_iso(CYCLE)
+        assert metadata["cycle_time"].endswith("-05:00")
+        assert metadata["valid_time"] == offset_iso(
+            CYCLE + timedelta(hours=entry["forecast_hour"])
+        )
+
+
 # --- Row：verdict-mismatch 与其相对路径对照 ----------------------------------
 
 
@@ -1011,13 +1174,21 @@ def test_non_integer_typed_forecast_hours_entry_fails_closed(tmp_path: Path) -> 
 
 
 def test_source_manifest_without_entries_key_fails_closed(tmp_path: Path) -> None:
-    """`DownloadManifest.from_dict` 的 `KeyError` MUST 收敛成 `source-manifest`。"""
+    """`DownloadManifest.from_dict` 的 `KeyError` MUST 收敛成 `source-manifest`。
+
+    同时是形态闸门 `if not isinstance(entries, list): return` 这条腿的判别器：该腿的
+    语义是「结构面不归本闸门，交给下一步的结构闸门」。判别器取在**消息**上——kind
+    两边相同（地板兜底也给 `source-manifest`），去掉该腿后 `enumerate(None)` 的
+    `TypeError` 会掉进准入地板，消息随之从具名的结构诊断退化成泛化的兜底诊断。
+    """
     payload = source_manifest_payload("gfs")
     payload.pop("entries")
     raw_root, work_dir = build_tree(tmp_path, manifest=payload)
     with pytest.raises(RawStagingError) as excinfo:
         staged(raw_root, work_dir)
     expect_kind(excinfo, "source-manifest")
+    assert STRUCTURE_MESSAGE in str(excinfo.value)
+    assert FLOOR_MESSAGE not in str(excinfo.value)
 
 
 def test_apcp_without_any_selector_mapping_fails_closed(tmp_path: Path) -> None:
@@ -2006,10 +2177,28 @@ def _install(monkeypatch: pytest.MonkeyPatch, dotted: str, replacement: Any) -> 
 def test_admission_phase_is_structurally_enclosed_by_one_floor() -> None:
     """`stage_raw` 的**整个**准入段落在唯一一个收口 `try` 内，无第二块、无块外语句。
 
-    这条断言才是闭合本身：它证明的不是「现在这些点位都被接住了」，而是「准入段与
-    收口块是同一个词法区间」，因此任何**将来**新增的准入语句都在块内。
+    判据取在**范围**上而不是槽位上。只钉 `body[0]` 是 `try`、`body[1]` 是写入期起点
+    是不够的：一条准入语句被移到 `body[2]`（仍在任何写入之前）就同时逃出地板**和**
+    AST 派生的探针参数集（实测 21 -> 20），违反 MUST 而全套件全绿。故这里钉两件事：
+    函数体顶层的**完整形状**（多出任何一条语句即红），以及地板 `try` 体的**首尾**
+    语句就是 fixture 具名的准入段两端点（任一端被移出即红）。
+
+    MUST NOT 改成钉 `len(ADMISSION_INJECTION_TARGETS)`：计数会在每次**合法**新增调用
+    点时变红，且它对「语句被移出地板」与「语句被删掉」不可区分——那正是本仓复盘所
+    批判的枚举式判别器。
+
+    **两条如实登记的残留**（本断言覆盖不到，不粉饰）：
+    - 准入语句被移进**写入段**的 `try`：那里有另一套 handler，是另一个问题；
+    - 准入工作被抽成函数、由写入段调用：任何 AST 用例都测不出来。
     """
     body = _stage_raw_body()
+    # 顶层形状：地板 try / 写入期起点 / 写入段 try / return，恰好四条。
+    assert [type(stmt).__name__ for stmt in body] == [
+        "Try",
+        "Assign",
+        "Try",
+        "Return",
+    ], [type(stmt).__name__ for stmt in body]
     node = body[0]
     assert isinstance(node, ast.Try), (
         "函数体第一条语句必须是收口 try（否则块前有裸语句）"
@@ -2018,6 +2207,13 @@ def test_admission_phase_is_structurally_enclosed_by_one_floor() -> None:
     following = body[1]
     assert isinstance(following, ast.Assign), "收口块之后必须紧接写入期起点"
     assert [t.id for t in following.targets if isinstance(t, ast.Name)] == ["written"]
+    # 地板 try 体的首尾 = 准入段的两个端点（fixture 逐字：「形参守卫直到
+    # `target-exists` 预检」）。首端是 `verdict.complete` 检查，尾端是
+    # `os.path.lexists` 的 target-exists 预检。
+    first = ast.unparse(node.body[0])
+    last = ast.unparse(node.body[-1])
+    assert "verdict.complete" in first, first
+    assert "os.path.lexists" in last and "target-exists" in last, last
 
     kinds = [ast.unparse(handler.type) for handler in node.handlers]
     assert kinds == ["(ConfigError, RawStagingError)", "Exception"], kinds
@@ -2073,13 +2269,16 @@ def test_admission_call_boundary_contains_injected_non_vocabulary_exception(
             ), "注入的异常必须留在 `__cause__`/`__context__` 里，不得被抹掉"
         if isinstance(exc, RawStagingError):
             assert exc.kind in rawcopy_module.ERROR_KINDS
+        # 零写入取证 MUST 落在**收口成功**这条分支上——19 个注入点实际走的就是它。
+        # （原先这两行写在下面 `raise` 之后，是不可达死码：探针于是对 governing
+        # invariant 第三合取项「不留任何部分产物」零判别力。）
+        monkeypatch.undo()
+        assert snapshot(work_dir) == {}, "准入期失败 MUST 零写入"
     except BaseException as exc:  # 探针要看的就是逃逸
         raise AssertionError(
             f"{dotted} 处注入的 {type(exc).__name__} 逃出了 "
             "{ConfigError, RawStagingError} 词表"
         ) from exc
-        monkeypatch.undo()
-        assert snapshot(work_dir) == {}, "准入期失败 MUST 零写入"
     else:
         monkeypatch.undo()
         assert not calls, f"{dotted} 被调用了却没有失败，注入无效"
@@ -2220,12 +2419,107 @@ def test_lossy_forecast_hour_shape_is_refused_before_any_write(
     assert snapshot(work_dir) == {}
 
 
+# 形态闸门 `if not isinstance(entry, Mapping) or "forecast_hour" not in entry` 是一条
+# **复合闸门**，两个分量各自的语义都是「这条 entry 不归本闸门管，交给结构闸门给出具名
+# 诊断」。两个分量各配一条判别器，判据取在消息上（kind 两侧同为 `source-manifest`）。
+
+
+def test_non_mapping_source_entry_is_diagnosed_by_the_structure_gate(
+    tmp_path: Path,
+) -> None:
+    """第一分量 `not isinstance(entry, Mapping)`：非容器 entry MUST 走结构闸门。
+
+    去掉该分量后 `"forecast_hour" not in 42` 抛 `TypeError`（`int` 不可迭代），落进
+    准入地板，诊断退化成泛化兜底。用 `42` 而不是字符串：字符串上 `in` 是**合法**的
+    子串判定、不抛，那样的输入对本分量没有判别力。
+    """
+    payload = source_manifest_payload("gfs")
+    payload["entries"].append(42)
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert STRUCTURE_MESSAGE in str(excinfo.value)
+    assert FLOOR_MESSAGE not in str(excinfo.value)
+    assert snapshot(work_dir) == {}
+
+
+def test_source_entry_without_forecast_hour_is_diagnosed_by_the_structure_gate(
+    tmp_path: Path,
+) -> None:
+    """第二分量 `"forecast_hour" not in entry`：缺该键的 entry MUST 走结构闸门。
+
+    去掉该分量后 `entry["forecast_hour"]` 抛 `KeyError`，同样落进准入地板。
+    """
+    payload = source_manifest_payload("gfs")
+    orphan = json.loads(json.dumps(source_entry(payload, 3, "apcp")))
+    orphan.pop("forecast_hour")
+    payload["entries"].append(orphan)
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert STRUCTURE_MESSAGE in str(excinfo.value)
+    assert FLOOR_MESSAGE not in str(excinfo.value)
+    assert snapshot(work_dir) == {}
+
+
+def test_safe_repr_falls_back_again_when_even_the_type_name_raises() -> None:
+    """`_safe_repr` 的**内层**兜底：连 `type(value).__name__` 都抛时仍不得抛。
+
+    外层兜底自己会取类型名去拼消息，于是一个 `__name__` 抛异常的元类能让「保证不抛」
+    的收口器与 `rollback` 在它们**自己的**兜底逻辑里失守。这条腿此前无判别器（删掉
+    内层 `except` 全套件不变红）。
+    """
+
+    class ExplodingName(type):
+        @property
+        def __name__(cls) -> str:  # 元类上的 property，故形参是类而非实例
+            raise RuntimeError("类型名也取不到")
+
+    class Pathological(metaclass=ExplodingName):
+        def __repr__(self) -> str:
+            raise RuntimeError("repr 自身抛异常")
+
+    value = Pathological()
+    # 前提取证：两层都真的会抛，本用例不是在测一个不会触发的分支。
+    with pytest.raises(RuntimeError):
+        repr(value)
+    with pytest.raises(RuntimeError):
+        _ = type(value).__name__
+    # 抛出即失败，但**不让病态对象进异常链**：它会连 pytest 自己的报告拼装一起炸
+    # （实测：内层兜底缺失时整轮 pytest 以 INTERNALERROR 收场，看不到红条）。
+    try:
+        rendered = rawcopy_module._safe_repr(value)
+    except BaseException as exc:  # noqa: BLE001 —— 判的就是「它抛了没有」
+        rendered = f"<_safe_repr 抛了 {type(exc).__name__}>"
+    assert rendered == "<无法取 repr 的对象>"
+
+    # 对照：只有 `__repr__` 抛的普通对象走**外层**兜底，两条腿不是同一条。
+    class OnlyReprRaises:
+        def __repr__(self) -> str:
+            raise RuntimeError("只有 repr 抛")
+
+    assert rawcopy_module._safe_repr(OnlyReprRaises()) == (
+        "<OnlyReprRaises 对象，repr() 自身抛异常>"
+    )
+
+
 def test_fractional_shadow_entry_cannot_hijack_a_real_slot(tmp_path: Path) -> None:
     """影子 entry（`forecast_hour: 3.9` + 完整 `idx_selectors`）MUST NOT 被接受。
 
-    没有形态闸门时它会占住 (3, "apcp") 的槽位，把 `remote_url` 与六键喂进产出
-    manifest 而 staging 正常成功。`idx_selectors` 必须带上——否则它会被
-    `_check_accumulation` 提前吸收成 `accumulation-metadata`，用例白绿。
+    **本用例是两条闸门的联合端到端回归，不是任一条的判别器**，这一点如实写明：该影子
+    同时是「`int()` 有损归一」与「(3, "apcp") 重复键」两种违规，于是只去形态闸门时由
+    injectivity 守卫接住、只去 injectivity 守卫时由形态闸门接住，**只有两条同时去掉
+    才变红**（round-4 实测：G1 不红、G2 不红、G1+G2 红）。原 docstring 声称「没有形态
+    闸门时它会占住槽位且 staging 正常成功」，在本 head 上不成立。
+    单条闸门各自的判别器另有其人，不在此重复构造：形态闸门是
+    `test_lossy_forecast_hour_shape_is_refused_before_any_write[3.9]`（坏 entry 是该
+    (lead, variable) 的唯一一条，不涉重复），injectivity 守卫是
+    `test_duplicate_source_entry_key_is_refused`（重复键是纯整数，不涉归一）。
+    它在这里的价值是那条**联合**性质：「一条源侧影子 entry 无法劫持一个真实槽位」。
+    `idx_selectors` 必须带上——否则它会被 `_check_accumulation` 提前吸收成
+    `accumulation-metadata`，用例白绿。
     """
     payload = source_manifest_payload("gfs")
     shadow = _shadow_entry(payload, 3, "apcp", forecast_hour=3.9)
@@ -2287,8 +2581,10 @@ def test_contains_by_identity_catches_inner_being_a_link_to_outer(
     outer.mkdir()
     inner = tmp_path / "link-to-raw"
     inner.symlink_to(outer, target_is_directory=True)
-    # 前提取证：两条路径归一后**不相交**，纯词法判据抓不到。
-    assert not inner.resolve().is_relative_to(tmp_path / "elsewhere")
+    # 前提取证：`inner` 在**词法**上不在 `outer` 之下，故 `is_relative_to` 这类纯
+    # 字符串前缀判据抓不到它。（原先这里比的是一个从未创建的 `elsewhere` 目录，对
+    # 任意路径恒为 False——是恒真式，不是前提。）
+    assert not inner.is_relative_to(outer)
     assert os.path.samestat(os.stat(inner), os.stat(outer))
     assert rawcopy_module._contains_by_identity(outer, inner) is True
     # 反向判别器：祖先段里没有 `outer` 时必须为 False（否则上一条恒真）。
@@ -2421,6 +2717,17 @@ def test_every_asserted_manifest_value_diverges_from_its_source_side_value(
         # 推导的分量，于是「承接」与「按已知形状重建」可判别。
         assert metadata["bundle"]["build_id"] == SOURCE_BUNDLE_TOKEN
         assert metadata["cfgrib_filter_by_keys"]["filterToken"] == SOURCE_CFGRIB_TOKEN
+        # `grib_short_name`：逐字承接。源侧带不可推导后缀，故与「按变量名查标准别名表
+        # 自算」发散——没有这个偏移，源侧就是标准别名本身，两种实现同值。
+        assert metadata["grib_short_name"] == source_metadata["grib_short_name"]
+        assert metadata["grib_short_name"].endswith(SOURCE_SHORT_NAME_TOKEN)
+        assert metadata["grib_short_name"] != variable
+        # 复数 `idx_selectors` 的**取值**（不只是键集）逐字承接：键集可由 config 的
+        # 变量表推导，只断言键集时「整份伪造复数键」的实现无法判别。
+        assert metadata["idx_selectors"] == source_metadata["idx_selectors"]
+        assert metadata["idx_selectors"]
+        for name, selector in metadata["idx_selectors"].items():
+            assert selector[SOURCE_IDX_TOKEN_KEY] == SOURCE_IDX_TOKEN, name
         # `remote_url` MUST 取源 entry 的同名字段，MUST NOT 取 `logical_remote_url`。
         assert entry["remote_url"] == origin["remote_url"]
         assert entry["remote_url"] != source_metadata["logical_remote_url"]

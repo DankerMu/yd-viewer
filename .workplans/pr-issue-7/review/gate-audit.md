@@ -17,19 +17,35 @@ render_bundle_filename, zip, load, S_ISLNK, sorted, len}`；只数函数体（�
 `ast.arg` 与 `AnnAssign` 的注解子树。实跑结果：head `b11138e` 上 **172** 个节点，
 round-4 修复后的 head 上 **191** 个。
 
+**round-5 重跑（本轮）**：规则未改，脚本按上面这段正文**独立重实现**了一次
+（`scratchpad/count_nodes.py`，先在 `b11138e` 与 `12acddb` 两个旧 head 上复现出
+**172 / 191** 逐字相符，再跑本轮源）。round-5 修复后的源上是 **200** 个节点（+9，
+全部来自新增的 entry 时间一致性闸门）。「规则可由正文重新导出」这条性质仍成立——
+本轮的 172/191 复现即是它的第二次独立验证。
+
 **「157」这个数字无法复现，故不再沿用。** 我按上述规则以及若干条变体规则（方法调用按
 点号全链匹配 / 不数 `Subscript` / 只数 `except` 与 `if`）都试过，没有一组能在
 `b11138e` 上得出 157——原审计只写了「采集哪些节点类型」，没有写死方法调用的匹配方式
 与注解剔除范围，故该数字不可复核。本轮把规则连同脚本一并钉死，代价是数字与旧记录不
 连续；这是有意的：一个不可复核的数字比一个变化的数字更糟。
 
-归并为下表 **103 + 24 = 127** 条闸门。**「无第三桶」这条完整性断言是假的，已作废**：
+归并为下表 **116 + 24 = 140** 条闸门（round-5：103 -> 116，死腿登记 24 条不变）。
+**「无第三桶」这条完整性断言是假的，已作废**：
 round-3 verifier 用三个**存活**变异体（E2/E4/E6）加两处穷举 grep 证明有五条闸门既不在
 表内、也不在死腿登记内。本轮把这五条各自归位（其中 tier-3 的 `add_note` 现已有杀手
 变异体、进表；其余四条是防御腿，进死腿登记并附理由——**MUST NOT 为它们编造覆盖**）。
 本轮不重新推导旧有的 88 条表内行；改动是「补上被证明缺席的行 + 纠正被证明错分的行 +
 登记本轮新增闸门」，因此 88 -> 103、20 -> 24 的增量逐条可核（见下两表的「round-4」标记
 行），而「归并总数 vs 原始节点数」这条映射仍有人工成分，不作完整性断言。
+
+**round-5 重扫（本轮）**：round-4 的复审用四个**存活**变异体证明「两桶穷尽」这条 MUST
+**再次**被违反，且违反者是 round-4 自己新增的四条闸门腿（`rawcopy.py:427` 的
+`if not isinstance(entries, list)`、`:432` 的复合闸门、`:171-172` 的 `_safe_repr` 内层兜底、
+`:578` 的复数 `idx_selectors` 承接）。同一把尺子这次也量了**本轮**新增的代码：entry 时间
+一致性闸门的每一条腿（两个比较分量、解析腿及其 `except` 元组的两个分量、以及「比较取在
+时刻而非文本」这一条）逐条进表、逐条配杀手变异体。`:432` 是「复合闸门只由单分量背书」的
+新实例，故按**分量**拆成两行、各配一个变异体。表内 103 -> **116**（新增 13 行，见下表
+「round-5」标记行）；死腿登记 **24 条不变**（本轮没有新增无判别器的腿）。
 
 **round-1 修复后重修（PR #65）**：复合闸门按**分量**重新展开（见文末「复合闸门逐分量
 重修」），表内由 38 条细化为 71 条，死腿登记 20 条不变。
@@ -82,6 +98,31 @@ MBUNDLE / MCFGRIB / MCOUNT / MORDER / E1 / E4 / E3 / REPR），全部对**最终
 故下表的红/绿不是陈旧字节码或 venv 重绑定的产物。这 14 个候选没有一个走大小写条件
 路径，故卷类别不影响本批结论。
 
+**round-5 修复轮的变异实验**：私有 scratch
+`…/102003db-765c-4fe8-a9a2-80dd7bc03c67/scratchpad/mut/{producer,openspec,docs}`
+（同一套 profile 措施：三个 rsync exclude + 仓根 `openspec/`/`docs/`、副本内
+`env -u VIRTUAL_ENV uv sync --frozen --python 3.12`、`PYTHONDONTWRITEBYTECODE=1` 且逐变异体
+清 `__pycache__`、逐变异体先 `grep` 断言变异 token 已落地、**恢复一律 `cp` 自工作树**并
+`diff -q` 校验）。解释器 **CPython 3.12.12**，卷 **darwin / APFS 大小写不敏感**
+（CI 是 ubuntu-latest / ext4 大小写敏感，其大小写条件路径不在本批测量范围内；本批 18 个
+变异体没有一个走该路径）。本轮基线 **808 passed / 16 skipped**（round-4 的 799 + 本轮新增
+9 条用例；`--collect-only` 815 -> **824**；逃逸探针参数集仍为 **21**）。控制变异
+**CTL0 / CTL1 / CTL2 / CTL3**（`_local_key` 前缀 `raw/` -> `rawCTL0/` 等）在候选**之前与之后**各跑：
+CTL0（改动落地前的 799 基线上）= **18 failed / 781 passed / 16 skipped**，CTL1（中途 807 基线）=
+**18 failed / 789 passed / 16 skipped**，CTL2 与 CTL3（最终 808 基线）=
+**18 failed / 790 passed / 16 skipped**。CTL1 与 CTL3 的红集**逐条同名**（18 个测试名
+排序后逐字节相同，实测比对）；CTL0 只留了计数，未留名单，故对它只作计数一致的声明。
+本轮候选 17 个：M1 / M3 / LEAK / N1 / N2a / N2b / N3 / MSEL / MSHORT / DRIFT /
+V1a / V1b / V1c / V1c-a / V1c-b / V1d / V1d2，逐条见上表「round-5」标记行。
+**沿用边界**：M1 / M3 / LEAK / N1 / N2a / N2b / N3 / MSEL / MSHORT / DRIFT / V1a / V1b / V1d / V1d2
+跑在中途源（807 基线）上，它们所指的闸门语句与杀手用例在最终源上**逐字节未变**，故结论沿用；
+`_entry_instant` 的 `except` 元组在最终源上被改写过，故 V1c / V1c-a / V1c-b 三个都是在
+最终源（808 基线）上跑的。另有一次**批量红证**：
+把 `12acddb` 的 `rawcopy.py` 放回本轮测试之下 = **5 failed**（entry 时间一致性的五行拒绝
+用例），偏移写法的绿用例仍绿——即新增用例确实咬住的是新增的闸门，而不是恒真式。
+节点计数脚本按本文件正文规则**独立重实现**，先复现 `b11138e` = 172、`12acddb` = 191，
+再得本轮源 = 200。
+
 **一条本轮才发现的环境陷阱，profile 应吸收**：仓内没有 `.python-version`，
 `producer/pyproject.toml` 只写 `requires-python = ">=3.12"`。工作树的 `.venv` 是既有的
 3.12；而**全新的 scratch 副本**里 `uv sync --frozen` 会选到当时最新的解释器（本次选到
@@ -98,7 +139,7 @@ legacy 行所指的闸门语句在本轮 diff 中**逐字节未变**（`_carried
 `_check_accumulation` 的取值域三闸门、`_reconstruct_sources` 的两处比对、`_render_manifest`
 的字段赋值），结论沿用。
 
-## 表内闸门（103 条，各有杀手变异体，全部实测变红）
+## 表内闸门（116 条，各有杀手变异体，全部实测变红）
 
 | 闸门（行/语义） | 所在函数 | 杀手变异体 | 结果 |
 |---|---|---|---|
@@ -190,7 +231,7 @@ legacy 行所指的闸门语句在本轮 diff 中**逐字节未变**（`_carried
 | `_ensure_dir` 的账本**登记时序**（先记账再 mkdir） | `_ensure_dir` | MF2 把 `written.dirs.extend` 移回 mkdir 之后 + `test_mkdir_failing_midway_leaves_no_directories_behind` | RED |
 | `_ensure_dir` 的 `mkdir` OSError 腿 | `_ensure_dir` | `test_unwritable_work_directory_reports_copy_failed` | RED |
 | `_copy_one` 的分块读写 `if not chunk` | `_copy_one` | M00 控制变异 + 内容逐字节断言 | RED |
-| **round-4** 准入期收口块（floor）：`stage_raw` 体内第一条语句即 `try`，其后紧接写入期起点 | `stage_raw` | PROBECAL（`except Exception` 只重抛不收敛）+ `test_admission_phase_is_structurally_enclosed_by_one_floor` 与 **21 条** AST 派生的参数化逃逸探针（19 条注入点变红；`ConfigError`/`RawStagingError` 两条按 happy-path 不可达登记在 `ADMISSION_UNREACHED_ON_HAPPY_PATH`，故不参与判别） | RED（21 failed：19 条探针 + 结构断言 + 递归形态回归） |
+| **round-4** 准入期收口块（floor）：`stage_raw` 体内第一条语句即 `try`，其后紧接写入期起点 | `stage_raw` | PROBECAL（`except Exception` 只重抛不收敛）+ `test_admission_phase_is_structurally_enclosed_by_one_floor` 与 **21 条** AST 派生的参数化逃逸探针（19 条注入点变红；`ConfigError`/`RawStagingError` 两条按 happy-path 不可达登记在 `ADMISSION_UNREACHED_ON_HAPPY_PATH`，故不参与判别） | RED（21 failed：19 条探针 + 结构断言 + 递归形态回归）。**round-5 更正**：该结构断言只钉 `body[0]`/`body[1]` 两个**槽位**，钉不住地板的**范围**（M1 实测违反 MUST 而全套件绿）；范围与零写入两半各自另立一行，见下方两条「round-5」行 |
 | **round-4** entry 级 `forecast_hour` 形态闸门（拒 `int()` 有损归一：`3.9`/`3.0`/`"3"`/`True`） | `_reject_lossy_forecast_hours` | G1（不调用该闸门）+ `test_lossy_forecast_hour_shape_is_refused_before_any_write` 四行 | RED（4 failed；**重复键用例不红** -> 与下一行可分离） |
 | **round-4** `(forecast_hour, variable)` 索引的 injectivity 守卫（拒重复键，不后写覆盖） | `_index_source_entries` | G2（守卫短路）+ `test_duplicate_source_entry_key_is_refused` / `..._on_a_lead_this_round_does_not_request...` | RED（2 failed；**形态用例不红** -> 与上一行可分离） |
 | **round-4** `_remove` 的 `{exc!r}` 改走不抛的 `_safe_repr`（`rollback`「保证不抛」在 repr 自身抛异常时也成立） | `_Written._remove` | REPR（改回 `{exc!r}`）+ `test_rollback_does_not_raise_when_the_exception_repr_itself_raises` | RED |
@@ -205,6 +246,20 @@ legacy 行所指的闸门语句在本轮 diff 中**逐字节未变**（`_carried
 | **round-4** `cfgrib_filter_by_keys` **逐字**承接（不由 `grib_short_name` 现造） | `_carried_metadata` | MCFGRIB（现造单键 Mapping；源侧多一个不可推导分量） | RED |
 | **round-4** entry **集合**由 verdict 定（不照搬源 entry 列表） | `_build_entries` | MCOUNT（把源侧多出的 entry 一并落盘；源侧已多出一个变量与两个 lead） | RED（10 failed） |
 | **round-4** entry **顺序**为 lead 升序 × variables 声明序（不照抄源侧顺序） | `_build_entries` | MORDER（按 `source_index` 的插入序重排；源侧 entry 顺序已整体反转） | RED |
+| **round-5** 准入地板的**范围**（地板 `try` 的词法区间 == 准入段：顶层形状恰为 `[Try, Assign, Try, Return]`，地板体首尾 = `verdict.complete` 检查与 `os.path.lexists` 的 target-exists 预检） | `stage_raw` | M1（把 `_render_manifest` 调用移出地板到 `written = _Written()` 之前）与 M3（把 target-exists 预检整段移出地板，尾部收缩）+ `test_admission_phase_is_structurally_enclosed_by_one_floor` | RED（各 1 failed。**round-4 的旧断言对二者全绿**：M1 下 798 passed 且探针参数集静默 21 -> 20） |
+| **round-5** 准入期失败的**零写入**取证（探针的收口成功分支） | `stage_raw` 准入段 / 探针 | LEAK（测试侧：注入器先在 `work_dir` 根下写一个文件再抛） | RED（18 failed = 21 个参数减去 2 个 happy-path 不可达 + 1 个非调用消费点。**改位置之前该断言在 `raise` 之后、21 个参数全绿**） |
+| **round-5** `if not isinstance(entries, list): return`（结构面不归形态闸门，交给结构闸门给具名诊断） | `_reject_lossy_forecast_hours` | N1（该腿短路）+ `test_source_manifest_without_entries_key_fails_closed`（判据取在**消息**上：两侧 kind 同为 `source-manifest`，去掉该腿后 `TypeError` 掉进地板、诊断退化成泛化兜底） | RED（1 failed；此前 N1 存活于全套件） |
+| **round-5** 复合闸门第一分量 `not isinstance(entry, Mapping)` | `_reject_lossy_forecast_hours` | N2a（只留第二分量）+ `test_non_mapping_source_entry_is_diagnosed_by_the_structure_gate`（entry 取 `42`：字符串上的 `in` 是合法子串判定、不抛，对本分量无判别力） | RED（1 failed） |
+| **round-5** 复合闸门第二分量 `"forecast_hour" not in entry` | `_reject_lossy_forecast_hours` | N2b（只留第一分量）+ `test_source_entry_without_forecast_hour_is_diagnosed_by_the_structure_gate` | RED（1 failed；此前 N2 存活 = round-4 的「复合闸门单分量取信」新实例） |
+| **round-5** `_safe_repr` 的**内层** `except BaseException` 兜底（连 `type(value).__name__` 都抛的病态对象） | `_safe_repr` | N3（删掉内层兜底）+ `test_safe_repr_falls_back_again_when_even_the_type_name_raises` | RED（1 failed；此前 N3 存活。用例不把病态对象放进异常链——直接放会让整轮 pytest 以 INTERNALERROR 收场） |
+| **round-5** 复数 `idx_selectors` 的**取值**逐字承接（此前只断言键集，而键集可由 config 变量表推导） | `_carried_metadata` | MSEL（`{k: {} for k in selectors}`，一个字节都不承接）+ 清扫用例新增的取值断言与源侧 `SOURCE_IDX_TOKEN` 偏移 | RED（1 failed；此前 MSEL 在 799 passed 下存活） |
+| **round-5** `grib_short_name` 逐字承接（不按变量名查标准别名表自算） | `_carried_metadata` | MSHORT（`carried["grib_short_name"] = variable`）+ 源侧 `SOURCE_SHORT_NAME_TOKEN` 偏移 | RED（3 failed）。另有 fixture 漂移告警 DRIFT（把偏移后缀改回空串 = 源侧退回标准别名）= RED（1 failed，清扫用例） |
+| **round-5** entry `cycle_time` 与本轮 cycle 的一致性 | `_check_carried_times` | V1a（该分量恒不成立）+ `test_entry_cycle_time_alone_off_by_one_cycle_is_refused`（只偏移 `cycle_time`，`valid_time` 全部正确） | RED（1 failed） |
+| **round-5** entry `valid_time` 与 cycle + lead 的一致性 | `_check_carried_times` | V1b（该分量恒不成立）+ `test_entry_valid_time_alone_not_matching_the_lead_is_refused`（`valid_time` 恒等于 cycle，判别力来自 lead 3/6） | RED（1 failed） |
+| **round-5** 一致性核对的**解析腿**（不可解析的时间由本闸门具名拒绝，不是掉进地板） | `_entry_instant` | V1c（`except` 元组收窄成空）+ `test_unparseable_entry_time_is_refused_by_the_entry_time_gate` 两行参数（判据取在消息上） | RED（2 failed，在**最终源**上实测：元组由三分量收窄为两分量、用例由单条改为两行参数之后重跑，不沿用中途数字） |
+| **round-5** 同一 `except` 元组的 **`AttributeError`** 分量（非字符串的时间值） | `_entry_instant` | V1c-b（收窄成只接 `ValueError`）+ 上述用例的 `20260304` 行 | RED（1 failed） |
+| **round-5** 同一 `except` 元组的 **`ValueError`** 分量（不合 ISO-8601 的字符串） | `_entry_instant` | V1c-a（收窄成只接 `AttributeError`）+ 上述用例的 `"not-a-time"` 行 | RED（1 failed）。`TypeError` **有意不列进该元组**：从 `json.load` 的输出走不到它（要走到需要 `bytes`），列进来就是一条无判别器的腿；真出现时准入地板兜住 |
+| **round-5** 核对取在**时刻**而不是文本上（`Z` / `+00:00` / `-05:00` 是同一时刻的三种写法） | `_check_carried_times` | V1d2（改成对两种 UTC 文本写法的白名单比较；该变异体对默认 fixture 全绿，只有偏移写法的用例咬得住）+ `test_entry_times_written_in_another_offset_stage_normally` | RED（1 failed）。粗暴版 V1d（直接比 `isoformat()`）= 47 failed，说明退化成文本比较会误拒合规源 manifest |
 
 ## 死腿登记（24 条，本轮无判别器；逐条附理由）
 
