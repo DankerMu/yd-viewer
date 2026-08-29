@@ -1,0 +1,250 @@
+# NWM@8ae9b8f2 packages/common/test_netcdf4.py
+"""NetCDF4 test fixture utilities — replaces mock_grib for test data generation."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path
+
+ERA5_VARIABLES: tuple[str, ...] = (
+    "2m_temperature",
+    "2m_dewpoint_temperature",
+    "10m_u_component_of_wind",
+    "10m_v_component_of_wind",
+    "surface_pressure",
+    "total_precipitation",
+    "surface_net_solar_radiation",
+    "surface_net_thermal_radiation",
+)
+
+GFS_VARIABLES: tuple[str, ...] = (
+    "tmp2m",
+    "apcp",
+    "rh2m",
+    "u10m",
+    "v10m",
+    "pressfc",
+    "dswrf",
+)
+
+CFGRIB_SHORT_NAMES: dict[str, str] = {
+    "tmp2m": "t2m",
+    "apcp": "tp",
+    "rh2m": "r2",
+    "u10m": "u10",
+    "v10m": "v10",
+    "pressfc": "sp",
+    "dswrf": "sdswrf",
+    "2m_temperature": "2t",
+    "2m_dewpoint_temperature": "2d",
+    "10m_u_component_of_wind": "10u",
+    "10m_v_component_of_wind": "10v",
+    "surface_pressure": "sp",
+    "total_precipitation": "tp",
+    "surface_net_solar_radiation": "ssr",
+    "surface_net_thermal_radiation": "str",
+}
+
+
+def default_gfs_value(variable: str, forecast_hour: int) -> float:
+    if variable == "tmp2m":
+        return 273.15 + 12.0 + forecast_hour * 0.05
+    if variable == "apcp":
+        return max(0.0, forecast_hour / 3.0)
+    if variable == "rh2m":
+        return min(100.0, 50.0 + forecast_hour * 0.1)
+    if variable == "u10m":
+        return 3.0
+    if variable == "v10m":
+        return 4.0
+    if variable == "pressfc":
+        return 101325.0
+    if variable == "dswrf":
+        return max(0.0, 250.0 - forecast_hour * 0.2)
+    raise ValueError(f"Unsupported GFS variable: {variable}")
+
+
+def default_era5_value(variable: str, forecast_hour: int) -> float:
+    if variable == "2m_temperature":
+        return 285.0 + forecast_hour * 0.05
+    if variable == "2m_dewpoint_temperature":
+        return 278.0 + forecast_hour * 0.03
+    if variable == "10m_u_component_of_wind":
+        return 3.0
+    if variable == "10m_v_component_of_wind":
+        return 4.0
+    if variable == "surface_pressure":
+        return 101325.0
+    if variable == "total_precipitation":
+        return max(0.0, forecast_hour * 0.00025)
+    if variable == "surface_net_solar_radiation":
+        return max(0.0, forecast_hour * 3600.0 * 180.0)
+    if variable == "surface_net_thermal_radiation":
+        return forecast_hour * 3600.0 * -70.0
+    raise ValueError(f"Unsupported ERA5 variable: {variable}")
+
+
+def write_test_netcdf4(
+    path: str | Path,
+    variable: str,
+    forecast_hour: int,
+    values: list[float] | None = None,
+    cycle_time: datetime | None = None,
+    source: str = "gfs",
+    longitudes: Sequence[float] | None = None,
+    latitudes: Sequence[float] | None = None,
+) -> bytes:
+    """Write a minimal NetCDF4 file for testing. Returns the file content as bytes."""
+    import xarray as xr
+
+    short_name = CFGRIB_SHORT_NAMES.get(variable, variable)
+    if values is None:
+        if source == "ERA5":
+            values = [default_era5_value(variable, forecast_hour)]
+        else:
+            values = [default_gfs_value(variable, forecast_hour)]
+
+    longitude_values = (
+        list(longitudes) if longitudes is not None else [0.0] * len(values)
+    )
+    latitude_values = list(latitudes) if latitudes is not None else [0.0] * len(values)
+    if len(longitude_values) != len(values) or len(latitude_values) != len(values):
+        raise ValueError(
+            "Longitude and latitude coordinate counts must match the value count."
+        )
+
+    ds = xr.Dataset(
+        {short_name: (["point"], values)},
+        coords={
+            "point": list(range(len(values))),
+            "latitude": ("point", latitude_values),
+            "longitude": ("point", longitude_values),
+        },
+        attrs={
+            "source": source,
+            "variable": variable,
+            "forecast_hour": forecast_hour,
+            "GRIB_shortName": short_name,
+        },
+    )
+    if cycle_time is not None:
+        ds.attrs["cycle_time"] = cycle_time.isoformat()
+    ds[short_name].attrs["GRIB_shortName"] = short_name
+    ds[short_name].attrs["shortName"] = short_name
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(target, engine="netcdf4")
+    content = target.read_bytes()
+    ds.close()
+    return content
+
+
+def write_test_netcdf4_bundle(
+    path: str | Path,
+    variables: Sequence[str],
+    forecast_hour: int,
+    cycle_time: datetime | None = None,
+    source: str = "gfs",
+    longitudes: Sequence[float] | None = None,
+    latitudes: Sequence[float] | None = None,
+) -> bytes:
+    """Write a minimal multi-variable NetCDF4 bundle for testing (#1412).
+
+    Mirrors the per-forecast-hour bundle layout of the GFS cloud-era manifest:
+    one dataset carrying every bundle variable as its own data_var keyed by
+    cfgrib short name, so per-variable canonical reads find their record.
+    """
+    import xarray as xr
+
+    if not variables:
+        raise ValueError("variables must be non-empty for a bundle payload")
+    longitude_values = list(longitudes) if longitudes is not None else [0.0]
+    latitude_values = list(latitudes) if latitudes is not None else [0.0]
+    if len(longitude_values) != len(latitude_values):
+        raise ValueError("Longitude and latitude coordinate counts must match.")
+    point_count = len(longitude_values)
+
+    data_vars: dict[str, tuple[list[str], list[float]]] = {}
+    per_var_attrs: dict[str, str] = {}
+    for variable in variables:
+        short_name = CFGRIB_SHORT_NAMES.get(variable, variable)
+        if source == "ERA5":
+            value = default_era5_value(variable, forecast_hour)
+        else:
+            value = default_gfs_value(variable, forecast_hour)
+        data_vars[short_name] = (["point"], [value] * point_count)
+        per_var_attrs[short_name] = short_name
+
+    ds = xr.Dataset(
+        data_vars,
+        coords={
+            "point": list(range(point_count)),
+            "latitude": ("point", latitude_values),
+            "longitude": ("point", longitude_values),
+        },
+        attrs={
+            "source": source,
+            "forecast_hour": forecast_hour,
+            "bundle_variables": ",".join(variables),
+        },
+    )
+    if cycle_time is not None:
+        ds.attrs["cycle_time"] = cycle_time.isoformat()
+    for short_name in per_var_attrs:
+        ds[short_name].attrs["GRIB_shortName"] = short_name
+        ds[short_name].attrs["shortName"] = short_name
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(target, engine="netcdf4")
+    content = target.read_bytes()
+    ds.close()
+    return content
+
+
+def encode_test_netcdf4_bundle(
+    variables: Sequence[str],
+    forecast_hour: int,
+    cycle_time: datetime | None = None,
+    source: str = "gfs",
+    longitudes: Sequence[float] | None = None,
+    latitudes: Sequence[float] | None = None,
+) -> bytes:
+    """Encode a multi-variable NetCDF4 bundle in memory (#1412)."""
+    import tempfile
+    from pathlib import Path as P
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = P(tmp) / "bundle.nc"
+        return write_test_netcdf4_bundle(
+            path, variables, forecast_hour, cycle_time, source, longitudes, latitudes
+        )
+
+
+def encode_test_netcdf4(
+    variable: str,
+    forecast_hour: int,
+    values: list[float] | None = None,
+    cycle_time: datetime | None = None,
+    source: str = "gfs",
+    longitudes: Sequence[float] | None = None,
+    latitudes: Sequence[float] | None = None,
+) -> bytes:
+    """Encode a NetCDF4 payload in memory (returns bytes without needing a file path)."""
+    import tempfile
+    from pathlib import Path as P
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = P(tmp) / "data.nc"
+        return write_test_netcdf4(
+            path,
+            variable,
+            forecast_hour,
+            values,
+            cycle_time,
+            source,
+            longitudes,
+            latitudes,
+        )

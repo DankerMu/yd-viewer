@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "cfgrib>=0.9",
     "eccodeslib>=2.48",
+    "netCDF4>=1.7",
     "numpy>=2",
     "pyproj>=3.7.2",
     "pyshp>=3.1.6",
@@ -34,3 +35,9 @@ target-version = "py312"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# NWM@8ae9b8f2 快照文件逐字承接 pin 的 lint 基线（ruff 0.16 默认规则集较 pin 时点扩面）。
+# 只对清单 §1 登记的快照目标生效，yd 自撰代码不豁免。
+"src/yd_producer/canonical/converter.py" = ["BLE001", "C409", "TRY201"]
+"tests/test_canonical_converter.py" = ["RUF012", "RUF015"]

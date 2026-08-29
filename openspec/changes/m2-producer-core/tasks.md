@@ -1573,7 +1573,7 @@ Minimal mergeable slice: atomic - 依赖+lock+冒烟+CI 绿是一条验证路径
 
 ## 7. forcing-chain（三）：canonical 转换
 
-- [ ] 7.1 快照 DB-free canonical converter 并以合成 raw fixture → canonical NetCDF + catalog 端到端测试（无数据库连接断言）
+- [x] 7.1 快照 DB-free canonical converter 并以合成 raw fixture → canonical NetCDF + catalog 端到端测试（无数据库连接断言）
 
 依赖：组 2、组 3（manifest）、组 6（依赖）
 §13.1 归属：DB-free 链
