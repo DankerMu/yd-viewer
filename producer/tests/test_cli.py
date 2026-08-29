@@ -196,7 +196,13 @@ def test_relative_paths_are_resolved_before_reaching_loaders(monkeypatch, tmp_pa
     monkeypatch.setattr(cli, "load_local", load_local)
     monkeypatch.chdir(tmp_path)
 
-    assert _exit_code(["init", "--config", "c1.toml", "--local", "l1.toml"], {}) == 3
+    # `init` 的业务体已落地（任务 11.1），故这里不再是退出码 3：`tmp_path` 下没有变体
+    # 目录，真实 `bootstrap` 在阶段 A 判 `VARIANT_MISSING` 并以 `EXIT_GUARD` 退出。本用例
+    # 的主张与退出码无关——它只要求装载器**已经**收到解析后的绝对路径。
+    assert (
+        _exit_code(["init", "--config", "c1.toml", "--local", "l1.toml"], {})
+        == cli.EXIT_GUARD
+    )
 
     assert load_config.calls[0][0][0] == (tmp_path / "c1.toml").resolve()
     assert load_local.calls[0][0][0] == (tmp_path / "l1.toml").resolve()
@@ -353,8 +359,18 @@ def test_prepare_with_executable_interpreter_reaches_staged_unimplemented(
     assert runner.count == 0
 
 
-def test_init_reaches_staged_unimplemented(capsys, tmp_path):
-    """正控制：`init` 在守卫全过后同样退出 3 并指名归属任务号。"""
-    assert _exit_code(_argv("init", tmp_path), env={}) == 3
+def test_init_reaches_the_real_business_body(capsys, tmp_path):
+    """正控制：`init` 在守卫全过后进入**真实业务体**（任务 11.1 已落地）。
 
-    assert "11.1" in capsys.readouterr().err
+    本用例是 `test_init_reaches_staged_unimplemented` 的等价改写：原意「守卫全过后
+    `init` 不在入口层被拦」逐字保留，只是可观测的落点从「分阶段未实现」变成了业务体的
+    拒绝——`tmp_path` 下没有变体目录，`bootstrap` 在阶段 A 判 `variant_missing`。判据取
+    「拒绝理由词表里的项出现在 stderr」而非退出码本身：退出码 `1` 与入口层的
+    `DATABASE_URL`/`ConfigError` 守卫共用，单看它区分不出是谁拒绝的。
+    """
+    assert _exit_code(_argv("init", tmp_path), env={}) == cli.EXIT_GUARD
+
+    err = capsys.readouterr().err
+    assert "variant_missing" in err
+    assert "11.1" not in err  # 已不再是分阶段未实现的外壳
+    assert "尚未落地" not in err

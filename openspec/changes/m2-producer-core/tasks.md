@@ -1892,12 +1892,187 @@ Review focus:
 
 ## 11. init-bootstrap：首态建链
 
-- [ ] 11.1 实现 init 编排：非全新根拒绝守卫、7 天扫描窗定各源首轮（复用 raw-scan）、任一源窗内无完整 cycle 即整体拒绝不写状态（fail closed）、率定末态重戳写首态（复用 state-tools）
+- [x] 11.1 实现 init 编排：非全新根拒绝守卫、7 天扫描窗定各源首轮（复用 raw-scan）、任一源窗内无完整 cycle 即整体拒绝不写状态（fail closed）、率定末态重戳写首态（复用 state-tools）
 
 依赖：组 3（扫描）、组 4（重戳）
 §13.1 归属：无直接行（测试归属见 change design D7）
 Suggested fixture level: compact - 复用 raw 目录树与合成状态 fixture
 Minimal mergeable slice: atomic - 单一编排函数，拒绝守卫/扫描窗/首态写入共享同一条 init 验证路径，无独立可交付子集
+
+### Issue #21 fixture（任务 11.1）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：正面命中 `openspec/project-profile.md` 的 domain expanded-triggers `cfg.ic`、重戳/restamp、`cycle`、`DONE`、状态链/warm start，以及核心强制触发词 `file output`、`writer`、`path`、`CLI`——本 issue 是全仓**第一处向 `YD_ROOT/states/` 落盘**的代码；profile 触发词按 `issue-risk-contract.md` 与核心触发词同为强制）
+Repair intensity: high（首次写 NFS 发布根、部分产物即把系统**永久砖化**——「已有任一状态即拒绝」使一次半写死锁住所有后续 init；同时命中 profile 首位风险轴「断链即整链失效」的**链起点**。适用 `Invariant Matrix`）
+Project profile: yd-viewer
+
+**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #21 的验收标准依赖「从两个变体内各自同源率定末态复制首态」（`specs/init-bootstrap/spec.md`、compute-loop §6.2 第 4 步），但**率定末态在变体目录内的落点，全仓无任何文档、spec 或配置钉死**：compute-loop §6.1 只说变体「水文参数和率定状态来自同一基线」，`config.toml` 的 `variants.*` 只到变体目录一级，`nwm-snapshot-inventory.md:132` 的 `_project_name` 只决定 tracker 轮询的 `<project>.cfg.ic.update` 文件名、且该 manifest 在 init 期不存在。该 seam 由本 issue 自行补齐（裁决 2），按核心规则「needed-but-missing seam is a reported deviation」记录在此，并**约束尚未落地的 #20 / 任务 10.3**（prepare 提交变体时必须满足裁决 2 的形态）。
+
+**核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
+
+1. **落点与形态**：新增 `producer/src/yd_producer/init.py`（issue 正文逐字指定 `yd_producer.init`），`cli.init()` 由 `_unimplemented` 改为**薄委托**——保持 `cli.py` 既有的「入口只做守卫 + 委托」形态（见 `cli.py:85-90` 的注释），业务判定与落盘一律在新模块。入口体 MUST NOT 自行解析 `YD_ROOT` 之外的路径。
+   - `now` **MUST 可注入**（`bootstrap(*, local, config, now: datetime) -> InitReport`，`cli.init()` 传 `datetime.now(UTC)`）。7 天窗对「执行时刻」有语义依赖，不可注入即测试只能自证。
+2. **率定末态定位判据（补齐的 seam）**：对每个 source，率定末态 = `Path(local.yd_root) / getattr(config.variants, source)` **顶层**（非递归）恰好一个后缀为 `.cfg.ic` 的**普通文件**。
+   - 命中 0 个或 ≥2 个 → **整体拒绝、零写入**（fail closed）。
+   - **不选**「按 `<变体目录名>.cfg.ic` 猜文件名」：项目名与目录名的等同关系全仓无任何权威来源，猜错的失败模式是「文件不存在」，与「prepare 未跑」不可区分；「恰好一个」把该歧义变成可断言的显式拒绝。
+   - **不选**递归搜索：变体内 SHUD 运行期会产生 `cfg.ic.update` 等衍生物（compute-loop §9.2），递归会把它们卷进候选集；且 init 只在全新根执行，顶层一层足够。
+   - **不选**配置新增 key：`cli-config` spec 的顶层 key 名逐字钉死（tasks.md:41），扩 schema 即拖入 #29/#32 面。
+   - 目录不存在 / 不是目录 / 无法枚举 → 同样整体拒绝、零写入，且拒绝理由 MUST 逐条可区分（见裁决 6 的词表）。
+   - 该判据同步补进 `docs/compute-loop-design.md` §6.2 与 `specs/init-bootstrap/spec.md`（本 PR 内一并落，docs 与实现同 PR 不产生「文档滞后实现」）。
+3. **扫描窗与首轮判据**：窗 = `[now - 7 天, now]`，**双端闭**。候选 cycle 由 `config.cycle.hours`（**不得硬编码 `[0, 12]`**）在窗内按 UTC 生成，**升序**取第一个 `rawscan.judge(...).complete is True` 的 cycle 作为该源首轮 T。
+   - `now` MUST 归一为 UTC aware；naive `now` MUST 抛 `ConfigError`（MUST NOT 按宿主时区静默重释——`restamp._ensure_utc` 的同类缺口已由 issue #67 立案）。
+   - 严格 `cycle <= now`：未来 cycle 不进候选集。
+   - `rawscan.judge` 抛的 `ConfigError`（配置取值域 / 请求校验 / 模式校验）**MUST 原样上抛**，MUST NOT 被吞成「不完整」——那会把一个配置错误伪装成「等 raw 补齐」，让运维永远重跑 init。tasks.md:531 已钉死「cycle 目录整体不存在**不是**错误」，故只有 `complete is False` 这一条走「继续找下一个候选」。
+   - `local.nwm.raw_root` 是 `judge` 的 `raw_root` 入参。
+4. **任一源无完整 cycle 即整体拒绝**（spec MUST，逐字 fail closed）：**所有** source 的首轮 T 全部确定之前，MUST NOT 发生任何写入。
+5. **两阶段落盘，这是本 fixture 的中心不变量**：**判定与内存构造全部在前，落盘集中在最后**。
+   - 阶段 A（零写入）：拒绝守卫 → 定位两份率定末态 → `state.parse` 两份文档 → 扫描窗定两个 T → `state.restamp_to_absolute_time` 得两份重戳文档 → `state.render` 得两份字节。任一步失败即返回拒绝，`states/` 与 `output/` 逐字节不变。
+   - 阶段 B（唯一写入窗）：`store.safe_fs.ensure_directory_no_follow` 建 `states/<source>/`，`store.safe_fs.write_bytes_no_follow_exclusive` 写 `states/<source>/<T:%Y%m%d%H>.cfg.ic`。
+   - **写用 exclusive 而非 `atomic_write_bytes_no_follow`**：后者按语义覆盖已有文件，与「只在全新根执行」直接冲突；`O_EXCL` 让守卫与写入之间的 TOCTOU 窗口 fail closed（`FileExistsError` → 拒绝，不覆盖）。
+   - **阶段 B 的写入顺序钉死为 `rawscan.SOURCES` 的迭代序**（当前值 `("ifs", "gfs")`），MUST NOT 依赖 `dict`/`set` 的偶然序。理由：部分落盘的 `detail` 必须可预期，否则收尾报告在两次执行间不可复现。
+   - **阶段 B 内失败的可观测后果 MUST 被钉死**：某个 source 写入失败时，其**前序已落盘**的 source 文件留在盘上（本函数 MUST NOT 回滚删除——删除面归 #23/#25，且 init 无权删它没确认过的东西），但 MUST 以非零退出码与明确理由报告，`detail` MUST 列出**全部前序已落盘 source 的路径**（而非硬编码某一个源），理由文本 MUST 指出「根已非全新，重跑 init 前需人工清理 `states/`」。这是**已接受的代价**而非缺陷：把它写成回滚会让 init 获得 `states/` 删除权，风险远大于收益。
+   - **该失败的可达构造钉死为：目标路径预置为一个空目录**（`states/gfs/<T_gfs>.cfg.ic/`）。这是裁决 8 的守卫（只认**普通文件**）与 `_FILE_FLAGS` 的 `O_CREAT|O_EXCL`（对任何已存在的条目都得 `EEXIST`）之间唯一的可达缝：预置**普通文件**会在阶段 A 就命中 `STATES_NOT_EMPTY`、永远走不到阶段 B，用它构造出的用例是假绿。MUST NOT 用 monkeypatch 注入写入失败来替代——那会让「阶段 B 真的用了 `O_EXCL`」这条判据退化为永真式。该缝隙的存在（非普通文件条目过得了 bootstrap 守卫、却挡得住写入）是**已知且刻意**的：把守卫扩到「任何条目」会让 `states/` 下一个 `.DS_Store` 目录永久砖化建链，方向与裁决 8 的「宁可要求人工确认」相反。MUST 写进模块头。
+6. **拒绝理由闭合词表**（`InitRefusal` 枚举，逐项可区分，MUST NOT 以异常逃逸）：
+   - `STATES_NOT_EMPTY`：`states/` 树下存在任一普通文件
+   - `DONE_PRESENT`：`output/` 树下存在任一名为 `DONE` 的普通文件
+   - `VARIANT_MISSING`：变体目录不存在 / 不是目录
+   - `CALIBRATION_STATE_AMBIGUOUS`：变体顶层 `*.cfg.ic` 命中数 ≠ 1（`detail` 带命中数与路径）
+   - `CALIBRATION_STATE_UNREADABLE`：率定末态存在但 `state.parse` 抛 `ValueError`（含超界、非 UTF-8、结构不可用）
+   - `HEADER_SHAPE_INVALID`：`restamp_to_absolute_time` 抛 `ValueError`（header 数值 token 数不为 3/4）
+   - `NO_COMPLETE_RAW_CYCLE`：某源窗内无完整 cycle（`detail` 带 source 与窗口端点）
+   - `DISCOVERY_UNREADABLE`：任一文件系统探测失败（见下条）
+   - `WRITE_FAILED`：阶段 B 失败（`detail` MUST 指明已落盘的 source 集合）
+7. **枚举/探测失败 MUST 与「不存在」分流，且 MUST NOT fail-open**（沿用 issue #22 裁决 9 的同一规则，本 issue 是同一风险面的写侧）：**只有** `FileNotFoundError` / `NotADirectoryError` 等价于「空集合」；其余任何 `OSError`（`EACCES`/`EPERM`/`EIO`/`ESTALE`/`ELOOP`…）MUST 判 `DISCOVERY_UNREADABLE` 并整体拒绝。**分层切分（镜像 #22 裁决 9）**：`DISCOVERY_UNREADABLE` 专指**集合无法枚举 / 条目无法判定**这一层；率定末态**本身**被定位成功后的读失败（含 mode 000 的 `EACCES`）由 `state.parse` 收敛为 `ValueError`，一律归 `CALIBRATION_STATE_UNREADABLE`。方向性理由与 #22 相反且更严：这里判空即**放行写入**，`states/` 因权限不可枚举时若按「空」处理，就会往一个可能已有状态的根上写首态——直接断链。适用于每一处探测：`states/` 与 `output/` 的树遍历、变体目录列举、率定末态的普通文件判定（MUST NOT 用裸 `Path.exists()`/`is_file()`——`pathlib` 只吞 `ENOENT/ENOTDIR/EBADF/ELOOP/EINVAL`，`EACCES`/`EIO` 会穿透）。
+8. **`DONE` 与状态的可见性判据取「宽」，与 #22 的前沿可见集**刻意不同**：#22 的前沿对不可解析条目判「不可见」是为了不让一次崩溃的发布永久砖化该源；本 issue 是**唯一的 bootstrap 闸门**，方向相反——`states/` 下**任一**普通文件（含不合命名规则的残留）都算「已有状态」而拒绝，`output/` 树下**任一**名为 `DONE` 的普通文件都算已有产物而拒绝。这张力已知且刻意：init 只在系统历史第一次执行，宁可要求人工确认，也不能在一个有残留的根上重新建链。该差异 MUST 写进模块头。
+9. **MUST NOT 运行 SHUD、MUST NOT 写任何 `DONE`、MUST NOT 触碰 `output/`**（spec 逐字）。这是可断言的负面证据：用例 MUST 断言 `output/` 树在 init 前后逐字节不变，且不存在任何 subprocess 调用面。
+10. **不做 QC / 不做负残差归零**：`state_qc.run_state_variable_qc` 与 `normalize_negative_residuals` 在 init 期**不调用**。理由：率定末态是 prepare 提交的、已被 #20 校验过的基线产物，init 只做「复制 + 重戳」（compute-loop §6.2 第 4 步逐字）；把 QC 塞进 init 会让一份合法基线因阈值判定被拒而无法建链，且 §8 的负残差归零逐字属**运行期**语义。记为显式 non-goal，不是缺口。
+11. **单源建链 / 事后补链入口 MUST NOT 提供**（compute-loop §6.2 逐字「不提供单源建链或事后补链入口」）：不加 `--source`、`--force`、`--from` 一类参数；`build_parser()` 的 `init` 子命令参数集不变。
+
+Change surface:
+- 新增 `producer/src/yd_producer/init.py`：`InitRefusal` 枚举、`InitReport`（frozen dataclass）、`bootstrap(*, local, config, now)`
+- 修改 `producer/src/yd_producer/cli.py`：`init()` 由 `_unimplemented` 改为薄委托（拒绝 → `_fail` 语义的非零退出；成功 → `0` 并打印两条落盘路径）
+- 新增 `producer/tests/test_init_bootstrap.py` 与其目录树 fixture 构造器（合成变体 + 合成 raw 树，复用 `producer/tests/cfg_ic_fixtures.py` 与既有 raw fixture 构造）
+- 修改 `producer/tests/test_cli.py`：`test_init_reaches_staged_unimplemented`(:356-358) 与 `:199` 的 `init` 退出码断言随裁决 1 失效，MUST 改写为「`init` 经守卫后进入真实业务体」的等价正控制（保留该用例的原意：守卫全过后 `init` 不在入口层被拦），MUST NOT 删除了事。`prepare` / `run` 的同类断言不得改动
+- 修改 `docs/compute-loop-design.md` §6.2：补「率定末态在变体内的定位判据」与「阶段 B 部分落盘的收尾语义」两句
+- 修改 `openspec/changes/m2-producer-core/specs/init-bootstrap/spec.md`：新增「率定末态定位」Requirement 与「部分落盘可观测收尾」Scenario
+
+Must preserve:
+- `producer/src/yd_producer/state/**`、`rawscan.py`、`store/safe_fs.py` MUST NOT 被修改（#8/#9/#22/#6/#5 已审面）；本 issue 只**消费**其公开签名
+- `cli.py` 的 `prepare` / `run` 分支、`_check_states_dir`、退出码常量与 `build_parser()` 的参数集不变（#3 已审面）
+- stdlib-only；不新增依赖，`producer/uv.lock` 不变
+- 零运行时 NWM import、零数据库/scheduler 依赖
+
+Must add/change:
+- `init.py`：
+  - `InitRefusal(StrEnum)`：裁决 6 的九项闭合词表
+  - `InitReport`（frozen dataclass）：`written: tuple[Path, ...]`、`refusal: InitRefusal | None`、`detail: str`；`written` 非空与 `refusal` 非 `None` **可同时成立**（`WRITE_FAILED` 的部分落盘，裁决 5）——这是与 #22 的 `FrontierDecision` 「恰有一个」不同的地方，MUST 在 docstring 写明
+  - `bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitReport`
+  - 判定顺序固定：`states/`/`output/` 拒绝守卫 → 逐源定位并解析率定末态 → 逐源扫描窗定 T → 逐源重戳 → 集中落盘
+  - source 词表取 `rawscan.SOURCES`，MUST NOT 再定义一份
+  - cycle 目录名格式取 `rawscan.CYCLE_DIR_FORMAT`，MUST NOT 再写一份 `"%Y%m%d%H"`
+- `cli.py`：`init()` 薄委托，拒绝时 `stderr` 打印 `refusal` 与 `detail`、返回 `EXIT_GUARD`；成功打印两条落盘路径、返回 `0`
+
+Seams under test:
+- `init.bootstrap(...)`：tmp 目录树（`YD_ROOT` 的 `input/models/yd_{gfs,ifs}`、`states/`、`output/` + 合成 raw 树）+ 注入 `now` → `InitReport` + 盘上可断言的产物集
+- `cli.main([...])`：经真实 `bootstrap` 走通一次成功与一次拒绝，断言退出码与 stderr 文本；MUST NOT 用 fake 替换 `bootstrap`（否则 spec 的 MUST 无用例把守）
+
+Invariant Matrix
+Governing invariant: `init` 要么让 `YD_ROOT` 从「全新根」转到「每个 source 恰有一份重戳到其首轮 T 的首态」，要么**一个字节都不写**；除阶段 B 内的写入失败外，不存在第三种终态，且任何情况下 `output/` 与已有 `states/` 内容都不被修改或删除。
+Source-of-truth identity/contract: `states/<source>/<T:%Y%m%d%H>.cfg.ic` 的**文件名 T** 与其 header minute token（`T.timestamp()/60`）**必须互相对应**；T 本身由「窗内最早完整 raw cycle」唯一确定。
+Surfaces:
+- Producers: `init.bootstrap` 阶段 B 的两次 `write_bytes_no_follow_exclusive`
+- Validators/preflight: `init.bootstrap` 阶段 A 的拒绝守卫、率定末态定位、`state.parse`、`restamp_to_absolute_time` 的 shape 门
+- Storage/cache/query: `YD_ROOT/states/<source>/`（唯一写入面）；`YD_ROOT/input/models/yd_<source>/`（只读）；NWM `raw_root`（只读，经 `rawscan.judge`）
+- Public routes/entrypoints: `cli.init()` / `yd-producer init`
+- Frontend/downstream consumers: `controller.decide_frontier`（#22，读 `states/<source>/<T>.cfg.ic` 并以**绝对**时间头判 T）；`run` 的 `_check_states_dir`（#3）
+- Failure paths/rollback/stale state: 阶段 A 的八类拒绝（零写入）；阶段 B 部分落盘的 `WRITE_FAILED` 收尾（不回滚、报告已落盘集合）
+- Evidence/audit/readiness: `InitReport.written` / `refusal` / `detail`；`cli` 的 stderr 文本与退出码
+Regression rows:
+- 全新根 + 两源窗内各有完整 cycle（且最早完整 cycle 不同）-> 两个文件落盘，各自文件名 T = 该源窗内最早完整 cycle，header minute token == `round(T.timestamp()/60)`，`output/` 树逐字节不变
+- `states/gfs/2026082700.cfg.ic` 已存在 -> `STATES_NOT_EMPTY`，`states/`/`output/` 逐字节不变（含 mtime 不变的可断言证据）
+- `output/<cycle>/gfs/DONE` 已存在 -> `DONE_PRESENT`，零写入
+- 窗内 IFS 无任何完整 cycle、GFS 有 -> `NO_COMPLETE_RAW_CYCLE`，`states/` 下**无任何文件**（不是「只写了 gfs」）
+- 变体目录缺失 / 顶层 0 个 `.cfg.ic` / 顶层 2 个 `.cfg.ic` -> `VARIANT_MISSING` / `CALIBRATION_STATE_AMBIGUOUS`（可区分），零写入
+- 率定末态 header 只有 2 个数值 token -> `HEADER_SHAPE_INVALID`，零写入（`restamp` 的 shape 门 MUST NOT 被绕过）
+- `chmod 0o000 states/` -> `DISCOVERY_UNREADABLE`，**MUST NOT** 判空后放行写入
+- 变体目录不可枚举（`chmod 0o000 input/models/yd_gfs`）-> `DISCOVERY_UNREADABLE`（**不是** `VARIANT_MISSING`、**不是** `CALIBRATION_STATE_AMBIGUOUS`），零写入
+- `output/` 树不可枚举（`chmod 0o000 output/<cycle>`）-> `DISCOVERY_UNREADABLE`，零写入（MUST NOT 判空后放行）
+- 率定末态存在但 `state.parse` 抛 `ValueError`（截断 / 非 UTF-8 / 超 `MAX_STATE_IC_BYTES`）-> `CALIBRATION_STATE_UNREADABLE`（与 `HEADER_SHAPE_INVALID`、`CALIBRATION_STATE_AMBIGUOUS` 逐项可区分），零写入
+- 配置使 `judge` 抛 `ConfigError`（如 `raw.gfs.bundles` 的模式渲染出重名）-> `ConfigError` **原样上抛**，MUST NOT 被收敛成 `NO_COMPLETE_RAW_CYCLE`；`cli.main` 转成退出码 `1`，零写入
+- naive（无 tzinfo）的 `now` -> `ConfigError`，零写入；MUST NOT 按宿主时区静默重释
+- 扫描窗下端点闭：唯一的完整 cycle 恰好落在 `now - 7 天` 这一时刻 -> **被接受**为首轮 T；同一 fixture 把该 cycle 整体前移**一个 cycle 步长**（12 小时）-> `NO_COMPLETE_RAW_CYCLE`。位移 MUST 是整 cycle 步长而非 1 小时——挪 1 小时会被 `config.cycle.hours` 过滤器排除，钉不住窗下界，一个回扫 30 天的实现能在那种构造下全绿。**本行的 fixture MUST 用 `cycle.hours = (0, 12)`**（与「非默认配置取值」行的 `hours=[12]` 分开）：`hours=[12]` 下前移 12 小时会落到 00Z、同样被候选网格过滤器排除，该行会丧失全部判别力
+- 未来 cycle 排除：唯一的完整 cycle 落在 `now + 12 小时` -> **不进候选集**，判 `NO_COMPLETE_RAW_CYCLE`
+- 未来 cycle 不夺首轮：同一 fixture 另在 `now - 12 小时` 补一个完整 cycle -> T 取 `now - 12 小时` 这个，MUST NOT 取更早枚举到的未来 cycle（按日期网格枚举、忘了 `cycle <= now` 的实现在本行必红）
+- 跳过语义：窗内最早的两个候选 cycle 不完整、第三个完整 -> T 取第三个（证明「升序找第一个 complete」而非「取窗内最早候选」）
+- 4-token 兼容 header（含 lake 段）的率定末态 -> 正常重戳落盘，minute token == `round(T.timestamp()/60)`，其余字节逐字不变
+- 非默认配置取值（`config.cycle.hours = [12]` 单值 + `variants.gfs = "input/models/alt_gfs"` 非默认目录名）-> 仍正确定位变体、仍只在 12Z 候选上扫描；硬编码 `[0, 12]` 或硬编码 `input/models/yd_<source>` 的实现在本行必红
+- 阶段 B 中途失败（`states/gfs/<T_gfs>.cfg.ic` 预置为**空目录**，写入序为 ifs→gfs）-> `WRITE_FAILED`，`detail` 列出已落盘的 `states/ifs/<T_ifs>.cfg.ic`，该文件**仍在**且内容不变，进程退出码非零
+- 未改动的下游 `controller.decide_frontier`（#22）读 init 写出的首态 -> 判为「全新链、待跑 T = 该文件名」，不因 header 时间被判 `HEADER_TIME_MISMATCH`（跨 issue 兼容性回归，本 PR MUST 有一条端到端用例）
+- `cli.main(["init", ...])` 成功一次、拒绝一次 -> 退出码 `0` / `EXIT_GUARD`，且 `run` 的 `_check_states_dir` 在 init 之后不再拒绝
+
+Boundary-surface checklist:
+- 共享 helper 根：`store/safe_fs`（写）、`state/`（解析/重戳）、`rawscan`（判定）——本 issue **只消费不修改**，MUST 报告检查过但未改的清单
+- 公共入口：`cli.init()`；`build_parser()` 的参数集不变
+- 读面：变体目录（顶层枚举 + 单文件读）、NWM raw 树（经 `judge`）
+- 写/覆盖面：仅 `states/<source>/`，且 `O_EXCL` 拒绝覆盖
+- staging/publish/rollback 面：无 staging（首态直接落终名；本 issue 不参与 §11 的发布顺序）；**不提供回滚**（裁决 5）
+- 生产者/消费者证据边界：`states/<T>.cfg.ic` 是 #22 前沿函数与 #24 发布器的上游
+- 陈旧状态/幂等边界：init **非幂等**且刻意如此——第二次执行必然 `STATES_NOT_EMPTY`
+- 未改动的下游消费者：`controller.decide_frontier`、`cli.run` 的 `_check_states_dir`
+
+Selected risk packs（项目特有检查）:
+- Public API / CLI / script entry: `yd-producer init` 首次成为真实入口；退出码与 stderr 是运维唯一可见面
+- Config / project setup: 读 `config.variants.*`、`config.cycle.hours`、`local.yd_root`、`local.nwm.raw_root`；MUST NOT 硬编码任何一项。判别证据由「非默认配置取值」回归行承担——fixture 树 MUST 用 `cycle.hours = [12]` 与非默认变体目录名，使任何硬编码必红
+- File IO / path safety / overwrite: 首次向 NFS 发布根落盘；no-follow + `O_EXCL`；零删除
+- Schema / columns / units / field names: 文件名 T 与 header minute token 的互相对应即契约
+- Concurrency / shared state / ordering: 守卫与写入之间的 TOCTOU 由 `O_EXCL` fail closed；两源写入的顺序与部分落盘语义
+- Resource limits / large input / discovery: 7 天扫描窗的候选集有界（`len(cycle.hours) * 8`，由「扫描窗边界」与「未来 cycle」两条回归行钉死上下端点）；率定末态读取经 `state.parse` 的 `MAX_STATE_IC_BYTES` 有界读（由 `CALIBRATION_STATE_UNREADABLE` 回归行的超界分支钉死）；变体目录枚举**非递归且只取顶层**（由 `CALIBRATION_STATE_AMBIGUOUS` 回归行钉死）
+- Error handling / rollback / partial outputs: 九项闭合词表 + 阶段 A 零写入 + 阶段 B 部分落盘的显式语义
+- Legacy compatibility / examples: 3-token 原生与 4-token 兼容 header 都要能重戳
+
+Risk packs considered (core):
+- Public API / CLI / script entry: selected - 见上
+- Config / project setup: selected - 见上
+- File IO / path safety / overwrite: selected - 见上
+- Schema / columns / units / field names: selected - 见上
+- Auth / permissions / secrets: not selected - 无凭据面；权限失败只体现为 `DISCOVERY_UNREADABLE` 分类
+- Concurrency / shared state / ordering: selected - 见上
+- Resource limits / large input / discovery: selected - 见上
+- Legacy compatibility / examples: selected - 见上
+- Error handling / rollback / partial outputs: selected - 见上
+- Release / packaging / dependency compatibility: not selected - 不新增依赖，lock 不变
+- Documentation / migration notes: selected - 裁决 2 补齐的 seam 必须同步进 compute-loop §6.2 与 init-bootstrap spec，否则 #20 落地时会与本 issue 分叉
+
+Domain packs (from active profile):
+- Geospatial / CRS: not selected - 无几何面
+- Time series / forcing / temporal boundaries: **selected** - 7 天窗、`cycle.hours` 全域、UTC aware 归一
+- 状态链 / warm-start 定戳一致性: **selected** - 本 issue 是整条状态链的**起点**，首态戳错即全链失效
+- NWM 快照溯源与 DB-free 隔离: not selected - 本模块无 pin 移植（只消费已落地的移植产物），无新增溯源头
+
+Evidence floor:
+- `cd producer && uv run pytest`
+- `cd producer && uv run ruff check . && uv run ruff format --check .`
+- `openspec validate m2-producer-core --strict --no-interactive`
+- 新行为用例的红证据（对 pre-change 源跑一次必红），按 implementer 契约批量提供
+- 所有 `chmod 0o000` 的 discovery 用例 MUST 带既有 `producer/tests` 的 root 跳过口径（root 下 `chmod 0o000` 不产生 `EACCES`，用例必须 skip 而不是假绿）
+- 所有传给 `safe_fs` 的路径 MUST 由 `tmp_path.resolve()` 派生：macOS 的 `tempfile.gettempdir()` 落 `/var/folders/...` 而 `/var` 是 symlink，`safe_fs._anchor_for` 逐段拒 symlink，未 resolve 即得与实现无关的假红（既有 `producer/tests` 已用此口径）
+
+Non-goals（越界即偏离）:
+- prepare 编排与变体生成（任务 10.3 / #20）
+- run 控制器循环、前沿推进、残留清理、锁（组 12–14）
+- 状态 QC / 负残差归零（裁决 10）
+- 单源建链、补链、`--force`、覆盖参数（裁决 11）
+- 任何删除动作（归 #23/#25）
+- 数值正确性（归 M4）
+
+Review focus:
+- 阶段 A 是否**真的**零写入：有没有在扫描或解析路径上顺手 `mkdir` 了 `states/<source>/`
+- 「任一源无完整 cycle 即整体拒绝」是否由**先全部定 T、后集中写**的结构保证，而不是靠恰好的循环顺序
+- 拒绝守卫的枚举是否 fail-closed（`EACCES` 是否被误当成「空」）
+- 写是否用 `O_EXCL`，而不是会覆盖的 `atomic_write_bytes_no_follow`
+- 首态 header 的 minute token 是否等于 `round(T.timestamp()/60)`，且用例的期望值由**构造/锚点**给出，而不是在测试里再调一次 `restamp_to_absolute_time`（被测函数自判 = 永真式）
+- `now` 与 `cycle.hours` 是否真的来自入参/配置，而非硬编码
+- 是否越界实现了 10.3 的 prepare 编排或组 12–14 的控制器
 
 ## 12. run-controller（一）：前沿发现与锁
 

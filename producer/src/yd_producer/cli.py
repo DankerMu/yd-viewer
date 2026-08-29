@@ -30,10 +30,15 @@ import argparse
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from yd_producer import nwm
 from yd_producer.config import Config, ConfigError, LocalConfig, load_config, load_local
+
+# 只导入 `bootstrap` 这一个符号：`from yd_producer import init` 会用模块对象遮蔽本模块
+# 的 `init()` 委托目标，`main` 的按名解析随即失效。
+from yd_producer.init import bootstrap
 
 __all__ = ["build_parser", "main"]
 
@@ -100,8 +105,24 @@ def prepare(local: LocalConfig, config: Config) -> int:
 
 
 def init(local: LocalConfig, config: Config) -> int:
-    """`init`：业务体（非全新根拒绝、7 天窗定首轮、率定末态重戳）归任务 11.1。"""
-    return _unimplemented("init", "11.1（init 编排：首态建链）")
+    """`init`：薄委托到 `yd_producer.init.bootstrap`（非全新根拒绝、7 天窗定首轮、重戳）。
+
+    入口体只做三件事：把「执行时刻」注入业务体（`now` 可注入是 `bootstrap` 的契约，7 天
+    扫描窗对它有语义依赖）、把拒绝转成退出码 `1` 与 stderr 文本、把成功的落盘路径打到
+    stdout。判定与落盘一律在 `yd_producer.init`，本函数 MUST NOT 自行解析 `YD_ROOT` 之外
+    的任何路径。
+
+    `bootstrap` 抛的 `ConfigError`（naive `now` 不可能在此发生；`rawscan.judge` 的配置类
+    拒绝会）由 `main` 统一转成退出码 `1`，MUST NOT 在此吞掉。
+    """
+    report = bootstrap(local=local, config=config, now=datetime.now(UTC))
+    if report.refusal is not None:
+        # 部分落盘（`WRITE_FAILED`）时 `written` 非空且 `refusal` 非 None 同时成立，
+        # 故成败一律以 `refusal` 判，MUST NOT 以 `written` 是否为空判。
+        return _fail(f"init 拒绝执行（{report.refusal.value}）：{report.detail}")
+    for path in report.written:
+        print(path)
+    return 0
 
 
 def run(local: LocalConfig, config: Config) -> int:

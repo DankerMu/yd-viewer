@@ -26,9 +26,20 @@
 - **WHEN** 窗内 IFS 无任何完整 cycle 而 GFS 有
 - **THEN** init 拒绝退出，`states/` 下无任何文件
 
+### Requirement: 率定末态定位
+`init` MUST 把每个变体目录（`config.toml` 的 `variants.<source>`，相对 `yd_root`）**顶层**恰好一个 `.cfg.ic` 普通文件识别为该源率定末态；命中数不为 1、目录不存在、或目录无法枚举时 MUST 整体拒绝且不写任何状态。
+
+#### Scenario: 变体顶层无唯一率定末态即拒绝
+- **WHEN** 某变体目录顶层的 `.cfg.ic` 文件数为 0 或 2
+- **THEN** init 拒绝退出，`states/` 下无任何文件，拒绝理由区分「变体缺失」与「率定末态不唯一」
+
 ### Requirement: 首态生成
-`init` MUST 从两个变体内各自同源率定末态复制首态，重戳到该源首轮 T，写为 `states/<source>/<T>.cfg.ic`；MUST NOT 运行 SHUD，MUST NOT 写任何 `DONE`。
+`init` MUST 从两个变体内各自同源率定末态复制首态，重戳到该源首轮 T，写为 `states/<source>/<T>.cfg.ic`；MUST NOT 运行 SHUD，MUST NOT 写任何 `DONE`。所有判定 MUST 在任何写入之前完成；写入 MUST 拒绝覆盖已存在的目标文件。
 
 #### Scenario: 首态写入
 - **WHEN** 对合成变体与完整 raw fixture 执行 init
 - **THEN** 每个建链 source 得到一个重戳到其首轮 T 的状态文件，`output/` 下无 `DONE`
+
+#### Scenario: 写入阶段失败的收尾可观测
+- **WHEN** 前序 source 的首态已写入后，后续 source 的目标路径上已存在一个条目（非普通文件，故未被「已有状态即拒绝」守卫拦下）导致排他写入被拒
+- **THEN** init 以非零退出码报告失败，理由列出全部已落盘 source 的路径与「根已非全新，重跑前需人工清理 `states/`」，且已落盘文件 MUST NOT 被删除
