@@ -1580,6 +1580,189 @@ Minimal mergeable slice: atomic - 依赖+lock+冒烟+CI 绿是一条验证路径
 Suggested fixture level: expanded - 需构造可被 cfgrib 读取的合成 GRIB 样本，fixture 制作本身有分量
 Minimal mergeable slice: atomic - converter 与其端到端测试互为验证，先合无测试的 converter 或无 converter 的 fixture 都不构成独立绿（依赖引入已剥离到组 6）
 
+### Issue #13 fixture（任务 7.1）
+
+Fixture level: expanded
+Upstream suggested level: expanded（agree，无 override）
+Repair intensity: high（写侧落 canonical NetCDF 与 catalog 到 object-store；catalog 是组 8 唯一的 canonical 产物真相，属 producer/consumer evidence 边界；溯源守卫与 DB-free 禁区守卫的期望落地集随本 PR 扩面。适用 `Invariant Matrix`）
+Project profile: yd-viewer
+
+**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：
+
+1. **issue #12（任务 6.1）的依赖引入不覆盖 NetCDF 写引擎，7.1 在现锁上不可实现**。pin 的 `CanonicalConverter._serialize_product`(converter.py L1861-1900) 硬 `import netCDF4` 且 `to_netcdf(engine="netcdf4", format="NETCDF4")`；读侧 fallback L1474 同样是 `engine="netcdf4"`；`producer/uv.lock` 内 `netCDF4`/`h5netcdf`/`scipy` 三者皆无。故本 PR **必须**引入 `netCDF4` 并 `uv lock`，作为本任务的伴生动作显式提交（与任务 6.1 自己写的「必要时 CI 补系统依赖，作为依赖引入的伴生动作显式提交」同一姿态）。已实测 `netCDF4==1.7.4` + xarray 写读 roundtrip 在 darwin 通过；ubuntu CI 走 manylinux wheel，**不新增 CI 系统依赖步骤**——若 CI 实测需要 HDF5 系统包，按 `ci-only` 修复补 `apt-get`，不改本裁决。
+   **MUST NOT 改引擎**（h5netcdf / scipy）：那是对忠实快照的一处未登记语义编辑，且 scipy 根本写不了 NETCDF4 格式。
+2. **issue #13 的 In Scope 写「无数据库连接断言」，但未说明断言形态**。本 fixture 裁决 6 给出可机检的形态。
+
+**核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
+
+1. **清单 §1 第 35/51/52 行的 `剥离点` 列是本任务的封闭规范，逐字执行、不得自行增删**。清单约定 3 明写「规范性动作只能写在 `剥离点` 列」，故：`剥离点` 点名的动作 MUST 全部执行；`剥离点` **未**点名的符号、分支、常量 MUST 原样保留，即便它在剥离后变成无调用者的死代码。实现者对任一条有异议时，MUST 作为偏离上报，MUST NOT 自行裁决。
+2. **落码方式 MUST 是 `git show` 基线复制 + 定点编辑，MUST NOT 手抄**。三个文件各自的基线命令写死：
+   - `git -C <NWM> show 8ae9b8f2:workers/canonical_converter/converter.py > producer/src/yd_producer/canonical/converter.py`
+   - `git -C <NWM> show 8ae9b8f2:tests/test_canonical_converter.py > producer/tests/test_canonical_converter.py`
+   - `git -C <NWM> show 8ae9b8f2:packages/common/test_netcdf4.py > producer/tests/netcdf_fixture.py`（清单 §1 第 52 行的强制改名：原名会被 pytest 误收集）
+
+   `<NWM>` = 本机 `/Users/danker/Desktop/Hydro-SHUD/NWM`（pin `8ae9b8f2` 已实测可读）。基线之上**只允许四类编辑**，任何第五类编辑都是偏离。**yd 自撰的新用例 MUST NOT 写进这三个快照文件**（写进去就在 diff-vs-pin 里造出无法归类的差异段，把裁决 2 的机械收敛证据废掉）：它们落在未登记的新文件 `producer/tests/test_canonical_db_free.py`（yd 自撰，无溯源头，不进清单路径表）：
+   (a) 清单 `剥离点` 点名的删除/改写；
+   (b) import 重映射：`packages.common.object_store` → `yd_producer.store.object_store`、`packages.common.storage` → `yd_producer.store.object_path`、`packages.common.source_identity` → `yd_producer.raw.source_identity`、`packages.common.test_netcdf4` → `netcdf_fixture`、`workers.canonical_converter.converter` → `yd_producer.canonical.converter`（全集以实跑 `grep -n '^from \|^import \|importlib.import_module' ` 收敛，逐个报告）；
+   (c) 溯源头部注释（裁决 3）；
+   (d) `uv run ruff format` 重排版 + `ruff check --fix` 的 import 排序。**(d) 是既有先例而非本轮发明**：`producer/src/yd_producer/store/safe_fs.py` 与 pin 相差 226 行、差异全是 88 列换行与溯源头（NWM 用 `line-length=120`，yd 用 ruff 默认 88）。
+3. **溯源头部的形式由 `specs/forcing-chain/spec.md`「快照模块可追溯」逐字约束，正反两向共用同一谓词**。三个快照文件各写一条**独立 `#` 注释行**，注释内容**恰为**：
+   - `producer/src/yd_producer/canonical/converter.py` → `NWM@8ae9b8f2 workers/canonical_converter/converter.py`
+   - `producer/tests/test_canonical_converter.py` → `NWM@8ae9b8f2 tests/test_canonical_converter.py`
+   - `producer/tests/netcdf_fixture.py` → `NWM@8ae9b8f2 packages/common/test_netcdf4.py`
+
+   路径后 MUST NOT 有任何尾随内容（含 `:<行号>`、括注、说明文字）；写在 docstring 或字符串里不算数。
+   **`producer/src/yd_producer/canonical/__init__.py` 是 yd 自撰文件，MUST NOT 带溯源头部形式的注释行**——它不在清单路径表内，带了就触发反向守卫（spec「未登记快照文件的反向守卫」）。
+4. **清单 §1 第 35/51/52 行的 `落地状态` MUST 由 `待落地` 翻成 `本 issue 落地`**。这不是记账：`落地状态` 是溯源守卫的**期望落地集**来源（清单 §1 序言），不翻面则守卫的期望集不含这三个新文件，issue 验收标准「溯源头部检查覆盖新模块」**静默落空**——正向检查一条都不会跑到新模块上。翻面后 `producer/tests/test_snapshot_provenance.py` 自动扩面，MUST 实跑证明它对新三个文件确有断言（删掉任一溯源头即变红）。
+5. **§4 风险 7 的落码期确认已由本 fixture 完成，实现者只需复核不需裁决**（风险 7 原文要求「在 7.1 落码时确认，避免删过头」）：
+   - `evaluate_canonical_readiness`(L403-581) **零** ERA5 分支（`grep -n -i era5` 在该区间无输出），原样保留，不得因「ERA5 面」误删。
+   - `剥离点` **未点名**的 ERA5 残面共 6 处，按裁决 1 **全部保留**：`ERA5_VARIABLE_MAPPING`(L81)、`ERA5_STANDARD_UNITS`(L112)、`ERA5_REQUIRED_STANDARD_VARIABLES`(L142)、`REQUIRED_STANDARD_VARIABLES_BY_SOURCE` 的 `"ERA5"` 条目(L153)、`compute_relative_humidity_values`(L846)、`convert_era5_radiation_values`(L891)。后两者的唯一调用点（L2050 / L2155）落在被删的 `ERA5CanonicalConverter` 体内，剥离后成为无调用者的模块级函数——**这是刻意的保留，不是遗漏**，ruff 不报未使用函数。保留用例对这 6 处零引用。
+   - **DB-free 剥离使三处分支成为不可达死代码，按裁决 1 一律保留、不得顺手删**（fixture 复核实测，pin 行号）：`_get_existing_product`(L1902-1909) 在 `repository is None` 时无条件 `return None`，故 `_existing_product_is_current`(L1911-1934) **仍被调用**(L1767) 但首句 `existing is None` 即 `return False`，其后半身（converter_version 比对、checksum 比对、object-store 存在性核验）永不可达；`_convert_record` 的 `status="already_done"` 分支(L1775) 整支不可达（`existing` 恒 `None` ⇒ 状态恒 `"created"`，L1811 三元式）。`_upsert_product`(L1936-1943) 与 `_update_cycle_status`(L1945-1965) 在 `repository is None` 时是 no-op，故 pin 的「fail 产物记录」与「cycle 状态置 `failed_convert`」两个面在 yd 侧**整体消失**——这是 DB-free 的必然后果，不是实现缺陷。
+   - `REQUIRED_STANDARD_VARIABLES_BY_SOURCE` 的 `"ERA5"` 键在 `normalize_source_id` 删掉 ERA5 条目后不可达（`required_standard_variables_for_source("ERA5")` 会在归一化处抛 `ValueError` 而非 `CanonicalConversionError`）。**本 issue MUST NOT 顺手"修"它**：它是清单未点名的继承矛盾，与 `:53` 记录的六键承接矛盾同类，按裁决 1 保留并作为偏离上报。
+6. **`剥离点` 的「改断言 object-store catalog」这条指令在 4 个保留用例上不可直译，本 fixture 逐例拍板，实现者不得自行裁决**（fixture 复核实测；清单第 51 行给的是**改写指令**而非逐例处置，此处补齐它没有预见的 4 个「oracle 在 DB-free 下结构性缺席」的情形。结论 MUST 回填清单第 51 行 `备注`）：
+   - `test_conversion_is_idempotent_on_rerun`(tcc L785)：**保留并改写**。pin 的 oracle 是 `repository.upsert_count` 与 `{"already_done"}` 状态集，二者在 DB-free 下都不存在（见裁决 5 的死分支登记）。DB-free 下唯一可断言且有判别力的幂等语义是**重写幂等**：两次 `convert_manifest` 各产出 14 份产物、状态集恒为 `{"created"}`，且**第二次跑完后每份 canonical 产物的 checksum 与 catalog 的 JSON 字节与第一次逐字节相同**。MUST NOT 断言「第二次不写盘」——pin 在 DB-free 下确实会重写，断言不写盘等于发明 pin 没有的行为。
+   - `test_quality_flag_fail_triggers_reconversion`(tcc L839)：**删除**。其前提是先在 repository 里把已有产物的 `quality_flag` 改成 `fail` 再重跑，DB-free 下没有任何可写入的前置状态面，用例**不可构造**。这是一处**刻意的净覆盖损失**：它覆盖的 `_existing_product_is_current` 的 fail-flag 分支在 DB-free 下本就不可达（裁决 5）。MUST NOT 为了保住它而把 repository 缝搬回来。
+   - `test_missing_required_variable_marks_cycle_failed_and_records_fail_product`(tcc L979) 与 `test_missing_variable_for_one_forecast_hour_records_specific_fail_product`(tcc L995)：**保留并改写**。`pytest.raises(CanonicalConversionError, match=...)` 与消息断言（`"Missing required canonical variables"` / `"dswrf->shortwave_down f003"`）在 DB-free 下完全成立且是本 issue 最有价值的失败路径 oracle，逐字保留；对 `repository.products[...]` / `repository.cycles[...]` 的断言（fail 产物行、`status == "failed_convert"`、`error_code == "CONVERT_FAILED"`）随其记录面消失而**删除**，替换为**取反方向**的可机检断言：该 cycle **没有**写出 catalog（`canonical/<source>/<cycle>/_catalog/catalog.json` 不存在），且缺失那一对 `(变量, lead)` **没有**写出 canonical 产物对象。该替换有真实判别力——`convert_manifest`(pin L1224-1228) 在任何产物写入**之前**就检出 missing pairs 并抛错，catalog 只在成功路径的 `_complete_cycle_after_conversion` 里写，故「失败即零产物零 catalog」是可被变异证伪的性质。
+   - 这 4 例之外，其余带 `repository` 断言的保留用例按清单第 51 行原指令改断言 catalog 或改断言 `ConversionResult`，逐例在报告中列出改法。
+   - **`test_conversion_without_repository_preserves_lineage_for_identity_readiness`(tcc L817) 的直接构造须同时去掉 `repository=None` 实参**（`剥离点` 已删该形参，留着即构造期 `TypeError`），并按清单第 51 行的跨行处置在 tcc L826 的 `CanonicalConverterConfig(...)` 补 `object_store_root=tmp_path` 与 `object_store_prefix=""` 两个 kwarg；`build_converter` 内的 tcc L109 同样补这两个 kwarg。
+
+7. **「无数据库连接」断言 MUST 是可机检的三条，MUST NOT 用「代码里没有 psycopg 字样」这种代理量单独充数**：
+   - **静态**：`producer/src/yd_producer/canonical/` 下零 `psycopg` / `DATABASE_URL` / scheduler / registry import 与环境变量读取（复用 `producer/tests/test_snapshot_provenance.py` 既有的禁区检查形态，扩面到新目录）。
+   - **动态（本条是判别力承重条）**：端到端转换用例执行期间，MUST 断言**没有发生任何出站 socket 连接**——以 `monkeypatch.setattr(socket.socket, "connect", <fail>)` 一类的运行期闸门实现，而不是只读源码。理由：静态检查对「运行期动态 import 一个 DB 驱动」零判别力，而本 issue 的验收正是运行期性质。该闸门 MUST 覆盖完整的 `convert_manifest` 路径（读 raw → 转换 → 写 NetCDF → 写 catalog）。
+   - **构造面**：`CanonicalConverter.__init__` 与两个保留子类的签名里 MUST 不存在 `repository` 形参，且 `CanonicalRepository` Protocol 已不存在（`hasattr(converter_module, "CanonicalRepository") is False`）。
+8. **合成 GRIB 端到端用例是 yd 自撰的新增交付物，与快照的 40 个用例并列，MUST NOT 用它替换快照用例**。理由与形态：
+   - pin 的测试套按设计走 **NetCDF fallback**（`packages/common/test_netcdf4.py` 的 docstring 逐字写着 "replaces mock_grib for test data generation"），故 40 个快照用例里**没有一个真正让 cfgrib 解码过一个字节**：`xr.open_dataset(file_path, engine="cfgrib")`(pin L1466) 在每个用例上都抛错并落进 L1474 的 netcdf4 回退。**措辞须精确到符号**（fixture 复核更正）：`_cfgrib_backend_kwargs` 与 `_select_cfgrib_data_variable` 两个 helper **已有**保留用例覆盖——`test_cfgrib_variable_mismatch_does_not_fallback_to_first_data_var`(tcc L1008) 直接调 `_select_cfgrib_data_variable`，`test_bundle_entries_open_cfgrib_with_entry_specific_filter`(tcc L1024) 以假 xarray 断言 `engine == "cfgrib"` 与 `backend_kwargs` 的形状；且这两个 helper 在回退路径上照样执行（L1464 在 try 之前、L1497/L1498 在两支之后）。缺的是**真实 cfgrib 解码**这一段，不是这两个符号。清单 §1 第 51/52 行命令快照这套 NetCDF 用例，本 fixture 不推翻它。
+   - issue #13 的 `Suggested fixture level` 理由（「需构造可被 cfgrib 读取的合成 GRIB 样本」）由**一条** yd 自撰的 e2e 用例兑现：用锁内 `eccodes`（cfgrib 的依赖，无需新增依赖）`codes_grib_new_from_samples('regular_ll_sfc_grib2')` 造真 GRIB2，设 `shortName`/`Ni`/`Nj`/网格角点/`dataDate`/`dataTime`/`step`/values，写进 object-store 的 `raw/...grib2` 键，配一份带 `metadata.grib_short_name` 的 manifest entry，跑 `convert_manifest`，断言：**cfgrib 分支实际被走到**（fallback 未触发，可用 caplog 断言 L1470 那条 "falling back to netcdf4" 警告**未**出现）、canonical NetCDF 与 catalog 落盘、格点值与写入值对应。已实测该造法可行（215 字节 GRIB2，cfgrib 读回 `t2m` + 3×4 网格）。
+   - 该用例是**真实 cfgrib 解码路径**（eccodes 解码 GRIB2 字节 → xarray Dataset → `_select_cfgrib_data_variable` 在真数据上选变量）在本仓的**唯一**覆盖；若 GRIB 造样在落码时被证明不可行（例如 eccodes 样本在 CI 的 ubuntu 上不可用），MUST 作为偏离上报并给出实测证据，MUST NOT 静默降级为再写一个 NetCDF 用例。
+9. **D4 零默认在本文件的落点由 `剥离点` (a)(b)(c)(d) 四条封闭，实现者 MUST NOT 自行发明缺省**。特别是清单 §4 风险 14 已显式声明：在 `config.toml` / `local.toml` 字段落地前（归任务 1.1），7.1 **不得**自行发明缺省。本 issue **MUST NOT 修改** `producer/src/yd_producer/config.py`、`config.toml` schema、`cli.py`，也不出 `specs/cli-config/spec.md` 的 delta——converter 的三个路径字段（`workspace_root`/`object_store_root`/`object_store_prefix`）按 `剥离点`(b) 改为无默认必填 kw-only 构造入参，由调用方（组 8 与任务 14.1）装配，本 PR 内只有测试作为调用方。
+10. **本 PR 不接线任何 CLI、不接线控制器**。`cli.py` 的子命令行为逐字不变；converter 只作为 `yd_producer.canonical` 包的库符号存在。NWM 侧 `workers/canonical_converter/cli.py` 不快照（清单 §1 第 35 行 `剥离点` 在处置 `from_env` 调用点时逐字记为「D5：NWM CLI 不快照」；design.md 的 D5 条目本身讲的是依赖策略，该引用在清单侧即为悬空，本 fixture 不修清单的措辞，只按其实质结论执行——NWM 的 CLI 入口不进快照集）。
+11. **零跨节点、零 NWM 运行时 import**。`yd_producer.canonical` MUST NOT 在运行期 import 任何 `workers.*` / `packages.*`；对 NWM 的访问只发生在**落码期**的只读 `git show`（agent-ops §5），实现者 MUST NOT 在 NWM 工作树里执行任何写操作、MUST NOT 在 NWM checkout 内跑 `uv sync` / `uv run`（agent-ops §7.2 维护窗口硬约束）。
+
+Change surface:
+- 新增 `producer/src/yd_producer/canonical/__init__.py`（yd 自撰，空导出或最小 re-export，无溯源头）
+- 新增 `producer/src/yd_producer/canonical/converter.py`（快照，清单 §1 第 35 行）
+- 新增 `producer/tests/netcdf_fixture.py`（快照，清单 §1 第 52 行，强制改名）
+- 新增 `producer/tests/test_canonical_converter.py`（抽取式快照，清单 §1 第 51 行：39 个保留用例（44 − 剥离点点名删的 4 − 裁决 6 判删的 1）+ 4 个 helper + 14 项模块级 import shim）
+- 新增 `producer/tests/test_canonical_db_free.py`（yd 自撰，**无溯源头、不进清单路径表**：no-DB 运行期闸门用例与合成 GRIB e2e 用例）
+- 修改 `producer/pyproject.toml` + `producer/uv.lock`：新增 `netCDF4`
+- 修改 `producer/tests/test_snapshot_provenance.py`（若守卫需要显式登记新目录；期望是清单翻面后自动扩面，实测为准）
+- 修改 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md`：第 35/51/52 行 `落地状态` 翻面；§4 风险 7 记入落码期确认结论；第 51 行 `备注` 回填裁决 6 的 4 例逐例处置与 `test_quality_flag_fail_triggers_reconversion` 的净覆盖损失，并把该 `备注` 现存的「减去上列 4 个删除用例 = 40 个」这处算术订正为 **39**（否则规范侧留一份与交付数不符的计数）
+- 修改 `openspec/changes/m2-producer-core/tasks.md`：勾选 7.1
+- 修改 `openspec/changes/m2-producer-core/specs/forcing-chain/spec.md`：为「DB-free canonical 转换」Requirement 增补 cfgrib 真实读路径的 Scenario
+
+Must preserve:
+- `producer` 现有 66 个源/测试文件的行为逐字不变；`uv run pytest` 既有全套通过
+- `producer/tests/test_snapshot_provenance.py` 的正反两向谓词不变（本 PR 只让期望集扩面，MUST NOT 放宽谓词）
+- `yd_producer.store.object_store.LocalObjectStore` / `object_path` / `safe_fs` 的公开行为不变（converter 是它们的新消费者，MUST NOT 为迁就 converter 修改它们）
+- `yd_producer.raw.source_identity.normalize_source_id` 的 `{"GFS": "gfs", "IFS": "ifs"}` 字面量不变
+- `cli.py` 子命令集合与 `config.py` 字段集合不变
+
+Must add/change:
+- `yd_producer.canonical.converter` 提供 DB-free 的 `CanonicalConverter` / `IFSCanonicalConverter`、`convert_manifest` / `convert_manifest_uri`、catalog 写入，全程零数据库
+- canonical 产物与 catalog 落 object-store：产物键由 pin 的 `_serialize_product` 路径决定，catalog 键为 `canonical/<source_id>/<compact_cycle>/_catalog/catalog.json`、payload `schema_version = "nhms.canonical.product_catalog.v1"`（逐字承接，MUST NOT 改名或改 schema 版本串）
+- `netCDF4` 进入 `pyproject.toml` 依赖与 `uv.lock`
+
+Seams under test（上游声明，consumed not renegotiated）:
+- `CanonicalConverter.convert_manifest(manifest)` —— 本任务的主 seam：合成 raw（object-store 内）+ manifest dict → `ConversionResult` + 落盘的 canonical NetCDF + catalog。change design.md「Sketch seams under test」的 forcing 主干 seam 在本任务的落点。
+- `yd_producer.store.object_store.LocalObjectStore` —— 产物落盘的读回 seam（不新增 seam，复用 issue #5 已落地的）。
+- **上游 seam 缺口（记录为偏离，非重新协商）**：design.md 的 seam 清单不含「快照溯源守卫」这一层，它是 issue #5 建立的仓内自有 seam（`producer/tests/test_snapshot_provenance.py`）。本 fixture 就地声明，不修改 design.md。
+
+Selected risk packs（逐项给项目具体检查）:
+- **Public API / CLI / script entry**: selected - `yd_producer.canonical` 是新公开包；`__init__.py` 的导出面、构造签名（config 必填 kw-only、无 `repository`）是组 8 的调用契约
+- **File IO / path safety / overwrite**: selected - 产物与 catalog 经 `LocalObjectStore.write_bytes_atomic` 落盘；键由 `source_id`/`cycle`/`variable`/`forecast_hour` 拼接，须经 `object_path.validate_object_path` 既有约束；重复转换的覆写语义按裁决 6 的**重写幂等**读法取证（`_existing_product_is_current` 在 DB-free 下不可达，MUST NOT 拿它当断言目标）
+- **Schema / columns / units / field names**: selected - catalog 的 16 个行字段与 4 个 payload 字段、`schema_version` 串、`VARIABLE_MAPPING`/`STANDARD_UNITS`/`CONVERSION_PARAMS` 的单位契约，是组 8 的下游 schema 真相
+- **Resource limits / large input / discovery**: selected - `_read_records` 逐 entry 打开数据集；`_configured_forecast_hours` 的 lead 全集；合成 fixture 规模须小到 CI 可跑
+- **Legacy compatibility / examples**: selected - 快照忠实度本身：`剥离点` 之外零改写，diff-vs-pin 必须只含四类允许编辑
+- **Error handling / rollback / partial outputs**: selected - `CanonicalConversionError` 是唯一的公开失败类型；缺变量/缺 lead/不可解析 raw/序列化失败四条路径各须有用例；catalog **自身**原子写（`write_bytes_atomic`），且转换失败时**不写** catalog。**MUST NOT 断言产物级回滚**：pin 逐份写产物、写完才写 catalog，失败时已写的产物对象留在 object-store，pin 无回滚——按裁决 1 这是继承行为，登记为已知非目标，不是本 issue 要补的缺口
+- **Release / packaging / dependency compatibility**: **selected** - 本 PR 引入 `netCDF4`，`uv sync --frozen` 与 CI producer job 是硬证据
+- **Documentation / migration notes**: selected - 清单 `落地状态` 翻面、§4 风险 7 结论回填、spec delta
+- Config / project setup: not selected - 裁决 8 明令不碰 `config.py` / `config.toml` schema
+- Auth / permissions / secrets: not selected - 无凭据面；DB 面已整体剥离
+- Concurrency / shared state / ordering: not selected - converter 是单进程纯转换，无锁、无共享可变状态、无重入路径（并发面归控制器组 12）
+
+Domain packs（active profile）:
+- **Time series / forcing / temporal boundaries**: selected - `compute_time_axis`、`parse_cycle_time`、`_step_hours` / `_step_hours_from_step_range` 的 APCP 累积语义、`lead_time_hours` 与 `valid_time` 的对应
+- **NWM 快照溯源 / DB-free 隔离**: selected - 本 issue 是清单第 35/51/52 行的落地点，正反两向守卫与运行期无连接闸门都在此定型
+- Geospatial / CRS / shapefile sidecars: not selected - converter 不做重投影，只读 GRIB/NetCDF 自带经纬网格（`_grid_definition_signature` 是签名不是投影）
+- 状态链 / warm-start 定戳一致性: not selected - 本 issue 不触碰 `cfg.ic` 与 `states/`
+
+Required evidence（输入 → 期望输出）:
+- `uv run pytest producer/tests/test_canonical_converter.py` -> 39 个快照用例全绿；`uv run pytest producer/tests/test_canonical_db_free.py` -> yd 自撰用例全绿
+- 合成 raw（NetCDF fixture，7 变量 × 2 lead）+ manifest -> `convert_manifest` 产出 14 份 canonical NetCDF + 1 份 catalog；catalog `products` 长度 14、`schema_version == "nhms.canonical.product_catalog.v1"`
+- 合成**真 GRIB2**（eccodes 造，`shortName` 与 manifest `metadata.grib_short_name` 一致）-> cfgrib 分支被走到（无 "falling back to netcdf4" 警告）、canonical 产物与 catalog 落盘、值对应
+- 转换全程 `socket.socket.connect` 被闸门拦截 -> 零调用（闸门被触发即用例红）
+- `hasattr(converter_module, "CanonicalRepository")` -> `False`；`CanonicalConverter.__init__` 签名无 `repository`
+- 缺必需变量的 manifest（`omitted_variables={"dswrf"}`）-> `CanonicalConversionError`，消息匹配 `Missing required canonical variables`；该 cycle 的 catalog **不存在**；零 canonical 产物对象
+- 单个 lead 缺变量的 manifest（`omitted_pairs={("dswrf", 3)}`）-> `CanonicalConversionError`，消息匹配 `dswrf->shortwave_down f003`；catalog 不存在；`shortwave_down` 的 f003 与 f000 产物对象均不存在（pin 侧靠 repository 区分二者，DB-free 下两者都不落盘，取反方向断言）
+- 同一 manifest 连跑两次 -> 两次各 14 份产物、状态集恒 `{"created"}`，第二次的每份产物 checksum 与 catalog JSON 字节与第一次逐字节相同（重写幂等，裁决 6）
+- 不可解析的 raw 字节 -> `CanonicalConversionError`，消息含 `local_key`；**不产出半份 catalog**
+- `CanonicalConverterConfig(workspace_root=..., )` 缺 `object_store_root` / `object_store_prefix` -> `TypeError`（必填 kw-only 生效，空串回退已删）
+- `producer/tests/test_snapshot_provenance.py` -> 正向覆盖新三个文件（删任一溯源头即红）；反向守卫不误判 `canonical/__init__.py`
+- `cd producer && uv sync --frozen` -> 无 lock drift
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+
+**红证明（red-proof）义务**：yd 自撰或改写的新断言（no-DB 运行期闸门、合成 GRIB e2e、溯源守卫扩面、裁决 6 改写出的三条取反/幂等断言）MUST 各给一条实跑过的红证据——把闸门/断言反过来、删掉溯源头、或让失败路径提前写一份 catalog，粘贴红输出。逐字移植的快照用例不承担红证明（它们在 pin 上已有历史），但 MUST 报告移植后首次运行的完整结果。
+
+**忠实度证明（本任务的判别力承重条）**：MUST 提交三份 `diff` 的机械收敛证据，即对每个快照文件跑 `diff <(git -C <NWM> show 8ae9b8f2:<pin路径>) <目标文件>`，并把每一段差异归入裁决 2 的四类允许编辑之一；无法归类的差异即偏离。另 MUST 重跑清单第 35 行自带的再生命令并报告命中数：
+- `grep -c 'repository' producer/src/yd_producer/canonical/converter.py` -> 0
+- `grep -nE 'os\.getenv|_float_env\(|_env_flag\(' producer/src/yd_producer/canonical/converter.py` -> 0 行
+- `grep -n 'from_env' producer/src/yd_producer/canonical/converter.py` -> 0 行
+- `grep -nE 'ERA5CanonicalConverter|ERA5CanonicalConverterConfig|convert_era5_precipitation_with_metadata|expected_converter_version' producer/src/yd_producer/canonical/converter.py` -> 0 行
+- `grep -c '^def test_' producer/tests/test_canonical_converter.py` -> **39**（44 个 pin 用例 − `剥离点` 点名删除的 4 个 − 裁决 6 判删的 `test_quality_flag_fail_triggers_reconversion` 1 个）
+- `grep -c '^def test_' producer/tests/test_canonical_db_free.py` -> yd 自撰用例数（no-DB 闸门 + 合成 GRIB e2e，单独报数）
+
+Invariant Matrix:
+- **Governing invariant**: 落进 `yd_producer/canonical/` 的每一个字节，要么与 pin `8ae9b8f2` 逐字对应，要么落在裁决 2 的四类允许编辑内；且该模块在任何执行路径上都不建立出站连接、不读环境变量、不 import NWM。
+- **Source-of-truth identity/contract**: pin commit `8ae9b8f2` + 清单 §1 第 35/51/52 行的 `剥离点`/`抽取`/`落地状态` 三列
+- **Producers**: `CanonicalConverter.convert_manifest` / `convert_manifest_uri`、`_serialize_product`、`_write_product_catalog`
+- **Validators/preflight**: `_missing_required_pairs`、`_ensure_grid_definition`、`_select_cfgrib_data_variable`、`required_standard_variables_for_source`
+- **Storage/cache/query**: `yd_producer.store.object_store.LocalObjectStore`（未改动的既有消费面）、`object_path.validate_object_path`
+- **Public routes/entrypoints**: `yd_producer.canonical.__init__` 的导出面；`cli.py` —— **none - 本 PR 不接线，裁决 9**
+- **Frontend/downstream consumers**: 组 8 的 direct-grid forcing（尚未落地，经 catalog 与 canonical 产物键消费）；本 PR 的义务是把 catalog schema 逐字承接，不改名
+- **Failure paths/rollback/stale state**: `CanonicalConversionError` 全集；失败路径的「零产物零 catalog」（missing-pairs 分支，pin L1224-1228 在任何写入之前）；catalog 写失败路径。`_existing_product_is_current` / `already_done` / `_upsert_product` / `_update_cycle_status` 四处在 DB-free 下不可达或 no-op，保留但**不作为断言目标**（裁决 5）
+- **Evidence/audit/readiness**: `producer/tests/test_snapshot_provenance.py`（正向溯源 + 反向守卫 + DB-free 禁区）、清单 `落地状态` 列、catalog 本身
+- **Regression rows**:
+  - `convert_manifest` + 完整合成 raw -> 14 份 canonical NetCDF + 1 份 catalog，catalog 行字段齐全，零出站连接
+  - `convert_manifest` + 真 GRIB2 raw -> 走 cfgrib 分支（无 fallback 警告），产物与 catalog 同上
+  - `convert_manifest` + 缺变量/不可解析 raw -> 稳定的 `CanonicalConversionError` 或 `MissingForecastVariable`，无半份 catalog
+  - `CanonicalConverterConfig` 缺必填 kw-only 字段 -> 构造期 `TypeError`，不静默回退到 `workspace_root`
+  - 删除任一快照文件的溯源头 -> `test_snapshot_provenance.py` 变红并指名该文件（守卫扩面的判别器）
+  - `canonical/__init__.py`（yd 自撰、无溯源头）-> 反向守卫不误判（未登记文件的正确放行）
+  - 未改动的兄弟消费者 `yd_producer.store.*` / `yd_producer.raw.*` 的既有用例 -> 逐条仍绿
+
+Boundary-surface checklist:
+- 共享 helper 根：`yd_producer/store/{object_store,object_path,safe_fs}.py` —— 只读消费，MUST NOT 修改
+- 公开入口：`yd_producer.canonical` 新包；`cli.py` 不动
+- 读面：object-store 内的 raw 字节（cfgrib 优先、netcdf4 fallback）
+- 写/覆写面：canonical NetCDF 产物键、catalog 键（原子写）
+- staging/publish/rollback 面：none - 本模块只写 work 内 object-store，NFS 发布归组 13
+- producer/consumer evidence 边界：catalog ↔ 组 8 forcing；清单 `落地状态` ↔ 溯源守卫
+- 陈旧态/幂等边界：同一 manifest 重复转换的**重写幂等**（裁决 6 第一条）；`_existing_product_is_current` 不可达，不在边界面内
+- 未改动的下游消费者：`yd_producer.raw.manifest` 的 `DownloadManifest` 信封（converter 是它的第一个消费者，MUST 按既有字段读，MUST NOT 改信封）
+
+Known limits（须走 Phase 8 的 deferral routing：每条配 follow-up issue 或一行不落 issue 的理由）:
+- **净覆盖损失**：`test_quality_flag_fail_triggers_reconversion`(tcc L839) 按裁决 6 删除，`_existing_product_is_current` 的 fail-flag 重转分支在 yd 侧零覆盖（该分支在 DB-free 下不可达，故覆盖损失与行为损失不等价）
+- **继承的死代码**：裁决 5 登记的 3 处不可达分支 + 2 处 no-op（`_get_existing_product` 后半、`_existing_product_is_current`、`already_done` 状态支、`_upsert_product`、`_update_cycle_status`）与 6 处 ERA5 残面，按裁决 1 保留
+- **继承的矛盾**：`REQUIRED_STANDARD_VARIABLES_BY_SOURCE` 的 `"ERA5"` 键不可达（`normalize_source_id("ERA5")` 抛 `ValueError` 而非 `CanonicalConversionError`）
+- **无产物级回滚**：转换中途失败时已写的 canonical 产物对象留在 object-store（pin 行为，无回滚）
+
+Non-goals:
+- direct-grid forcing 生产、work 内临时 registry、SHUD 输入组装（组 8）
+- 数值正确性与真实 NWM 数据验证（profile：合成 fixture 是 M2 唯一 oracle，数值正确性显式归 M4）
+- `config.toml` / `local.toml` 新字段（清单 §4 风险 14，归任务 1.1）
+- CLI 接线与控制器接线（任务 14.1）
+- 修复清单继承下来的矛盾（`"ERA5"` 键不可达、`:53` 记录的六键承接矛盾 #99）——报告，不修
+
+Review focus:
+- 忠实度：三份 diff-vs-pin 的每一段差异是否都能归入四类允许编辑；`剥离点` 的每一条是否都执行、且**只**执行了它点名的；yd 自撰用例是否真的全部落在 `test_canonical_db_free.py`（写进快照文件即废掉收敛证据）
+- 裁决 6 的 4 例改写是否照做：改写后的断言是否真有判别力（尤其失败路径的「零产物零 catalog」与重写幂等的逐字节比对），有没有被降级成永真式
+- 守卫扩面是否真有判别力：清单 `落地状态` 翻面后，正向检查是否真的跑到了新三个文件（删溯源头须变红），反向守卫是否误判 `canonical/__init__.py`
+- 「无数据库连接」是否只有静态代理量，运行期闸门是否覆盖完整 `convert_manifest` 路径
+- 合成 GRIB e2e 是否真的走了 cfgrib 分支（fallback 静默生效是本用例最可能的假绿形态）
+- `netCDF4` 引入是否伴随 `uv lock` 并通过 `uv sync --frozen`；是否误改了引擎
+- catalog 的 schema 串与字段名是否逐字承接（组 8 的下游契约）
+
 ## 8. forcing-chain（四）：direct-grid forcing 与 SHUD 输入组装
 
 - [ ] 8.1 快照 file-backend direct-grid forcing 生产（格点即站点、binding 权重 1、`Time_Day=0` 锚 cycle）
