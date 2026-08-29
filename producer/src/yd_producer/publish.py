@@ -66,9 +66,11 @@ r"""NFS 发布器：一轮成功计算的正式提交（任务 13.1，issue #24�
 :data:`PUBLISH_DIR_MODE`（`ensure_directory_no_follow` 逐字拒绝放宽，见
 `store/safe_fs.py:107-131`，故 umask 0o077 的现场它落地即 0o700，node-27 连穿越都做不到）。
 放宽逐级、非递归，且只作用于 `output/`、`output/<T>/`、`output/<T>/<source>/` 三级——
-不触碰 `states/`、`logs/`、`YD_ROOT` 自身或历史 cycle 目录。**放宽是「尝试」，可穿越才是要
-立的性质**：三级就位后逐级复 stat 并要求组或其他至少有一个 `x`，任一级不满足即在第一处 NFS
-写入之前抛 `PublishError`（`_require_traversable`）——「本次调用之前不存在」不是可持久化的
+不触碰 `states/`、`logs/`、`YD_ROOT` 自身或历史 cycle 目录。**放宽是「尝试」，node-27 可遍历且可读才是
+要立的性质**：三级就位后逐级复 stat，并要求组或其他之中至少有一类**同时**具备 `r` 与 `x`
+（判据由 `docs/products-contract.md` §8「目录遍历与读取权限」推导，见
+`_is_readable_and_traversable`），任一级不满足即在第一处 NFS 写入之前抛 `PublishError`
+（`_require_traversable`）——「本次调用之前不存在」不是可持久化的
 属性，`mkdir` 与放宽之间一次 EIO/重启就会把该层级以 `0o700` 永久闩死，而其后每一轮都把它
 看作「已存在」而不动。
 
@@ -133,11 +135,12 @@ __all__ = [
 #: 正式产物的文件位（`docs/agent-ops.md` §10）：node-27 以 `nwm` 身份只需读。
 #: 共享组与 setgid 是现场目录策略，不由本模块设置 gid。
 PUBLISH_FILE_MODE = 0o644
-#: 发布目录位：node-27 必须能**穿越** `output/<T>/<source>/`。
+#: 发布目录位：node-27 必须能**穿越并读取** `output/<T>/<source>/`。
 PUBLISH_DIR_MODE = 0o755
-#: 可穿越后置断言的判据位：组或其他至少有一个 `x`。owner 的 `x` **不算**——发布进程自己
-#: 总是能进去，用它当判据等于把断言写成恒真（变异体 (aq)）。
-_TRAVERSABLE_BITS = stat.S_IXGRP | stat.S_IXOTH
+#: 组的「遍历 + 读取」位对（`0o050`）。
+_GROUP_READ_TRAVERSE = stat.S_IRGRP | stat.S_IXGRP
+#: 其他的「遍历 + 读取」位对（`0o005`）。
+_OTHER_READ_TRAVERSE = stat.S_IROTH | stat.S_IXOTH
 #: v2 DAT 的定长前缀：1024 字节文本头 + `st`(float64) + `nc`(float64)。
 DAT_FIXED_HEADER_BYTES = 1024 + 8 + 8
 #: 文本头本身的字节数（v2 判据作用的窗口）。
@@ -580,20 +583,41 @@ def _widen_publish_dir(directory: Path, *, root: Path) -> None:
         os.close(fd)
 
 
+def _is_readable_and_traversable(mode: int) -> bool:
+    """发布目录对 node-27 是否**既可遍历又可读**。判据由消费者契约推导，不是掩码字面值。
+
+    出处逐字（这条判据前后写坏过两次，两次都是拿上一轮的反例去调掩码，故把推导链写在
+    这里）：
+
+    * `docs/products-contract.md` §8（:120）——「node-27 `nwm` 账户只需对 `input/viewer`
+      和 `output` 有目录**遍历与读取**权限」；
+    * `docs/agent-ops.md` §10（:311）——「node-27 只需 `input/viewer` 和 `output` 的
+      **读/遍历**权限；优先使用双方共享组和目录 setgid」。
+
+    两份文档都把「遍历」与「读取」并列写着，故两者都是必需的、且必须**落在同一类主体上**：
+    目录的遍历是 `x`（`open`/`stat` 目录内的名字），目录的读取是 `r`（`readdir` 列出名字）。
+    node-27 只有一个身份，它要么走 group 要么走 other——一类只有 `x`（如 `0o710`）时它进得
+    去却列不出 cycle 目录，一类只有 `r`（如 `0o744`）时它列得出名字却 `stat` 不到任何条目，
+    两种都让 `DONE` 封在一棵 viewer 瞎眼的树上。`output/` 恰是 viewer 必须 `readdir` 才能
+    枚举 cycle 的那一级：`products-contract.md` §7.1 的枚举锚点是「最新 `DONE` cycle」而不是
+    墙钟，§7.3 又要求算停后最后一批仍可显示，两条一起堵死了按名字猜候选路径的退路。
+
+    owner 位 MUST NOT 计入：发布进程自己永远进得去，算上它这条判据即恒真（变异体 (aq)）。
+
+    判据只看低九位，`S_ISGID`/sticky 等高位经 :func:`stat.S_IMODE` 原样穿过：现场按 §10
+    首选做法设的 `0o2750` 满足 group 的 `r`+`x` 而原样通过。
+    """
+    return (mode & _GROUP_READ_TRAVERSE) == _GROUP_READ_TRAVERSE or (
+        mode & _OTHER_READ_TRAVERSE
+    ) == _OTHER_READ_TRAVERSE
+
+
 def _require_traversable(directory: Path, *, root: Path) -> None:
-    """发布目录的**可穿越后置断言**（裁决 8 的 fail-closed 半边）。
+    """发布目录的**可遍历且可读断言**（裁决 8 的 fail-closed 半边）。
 
-    判据是 `stat.S_IMODE(mode) & (S_IXGRP | S_IXOTH) != 0`，即 `& 0o011`：组或其他至少有
-    一个 `x`。owner 位不算——发布进程自己永远进得去，拿它当判据这条断言就是恒真的
-    （变异体 (aq)）。
-
-    这里**刻意不取**裁决 8 写的字面掩码 `0o055`（记为偏离）：`0o055` 把组/其他的 `r` 也算
-    进来，于是 `0o744` 这类 mode 满足 `& 0o055 != 0` 却根本**不可穿越**——组与其他能列出
-    名字，却 stat/open 不了目录里的任何东西，`DONE` 照样封在一棵 node-27 瞎眼的树上，正是
-    本轮要闭掉的那个形态。裁决 8 自己的括号注（「组或其他至少有一个 `x`」）与变异体 (aq)
-    的措辞（「组或其他有 `x`」）都指向 x 位，故 `0o055` 是该裁决内部的措辞不一致而不是
-    刻意的宽松。两种掩码在裁决钉死的两个形态上结论相同：`0o2750` 通过（`0o010`），
-    `0o700` 拒绝。
+    判据整条交给 :func:`_is_readable_and_traversable`，那里写着它从
+    `docs/products-contract.md` §8 与 `docs/agent-ops.md` §10 的推导链；本函数只负责取到
+    fd 绑定的 mode 并把不合格的层级变成一条 pre-`DONE` 的响亮失败。
 
     存在理由：「本次调用之前不存在」不是可持久化的属性。三级 stat 完成到放宽循环跑完之间
     任何一次失败（NFS EIO/ESTALE、SIGKILL、节点重启），已 `mkdir` 的层级就以 umask 0o077
@@ -602,9 +626,9 @@ def _require_traversable(directory: Path, *, root: Path) -> None:
     父级，canonical 恢复路径也救不回来。任一父级不可穿越即等于 node-27 什么都看不到，同时
     状态链照常推进、无任何信号——这直接违反治理不变量的「node-27 **可读**」半边。
 
-    现场按 `docs/agent-ops.md` §10 首选做法设的 `0o2750` 满足 `& 0o055 == 0o050`，**原样
-    通过、不被改写**：MUST NOT 把这条断言改成「发现不可穿越就放宽已存在的层级」——那会把
-    round 1 的 cand-02（重写现场的 `2750`、清掉 setgid）原样放回来。
+    现场按 `docs/agent-ops.md` §10 首选做法设的 `0o2750` 组位齐备（`r`+`x`），**原样通过、
+    不被改写**：MUST NOT 把这条断言改成「发现不可穿越就放宽已存在的层级」——那会把 round 1
+    的 cand-02（重写现场的 `2750`、清掉 setgid）原样放回来。
 
     读法是 fd 绑定的（`open_directory_no_follow` + `os.fstat`），与 :func:`_widen_publish_dir`
     同一高度：不跟随 symlink，且断言的正是随后会被写入的那个 inode。
@@ -614,10 +638,11 @@ def _require_traversable(directory: Path, *, root: Path) -> None:
         mode = stat.S_IMODE(os.fstat(fd).st_mode)
     finally:
         os.close(fd)
-    if not mode & _TRAVERSABLE_BITS:
+    if not _is_readable_and_traversable(mode):
         raise PublishError(
-            f"发布目录 {directory} 不可穿越（mode={mode:#o}）：组与其他都没有 `x`，"
-            "node-27 将读不到本轮产物；本轮不发布（已存在的层级由现场按 "
+            f"发布目录 {directory} 不可遍历或不可读（mode={mode:#o}）：组与其他都没有一类"
+            "同时具备 `r` 与 `x`，node-27 将读不到本轮产物（products-contract.md §8："
+            "「目录遍历与读取权限」）；本轮不发布（已存在的层级由现场按 "
             "docs/agent-ops.md §10 放宽，本模块不改写它）"
         )
 
@@ -644,7 +669,13 @@ def _prepare_output_dir(inputs: PublishInputs) -> None:
     * **放宽之后**再查全部三级——这一趟才是裁决 8 点名的后置断言，它盖住「本次自建但
       `fchmod` 没跑成/没跑到」这条真实失败面（首轮 EIO -> 次轮把 `0o700` 当已存在而放行）。
 
-    两趟共用同一个谓词，缺任一趟都有判别器（变异体 (ap)）。
+    两趟 MUST 共用同一个判据函数（:func:`_is_readable_and_traversable`），避免两处实现漂移。
+    但两趟的判别力**不对称**，这一点按变异体 (ap) 的实测结论如实写在这里：删掉前置那趟会被
+    「预置 `0o700` 的 `output/`」用例当场杀死（它要求 `YD_ROOT` 递归快照逐项不变，而只留后置
+    的实现会先把下面两级 `mkdir` 出来）；而**只删后置那趟按设计存活**——后置唯一独占的场景是
+    「`fchmod` 返回成功却不生效」，全项目文档无此机制，最接近的真实类比（父目录 default POSIX
+    ACL clamp）已由 Known limits 路由到 M4 现场验证。故后置那趟是 belt-and-braces，MUST NOT
+    为它编一段「`os.fchmod` 静默空转」的 mock 编排来凑判别器。
     """
     root = inputs.root
     levels = (

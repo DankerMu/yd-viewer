@@ -1761,3 +1761,138 @@ def test_unstattable_scratch_dat_converges_to_publish_error(tmp_path: Path) -> N
         dat_dir.chmod(0o755)
 
     _assert_unchanged(before, scene)
+
+
+# --- 可穿越判据的 mode 域逐格枚举（round 3 cand-01 / Review Failure Retro 的核心产出） ---
+
+
+@pytest.mark.parametrize(
+    ("preset_mode", "accepted"),
+    [
+        (0o755, True),
+        (0o750, True),
+        (0o705, True),
+        (0o2750, True),
+        (0o2751, True),
+        (0o700, False),
+        (0o744, False),
+        (0o710, False),
+        (0o711, False),
+        (0o701, False),
+    ],
+    ids=[
+        "0o755",
+        "0o750",
+        "0o705",
+        "0o2750",
+        "0o2751",
+        "0o700",
+        "0o744",
+        "0o710",
+        "0o711",
+        "0o701",
+    ],
+)
+def test_traversability_predicate_over_the_whole_mode_domain(
+    tmp_path: Path, strict_umask: None, preset_mode: int, accepted: bool
+) -> None:
+    """预置的 `output/` 逐格跑完判据的整个输入域（变异体 (aq) / (aq2) / (aq3)）。
+
+    判据是「组或其他之中至少有一类**同时**具备 `r` 与 `x`」，由
+    `docs/products-contract.md` §8（node-27 `nwm` 需要目录**遍历与读取**权限）与
+    `docs/agent-ops.md` §10（「读/遍历」）推导。`x` 是遍历，`r` 是 `readdir`；node-27 只有
+    一个身份，两位落在不同类上等于两边都不够用。
+
+    逐格枚举而不是「每轮补一格」是这条用例的全部意义：本 PR 三轮里每一轮都只为当轮那个反例
+    mode 补了一条用例，于是每次改判据都只能等下一轮 review 发现新漏的那一格。两个初稿掩码
+    各漏一格且互为镜像——`0o055` 放行 `0o744`（列得出名字、进不去），`0o011` 放行
+    `0o710`/`0o711`/`0o701`（进得去、列不出名字）——故这两格 MUST 各自单列。
+
+    `0o2750`/`0o2751` 两格另做现场配重：`agent-ops.md` §10 首选的共享组 + setgid 必须原样
+    放行，判据 MUST NOT 因为 `S_ISGID` 这个高位而改变结论。
+    """
+    scene = build_scene(tmp_path)
+    output_root = scene.root / "output"
+    output_root.chmod(preset_mode)
+    assert _mode(output_root) == preset_mode, "前提：预置 mode 落地"
+    source_dir = output_root / T_TEXT / SOURCE
+
+    if accepted:
+        publish.publish(scene.make_inputs())
+        assert (source_dir / "DONE").is_file()
+        # 已存在的层级原样不动：放行不等于放宽（变异体 (ai)/(aj)）。
+        assert _mode(output_root) == preset_mode
+        return
+
+    before = snapshot_tree(scene.root)
+    with pytest.raises(publish.PublishError) as excinfo:
+        publish.publish(scene.make_inputs())
+
+    message = str(excinfo.value)
+    assert str(output_root) in message
+    assert f"{preset_mode:#o}" in message
+    assert not (output_root / T_TEXT).exists()
+    _assert_unchanged(before, scene)
+
+
+# --- DAT 短于定长头部（round 3 cand-03） ---
+
+
+def test_fixed_header_size_matches_the_independent_fixture_oracle() -> None:
+    """定长头部长度的两处登记必须一致（下一条用例的期望长度取自 `publish` 侧）。
+
+    `dat_fixtures.FIXED_HEADER_BYTES` 是独立于被测模块登记的 oracle；截断长度按 fixture
+    要求从 `publish.DAT_FIXED_HEADER_BYTES` 推出（不得写死 1040），这条等式把两者钉在一起。
+    """
+    assert publish.DAT_FIXED_HEADER_BYTES == FIXED_HEADER_BYTES
+
+
+@pytest.mark.parametrize(
+    "size",
+    [publish.DAT_FIXED_HEADER_BYTES - 1, 100],
+    ids=["boundary", "tiny"],
+)
+def test_dat_shorter_than_fixed_header_is_refused(tmp_path: Path, size: int) -> None:
+    """字节数少于定长头部的 DAT -> `PublishError`，零 NFS 变更（变异体 (av)）。
+
+    钉的是异常**类型**而不只是「抛了错」：删掉该长度闸后 `head[1032:1040]` 是一段不足 8
+    字节的切片，`struct.unpack` 抛 `struct.error`——它既不是 `OSError` 也不是 `ValueError`，
+    沿途两处 `except (SafeFilesystemError, OSError)` 都接不住，`check_publish_contract` 与
+    `publish` 两个公共入口都会被它穿透，14.1 的 `except PublishError` 更接不住。
+
+    既有的 `test_column_table_read_error_converges_to_publish_error` 对这条**没有**判别力：
+    它在定长前缀**之后**截断，根本走不到这条臂；文本头形状闸也拦不住——被截断的 v2 前缀
+    仍然是「可打印 ASCII + 其后全 NUL」，照样通过。
+    """
+    payload = build_dat_bytes(nc=REACH_COUNT, rows=EXPECTED_ROWS)[:size]
+    assert len(payload) < publish.DAT_FIXED_HEADER_BYTES
+    scene = build_scene(tmp_path, dat_payload=payload)
+    before = snapshot_tree(scene.root)
+
+    with pytest.raises(publish.PublishError) as excinfo:
+        publish.publish(scene.make_inputs())
+
+    message = str(excinfo.value)
+    assert "非 v2" in message
+    assert "定长头部不足" in message
+    _assert_unchanged(before, scene)
+
+
+def test_dat_shorter_than_fixed_header_is_refused_by_the_contract_check(
+    tmp_path: Path,
+) -> None:
+    """同一形态经 `check_publish_contract` 这个公共入口进来时同样收敛（变异体 (av)）。
+
+    错误域不变量约束的是**两个**公共边界，而 `check_publish_contract` 沿途一处 `except`
+    都没有（`publish` 至少还有步骤 3–5 的收敛点），故它是 `struct.error` 逃逸最短的一条路。
+    """
+    payload = build_dat_bytes(nc=REACH_COUNT, rows=EXPECTED_ROWS)[
+        : publish.DAT_FIXED_HEADER_BYTES - 1
+    ]
+    scene = build_scene(tmp_path, dat_payload=payload)
+    before = snapshot_tree(scene.root)
+
+    with pytest.raises(publish.PublishError, match="定长头部不足"):
+        publish.check_publish_contract(scene.make_inputs())
+
+    _assert_unchanged(before, scene)
