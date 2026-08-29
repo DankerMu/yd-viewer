@@ -36,6 +36,7 @@ from yd_producer.canonical.converter import (
     CanonicalConverter,
     CanonicalConverterConfig,
     IFSCanonicalConverter,
+    IFSCanonicalConverterConfig,
 )
 from yd_producer.store.object_store import LocalObjectStore
 
@@ -307,3 +308,163 @@ def test_unparseable_raw_bytes_fail_without_partial_catalog(tmp_path: Path) -> N
         converter.convert_manifest(manifest)
 
     assert not converter.object_store.exists(CATALOG_KEY)
+
+
+IFS_COMPACT_CYCLE = "2026050706"
+IFS_CATALOG_KEY = f"canonical/ifs/{IFS_COMPACT_CYCLE}/_catalog/catalog.json"
+
+#: IFS 每个原生变量在 f000 / f003 上写入的原生值。tp / ssr / str 是 cycle 累积量，
+#: 单调不减以保证去累积后每个产物的 quality_flag 恒为 "ok"；2d 恒低于 2t 保证 Magnus
+#: 相对湿度落在 (0, 1]。tp 3mm/3h = 24 mm/day；ssr 1.08e6 J/m2 / 10800s = 100 W/m2；
+#: net = (1.08e6 - 0.54e6) / 10800 = 50 W/m2。
+IFS_NATIVE_VALUES: dict[str, tuple[float, float]] = {
+    "2t": (285.0, 286.0),
+    "2d": (280.0, 281.0),
+    "tp": (0.0, 0.003),
+    "10u": (1.0, 1.5),
+    "10v": (2.0, 2.5),
+    "sp": (101325.0, 101300.0),
+    "ssr": (0.0, 1_080_000.0),
+    "str": (0.0, -540_000.0),
+}
+
+
+def _build_ifs_converter(tmp_path: Path) -> IFSCanonicalConverter:
+    root = tmp_path.resolve()
+    return IFSCanonicalConverter(
+        config=IFSCanonicalConverterConfig(
+            workspace_root=root,
+            object_store_root=root,
+            object_store_prefix="",
+        ),
+        object_store=LocalObjectStore(root),
+    )
+
+
+def _write_ifs_netcdf_raw(store: LocalObjectStore) -> dict[str, Any]:
+    """合成完整的 IFS raw + manifest。
+
+    `source_id` 逐字取 `rawcopy.py` 实际发出的值：`DownloadManifest(source_id=SOURCE_DIR_NAMES[source])`
+    而 `rawscan.SOURCE_DIR_NAMES == {"ifs": "IFS", "gfs": "gfs"}`，故 IFS 侧发出的是大写 `"IFS"`。
+    """
+
+    cycle_time = converter_module.parse_cycle_time(IFS_COMPACT_CYCLE)
+    entries: list[dict[str, Any]] = []
+    for index, forecast_hour in enumerate(FORECAST_HOURS):
+        for variable, values in IFS_NATIVE_VALUES.items():
+            local_key = (
+                f"raw/IFS/{IFS_COMPACT_CYCLE}/ifs.t06z.0p25"
+                f".f{forecast_hour:03d}.{variable}.grib2"
+            )
+            store.write_bytes_atomic(
+                local_key,
+                encode_test_netcdf4(
+                    variable,
+                    forecast_hour,
+                    values=[values[index]],
+                    cycle_time=cycle_time,
+                    source="IFS",
+                ),
+            )
+            entries.append(
+                {
+                    "remote_url": f"mock://ifs/{variable}/{forecast_hour}",
+                    "local_key": local_key,
+                    "variable": variable,
+                    "forecast_hour": forecast_hour,
+                }
+            )
+    return {
+        "source_id": "IFS",
+        "cycle_time": cycle_time.isoformat(),
+        "entries": entries,
+    }
+
+
+def test_ifs_convert_manifest_is_ready_and_lands_on_one_lowercase_identity(
+    tmp_path: Path, no_outbound_sockets: None
+) -> None:
+    """IFS 端到端：完整产物集 MUST 判 `canonical_ready`，且全链只用一个小写身份。
+
+    这是仓内唯一不经快照用例的 IFS oracle（tasks.md 裁决 13）。在裁决 12 的入口归一之前，
+    `_canonical_product_result_readiness_row` 用原始 `"IFS"` 打戳而
+    `evaluate_canonical_readiness` 以 `normalize_source_id` 后的 `"ifs"` 过滤，
+    每一行都被丢弃，本用例在 `canonical_ready` 断言上变红。
+    """
+
+    converter = _build_ifs_converter(tmp_path)
+    manifest = _write_ifs_netcdf_raw(converter.object_store)
+
+    result = converter.convert_manifest(manifest)
+
+    assert result.status == "canonical_ready"
+    # 每个 lead 8 份：7 个必需标准变量 + net_radiation。
+    assert len(result.products) == 8 * len(FORECAST_HOURS)
+    assert set(converter_module.IFS_REQUIRED_STANDARD_VARIABLES) <= {
+        product.variable for product in result.products
+    }
+
+    # products-contract §3.2：`source` 固定小写。对象键、catalog 键、catalog 行
+    # `source_id` 与 `canonical_product_id` MUST 同用一个小写身份。
+    for product in result.products:
+        assert product.object_uri.startswith(f"canonical/ifs/{IFS_COMPACT_CYCLE}/")
+        assert product.canonical_product_id.startswith(f"ifs_{IFS_COMPACT_CYCLE}_")
+        assert converter.object_store.exists(product.object_uri)
+
+    catalog = json.loads(
+        converter.object_store.read_bytes(IFS_CATALOG_KEY).decode("utf-8")
+    )
+    assert catalog["source_id"] == "ifs"
+    assert len(catalog["products"]) == 8 * len(FORECAST_HOURS)
+    assert {row["source_id"] for row in catalog["products"]} == {"ifs"}
+
+
+def test_product_catalog_pins_the_inherited_payload_and_row_schema(
+    tmp_path: Path,
+) -> None:
+    """catalog 是组 8 的下游 schema 真相：payload 4 键与行 16 键逐字钉死。
+
+    键表取自 pin `NWM@8ae9b8f2 workers/canonical_converter/converter.py`
+    `_write_product_catalog`(L1392-1434)，故本断言钉的是**继承来的**契约而非当下实现的产出。
+    """
+
+    converter = _build_converter(tmp_path)
+    manifest = _write_netcdf_raw(converter.object_store)
+
+    converter.convert_manifest(manifest)
+
+    payload = _read_catalog(converter)
+    assert sorted(payload.keys()) == [
+        "cycle_time",
+        "products",
+        "schema_version",
+        "source_id",
+    ]
+    assert payload["schema_version"] == "nhms.canonical.product_catalog.v1"
+
+    rows = payload["products"]
+    assert rows
+    for row in rows:
+        assert sorted(row.keys()) == [
+            "canonical_product_id",
+            "checksum",
+            "cycle_time",
+            "grid_definition_uri",
+            "grid_id",
+            "lead_time_hours",
+            "lineage_json",
+            "native_spatial_resolution",
+            "native_time_resolution",
+            "object_uri",
+            "quality_flag",
+            "source_id",
+            "source_version",
+            "unit",
+            "valid_time",
+            "variable",
+        ]
+        # 这四个字段此前全仓零断言（四个一起改名，1337 个测试仍全绿）。
+        assert row["source_version"] == COMPACT_CYCLE
+        assert row["grid_id"] == "gfs_0p25"
+        assert row["native_time_resolution"] == "3h"
+        assert row["native_spatial_resolution"] == "0.25deg"

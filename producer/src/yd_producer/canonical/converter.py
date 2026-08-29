@@ -1226,6 +1226,12 @@ class CanonicalConverter:
             raise CanonicalConversionError(
                 f"Manifest source_id {source_id!r} does not match converter source_id {self.config.source_id!r}."
             )
+        # 偏离（`剥离点`(f)/tasks.md 裁决 12）：入口归一一次，此后全链只用归一值。
+        # pin 上 normalize_source_id("IFS") == "IFS"，yd 侧归一成 "ifs"（issue #5 落地），
+        # 不归一则 readiness 以 "ifs" 过滤、打戳却用 "IFS"，IFS 的每一行都被丢弃。
+        # 归一后对象键、catalog 键与行 source_id、canonical_product_id、readiness 行与
+        # 过滤同用一个小写身份，与 docs/products-contract.md §3.2 一致。
+        source_id = normalize_source_id(source_id)
 
         try:
             entries = _manifest_entries(manifest)
@@ -2052,6 +2058,12 @@ class IFSCanonicalConverter(CanonicalConverter):
             raise CanonicalConversionError(
                 f"Manifest source_id {source_id!r} does not match converter source_id {self.config.source_id!r}."
             )
+        # 偏离（`剥离点`(f)/tasks.md 裁决 12）：入口归一一次，此后全链只用归一值。
+        # pin 上 normalize_source_id("IFS") == "IFS"，yd 侧归一成 "ifs"（issue #5 落地），
+        # 不归一则 readiness 以 "ifs" 过滤、打戳却用 "IFS"，IFS 的每一行都被丢弃。
+        # 归一后对象键、catalog 键与行 source_id、canonical_product_id、readiness 行与
+        # 过滤同用一个小写身份，与 docs/products-contract.md §3.2 一致。
+        source_id = normalize_source_id(source_id)
 
         try:
             entries = _manifest_entries(manifest)
