@@ -330,6 +330,29 @@ class YdRootBuilder:
                 state_payload("1.000000")
             )
 
+    def write_states_residue_clutter(self, cycle_text: str, source: str) -> None:
+        """`states/<source>/` 下对**残留清理**有判别力的四个不可见条目（issue #23）。
+
+        与 `write_states_clutter` 分开：这四个名字逐条对应一种「按文件名字符串比较就会被
+        误删」的形态——发布临时名（后缀不是 `.cfg.ic`）、非数字名、10 位且
+        `%Y%m%d%H` 可解析但 `+12h` 溢出的 `9999123123`（字符串序上远晚于任何真 cycle）、
+        以及点文件。
+        """
+        directory = self.states_dir(source)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{cycle_text}{STATE_SUFFIX}.tmp").write_bytes(b"partial\n")
+        (directory / f"nine{STATE_SUFFIX}").write_bytes(b"not a cycle\n")
+        (directory / f"9999123123{STATE_SUFFIX}").write_bytes(state_payload("1.000000"))
+        (directory / ".DS_Store").write_bytes(b"\x00\x01")
+
+    def write_output_residue_clutter(self) -> None:
+        """`output/` 下的不可见条目：`stray/` 目录与 `.DS_Store`（issue #23）。"""
+        output = self.root / "output"
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "stray").mkdir(exist_ok=True)
+        (output / "stray" / "keep.txt").write_text("stray\n", encoding="utf-8")
+        (output / ".DS_Store").write_bytes(b"\x00\x01")
+
 
 class RecordingRawComplete:
     """记录型 `raw_complete` fake：记下被问过哪些 cycle，按集合作答。"""
@@ -347,14 +370,17 @@ class RecordingRawComplete:
         return [cycle_id(cycle) for cycle in self.calls]
 
 
-def snapshot_tree(root: Path) -> dict[str, tuple[str, int, int, str]]:
-    """整棵树的递归快照：相对路径 → (条目类型, `st_mode`, size, 内容摘要)。
+def snapshot_tree(root: Path) -> dict[str, tuple[str, int, int, str, int]]:
+    """整棵树的递归快照：相对路径 → (条目类型, `st_mode`, size, 内容摘要, `st_mtime_ns`)。
 
     维度必须钉死到内容摘要：只比对路径集合的话，**等长原地改写**在比对下不可见。
+    `st_mtime_ns` 是最后一维（issue #23 要求「路径、类型、大小、mtime」逐项相等）：摘要
+    与 mtime 互不蕴含——`touch` 改 mtime 不改内容，重写同样字节改 mtime 不改摘要。读路径
+    只动 atime，故「零写入」的前后比对不会因为这一维而假红。
     `lstat` 而非 `stat`：断链 symlink 也要能快照。只有普通文件才 `open()` 读摘要——
     对 FIFO 做 `open()` 会永久阻塞。
     """
-    snapshot: dict[str, tuple[str, int, int, str]] = {}
+    snapshot: dict[str, tuple[str, int, int, str, int]] = {}
     for path in sorted(root.rglob("*")):
         info = path.lstat()
         relative = str(path.relative_to(root))
@@ -375,5 +401,5 @@ def snapshot_tree(root: Path) -> dict[str, tuple[str, int, int, str]]:
         else:
             kind = "special"
             digest = ""
-        snapshot[relative] = (kind, mode, info.st_size, digest)
+        snapshot[relative] = (kind, mode, info.st_size, digest, info.st_mtime_ns)
     return snapshot

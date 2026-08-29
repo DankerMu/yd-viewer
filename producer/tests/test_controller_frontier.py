@@ -603,7 +603,7 @@ def test_discovery_unreadable_is_isolated_per_source(tmp_path: pathlib.Path) -> 
 
     同一棵树、同一个不可读窗口内问两次：`output/<cycle>/gfs/` 不可读 -> gfs
     `DISCOVERY_UNREADABLE`，ifs 仍得到正常可跑结论。既有的逐源行只覆盖「缺失」与
-    `STATE_MISSING`，四条 discovery 用例又全是单源；把 `_done_cycles` 改成枚举
+    `STATE_MISSING`，四条 discovery 用例又全是单源；把 `done_cycles` 改成枚举
     `output/<cycle>/` 的目录项（而非逐源 stat `DONE`）会让 gfs 的 EACCES 漏给 ifs。
     """
     _skip_if_root()
