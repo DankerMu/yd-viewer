@@ -610,6 +610,35 @@ def test_cleanup_note_reaches_stderr_on_the_exit_one_path(
     assert "Traceback" not in err
 
 
+def test_a_none_report_is_never_reported_as_success(monkeypatch, tmp_path):
+    """委托返回 `None` 时 MUST NOT 报成成功（`cli.prepare` 的"报告不做 `None` 兜底"）。
+
+    断言里两个部件都是承重的，别"化简"掉：
+
+    - `except BaseException: rc = "escaped"` 用的是**哨兵**而不是 `None`。逃逸与"返回
+      `None`"是两种不同的结局，收敛成同一个值会漏掉一整类兜底变异体；
+    - `rc is not None` 钉的正是那一类：`if report is not None: ... return 0` 之后**穿透**
+      到函数末尾的变异体让 `main()` 返回 `None`，在真实边界 `sys.exit(main())` 上就是
+      `sys.exit(None)`、进程退出码 `0`——恰恰是本条契约要禁的"坏掉的委托被报成成功"。
+      只写 `rc != 0` 时该变异体存活。
+
+    本用例不点名任何异常类：钉的是"不得报成成功"这条契约，不是当前实现偶然抛出的
+    `AttributeError`。两种同样正确的替代实现（抛 `PrepareError` 走退出码 `1`、或以退出码
+    `2` 显式报错）下它都仍绿。附带记录：这条路径今天以未被三个 handler 接住的异常收场，
+    故控制台入口上会打出 traceback，见 `cli._print_notes` 的 docstring。
+    """
+    monkeypatch.setattr(cli, "run_prepare", Recorder(result=None))
+
+    try:
+        rc = cli.main(_prepare_argv(tmp_path), env={})
+    except SystemExit as exc:  # 必须排在 BaseException 之前
+        rc = exc.code
+    except BaseException:  # noqa: BLE001 - 见 docstring：结局分三类，逃逸是其中一类
+        rc = "escaped"  # 哨兵：逃逸当然不是成功，但也不是"返回 None"
+
+    assert rc != 0 and rc is not None
+
+
 @pytest.mark.parametrize("command", ["prepare", "init", "run"])
 def test_dispatch_resolves_delegates_at_call_time(monkeypatch, tmp_path, command):
     """三个委托目标 MUST 以**模块级名字**在调用时解析，而非导入时冻结进 dict。

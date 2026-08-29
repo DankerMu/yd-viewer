@@ -338,7 +338,7 @@ def variant_targets(local: LocalConfig, config: Config) -> dict[str, Path]:
        同理：两个 `lexists` 与产物校验都发现不了，而提交后 `ifs` 变体会躺在已提交的
        `gfs` 变体**目录内部**。
 
-    pinned：单一来源 test_variant_targets_is_the_single_source_of_final_names、
+    pinned: 单一来源 test_variant_targets_is_the_single_source_of_final_names、
     test_overwrite_guard_follows_config_not_the_default_literal、
     test_commit_lands_where_config_points_not_at_the_default_literal；闸门 2
     test_variant_target_on_the_viewer_read_surface_is_refused、
@@ -488,8 +488,17 @@ def _remove_tree(path: Path) -> None:
     只用于**本次新建**的条目——它们在执行前都不存在（四个终名由 `lexists` 守卫证实），
     故树内不可能有既有内容被误删。这里刻意保留 `rmtree_no_follow` 的**拒绝 symlink**
     策略：`YD_ROOT` 内的这些树由本模块逐条新建，出现 symlink 是**篡改证据**，不该被
-    默默清掉。builder 产出的 scratch 树是相反的情形，见 `_remove_scratch_tree`（两条策略
-    的分工 pinned: test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed）。
+    默默清掉。builder 产出的 scratch 树是相反的情形，见 `_remove_scratch_tree`。两条策略
+    的分工由两组用例分别钉住，各自钉的东西不同：
+    - scratch 侧"全删"pinned:
+      test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed；
+    - `YD_ROOT` 侧走的**是哪个原语** pinned:
+      test_one_failing_rollback_step_does_not_cancel_the_others、
+      test_success_survives_a_staging_cleanup_failure、
+      test_scratch_cleanup_failure_does_not_gate_the_staging_cleanup——三条都经
+      `safe_fs.rmtree_no_follow` 注入失败，本函数改用 `remove_tree_allow_symlinks` 后注入
+      不再命中，恰这三条变红（实测）。它们钉的是"`YD_ROOT` 侧删除走 no-follow 原语"，
+      不是直接断言一条 symlink 残留被拒——后者今天**未钉**，归 #88。
 
     失败抛 `PrepareError`，由 `_run_cleanup_steps` 收集——MUST NOT 直接从清理位置逃逸
     （那会取消其余清理步骤、并替换掉正在传播的原始异常，见模块头 I1；pinned:
@@ -533,9 +542,9 @@ def _remove_created_directory(path: Path) -> None:
     test_rollback_never_recursively_deletes_a_shared_parent）。
 
     「父目录已消失即无操作」那一支（`except FileNotFoundError: return`）**未钉**，归
-    round-2 记录项：`safe_fs.open_directory_no_follow` 的 docstring 并不承诺缺失父目录一定
-    以裸 `FileNotFoundError` 形态出现，在该形态被上游钉死之前，为它写用例等于把当前实现
-    细节当契约。本阶段不声明。
+    #88（round-2 记录项）：`safe_fs.open_directory_no_follow` 的 docstring 并不承诺缺失父
+    目录一定以裸 `FileNotFoundError` 形态出现，在该形态被上游钉死之前，为它写用例等于把
+    当前实现细节当契约。本阶段不声明。
 
     `os.rmdir` 走父目录 fd，父目录本身用 `safe_fs.open_directory_no_follow` 打开——路径
     逐层 no-follow，与本模块其余文件系统操作同纪律。

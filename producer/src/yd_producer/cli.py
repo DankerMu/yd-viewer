@@ -41,9 +41,10 @@ test_database_url_guard_wins_before_parsing、test_run_rejects_missing_states_di
 存在的目录。`resolve()` 路径不存在时不抛（`strict=False`），故不与 fail-closed 冲突。
 （pinned: test_relative_paths_are_resolved_before_reaching_loaders、
 test_error_message_carries_resolved_absolute_path、
-test_prepare_delegates_resolved_baseline_path。`resolve()` vs `os.path.abspath` 的差别本身
-是等价变异、不可判别：判别它需要一棵含 symlink 的 `..` 路径，属 `safe_fs` 的 no-follow
-面，本入口层不重复声明。）
+test_prepare_delegates_resolved_baseline_path。`resolve()` vs `os.path.abspath` 的差别
+**可判别**——判别方式：一条含 symlink 的 `..` 路径（`abspath` 只做词法折叠，`resolve()`
+跟随 symlink 后再折叠，两者落在不同目录，失败消息里的绝对路径随之不同）；本阶段裁定不
+钉：该语义属 `safe_fs` 的 no-follow 面，归 #88，本入口层不重复声明。）
 
 两个参数都**必需**、无内置默认：spec cli-config 禁止内置现场默认值，而给 `--config`
 一个默认等于在代码里第二次写死仓库布局（pinned: test_required_option_sets_per_subcommand、
@@ -158,9 +159,9 @@ def prepare(local: LocalConfig, config: Config, baseline_root: Path) -> int:
     ——断言的是 `capsys.readouterr().err`，故流向 stderr 这一点也被钉住）。
 
     报告不做 `None` 兜底：委托目标按契约必返回 `PrepareReport`，兜底只会把坏掉的委托
-    伪装成成功。（等价变异，不可判别：加一个 `report is not None` 容错的变异体全套仍绿；
-    唯一可能的钉法是对 `None` 委托断言 `pytest.raises(AttributeError)`，那钉的是当前实现
-    偶然抛出的异常类型，不是"不做兜底"这条契约。）
+    伪装成成功。（pinned: test_a_none_report_is_never_reported_as_success——它不点名异常
+    类，只断言"退出码既不是 `0` 也不是 `None`"，故 `return 0` 兜底与穿透到 `return None`
+    的兜底两种变异体都变红。）
     """
     nwm.check_interpreter(local)
     report = run_prepare(local=local, config=config, baseline_root=baseline_root)
@@ -195,7 +196,9 @@ def _check_states_dir(states: Path) -> str | None:
     `NotADirectoryError` 逃逸成 traceback（pinned:
     test_run_rejects_states_path_that_is_a_regular_file——断言 `"不是目录"` 且
     `"Traceback" not in err`；三条 lane 各断言本 lane 独有的措辞，见各用例注释）。
-    「空判定用 `next(...)` 早停」是性能选择，不是行为选择（等价变异，不可判别）。
+    「空判定用 `next(...)` 早停」是性能选择，不是行为选择（等价变异，不可判别：改成
+    `list(entries)` 只是把整个目录读完再判空，空/非空的判定结果、返回的拒绝理由与是否
+    写入都不变，没有可观测差别可断言）。
     """
     if not states.exists():
         return (
@@ -217,13 +220,25 @@ def _print_notes(exc: BaseException) -> None:
     """把在途异常的 `__notes__` 打到 stderr（spec cli-config）。
 
     `str(exc)` **不含** notes——notes 只在 `traceback.format_exception` 里出现，而本入口
-    刻意不打 traceback。`prepare` 的回滚/清理失败恰恰只以 `add_note` 附在原始异常上
+    对**被 `main` 的分派 handler 接住的**异常刻意不打 traceback（未被接住而逃逸的异常仍会
+    在控制台入口打出 traceback，见 test_a_none_report_is_never_reported_as_success 那条
+    路径；该子句不是全称的）。`prepare` 的回滚/清理失败恰恰只以 `add_note` 附在原始异常上
     （`prepare.run_prepare` 步骤 8：抛出会替换原始异常并降级退出码），故不在这里渲染
     就等于把"`YD_ROOT` 里还有残留"这条证据丢掉。
+    （"不打 traceback"pinned: test_config_error_becomes_exit_one_without_traceback、
+    test_run_rejects_states_path_that_is_a_regular_file、
+    test_prepare_with_executable_interpreter_reaches_production_builder_binding、
+    test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code、
+    test_cleanup_failure_text_reaches_stderr_on_the_failure_path、
+    test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes、
+    test_prepare_error_becomes_exit_one、
+    test_cleanup_note_reaches_stderr_on_the_exit_one_path——八条各断言
+    `"Traceback" not in err`。）
 
     三个分派 handler 各调一次，而不是塞进 `_fail`：`BuilderUnavailableError` 那支退出码
     是 `3`、根本不经 `_fail`，只改 `_fail` 覆不全。`run_prepare` 的 `except BaseException`
-    会给**任何**在途异常挂 note，逃逸出去的 `ConfigError` 同样带证据。
+    按类型无差别地给在途异常挂 note，故三支都可能拿到证据——但 `ConfigError` 那支今天按
+    构造不可达，见下面第 3 条。
 
     三个调用点逐个交代（spec cli-config「prepare 的清理告警与残留证据 MUST 到达运维」的
     失败路径子句没有退出码限定，故三支都要有交代）：
