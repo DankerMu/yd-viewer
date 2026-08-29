@@ -286,7 +286,7 @@ SHUD 会反复覆盖同一个 `<project>.cfg.ic.update`：当模型时间为 720
 
 1. 启动 SHUD；
 2. 轮询 `cfg.ic.update` 的 header 时间；
-3. 命中 relative 720 分钟或等价的 T+12 绝对分钟时，复制到独立 checkpoint 文件；
+3. 命中 relative 720 分钟时，复制到独立 checkpoint 文件（`cfg.ic.update` 的 header 是模型相对分钟，tracker 只认这一种形式；epoch 形式的 header 属重戳后的正式状态，见下段，tracker 对其判未命中而非兼容）；
 4. 确认复制完成并可按原生分段格式读取；
 5. SHUD 继续跑到 7 天。
 
