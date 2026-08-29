@@ -43,3 +43,22 @@
 #### Scenario: 写入阶段失败的收尾可观测
 - **WHEN** 前序 source 的首态已写入后，后续 source 的目标路径上已存在一个条目（非普通文件，故未被「已有状态即拒绝」守卫拦下）导致排他写入被拒
 - **THEN** init 以非零退出码报告失败，理由列出全部已落盘 source 的路径与「根已非全新，重跑前需人工清理 `states/`」，且已落盘文件 MUST NOT 被删除
+
+#### Scenario: 零残留的写入失败不得宣称需要清理
+- **WHEN** 写入序首位 source 的首态写入即失败，尚无任何 source 落盘，且失败发生在目标文件被创建之前（故盘上零残留）
+- **THEN** init 以非零退出码报告失败，理由 MUST 指出零写入、根仍是全新根并给出根因，MUST NOT 宣称根已非全新或需要人工清理 `states/`
+
+#### Scenario: 写入中途的 I/O 失败点名可能的半写产物
+- **WHEN** 目标文件被排他创建后，写入过程中途因 I/O 或配额错误失败
+- **THEN** init 的失败理由 MUST 点名该目标路径可能已被部分写入、重跑前须一并人工确认
+
+### Requirement: 扫描窗配置取值域自查
+`init` MUST 在构造候选 cycle 之前自查 `cycle.hours` 非空且每个值都是合法小时；不满足时 MUST 以配置错误拒绝并点名该配置项，MUST NOT 退化为「窗内无完整 cycle」，也 MUST NOT 以未分类异常逃逸。
+
+#### Scenario: 空的 cycle.hours 不得伪装成缺 raw
+- **WHEN** `cycle.hours` 为空列表而 raw 目录树完整
+- **THEN** init 以配置错误拒绝并点名 `cycle.hours`，MUST NOT 返回「窗内无完整 cycle、等待 raw 补齐」
+
+#### Scenario: 非法小时不得以未分类异常逃逸
+- **WHEN** `cycle.hours` 含 0–23 之外的值
+- **THEN** init 以配置错误拒绝并点名 `cycle.hours`，CLI 不泄漏 traceback

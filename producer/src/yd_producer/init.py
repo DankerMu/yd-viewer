@@ -27,11 +27,27 @@ init-bootstrap/spec.md` 的三条 Requirement（「只在全新根执行」「�
 全新根执行」直接冲突；`O_EXCL` 让守卫与写入之间的 TOCTOU 窗口 fail closed
 （`FileExistsError` → 拒绝，不覆盖）。
 
-**已知且刻意的缝隙**：拒绝守卫只认**普通文件**（下条），而 `safe_fs._FILE_FLAGS` 的
-`O_CREAT|O_EXCL` 对**任何**已存在的条目都得 `EEXIST`。于是 `states/<source>/<T>.cfg.ic`
-预置为目录/FIFO 一类非普通文件时，它过得了阶段 A 的守卫却挡得住阶段 B 的写入——这正是
-阶段 B 失败的唯一可达构造。不把守卫扩到「任何条目」：那会让 `states/` 下一个 `.DS_Store`
-目录永久砖化建链，方向与下条「宁可要求人工确认」相反。
+**阶段 B 的失败构造分两类**（MUST NOT 再写「唯一可达构造」——那个说法已被实测证伪）：
+
+- **类一（`EEXIST`）**：拒绝守卫只认**普通文件**（下条），而 `safe_fs._FILE_FLAGS` 的
+  `O_CREAT|O_EXCL` 对**任何**已存在的条目都得 `EEXIST`。于是 `states/<source>/<T>.cfg.ic`
+  预置为目录/FIFO 一类非普通文件时，它过得了阶段 A 的守卫却挡得住阶段 B 的写入。这是
+  **已知且刻意**的缝隙：不把守卫扩到「任何条目」，否则 `states/` 下一个 `.DS_Store` 目录
+  就永久砖化建链，方向与下条「宁可要求人工确认」相反。此类**盘上零残留**。
+- **类二（写循环中途的 I/O 失败）**：目标不存在、`O_EXCL` 成功创建之后 `os.write` 中途抛
+  `ENOSPC`/`EDQUOT`/`EIO`（NFS 发布根上最现实的失败类）。
+  `safe_fs.write_bytes_no_follow_exclusive` 的 `except OSError` 臂只关 fd 后转抛、**不
+  unlink**（与同模块 `atomic_write_bytes_no_follow` 的失败路径不对称），故盘上留下一份
+  **header 合法、body 截断**的普通文件；下游 `controller` 只读 header 行，会把它当成合法
+  链起点。本模块因此 MUST 区分 `FileExistsError` 与 `SafeFilesystemError(kind="io")`，
+  后者的 `detail` 点名该目标**可能已被部分写入**、重跑前须一并人工确认——它既不在
+  `written` 里、也不算「前序已落盘」，照类一的话术清理会漏掉它。
+  `safe_fs` 的缺 unlink 与 `controller` 接受截断状态两条缺陷都在本模块的 Must-preserve
+  面之外，已另行立案；本模块只负责**把它变成可观测的**。
+
+**收尾话术随 `written` 分支**：`written` 非空才说「根已非全新，重跑 init 前需人工清理
+`states/`」；`written` 为空（如阶段 B 首个 `ensure_directory_no_follow` 就抛 `EACCES`）时
+根仍是全新根，MUST NOT 宣称需要清理，而是把根因放在首位并报「零写入，根仍是全新根」。
 
 **可见性判据取「宽」，与 `controller` 的前沿可见集刻意不同**：`controller.decide_frontier`
 （issue #22）对不可解析的条目判「不可见」，为的是不让一次崩溃的发布永久砖化该源；本模块
@@ -234,6 +250,26 @@ def _normalize_now(now: datetime) -> datetime:
     return now.astimezone(UTC)
 
 
+def _require_constructible_hours(hours: tuple[int, ...]) -> None:
+    """候选网格可构造性自查：`hours` 非空、且每个值都在 `0..23` 内。
+
+    只管「网格能不能建」，不管业务取值域（`{0, 12}` 由 `rawscan.judge` 施加，见
+    :func:`_candidate_cycles` 的 docstring）。
+    """
+    if not hours:
+        raise ConfigError(
+            "配置项 `cycle.hours` 不得为空列表：候选 cycle 网格会退化成空集，"
+            "扫描窗内一次 raw 判定都不会发生"
+        )
+    invalid = [
+        hour for hour in hours if not isinstance(hour, int) or not 0 <= hour < 24
+    ]
+    if invalid:
+        raise ConfigError(
+            f"cycle.hours 含非法小时 {invalid}：每个值必须是 0..23 内的整数"
+        )
+
+
 def _candidate_cycles(
     window_start: datetime, now: datetime, hours: tuple[int, ...]
 ) -> tuple[datetime, ...]:
@@ -242,7 +278,20 @@ def _candidate_cycles(
     小时集合取自 `config.cycle.hours`（MUST NOT 硬编码 `[0, 12]`）；窗**双端闭**；严格
     `cycle <= now`，未来 cycle 不进候选集。`hours` 在 `config.toml` 内的书写顺序不作数，
     故最后统一排序——按日期网格 × 声明序枚举出的序列未必升序。
+
+    **取值域自查跑在枚举之前**：全仓唯一的域校验 `rawscan._validate_config_domain` 在
+    `judge` **体内**，而本函数是这条路径上 `config.cycle.hours` 的第一个消费者、跑在任何
+    `judge` 调用之前，于是有两个输入结构性地到不了那道校验——`hours = ()` 让候选集为空、
+    `judge` 一次都不调，退化成「窗内无完整 cycle、等 raw 补齐」这个**伪装**；`hours` 含
+    `0..23` 之外的值让 `datetime(...)` 抛**裸 `ValueError`**，`cli.main` 的
+    `except ConfigError` 接不住，traceback 逃逸出 CLI。故此处只补这两个洞：非空 + 每个值
+    是合法小时，不满足即 `ConfigError` 点名 `cycle.hours`。
+    **MUST NOT 在此重新声明 `{0, 12}` 这个域**，也 MUST NOT 导入私有的
+    `rawscan._validate_config_domain`（`rawscan` 属 Must-preserve 面）：候选网格一旦非空
+    且可构造，第一次 `judge` 调用就会施加 `{0, 12}` 并原样上抛 `ConfigError`——`rawscan`
+    仍是取值域的唯一权威。
     """
+    _require_constructible_hours(hours)
     candidates: list[datetime] = []
     start_date = window_start.date()
     span = (now.date() - start_date).days
@@ -279,6 +328,35 @@ def _first_complete_cycle(
 
 def _refuse(refusal: InitRefusal, detail: str) -> InitReport:
     return InitReport(written=(), refusal=refusal, detail=detail)
+
+
+def _write_failed(
+    source: str,
+    target: Path,
+    written: list[Path],
+    error: BaseException,
+    *,
+    possibly_partial: bool,
+) -> InitReport:
+    """阶段 B 的失败收尾。话术随 `written` 与失败类别分支（见模块头）。"""
+    parts = [f"{source} 的首态写入 {target} 失败：{error}"]
+    if possibly_partial:
+        parts.append(
+            f"{target} 已被排他创建但写入中途失败，可能已被部分写入"
+            "（header 合法、body 截断），重跑 init 前须一并人工确认并清理"
+        )
+    landed = "、".join(str(path) for path in written) or "（无）"
+    parts.append(f"已落盘的首态：{landed}（不回滚、不删除）")
+    if written or possibly_partial:
+        # 半写产物同样让根不再全新，即使它不在 `written` 里。
+        parts.append("根已非全新，重跑 init 前需人工清理 `states/`")
+    else:
+        parts.append("零写入，根仍是全新根")
+    return InitReport(
+        written=tuple(written),
+        refusal=InitRefusal.WRITE_FAILED,
+        detail="；".join(parts),
+    )
 
 
 def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitReport:
@@ -376,19 +454,25 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
         target = target_dir / (
             frontier[source].strftime(rawscan.CYCLE_DIR_FORMAT) + STATE_SUFFIX
         )
+        # 两次调用**分别** try：`ensure_directory_no_follow` 的 `mkdir` 失败同样被
+        # `safe_fs` 包成 `kind="io"`，合在一个 try 里会让「目标可能被部分写入」这句话套到
+        # 一个从未被 `os.open` 过的路径上（`chmod 0o500 states/` 就是这种终态）。
         try:
             safe_fs.ensure_directory_no_follow(target_dir)
-            safe_fs.write_bytes_no_follow_exclusive(target, payloads[source])
         except (OSError, safe_fs.SafeFilesystemError) as error:
-            landed = "、".join(str(path) for path in written) or "（无）"
-            return InitReport(
-                written=tuple(written),
-                refusal=InitRefusal.WRITE_FAILED,
-                detail=(
-                    f"{source} 的首态写入 {target} 失败：{error}；"
-                    f"已落盘的首态：{landed}（不回滚、不删除）；"
-                    "根已非全新，重跑 init 前需人工清理 `states/`"
-                ),
+            return _write_failed(source, target, written, error, possibly_partial=False)
+        try:
+            safe_fs.write_bytes_no_follow_exclusive(target, payloads[source])
+        except FileExistsError as error:
+            # 类一：`O_EXCL` 拒绝覆盖，盘上零残留。
+            return _write_failed(source, target, written, error, possibly_partial=False)
+        except (OSError, safe_fs.SafeFilesystemError) as error:
+            # 类二：`O_EXCL` 已建成文件、`os.write` 中途失败（`safe_fs` 不 unlink）。
+            possibly_partial = (
+                isinstance(error, safe_fs.SafeFilesystemError) and error.kind == "io"
+            )
+            return _write_failed(
+                source, target, written, error, possibly_partial=possibly_partial
             )
         written.append(target)
 

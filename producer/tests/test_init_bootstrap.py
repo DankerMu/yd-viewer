@@ -20,6 +20,7 @@ from init_bootstrap_fixtures import (
     expected_bytes,
     skip_if_root,
     snapshot,
+    stat_hostile,
     two_token_payload,
     unreadable,
 )
@@ -308,4 +309,81 @@ def test_unlistable_output_cycle_dir_refuses(tmp_path: Path) -> None:
 
     assert report.refusal is InitRefusal.DISCOVERY_UNREADABLE
     assert str(cycle_dir) in report.detail
+    assert all_files(tree.states) == []
+
+
+# --- 探测失败的 stat 层（round 1 cand-06）------------------------------------
+#
+# 上面三条 `chmod 0o000` 都让**目录本身**不可列，只行使 `_entry_names`。目录置 `0o444`
+# 时 `listdir` 仍成功、但子项的 `lstat`/`stat` 抛 `EACCES`（darwin/Linux 上「有 r 无 x」
+# 即此语义），这才行使 `_entry_kind` / `_is_directory` 这一层——而它正是「判空即放行写入」
+# 这条防线的最后一层。
+
+
+def test_unstatable_state_entry_refuses_instead_of_looking_absent(
+    tmp_path: Path,
+) -> None:
+    """`states/gfs/` 置 `0o444` 且内含残留文件 -> `DISCOVERY_UNREADABLE`，**不放行写入**。
+
+    `_entry_kind` 吞掉 `OSError` 的实现会把残留判成「既不是文件也不是目录」，于是守卫放行、
+    init 往一个**已有状态**的根上写首态——断链的直接入口。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+    residual_dir = tree.states / "gfs"
+    residual_dir.mkdir(parents=True)
+    (residual_dir / ("2026082700" + STATE_SUFFIX)).write_bytes(b"residual\n")
+
+    with stat_hostile(residual_dir):
+        report = tree.run()
+
+    assert report.refusal is InitRefusal.DISCOVERY_UNREADABLE
+    assert report.written == ()
+    assert str(residual_dir) in report.detail
+
+
+def test_unstatable_variant_entry_is_not_read_as_zero_hits(tmp_path: Path) -> None:
+    """变体目录置 `0o444`（内含率定末态）-> `DISCOVERY_UNREADABLE`，**不是** ambiguous。
+
+    `_entry_kind` 吞掉 `OSError` 的实现会把唯一的 `.cfg.ic` 判成「不是普通文件」、命中数
+    退化为 0，于是报 `CALIBRATION_STATE_AMBIGUOUS`——一条把权限故障说成配置问题的错误
+    诊断。名字仍列得出来（`listdir` 成功），故本行行使的确实是 stat 层。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+    variant = tree.variant_dir("ifs")
+
+    with stat_hostile(variant):
+        report = tree.run()
+
+    assert report.refusal is InitRefusal.DISCOVERY_UNREADABLE
+    assert report.refusal is not InitRefusal.CALIBRATION_STATE_AMBIGUOUS
+    assert all_files(tree.states) == []
+
+
+def test_unstatable_variant_directory_itself_is_not_read_as_missing(
+    tmp_path: Path,
+) -> None:
+    """变体目录的**父目录**置 `0o444` -> `_is_directory` 无法判定 -> `DISCOVERY_UNREADABLE`。
+
+    与上一条分工：那条打的是 `_entry_kind`（子项判定），这条打的是 `_is_directory`（变体
+    目录**自身**的判定）。`_is_directory` 吞掉 `OSError` 的实现会返回 `False` 并报
+    `VARIANT_MISSING`，把一个权限故障说成「prepare 没跑」。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+    models_dir = tree.variant_dir("ifs").parent
+
+    with stat_hostile(models_dir):
+        report = tree.run()
+
+    assert report.refusal is InitRefusal.DISCOVERY_UNREADABLE
+    assert report.refusal is not InitRefusal.VARIANT_MISSING
+    assert str(tree.variant_dir("ifs")) in report.detail
     assert all_files(tree.states) == []

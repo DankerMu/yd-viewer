@@ -69,6 +69,12 @@ EPOCH_MINUTES_24_12Z = 29792880  # +720*8
 EPOCH_MINUTES_25_00Z = 29793600  # +720*10
 EPOCH_MINUTES_26_12Z = 29795760  # +720*13
 EPOCH_MINUTES_27_00Z = 29796480  # +720*14
+EPOCH_MINUTES_27_12Z = 29797200  # +720*15（== NOW，钉死扫描窗**上**端点闭合）
+
+#: off-grid 的执行时刻：既不是 00Z 也不是 12Z，故同一天的 12Z 候选**被枚举到**却严格晚于
+#: `now`。窗因此为 [2026-08-20T06:00Z, 2026-08-27T06:00Z]。用它才能把「日期网格上界」与
+#: 「`cycle <= now` 比较」两条约束分开钉死（`NOW + 12h` 落在从不被枚举的日期上）。
+NOW_OFF_GRID = datetime(2026, 8, 27, 6, tzinfo=UTC)
 
 CYCLE_DIR_FORMAT = "%Y%m%d%H"  # 逐字写死，见模块头
 STATE_SUFFIX = ".cfg.ic"
@@ -155,6 +161,13 @@ def compat_four_token_payload() -> bytes:
         lake_rows=[river_row(1)],
         header_tokens=("2", "1", "1", DEFAULT_MINUTE),
         delimiter="\t",
+    ).payload
+
+
+def large_payload(mesh_count: int = 200) -> bytes:
+    """一份**大于 `RLIMIT_FSIZE` 测试上限**的率定末态，用于构造写循环中途的真实 I/O 失败。"""
+    return build_cfg_ic(
+        mesh_count=mesh_count, river_count=mesh_count, delimiter="\t"
     ).payload
 
 
@@ -269,6 +282,22 @@ def unreadable(path: Path) -> Iterator[None]:
     """把 `path` 临时置为 `chmod 0o000`，退出时**一定**恢复（否则 tmp 清理会踩到）。"""
     original = stat.S_IMODE(path.stat().st_mode)
     path.chmod(0o000)
+    try:
+        yield
+    finally:
+        path.chmod(original)
+
+
+@contextlib.contextmanager
+def stat_hostile(path: Path) -> Iterator[None]:
+    """把 `path` 临时置为 `0o444`：**可列目录**、但子项 `lstat`/`stat` 抛 `EACCES`。
+
+    与 `unreadable`（`0o000`，连 `listdir` 都不行）刻意分层：`0o000` 只行使
+    `_entry_names`，本 helper 才行使 `_entry_kind` / `_is_directory` 这一层。darwin 与
+    Linux 上「目录有 r 无 x」即此语义（读得到名字，解析不了名字）。
+    """
+    original = stat.S_IMODE(path.stat().st_mode)
+    path.chmod(0o444)
     try:
         yield
     finally:

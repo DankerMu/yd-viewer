@@ -26,11 +26,19 @@ from init_bootstrap_fixtures import (
     compat_four_token_payload,
     default_payload,
     expected_bytes,
+    large_payload,
+    skip_if_root,
     snapshot,
 )
 
 from yd_producer import controller, init
 from yd_producer.init import InitRefusal
+from yd_producer.store import safe_fs
+
+#: 收尾话术的三段常量，逐字写死在测试侧（从被测模块 import 会让断言变成恒真式）。
+CLEANUP_CLAIM = "根已非全新，重跑 init 前需人工清理 `states/`"
+FRESH_CLAIM = "零写入，根仍是全新根"
+PARTIAL_CLAIM = "可能已被部分写入"
 
 # --- 成功路径 ----------------------------------------------------------------
 
@@ -123,7 +131,10 @@ def test_partial_write_reports_landed_paths_without_rolling_back(
     assert report.refusal is InitRefusal.WRITE_FAILED
     assert report.written == (ifs_target,)  # 前序已落盘的**全部** source
     assert str(ifs_target) in report.detail
-    assert "根已非全新，重跑 init 前需人工清理 `states/`" in report.detail
+    assert CLEANUP_CLAIM in report.detail
+    assert FRESH_CLAIM not in report.detail
+    # 类一（`EEXIST`）盘上零残留：MUST NOT 声称目标可能被部分写入。
+    assert PARTIAL_CLAIM not in report.detail
     # 已落盘文件仍在且内容不变；本函数不回滚删除。
     assert ifs_target.read_bytes() == expected_bytes(
         tree.payloads["ifs"], EPOCH_MINUTES_25_00Z
@@ -142,6 +153,155 @@ def test_phase_b_write_order_is_ifs_then_gfs(tmp_path: Path) -> None:
     report = tree.run()
 
     assert [path.parent.name for path in report.written] == list(WRITE_ORDER)
+
+
+def test_exclusive_write_refuses_a_target_planted_after_phase_a(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """裁决 5「写用 `O_EXCL` 而非 `atomic_write_bytes_no_follow`」唯一的判别构造。
+
+    既有的「预置空目录」构造对**两个** helper 都失败（`os.replace` 落到目录同样报错），
+    故它对这条选择毫无判别力。这里在**另一个** seam（`ensure_directory_no_follow`）上包
+    一层：目录**真的**被建出来，同时在 gfs 目标路径植入一个带哨兵字节的**真实普通文件**。
+    该文件在阶段 A 之后才出现，正是裁决 5 要 fail closed 的 TOCTOU 窗；`O_EXCL` 得
+    `EEXIST` 而拒绝，覆盖写则会把哨兵字节抹掉。
+
+    禁令「MUST NOT 用 monkeypatch 伪造写入失败」不覆盖本构造：写入结果没有被伪造，失败
+    由真实的 `O_CREAT|O_EXCL` 在真实的普通文件上自然产生。
+    """
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    gfs_target = tree.state_path("gfs", cycle)
+    sentinel = b"sentinel-planted-inside-the-toctou-window\n"
+    real_ensure = safe_fs.ensure_directory_no_follow
+
+    def planting_ensure(path: Path, **kwargs):
+        created = real_ensure(path, **kwargs)
+        if Path(path) == gfs_target.parent:
+            gfs_target.write_bytes(sentinel)
+        return created
+
+    monkeypatch.setattr(safe_fs, "ensure_directory_no_follow", planting_ensure)
+
+    report = tree.run()
+
+    ifs_target = tree.state_path("ifs", cycle)
+    assert report.refusal is InitRefusal.WRITE_FAILED
+    assert report.written == (ifs_target,)
+    # 哨兵逐字节不变：覆盖写的实现在这一行必红。
+    assert gfs_target.read_bytes() == sentinel
+    assert CLEANUP_CLAIM in report.detail
+    assert PARTIAL_CLAIM not in report.detail
+
+
+def test_write_failure_with_zero_landed_states_does_not_claim_cleanup(
+    tmp_path: Path,
+) -> None:
+    """写入序**首位**（ifs）即失败 -> `written == ()`，收尾 MUST NOT 宣称需要清理。
+
+    同时钉死 `detail` 的「列出**全部**前序已落盘 source」不是硬编码某一个源：既有构造只
+    堵第二个源，`written` 恒为单元素，把 join 换成 `str(written[0])` 在那条用例上看不出
+    区别，本行的空元组会让它直接 `IndexError`。
+    """
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    blocker = tree.state_path("ifs", cycle)
+    blocker.mkdir(parents=True)  # 非普通文件：过得了阶段 A 守卫，挡得住 `O_EXCL`
+
+    report = tree.run()
+
+    assert report.refusal is InitRefusal.WRITE_FAILED
+    assert report.written == ()
+    assert "（无）" in report.detail
+    assert FRESH_CLAIM in report.detail
+    assert CLEANUP_CLAIM not in report.detail
+    assert PARTIAL_CLAIM not in report.detail
+    # 首位失败即整体停手：第二个源的目录从未被创建。
+    assert not (tree.states / "gfs").exists()
+    assert all_files(tree.states) == []
+
+
+def test_unwritable_states_dir_reports_root_cause_without_cleanup_claim(
+    tmp_path: Path,
+) -> None:
+    """阶段 B 首个 `ensure_directory_no_follow` 抛 `EACCES`（`chmod 0o500 states/`）。
+
+    阶段 A 的枚举全过（`states/` 可读可搜索、且为空），阶段 B 的 `mkdir` 失败，终态是**真**
+    零写入。`safe_fs` 把这次 `mkdir` 失败同样包成 `kind="io"`，故实现若把两次调用合进
+    一个 `try`，就会对一个从未被 `os.open` 过的路径宣称「可能已被部分写入」。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+    original = tree.states.stat().st_mode
+    tree.states.chmod(0o500)
+    try:
+        report = tree.run()
+    finally:
+        tree.states.chmod(original)
+
+    assert report.refusal is InitRefusal.WRITE_FAILED
+    assert report.written == ()
+    assert FRESH_CLAIM in report.detail
+    assert CLEANUP_CLAIM not in report.detail
+    assert PARTIAL_CLAIM not in report.detail
+    assert all_files(tree.states) == []
+
+
+def test_mid_write_io_failure_names_the_possibly_partial_target(
+    tmp_path: Path,
+) -> None:
+    """裁决 5 类二：`O_EXCL` 建成文件后 `os.write` 中途真实失败 -> 收尾点名半写产物。
+
+    构造用真实的 `RLIMIT_FSIZE`（4096 字节）而非注入 fake：`safe_fs` 的
+    `write_bytes_no_follow_exclusive` 失败路径**不 unlink**，盘上因此留下一份 header 合法、
+    body 截断的普通文件。它既不在 `written` 内、也不在「已落盘的首态」列表内，运维照类一
+    的话术清理会漏掉它。
+
+    ifs 的率定末态小于上限（先正常落盘），gfs 的远大于上限：`written` 因此非空，
+    「该目标不在已落盘列表内」这条断言才有判别力，而不是在空元组上恒真。
+    """
+    resource = pytest.importorskip("resource")
+    import signal
+
+    limit = 4096
+    tree = Tree(tmp_path, payloads={"ifs": default_payload(), "gfs": large_payload()})
+    assert len(tree.payloads["ifs"]) < limit < len(tree.payloads["gfs"])
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    previous_handler = signal.getsignal(signal.SIGXFSZ)
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    try:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, hard))
+        try:
+            report = tree.run()
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+    finally:
+        signal.signal(signal.SIGXFSZ, previous_handler)
+
+    ifs_target = tree.state_path("ifs", cycle)
+    gfs_target = tree.state_path("gfs", cycle)
+    assert report.refusal is InitRefusal.WRITE_FAILED
+    assert report.written == (ifs_target,)
+    assert gfs_target not in report.written
+    assert PARTIAL_CLAIM in report.detail
+    assert str(gfs_target) in report.detail
+    # 「已落盘的首态」列表只列 ifs——半写的 gfs 目标由上一条话术单独点名。
+    landed = report.detail.split("已落盘的首态：")[1]
+    assert str(ifs_target) in landed
+    assert str(gfs_target) not in landed
+    # 真实的半写产物：文件存在、且短于完整字节。
+    assert gfs_target.is_file()
+    assert 0 < gfs_target.stat().st_size < len(tree.payloads["gfs"])
 
 
 # --- 负面证据：不跑 SHUD、不写 DONE、不碰 output/ ---------------------------
@@ -192,6 +352,31 @@ def test_success_writes_no_done_and_leaves_output_untouched(tmp_path: Path) -> N
     assert report.refusal is None
     assert snapshot(tree.output) == before_output
     assert list(tree.output.rglob("DONE")) == []
+
+
+def test_non_done_regular_file_under_output_does_not_block_init(
+    tmp_path: Path,
+) -> None:
+    """裁决 8 的两侧**不对称**：`output/` 侧只认名为 `DONE` 的普通文件。
+
+    `output/<cycle>/gfs/yd.rivqdown.dat` 是一次崩溃发布留下的最常见残留。把守卫的
+    `name=DONE_NAME` 去掉的实现在本行必红，而放宽后的守卫会让任何带残留的全新根永久无法
+    建链，与「无 DONE 残留必须可干净重跑」直接冲突。`states/` 侧的「认任一普通文件」由
+    `test_residual_file_with_unparsable_name_still_refuses` 把守，两条合起来才钉死不对称。
+    """
+    tree = Tree(tmp_path)
+    residue = tree.output / "2026082400" / "gfs" / "yd.rivqdown.dat"
+    residue.parent.mkdir(parents=True)
+    residue.write_bytes(b"stale product\n")
+    before_output = snapshot(tree.output)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+
+    report = tree.run()
+
+    assert report.refusal is None
+    assert len(report.written) == len(WRITE_ORDER)
+    assert snapshot(tree.output) == before_output
 
 
 def test_bootstrap_is_not_idempotent_and_refuses_on_second_run(
@@ -368,4 +553,42 @@ def test_cli_init_turns_a_judge_config_error_into_exit_one(
     assert "raw.gfs.bundles" in err
     # 配置错误 MUST NOT 被伪装成「等 raw 补齐」。
     assert InitRefusal.NO_COMPLETE_RAW_CYCLE.value not in err
+    assert not (yd_root / "states").exists()
+
+
+def test_cli_init_turns_an_out_of_range_cycle_hour_into_a_clean_refusal(
+    capsys, tmp_path: Path
+) -> None:
+    """spec「非法小时不得以未分类异常逃逸」的 **CLI 侧**：无 traceback、零写入。
+
+    `config` 的 TOML 加载只校验「是整数列表」（`_require_int_list`），`hours = [0, 25]`
+    因此真的进得来；`_candidate_cycles` 里 `datetime(..., hour=25)` 的裸 `ValueError`
+    接不住于 `cli.main` 的 `except ConfigError`，异常会穿透出入口。本行在**入口**这一层
+    把该 MUST 钉死——spec 的 WHEN 说的就是 CLI。
+    """
+    from cli_fixtures import render_config, write_local
+
+    from yd_producer import cli
+
+    root = tmp_path.resolve()
+    yd_root = root / "yd"
+    for source in WRITE_ORDER:
+        variant = yd_root / DEFAULT_VARIANTS[source]
+        variant.mkdir(parents=True)
+        (variant / f"yd_{source}{STATE_SUFFIX}").write_bytes(default_payload())
+    (yd_root / "output").mkdir(parents=True)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        render_config().replace("hours = [0, 12]", "hours = [0, 25]"),
+        encoding="utf-8",
+    )
+    local_path = write_local(tmp_path)
+    _write_cli_raw(root / "nwm" / "raw", _recent_cycle())
+
+    argv = ["init", "--config", str(config_path), "--local", str(local_path)]
+    assert cli.main(argv, env={}) == cli.EXIT_GUARD
+
+    err = capsys.readouterr().err
+    assert "cycle.hours" in err
+    assert "Traceback" not in err
     assert not (yd_root / "states").exists()
