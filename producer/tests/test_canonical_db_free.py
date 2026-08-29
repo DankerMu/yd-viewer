@@ -384,12 +384,19 @@ def _write_ifs_netcdf_raw(store: LocalObjectStore) -> dict[str, Any]:
 def test_ifs_convert_manifest_is_ready_and_lands_on_one_lowercase_identity(
     tmp_path: Path, no_outbound_sockets: None
 ) -> None:
-    """IFS 端到端：完整产物集 MUST 判 `canonical_ready`，且全链只用一个小写身份。
+    """IFS 端到端：完整产物集 MUST 判 `canonical_ready`，并钉住 f003 的三处单位换算。
 
     这是仓内唯一不经快照用例的 IFS oracle（tasks.md 裁决 13）。在裁决 12 的入口归一之前，
     `_canonical_product_result_readiness_row` 用原始 `"IFS"` 打戳而
     `evaluate_canonical_readiness` 以 `normalize_source_id` 后的 `"ifs"` 过滤，
     每一行都被丢弃，本用例在 `canonical_ready` 断言上变红。
+
+    小写身份只到对象键、catalog 键与行 `source_id`、`canonical_product_id` 为止：
+    `grid_definition_uri` 这一段**故意不是**小写（pin 常量 `converter.py:206`，裁决 1/16
+    裁定不改），本用例按已登记的 Known limit 原样钉住大写值，不宣称「全链一个小写身份」。
+
+    本用例把 NetCDF 字节写在 `.grib2` 键下，故按设计走 netcdf4 回退，**不**构成 GRIB 覆盖；
+    真实 cfgrib 解码由 `test_convert_manifest_decodes_real_grib2_through_cfgrib_backend` 承担。
     """
 
     converter = _build_ifs_converter(tmp_path)
@@ -404,8 +411,9 @@ def test_ifs_convert_manifest_is_ready_and_lands_on_one_lowercase_identity(
         product.variable for product in result.products
     }
 
-    # products-contract §3.2：`source` 固定小写。对象键、catalog 键、catalog 行
-    # `source_id` 与 `canonical_product_id` MUST 同用一个小写身份。
+    # tasks.md 裁决 12（含 round-2 勘误）：canonical 命名空间归 yd 所有，且过滤用归一值、
+    # 打戳用原始值是一处真实缺陷。故对象键、catalog 键、catalog 行 `source_id` 与
+    # `canonical_product_id` MUST 同用一个小写身份；`grid_definition_uri` 是例外，见下。
     for product in result.products:
         assert product.object_uri.startswith(f"canonical/ifs/{IFS_COMPACT_CYCLE}/")
         assert product.canonical_product_id.startswith(f"ifs_{IFS_COMPACT_CYCLE}_")
@@ -417,6 +425,25 @@ def test_ifs_convert_manifest_is_ready_and_lands_on_one_lowercase_identity(
     assert catalog["source_id"] == "ifs"
     assert len(catalog["products"]) == 8 * len(FORECAST_HOURS)
     assert {row["source_id"] for row in catalog["products"]} == {"ifs"}
+    for row in catalog["products"]:
+        # 裁决 16：`grid_definition_uri` 是 pin 常量（converter.py:206），入口归一够不着它，
+        # 故整棵 canonical 树里只有网格键仍是大写。这里**故意**钉住大写值——它钉的是一条
+        # 已登记的 Known limit；日后 follow-up 把该常量改小写时，本行会自动变红。
+        assert row["grid_definition_uri"] == "canonical/IFS/grid/ifs_0p25/grid.json"
+
+    # 裁决 15：f003 的三处单位换算 MUST 带值级 oracle，数值取本文件 IFS_NATIVE_VALUES
+    # 上方 `#:` 注释里已算好的三个（tp 3mm/3h → 24 mm/day；ssr 1.08e6 J/m2 / 10800s →
+    # 100 W/m2；net = (1.08e6 - 0.54e6) / 10800 → 50 W/m2）。每格只写一个值。
+    by_id = {row["canonical_product_id"]: row for row in catalog["products"]}
+    for standard_variable, expected in (
+        ("prcp_rate_or_amount", 24.0),
+        ("shortwave_down", 100.0),
+        ("net_radiation", 50.0),
+    ):
+        product_row = by_id[f"ifs_{IFS_COMPACT_CYCLE}_{standard_variable}_f003"]
+        assert _product_values(
+            converter, product_row["object_uri"], standard_variable
+        ) == pytest.approx([expected], abs=0.05)
 
 
 def test_product_catalog_pins_the_inherited_payload_and_row_schema(

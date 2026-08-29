@@ -1229,8 +1229,11 @@ class CanonicalConverter:
         # 偏离（`剥离点`(f)/tasks.md 裁决 12）：入口归一一次，此后全链只用归一值。
         # pin 上 normalize_source_id("IFS") == "IFS"，yd 侧归一成 "ifs"（issue #5 落地），
         # 不归一则 readiness 以 "ifs" 过滤、打戳却用 "IFS"，IFS 的每一行都被丢弃。
-        # 归一后对象键、catalog 键与行 source_id、canonical_product_id、readiness 行与
-        # 过滤同用一个小写身份，与 docs/products-contract.md §3.2 一致。
+        # 归一后产物对象键、catalog 键与行 source_id、canonical_product_id、readiness 行
+        # 与过滤同用一个小写身份。权威是裁决 12 本身（canonical 命名空间归 yd 所有）加上
+        # 这个真实缺陷，不是 products-contract §3.2——§3.2 管的是发布布局，canonical/ 键
+        # 是 work 内 scratch 工件，不受其约束。例外：grid_definition_uri 是 :206 的 pin
+        # 常量、不由 source_id 派生，按裁决 1/16 不改，网格键仍是 canonical/IFS/…。
         source_id = normalize_source_id(source_id)
 
         try:
@@ -2061,8 +2064,11 @@ class IFSCanonicalConverter(CanonicalConverter):
         # 偏离（`剥离点`(f)/tasks.md 裁决 12）：入口归一一次，此后全链只用归一值。
         # pin 上 normalize_source_id("IFS") == "IFS"，yd 侧归一成 "ifs"（issue #5 落地），
         # 不归一则 readiness 以 "ifs" 过滤、打戳却用 "IFS"，IFS 的每一行都被丢弃。
-        # 归一后对象键、catalog 键与行 source_id、canonical_product_id、readiness 行与
-        # 过滤同用一个小写身份，与 docs/products-contract.md §3.2 一致。
+        # 归一后产物对象键、catalog 键与行 source_id、canonical_product_id、readiness 行
+        # 与过滤同用一个小写身份。权威是裁决 12 本身（canonical 命名空间归 yd 所有）加上
+        # 这个真实缺陷，不是 products-contract §3.2——§3.2 管的是发布布局，canonical/ 键
+        # 是 work 内 scratch 工件，不受其约束。例外：grid_definition_uri 是 :206 的 pin
+        # 常量、不由 source_id 派生，按裁决 1/16 不改，网格键仍是 canonical/IFS/…。
         source_id = normalize_source_id(source_id)
 
         try:
