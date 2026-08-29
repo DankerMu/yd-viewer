@@ -426,7 +426,7 @@ Review focus:
 ## 3. raw-scan：完整性扫描与临时 manifest
 
 - [x] 3.1 实现 IFS/GFS 完整性规则判定（00/12 限定、0–168h、变量/bundle 模式、GFS f000 特例、逐文件检查）
-- [ ] 3.2 实现 raw 只读复制到 `work/raw/`（源不可变断言）与临时 `raw-manifest.json` 生成（entry 只引用副本）
+- [x] 3.2 实现 raw 只读复制到 `work/raw/`（源不可变断言）与临时 `raw-manifest.json` 生成（entry 只引用副本）
 
 依赖：组 1（规则来自 config）、组 2（manifest 结构）
 §13.1 归属：raw 扫描
