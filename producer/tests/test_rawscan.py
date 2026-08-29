@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from yd_producer.config import (
+    CanonicalGridConfig,
     Config,
     ConfigError,
     CycleConfig,
@@ -78,6 +79,10 @@ def make_config(
         checkpoint_hours=(12,),
         reach_count=3988,
         nwm_mapping_builder_module="workers.mapping_builder.cli",
+        # issue #20 新增的必需字段；rawscan 不读它，但 `Config` 零默认值，缺它即构造失败。
+        nwm_canonical_grid_id=CanonicalGridConfig(
+            gfs="fixture-grid-gfs", ifs="fixture-grid-ifs"
+        ),
         cycle=CycleConfig(hours=tuple(cycle_hours)),
         variants=VariantsConfig(gfs="input/models/yd_gfs", ifs="input/models/yd_ifs"),
         raw=RawConfig(
