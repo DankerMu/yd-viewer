@@ -66,7 +66,11 @@ r"""NFS 发布器：一轮成功计算的正式提交（任务 13.1，issue #24�
 :data:`PUBLISH_DIR_MODE`（`ensure_directory_no_follow` 逐字拒绝放宽，见
 `store/safe_fs.py:107-131`，故 umask 0o077 的现场它落地即 0o700，node-27 连穿越都做不到）。
 放宽逐级、非递归，且只作用于 `output/`、`output/<T>/`、`output/<T>/<source>/` 三级——
-不触碰 `states/`、`logs/`、`YD_ROOT` 自身或历史 cycle 目录。
+不触碰 `states/`、`logs/`、`YD_ROOT` 自身或历史 cycle 目录。**放宽是「尝试」，可穿越才是要
+立的性质**：三级就位后逐级复 stat 并要求组或其他至少有一个 `x`，任一级不满足即在第一处 NFS
+写入之前抛 `PublishError`（`_require_traversable`）——「本次调用之前不存在」不是可持久化的
+属性，`mkdir` 与放宽之间一次 EIO/重启就会把该层级以 `0o700` 永久闩死，而其后每一轮都把它
+看作「已存在」而不动。
 
 零新增依赖：`struct`/`os`/`pathlib`/`datetime` 全在 stdlib。契约检查阶段对 DAT 只做**有界
 读**（先读定长头部拿 `nc`，再读列编号表），行数由 `st_size` 算术得出，MUST NOT 把数据区
@@ -131,6 +135,9 @@ __all__ = [
 PUBLISH_FILE_MODE = 0o644
 #: 发布目录位：node-27 必须能**穿越** `output/<T>/<source>/`。
 PUBLISH_DIR_MODE = 0o755
+#: 可穿越后置断言的判据位：组或其他至少有一个 `x`。owner 的 `x` **不算**——发布进程自己
+#: 总是能进去，用它当判据等于把断言写成恒真（变异体 (aq)）。
+_TRAVERSABLE_BITS = stat.S_IXGRP | stat.S_IXOTH
 #: v2 DAT 的定长前缀：1024 字节文本头 + `st`(float64) + `nc`(float64)。
 DAT_FIXED_HEADER_BYTES = 1024 + 8 + 8
 #: 文本头本身的字节数（v2 判据作用的窗口）。
@@ -573,6 +580,48 @@ def _widen_publish_dir(directory: Path, *, root: Path) -> None:
         os.close(fd)
 
 
+def _require_traversable(directory: Path, *, root: Path) -> None:
+    """发布目录的**可穿越后置断言**（裁决 8 的 fail-closed 半边）。
+
+    判据是 `stat.S_IMODE(mode) & (S_IXGRP | S_IXOTH) != 0`，即 `& 0o011`：组或其他至少有
+    一个 `x`。owner 位不算——发布进程自己永远进得去，拿它当判据这条断言就是恒真的
+    （变异体 (aq)）。
+
+    这里**刻意不取**裁决 8 写的字面掩码 `0o055`（记为偏离）：`0o055` 把组/其他的 `r` 也算
+    进来，于是 `0o744` 这类 mode 满足 `& 0o055 != 0` 却根本**不可穿越**——组与其他能列出
+    名字，却 stat/open 不了目录里的任何东西，`DONE` 照样封在一棵 node-27 瞎眼的树上，正是
+    本轮要闭掉的那个形态。裁决 8 自己的括号注（「组或其他至少有一个 `x`」）与变异体 (aq)
+    的措辞（「组或其他有 `x`」）都指向 x 位，故 `0o055` 是该裁决内部的措辞不一致而不是
+    刻意的宽松。两种掩码在裁决钉死的两个形态上结论相同：`0o2750` 通过（`0o010`），
+    `0o700` 拒绝。
+
+    存在理由：「本次调用之前不存在」不是可持久化的属性。三级 stat 完成到放宽循环跑完之间
+    任何一次失败（NFS EIO/ESTALE、SIGKILL、节点重启），已 `mkdir` 的层级就以 umask 0o077
+    下的 `0o700` **永久闩死**——其后每一轮都把它看作「已存在」而不动，而
+    `residue._half_product_dirs`（`residue.py:296-311`）只删 `output/<T>/<source>/`、从不碰
+    父级，canonical 恢复路径也救不回来。任一父级不可穿越即等于 node-27 什么都看不到，同时
+    状态链照常推进、无任何信号——这直接违反治理不变量的「node-27 **可读**」半边。
+
+    现场按 `docs/agent-ops.md` §10 首选做法设的 `0o2750` 满足 `& 0o055 == 0o050`，**原样
+    通过、不被改写**：MUST NOT 把这条断言改成「发现不可穿越就放宽已存在的层级」——那会把
+    round 1 的 cand-02（重写现场的 `2750`、清掉 setgid）原样放回来。
+
+    读法是 fd 绑定的（`open_directory_no_follow` + `os.fstat`），与 :func:`_widen_publish_dir`
+    同一高度：不跟随 symlink，且断言的正是随后会被写入的那个 inode。
+    """
+    fd = open_directory_no_follow(directory, containment_root=root)
+    try:
+        mode = stat.S_IMODE(os.fstat(fd).st_mode)
+    finally:
+        os.close(fd)
+    if not mode & _TRAVERSABLE_BITS:
+        raise PublishError(
+            f"发布目录 {directory} 不可穿越（mode={mode:#o}）：组与其他都没有 `x`，"
+            "node-27 将读不到本轮产物；本轮不发布（已存在的层级由现场按 "
+            "docs/agent-ops.md §10 放宽，本模块不改写它）"
+        )
+
+
 def _prepare_output_dir(inputs: PublishInputs) -> None:
     """创建并放宽 `output/`、`output/<T>/`、`output/<T>/<source>/` 三级。
 
@@ -584,6 +633,18 @@ def _prepare_output_dir(inputs: PublishInputs) -> None:
     层级一律不动——现场按 `docs/agent-ops.md` §10 把 `output/` 设成 `2750`（共享组 +
     setgid）时，无条件 `fchmod(0o755)` 既把一棵刻意收紧的树开成 world `r-x`，又清掉
     setgid，两者都不是「放宽」。
+
+    **且放宽只是「尝试」，可穿越才是要立的性质**：故三级全部就位后逐级复 stat，任一级不可
+    穿越即抛 :class:`PublishError`（:func:`_require_traversable`）。该断言分**两趟**跑：
+
+    * **建目录之前**先查已存在的层级——裁决 8 要求这条在「第一处 NFS 写入之前」抛，而
+      Required evidence 的「自建层级不可穿越即拒」一行还要求 `YD_ROOT` 递归快照**逐项不
+      变**；只在末尾查的话，一个 `0o700` 的 `output/` 会先让下面两级被 `mkdir` 出来，快照
+      当场就变了。
+    * **放宽之后**再查全部三级——这一趟才是裁决 8 点名的后置断言，它盖住「本次自建但
+      `fchmod` 没跑成/没跑到」这条真实失败面（首轮 EIO -> 次轮把 `0o700` 当已存在而放行）。
+
+    两趟共用同一个谓词，缺任一趟都有判别器（变异体 (ap)）。
     """
     root = inputs.root
     levels = (
@@ -594,9 +655,14 @@ def _prepare_output_dir(inputs: PublishInputs) -> None:
     self_created = [
         directory for directory in levels if not _entry_exists(directory, root=root)
     ]
+    for directory in levels:
+        if directory not in self_created:
+            _require_traversable(directory, root=root)
     ensure_directory_no_follow(inputs.source_output_dir, containment_root=root)
     for directory in self_created:
         _widen_publish_dir(directory, root=root)
+    for directory in levels:
+        _require_traversable(directory, root=root)
 
 
 def _entry_exists(path: Path, *, root: Path) -> bool:
@@ -670,16 +736,27 @@ def _done_is_on_disk(inputs: PublishInputs) -> bool:
     unlink 会改变既有 `mode=None` 调用方的失败路径）。于是文件可能已经对 node-27 可见，
     错误却是「创建失败」。故失败后 MUST 复探：在盘即 :class:`PublishCleanupError`。
 
+    复探原语 MUST 是**裸 `os.lstat`**：成功即 `True`，任何 `OSError` 即 `False`——与姊妹
+    模块 `controller.done_cycles`（`controller.py:308-317`）、`residue._half_product_dirs`
+    （`residue.py:302-309`）同一高度。MUST NOT 走 `stat_no_follow`：它把 EACCES/EIO/ESTALE
+    一律包成 `SafeFilesystemError(kind="io")`（`store/safe_fs.py:369-397`），`_open_child_dir`
+    把父链上的一切非 `FileNotFoundError` 失败同样包起来（`:795-811`），于是
+    `except SafeFilesystemError: return True` 会把「测不出来」翻译成「本轮已完成」——实测
+    `output/<T>/<source>/` 被 `chmod 0o000` 且 `DONE` 不存在时得到错误的 `True`。按 `kind`
+    分支同样证伪：父级被换成普通文件时 `kind` 是默认的 `unsafe`，而 `DONE` 按构造不可能存在。
+    这与 round 1 的「`safe_fs` 把一切失败都包成 `SafeFilesystemError`」是同一条可复用错误
+    假设的反面。
+
     任何条目（含 symlink、目录）都算「在盘」——viewer 与 `decide_frontier` 判的就是条目
-    存在与否。复探本身失败时返回 `False`（收敛为 `PublishError`）：不能凭一次失败的探测
-    宣布本轮已完成。
+    存在与否，裸 `lstat` 正好保住这条。复探失败返回 `False`（收敛为 `PublishError`）：
+    不能凭一次失败的探测宣布本轮已完成。此处不需要 `safe_fs` 的 containment/no-follow
+    保护：只读一个 `st_mode` 都不看的存在性判定，不打开、不写入、不跟随任何东西。
     """
     try:
-        return _stat_or_none(inputs.done_path, containment_root=inputs.root) is not None
-    except SafeFilesystemError:
-        return True
+        os.lstat(inputs.done_path)
     except OSError:
         return False
+    return True
 
 
 def _stale_state_files(inputs: PublishInputs) -> tuple[Path, ...]:

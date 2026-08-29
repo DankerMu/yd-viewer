@@ -24,6 +24,7 @@ macOS 的 `/var` 是 symlink，未 resolve 的 `tmp_path` 会得到与被测逻�
 
 from __future__ import annotations
 
+import errno
 import os
 import pathlib
 import stat
@@ -1559,3 +1560,204 @@ def test_widening_preserves_inherited_setgid(
 
     for level in levels:
         assert _mode(level) == 0o2755, level
+
+
+# --- 权限：可穿越是后置断言，不是「放宽跑过了」（round 2 cand-02） ---
+
+
+def test_untraversable_output_level_is_refused(
+    tmp_path: Path, strict_umask: None
+) -> None:
+    """已存在的 `output/` 不可穿越 -> `PublishError` 指名该层级，零 NFS 变更（变异体 (ap)）。
+
+    这棵树的 `output/` 是在 `os.umask(0o077)` 下由上游建出来的，落地即 `0o700`——正是本轮
+    P1 描述的闩死态的静态形态。今日行为（无后置断言）是 `DONE=True` 且 `output/` 留在
+    `0o700`：`DONE` 封在一棵 node-27 连穿越都做不到的树上，状态链照常推进、无任何信号。
+
+    断言里的递归快照是这条的承重部分：只在末尾复 stat 的实现会先把 `output/<T>/` 与
+    `output/<T>/<source>/` `mkdir` 出来再拒绝，快照当场就变。
+    """
+    scene = build_scene(tmp_path)
+    output_root = scene.root / "output"
+    assert _mode(output_root) == 0o700, "前提：umask 0o077 下 output/ 落地即 0o700"
+    before = snapshot_tree(scene.root)
+
+    with pytest.raises(publish.PublishError) as excinfo:
+        publish.publish(scene.make_inputs())
+
+    message = str(excinfo.value)
+    assert str(output_root) in message
+    assert "0o700" in message
+    assert not (output_root / T_TEXT).exists()
+    assert not (output_root / T_TEXT / SOURCE / "DONE").exists()
+    _assert_unchanged(before, scene)
+
+
+@pytest.mark.parametrize(
+    ("failing_widen", "level_index"),
+    [(1, 0), (2, 1)],
+    ids=["output_root", "cycle_dir"],
+)
+def test_latched_output_level_is_refused_on_the_next_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    strict_umask: None,
+    failing_widen: int,
+    level_index: int,
+) -> None:
+    """闩死态的**动态**入口：首轮放宽抛 EIO -> 次轮仍必须拒（变异体 (ap)）。
+
+    monkeypatch 打在 `os.fchmod` 这一层而不是整个 `_widen_publish_dir`：真实失败面就是
+    `fchmod` 这一次系统调用（NFS EIO/ESTALE），换掉整个 helper 会把「stat 与放宽之间」这段
+    窗口一起换掉，判别力反而下降。
+
+    首轮之后该层级以 `0o700` 留在盘上；其后每一轮都把它看作「已存在」而不动，
+    `residue._half_product_dirs` 也只删 `output/<T>/<source>/`、从不碰父级。故没有后置断言
+    的实现在**次轮**会一路走到 `DONE`——那正是这条要杀的形态。`output/<T>/` 这一级单独跑
+    一次：verifier 实测它同样会闩死，「只有 `output/` 会永久闩住」的说法已被证伪。
+    """
+    scene = build_scene(tmp_path, create_output_root=False)
+    levels = (
+        scene.root / "output",
+        scene.root / "output" / T_TEXT,
+        scene.root / "output" / T_TEXT / SOURCE,
+    )
+    latched = levels[level_index]
+    real_fchmod = os.fchmod
+    calls = {"n": 0}
+
+    def flaky(fd: int, mode: int) -> None:
+        calls["n"] += 1
+        if calls["n"] == failing_widen:
+            raise OSError(errno.EIO, "Input/output error")
+        real_fchmod(fd, mode)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "fchmod", flaky)
+        with pytest.raises(publish.PublishError):
+            publish.publish(scene.make_inputs())
+
+    assert _mode(latched) & (stat.S_IXGRP | stat.S_IXOTH) == 0, (
+        "前提：该层级已以 0o700 闩死"
+    )
+
+    # 真实 fchmod 恢复后对**同一轮**重跑：不得把 DONE 封在一棵闩死的树上。
+    with pytest.raises(publish.PublishError) as excinfo:
+        publish.publish(scene.make_inputs())
+
+    assert str(latched) in str(excinfo.value)
+    assert not (levels[2] / "DONE").exists()
+
+
+# --- `DONE` 复探的极性（round 2 cand-01 / cand-03a） ---
+
+
+def test_done_reprobe_failure_converges_to_publish_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """复探测不出来 -> 「本轮未完成」（变异体 (ao)）。
+
+    构造：步骤 5 的写入抛错，**且**同时把 `output/<T>/<source>/` 置为 `0o000`，于是复探
+    本身失败而 `DONE` 按构造不存在。今日行为是 `PublishCleanupError`（「本轮已完成」）——
+    `stat_no_follow` 把 EACCES 包成 `SafeFilesystemError(kind="io")`，而旧复探把
+    `SafeFilesystemError` 读成「条目存在」。
+
+    `PublishCleanupError` **不是** `PublishError` 的子类，故这条 `pytest.raises` 本身就是
+    判别器：旧实现会让 `PublishCleanupError` 直接逃出去。与既有的
+    `test_done_landed_then_create_fails_is_cleanup_error` 构成一对反向配重。
+    """
+    scene = build_scene(tmp_path)
+    source_dir = scene.root / "output" / T_TEXT / SOURCE
+
+    def exploding(path, content, **kwargs):  # type: ignore[no-untyped-def]
+        source_dir.chmod(0o000)
+        raise SafeFilesystemError("Failed to create DONE: [Errno 5] Input/output error")
+
+    monkeypatch.setattr(publish, "write_bytes_no_follow_exclusive", exploding)
+
+    try:
+        with pytest.raises(publish.PublishError, match="创建失败"):
+            publish.publish(scene.make_inputs())
+    finally:
+        source_dir.chmod(0o755)
+
+    assert not (source_dir / "DONE").exists()
+
+
+def test_done_as_symlink_still_counts_as_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """反向半边：`DONE` 位置是 symlink 时复探仍判「在盘」（裸 `lstat` 的语义）。
+
+    缺这条，把复探写成「`os.path.isfile` / 跟随 symlink 的 stat」也能让上一条全绿，而那会
+    在一条 symlink `DONE` 上报「本轮未完成」——viewer 与 `decide_frontier` 判的是条目存在
+    与否，那份产物对它们已经是完成态了。
+    """
+    scene = build_scene(tmp_path)
+    source_dir = scene.root / "output" / T_TEXT / SOURCE
+
+    def exploding(path, content, **kwargs):  # type: ignore[no-untyped-def]
+        Path(path).symlink_to(scene.log)
+        raise SafeFilesystemError("Failed to create DONE: [Errno 5] Input/output error")
+
+    monkeypatch.setattr(publish, "write_bytes_no_follow_exclusive", exploding)
+
+    with pytest.raises(publish.PublishCleanupError) as excinfo:
+        publish.publish(scene.make_inputs())
+
+    assert excinfo.value.done_path == source_dir / "DONE"
+    assert (source_dir / "DONE").is_symlink()
+
+
+# --- checkpoint 不可解析（round 2 cand-03c） ---
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"\xff\xfe\x00\x01\x02\x03" * 64, b""],
+    ids=["binary_junk", "empty"],
+)
+def test_unparseable_checkpoint_converges_to_publish_error(
+    tmp_path: Path, payload: bytes
+) -> None:
+    """`parse(raw)` 的 `ValueError` MUST 收敛为 `PublishError`（变异体 (ar)）。
+
+    `parse` 的契约是「任何结构性不可用一律抛 `ValueError`」（`state/cfg_ic.py:290-291`）：
+    二进制垃圾走「不是合法 UTF-8」、零字节走「空 IC 文件」。既有的 header 形状用例走的是
+    其后的**重戳**臂，从未执行到这一条；该 `ValueError` 若穿透，14.1 的
+    `except PublishError` 接不住。
+    """
+    scene = build_scene(tmp_path, checkpoint_payload=payload)
+    before = snapshot_tree(scene.root)
+
+    with pytest.raises(publish.PublishError, match="无法解析"):
+        publish.publish(scene.make_inputs())
+
+    _assert_unchanged(before, scene)
+
+
+def test_unstattable_scratch_dat_converges_to_publish_error(tmp_path: Path) -> None:
+    """`_read_dat_head` 的 **stat** 臂（round 1 cand-03 收口后零覆盖的那一条）。
+
+    既有的 `test_unreadable_scratch_dat_converges_to_publish_error` 只 `chmod 0o000` 文件
+    本身：`lstat` 照样成功，红的是其后的有界读。要打到 stat 臂必须让**父目录**不可进入，
+    故 DAT 单独放一个目录（`scratch/out/` 里还有 checkpoint 与日志，一起封掉会先在
+    checkpoint 上失败）。`stat_no_follow` 把 EACCES 包成 `SafeFilesystemError`，此处必须
+    收敛为 `PublishError` 而不是穿透。
+    """
+    scene = build_scene(tmp_path)
+    dat_dir = scene.scratch / "datonly"
+    dat_dir.mkdir()
+    dat = dat_dir / "yd.rivqdown.dat"
+    dat.write_bytes(scene.dat.read_bytes())
+    inputs = scene.make_inputs(scratch_dat=dat)
+    before = snapshot_tree(scene.root)
+
+    dat_dir.chmod(0o000)
+    try:
+        with pytest.raises(publish.PublishError, match="不可用"):
+            publish.publish(inputs)
+    finally:
+        dat_dir.chmod(0o755)
+
+    _assert_unchanged(before, scene)
