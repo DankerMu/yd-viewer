@@ -69,7 +69,8 @@ r"""NFS 发布器：一轮成功计算的正式提交（任务 13.1，issue #24�
 不触碰 `states/`、`logs/`、`YD_ROOT` 自身或历史 cycle 目录。**放宽是「尝试」，node-27 可遍历且可读才是
 要立的性质**：三级就位后逐级复 stat，并要求组或其他之中至少有一类**同时**具备 `r` 与 `x`
 （判据由 `docs/products-contract.md` §8「目录遍历与读取权限」推导，见
-`_is_readable_and_traversable`），任一级不满足即在第一处 NFS 写入之前抛 `PublishError`
+`_is_readable_and_traversable`；它的正确性由一张**穷举真值表**守住，不由任何一组样本
+mode 守住），任一级不满足即在第一处 NFS 写入之前抛 `PublishError`
 （`_require_traversable`）——「本次调用之前不存在」不是可持久化的
 属性，`mkdir` 与放宽之间一次 EIO/重启就会把该层级以 `0o700` 永久闩死，而其后每一轮都把它
 看作「已存在」而不动。
@@ -606,6 +607,14 @@ def _is_readable_and_traversable(mode: int) -> bool:
 
     判据只看低九位，`S_ISGID`/sticky 等高位经 :func:`stat.S_IMODE` 原样穿过：现场按 §10
     首选做法设的 `0o2750` 满足 group 的 `r`+`x` 而原样通过。
+
+    **验收形式是穷举真值表，不是一组样本 mode**：
+    `tests/test_publish.py::test_traversability_predicate_matches_an_independent_oracle`
+    对 512 个低九位 × `S_ISUID`/`S_ISGID`/`S_ISVTX` 的全部 8 种组合（4096 个 mode，恰好是
+    :func:`stat.S_IMODE` 的完整值域），与一份按类循环、独立措辞（不共享本函数的组合常量）
+    的 oracle 逐值对拍。端到端那张十三格表只是**接线证据**（判据确实被 `publish()` 调用、
+    拒绝确实早于第一处 NFS 写入），它挡不住自然掩码族的变异——round 4 实测十三格下仍有 94
+    个此类变异体存活，这正是本函数被连续写坏三轮的机理。
     """
     return (mode & _GROUP_READ_TRAVERSE) == _GROUP_READ_TRAVERSE or (
         mode & _OTHER_READ_TRAVERSE
@@ -616,8 +625,10 @@ def _require_traversable(directory: Path, *, root: Path) -> None:
     """发布目录的**可遍历且可读断言**（裁决 8 的 fail-closed 半边）。
 
     判据整条交给 :func:`_is_readable_and_traversable`，那里写着它从
-    `docs/products-contract.md` §8 与 `docs/agent-ops.md` §10 的推导链；本函数只负责取到
-    fd 绑定的 mode 并把不合格的层级变成一条 pre-`DONE` 的响亮失败。
+    `docs/products-contract.md` §8 与 `docs/agent-ops.md` §10 的推导链，以及它的验收形式
+    （穷举真值表 + 独立措辞 oracle）；本函数只负责取到 fd 绑定的 mode 并把不合格的层级变成
+    一条 pre-`DONE` 的响亮失败。本函数自己被测的是**逐级**：三级里任何一级不合格都必须在
+    `mkdir` 之前拒（前置那趟 MUST 遍历全部已存在层级，只查首级会让下面两级先被建出来）。
 
     存在理由：「本次调用之前不存在」不是可持久化的属性。三级 stat 完成到放宽循环跑完之间
     任何一次失败（NFS EIO/ESTALE、SIGKILL、节点重启），已 `mkdir` 的层级就以 umask 0o077

@@ -25,6 +25,7 @@ macOS 的 `/var` 是 symlink，未 resolve 的 `tmp_path` 会得到与被测逻�
 from __future__ import annotations
 
 import errno
+import itertools
 import os
 import pathlib
 import stat
@@ -1763,7 +1764,134 @@ def test_unstattable_scratch_dat_converges_to_publish_error(tmp_path: Path) -> N
     _assert_unchanged(before, scene)
 
 
-# --- 可穿越判据的 mode 域逐格枚举（round 3 cand-01 / Review Failure Retro 的核心产出） ---
+# --- 可穿越判据：穷举真值表 + 独立措辞 oracle（round 4 的第二份 Review Failure Retro） ---
+
+#: 逐位分解表：只登记 `stat` 模块的**具名单比特**常量，不含任何组合掩码。
+#: 被测实现用的是模块级组合常量 `_GROUP_READ_TRAVERSE`/`_OTHER_READ_TRAVERSE`（`0o050`/
+#: `0o005`），两边没有任何共享的字面值或常量——改坏其中一处不会传染到另一处。
+_NAMED_PERMISSION_BITS = (
+    stat.S_ISUID,
+    stat.S_ISGID,
+    stat.S_ISVTX,
+    stat.S_IRUSR,
+    stat.S_IWUSR,
+    stat.S_IXUSR,
+    stat.S_IRGRP,
+    stat.S_IWGRP,
+    stat.S_IXGRP,
+    stat.S_IROTH,
+    stat.S_IWOTH,
+    stat.S_IXOTH,
+)
+
+#: node-27 只可能落到的两类主体，各自的「列名字」位与「进得去」位。
+#: owner 不在表里：发布进程自己永远进得去，算上它这条判据即恒真（变异体 (aq)）。
+_NON_OWNER_CLASSES = (
+    ("group", stat.S_IRGRP, stat.S_IXGRP),
+    ("other", stat.S_IROTH, stat.S_IXOTH),
+)
+
+
+def _permission_bits(mode: int) -> set[int]:
+    """把一个 mode 拆成它所置位的具名 `stat` 常量集合（组合掩码在这里不存在）。"""
+    return {bit for bit in _NAMED_PERMISSION_BITS if mode & bit}
+
+
+def _node27_can_list_and_enter(mode: int) -> bool:
+    """独立 oracle：`{group, other}` 中**存在某一类**同时具备 `r` 与 `x`。
+
+    这是 `docs/products-contract.md` §8（node-27 `nwm` 需要目录**遍历与读取**权限）与
+    `docs/agent-ops.md` §10（「读/遍历」）的直译：node-27 只有一个身份，它要么走 group
+    要么走 other；`r` 是 `readdir`（列得出 cycle 目录里的名字），`x` 是遍历（`open`/`stat`
+    目录内的条目），两者缺一它都用不了这棵树。
+
+    形式上刻意与被测实现**不同构**：这里先把 mode 拆成一组具名单比特常量，再按类循环做
+    集合成员判定；被测实现是「组合掩码与自身相等」。故这不是同义反复——它既不共享常量，
+    也不共享运算形状，改坏 `_GROUP_READ_TRAVERSE` 之类的一处不会同时改坏两边。
+    """
+    present = _permission_bits(mode)
+    for _class_name, read_bit, traverse_bit in _NON_OWNER_CLASSES:
+        can_list = read_bit in present
+        can_enter = traverse_bit in present
+        if can_list and can_enter:
+            return True
+    return False
+
+
+def test_traversability_predicate_matches_an_independent_oracle() -> None:
+    """判据的**整个输入域**与独立 oracle 逐值对拍（0o7777 全域，4096 个 mode）。
+
+    这条是本 fixture 里判据类断言的验收形式，它取代了 round 3 retro 定下的「十格逐格枚
+    举」。round 4 的 verifier 实测证明那十格与「拿上一轮反例调掩码」是同一个错误高了一
+    层：三条自然变异体在十格下全部存活（跨类合取误放行 `0o741`/`0o714`；整位段相等误**拒**
+    §10 首选的 `0o2770`；前置那趟只查首级），而且**即使扩到十三格，对自然掩码族做暴力扫描
+    仍有 94 个变异体存活**。样本追不上域，只有穷举加独立 oracle 关得掉这条复发路径。
+
+    oracle 见 :func:`_node27_can_list_and_enter`：按类循环的自然语言直译，MUST NOT 抄被测
+    的掩码表达式。三重独立性写在这里，供 review 复核：
+
+    1. **运算形状不同**——oracle 先逐位拆成具名 `stat` 常量再做集合成员判定，被测是组合掩码
+       自等比较；
+    2. **常量不共享**——oracle 只用 `stat.S_IRGRP`/`S_IXGRP`/`S_IROTH`/`S_IXOTH`，被测用
+       `_GROUP_READ_TRAVERSE`/`_OTHER_READ_TRAVERSE`（`0o050`/`0o005`）。把被测的组合常量
+       改成 `0o054` 之类不会传染到 oracle（这正是变异体 (aq7)）；
+    3. **第三方配重**——放行格数由组合数**手算**得出并单独断言：owner 三位自由（8 种），
+       非 owner 两个位段各 8 种、其中「`r` 与 `x` 同时置位」的有 2 种（`w` 自由），故不放行
+       的是 `6 × 6`，放行的是 `8 × (8×8 − 6×6) = 224`。这个数既不来自被测也不来自 oracle
+       的代码形状，oracle 自己写错也会当场变红。
+
+    高位叠加取 `S_ISUID`/`S_ISGID`/`S_ISVTX` 的**全部 8 种组合**（fixture 要求的是三种单叠，
+    这里取全组合是它的超集）：512 × 8 = 4096 恰好是 :func:`stat.S_IMODE` 能返回的**每一个
+    值**，故这张表覆盖的是判据的完整输入域，一个字面值都没剩。只叠三个单高位会漏掉
+    「setgid + sticky」这类组合——共享组目录上再加 sticky 是现场会出现的形态，而一条形如
+    「…且不得同时置 setgid 与 sticky」的错判据能从那个洞里钻过去。两边在所有 8 种叠加下都
+    必须与无高位时**同值**——现场按 `agent-ops.md` §10 首选做法设的 `0o2750` 靠的就是这条。
+
+    owner 位被剥掉的那些 mode（如 `0o055`、`0o007`）在这里按**纯函数契约**断言：判据只看
+    非 owner 两类，故 `0o055` 为真。端到端它们走不到这一步——`open_directory_no_follow`
+    自己就先失败了，那是另一套机制。本用例测的是函数，不是那一轮，两者在这里合法地不同。
+    """
+    high_bits = (
+        (stat.S_ISUID, "S_ISUID"),
+        (stat.S_ISGID, "S_ISGID"),
+        (stat.S_ISVTX, "S_ISVTX"),
+    )
+    overlays = [(0, "无高位")]
+    for count in (1, 2, 3):
+        for combination in itertools.combinations(high_bits, count):
+            overlay = 0
+            for bit, _label in combination:
+                overlay |= bit
+            overlays.append((overlay, "+".join(label for _bit, label in combination)))
+    accepted = 0
+    checked = 0
+    disagreements: list[str] = []
+
+    for low in range(0o1000):
+        expected = _node27_can_list_and_enter(low)
+        accepted += int(expected)
+        for overlay, label in overlays:
+            mode = low | overlay
+            checked += 1
+            if _node27_can_list_and_enter(mode) is not expected:
+                disagreements.append(f"{mode:#o}[{label}]：oracle 自身被高位改了结论")
+            if publish._is_readable_and_traversable(mode) is not expected:
+                disagreements.append(
+                    f"{mode:#o}[{label}]：判据={not expected}，oracle={expected}"
+                )
+
+    assert len(overlays) == 8, "前提：三个高位的全部 8 种组合"
+    assert checked == 8 * 0o1000, (
+        "前提：0o7777 这个域**全跑**——512 个低九位 × 三个高位的 8 种组合 = 4096，"
+        "恰好是 stat.S_IMODE 能返回的每一个值"
+    )
+    assert accepted == 224, (
+        f"oracle 自身的配重：手算放行格数 8 × (8×8 − 6×6) = 224，实得 {accepted}"
+    )
+    assert not disagreements, (
+        f"判据与独立 oracle 在 {len(disagreements)} 处分歧，前 10 处："
+        + "；".join(disagreements[:10])
+    )
 
 
 @pytest.mark.parametrize(
@@ -1774,11 +1902,14 @@ def test_unstattable_scratch_dat_converges_to_publish_error(tmp_path: Path) -> N
         (0o705, True),
         (0o2750, True),
         (0o2751, True),
+        (0o2770, True),
         (0o700, False),
         (0o744, False),
         (0o710, False),
         (0o711, False),
         (0o701, False),
+        (0o741, False),
+        (0o714, False),
     ],
     ids=[
         "0o755",
@@ -1786,30 +1917,31 @@ def test_unstattable_scratch_dat_converges_to_publish_error(tmp_path: Path) -> N
         "0o705",
         "0o2750",
         "0o2751",
+        "0o2770",
         "0o700",
         "0o744",
         "0o710",
         "0o711",
         "0o701",
+        "0o741",
+        "0o714",
     ],
 )
-def test_traversability_predicate_over_the_whole_mode_domain(
+def test_traversability_predicate_is_wired_into_publish(
     tmp_path: Path, strict_umask: None, preset_mode: int, accepted: bool
 ) -> None:
-    """预置的 `output/` 逐格跑完判据的整个输入域（变异体 (aq) / (aq2) / (aq3)）。
+    """十三格**接线证据**：判据真的被 `publish()` 调用，拒绝真的发生在第一处 NFS 写入之前。
 
-    判据是「组或其他之中至少有一类**同时**具备 `r` 与 `x`」，由
-    `docs/products-contract.md` §8（node-27 `nwm` 需要目录**遍历与读取**权限）与
-    `docs/agent-ops.md` §10（「读/遍历」）推导。`x` 是遍历，`r` 是 `readdir`；node-27 只有
-    一个身份，两位落在不同类上等于两边都不够用。
+    判据本身的正确性由 :func:`test_traversability_predicate_matches_an_independent_oracle`
+    的穷举真值表守住，**不由这张格子表守住**——这十三格挡不住自然掩码族的绝大多数变异体
+    （round 4 verifier 实测：十三格下仍有 94 个存活）。这条用例只负责另一件穷举表做不到的
+    事：把纯函数接到真实的一轮发布上，钉住「拒绝时 `output/<T>/` 未被创建、`YD_ROOT` 递归
+    快照逐项不变」这个提交序性质。
 
-    逐格枚举而不是「每轮补一格」是这条用例的全部意义：本 PR 三轮里每一轮都只为当轮那个反例
-    mode 补了一条用例，于是每次改判据都只能等下一轮 review 发现新漏的那一格。两个初稿掩码
-    各漏一格且互为镜像——`0o055` 放行 `0o744`（列得出名字、进不去），`0o011` 放行
-    `0o710`/`0o711`/`0o701`（进得去、列不出名字）——故这两格 MUST 各自单列。
-
-    `0o2750`/`0o2751` 两格另做现场配重：`agent-ops.md` §10 首选的共享组 + setgid 必须原样
-    放行，判据 MUST NOT 因为 `S_ISGID` 这个高位而改变结论。
+    格子的来历：`0o744`/`0o710` 是初稿 `0o055` 与 round-2 `0o011` 各自漏掉的那一格；
+    `0o741`/`0o714` 是 `r` 与 `x` 分处两类的形态（变异体 (aq4) 的判别器）；`0o2770` 是
+    `agent-ops.md` §10 首选的共享组 + setgid 形态，误拒它等于该源永久停摆（变异体 (aq5)）；
+    `0o2750`/`0o2751` 钉住高位原样穿过。
     """
     scene = build_scene(tmp_path)
     output_root = scene.root / "output"
@@ -1832,6 +1964,40 @@ def test_traversability_predicate_over_the_whole_mode_domain(
     assert str(output_root) in message
     assert f"{preset_mode:#o}" in message
     assert not (output_root / T_TEXT).exists()
+    _assert_unchanged(before, scene)
+
+
+def test_untraversable_middle_output_level_is_refused(
+    tmp_path: Path, strict_umask: None
+) -> None:
+    """不合规的是**中间**层级（`output/` 合规、`output/<T>/` 为 `0o700`）（变异体 (aq8)）。
+
+    前置那趟 MUST 逐级查，而不是只查首级：只查首级的实现会先把 `output/<T>/<source>/`
+    `mkdir` 出来再由后置那趟拒绝，`YD_ROOT` 递归快照当场就变。故这条的判别力**不在**异常
+    消息上（那个变异体照样抛 `PublishError` 且照样指名中间层级），而在下面两条：
+    `output/<T>/<source>/` 未被创建、快照逐项不变。
+
+    这一级同样会永久闩死：`residue._half_product_dirs` 只删 `output/<T>/<source>/`、从不碰
+    父级，而已存在的层级本模块一律不改 mode。
+    """
+    scene = build_scene(tmp_path)
+    output_root = scene.root / "output"
+    output_root.chmod(0o755)
+    middle = output_root / T_TEXT
+    middle.mkdir()
+    middle.chmod(0o700)
+    assert _mode(output_root) == 0o755, "前提：首级合规"
+    assert _mode(middle) == 0o700, "前提：中间层级不合规"
+    before = snapshot_tree(scene.root)
+
+    with pytest.raises(publish.PublishError) as excinfo:
+        publish.publish(scene.make_inputs())
+
+    message = str(excinfo.value)
+    assert str(middle) in message
+    assert "0o700" in message
+    assert not (middle / SOURCE).exists()
+    assert not (middle / SOURCE / "DONE").exists()
     _assert_unchanged(before, scene)
 
 
