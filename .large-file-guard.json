@@ -3,9 +3,15 @@
   "maxLines": 1000,
   "exclude": [
     "openspec/changes/m2-producer-core/tasks.md",
+    "producer/src/yd_producer/canonical/converter.py",
+    "producer/src/yd_producer/rawcopy.py",
+    "producer/tests/test_canonical_converter.py",
     "producer/tests/test_cfg_ic.py",
     "producer/tests/test_config.py",
     "producer/tests/test_geometry.py",
+    "producer/tests/test_prepare.py",
+    "producer/tests/test_publish.py",
+    "producer/tests/test_rawcopy.py",
     "producer/tests/test_rawscan.py",
     "producer/tests/test_state_tools_qc.py"
   ]

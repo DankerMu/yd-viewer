@@ -40,7 +40,13 @@
     "5": {
       "ceilingPrs": [],
       "gateEntries": 2,
-      "closed": []
+      "closed": [
+        {
+          "pr": 40,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
     },
     "3": {
       "ceilingPrs": [],
@@ -160,6 +166,41 @@
       ],
       "gateEntries": 2,
       "closed": []
+    },
+    "7": {
+      "ceilingPrs": [
+        65
+      ],
+      "gateEntries": 2,
+      "closed": [
+        {
+          "pr": 65,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
+    },
+    "13": {
+      "ceilingPrs": [],
+      "gateEntries": 1,
+      "closed": [
+        {
+          "pr": 101,
+          "outcome": "merged",
+          "rounds": 4
+        }
+      ]
+    },
+    "24": {
+      "ceilingPrs": [],
+      "gateEntries": 2,
+      "closed": [
+        {
+          "pr": 93,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
     }
   }
 }

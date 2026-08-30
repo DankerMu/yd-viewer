@@ -30,6 +30,7 @@ __all__ = [
     "SOURCE_DIR_NAMES",
     "ScanVerdict",
     "judge",
+    "render_bundle_filename",
 ]
 
 # 合法 source 词表：同时也是 `config.raw` 的属性名，恒小写。
@@ -238,6 +239,21 @@ def _render(pattern: str, cycle_hour: int, lead: int, path: str) -> str:
             path,
         )
     return rendered
+
+
+def render_bundle_filename(
+    pattern: str, *, cycle_hour: int, lead: int, config_path: str
+) -> str:
+    """校验并渲染单个 bundle 文件名；失败抛 `ConfigError`。
+
+    本函数只是 `_validate_pattern` + `_render` 的薄公开包装，判定路径
+    （`_iter_expected`）的行为不经由它、也不因它改变。存在的唯一理由是任务 3.2
+    （`rawcopy.stage_raw`）要按同一规则**重新构造**源 bundle 路径并与
+    `ScanVerdict.expected_files` 逐字比对：那道 containment 检查以「两处相等」为判据，
+    若 3.2 自抄一份模式校验/渲染规则，检查就退化成比对自己、判别力归零。
+    """
+    _validate_pattern(pattern, config_path)
+    return _render(pattern, cycle_hour, lead, config_path)
 
 
 # --- 4. 逐文件检查 -----------------------------------------------------------
