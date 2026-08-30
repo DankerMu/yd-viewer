@@ -356,6 +356,33 @@ Surfaces:
 - **桶 B（19 行）— 有正向判别断言、变异体未声明**：全新根成功路径、`DONE_PRESENT`、`VARIANT_MISSING`/`AMBIGUOUS`、`HEADER_SHAPE_INVALID`、`chmod 0o000 states/`、变体目录不可枚举、`output/` 树不可枚举、`CALIBRATION_STATE_UNREADABLE`、`ConfigError` 原样上抛、naive `now`、扫描窗下端点闭、未来 cycle 不夺首轮、`decide_frontier` 4-token 参数化、跳过语义、4-token 兼容 header、非默认配置取值、阶段 B 中途失败（gfs 空目录）、`decide_frontier` 端到端、`cli.main` 成功/拒绝。这些行都断言了一个**具体的不同终态**（refusal 枚举项 / 文件内容 / 退出码），判别力有结构性理由但未被声明。**本轮 MUST 为每行补一句判别变异体声明；实测随实现方的变异表一并给出，MUST NOT 为每行单独跑一轮。**
 - **桶 C（4 条工作项）— 仅代理量 / 仅反向断言 / 构造走不到被覆盖分支**：见下方新增/修订的四组行。**桶 C 是本轮唯一强制实测的桶**——inspection 在这里有已证实的假阴性率（`0o500` vs `0o600`、`states/` vs `states/ifs/` 正是 inspection 漏掉的两处）。
 
+**桶 B 的判别变异体声明**（round 3 retro 步骤 2；声明即规范面，实测随实现方变异表给出，本轮不为每行单独跑一轮）：
+
+| 回归行 | 判别变异体（对被覆盖分支的最小改写） |
+|---|---|
+| 全新根成功路径 | header minute token 由 `round(T.timestamp()/60)` 改为 `T.timestamp()`，或跳过重戳直接复制率定末态 |
+| `DONE_PRESENT` | 删除 `output/` 侧的 `DONE` 守卫 |
+| `VARIANT_MISSING` / `CALIBRATION_STATE_AMBIGUOUS` | 两者返回同一枚举项（本行要求逐项可区分） |
+| `HEADER_SHAPE_INVALID` | 把 `restamp_to_absolute_time` 的 `ValueError` 收敛成 `CALIBRATION_STATE_UNREADABLE` |
+| `chmod 0o000 states/` | `_entry_names` 的 `OSError` 臂改为 `return ()`（判空即放行写入） |
+| 变体目录不可枚举 | 该处 `OSError` 收敛成 `VARIANT_MISSING`（本行要求与「不存在」分流） |
+| `output/` 树不可枚举 | 该处 `OSError` 改为判空放行 |
+| `CALIBRATION_STATE_UNREADABLE` | 把 `state.parse` 的 `ValueError` 收敛成 `HEADER_SHAPE_INVALID`（本行要求三者逐项可区分） |
+| `ConfigError` 原样上抛 | 在 `_first_complete_cycle` 外包一层 `except ConfigError: return None` |
+| naive `now` | 删除 `now.tzinfo` 自查，按宿主时区静默重释 |
+| 扫描窗下端点闭 | `window_start <= cycle` 改为 `window_start < cycle` |
+| 未来 cycle 不夺首轮 | 「升序取第一个 complete」改为「取窗内最晚 complete」 |
+| `decide_frontier` 4-token 参数化 | `decide_frontier` 的 header 数值 token 数门收成只认 3 |
+| 跳过语义 | 「升序找第一个 complete」改为「取窗内最早候选」（不判 complete） |
+| 4-token 兼容 header | `restamp_to_absolute_time` 的 token 数门收成只认 3 |
+| 非默认配置取值 | 硬编码 `cycle.hours = [0, 12]`，或硬编码变体目录名 `input/models/yd_<source>` |
+| 阶段 B 中途失败（gfs 空目录） | 把「失败不回滚」改为失败时删除已落盘的前序首态 |
+| `decide_frontier` 端到端 | init 写出的 header 改用相对时间 token（本行必红于 `HEADER_TIME_MISMATCH`） |
+| `cli.main` 成功/拒绝 | 「任何 refusal -> `EXIT_GUARD`」改为 `return 0` |
+
+桶 B 的共同结构性理由：每行都断言了一个**具体的不同终态**（refusal 枚举项 / 文件内容 / 退出码），故上列变异体各自把该终态改成另一个可观测值。这与桶 C 的失效模式（断言的是代理量或某措辞不出现，变异后终态不变）正相反——这正是划桶的判据。
+
+
 
 Regression rows:
 - 每个新增快照文件（源与测试） -> 前 5 行内存在一条 `#` 注释行，其内容含 `NWM@8ae9b8f2 <该文件在清单里的原路径>`。**正反向必须共用同一个「什么算溯源头部」的谓词**：注释形式（规格「原路径注释」的字面要求）+ 行预算只作用于正向。守卫自身不得出现第二份口径——round 1（位置维度）与 round 2（形式维度）两次失守都源于正反向各有一套定义
