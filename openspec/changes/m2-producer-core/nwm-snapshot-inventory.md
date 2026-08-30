@@ -181,6 +181,16 @@ compute-loop §4.2 禁复制清单逐条核对。结论：**清单 27 行中没�
     另外两个曾被路由到 `config.toml` 的容差（IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2、PRECIP_NEGATIVE_NOISE_TOLERANCE_MM）**已不在本条范围内**：`:31`(c) 本轮改为版本化模块常量，不进 `config.toml`，故不产生 handoff。
     本清单其余的 `config.toml` 路由都落在已有字段上，无缺口：`:42` 的 cycle 小时对应 spec 的「cycle 固定 00/12」，`:46`(a) 的 `output_interval_minutes` 与 `local.toml` 的 SHUD 二进制 / Slurm walltime 均在上引的两份字段表内。
 
+### 4.1 Issue #14 Round 1 repair 偏离补记
+
+PR #115 Round 1 的独立 verifier 在 yd 新公开 seam 上确认了五类 pin fidelity 之外的合同缺口；下列动作是对本清单第 32/38/49 行落地物的**最小 yd 加固**，不是恢复被剥离的 DB/grid-registry/IDW/handoff parser：
+
+- `workers/forcing_producer/producer.py` 快照：在任何 repository access 前增加 yd 00Z/12Z 整点 cycle domain guard；对 catalog row 派生精确 canonical object key，并把 canonical writer 已有的 `data variable/cycle_time/valid_time/lead_time_hours/unit/grid_id` 与 row 联合校验；新增 stable output-config identity 并纳入 lineage/current-ready。对应 source/cycle/model/package seam 均不改，ERA5/DB/scheduler 分支不恢复。
+- `workers/forcing_producer/direct_grid_contract.py` 快照：pin parser 仍允许多值 `applicable_source_ids` 供其它上下文使用；yd production 传入 current source 时，额外要求列表为只含该 normalized source 的单例。这样保留 parser 字段形状，不新增 source-keyed schema，也禁止 GFS/IFS 共用一份 binding。
+- yd 自撰 `forcing/netcdf_open.py`：同一 no-follow fd 增加版本化 `MAX_CANONICAL_NETCDF_BYTES = 536870912`，先 `fstat`、再在 checksum 累计读取中二次限制；不修改共享 `safe_fs`，不新增环境/config authority。
+- `tests/test_forcing_producer.py` 保留 seed 中原有 `["GFS", "IFS"]` 若只行使无 current-source 的 parser 兼容 seam；凡进入 yd production 的 fixture 改为 source-specific 单例。新增对象 identity/cycle/output currency/byte cap 与 low-limit 判别器落在 yd 自撰测试，不把 NWM pin 测试伪装成新 oracle。
+- `forcing_fixtures.py` 不再调用 production `parse_cycle_time` 构造 expected；12Z 用 stdlib/literal UTC，IFS grid-definition URI 使用 canonical writer 的精确大写 `canonical/IFS/...`。这两项是 oracle 独立性修复，不改变生产 schema。
+
 ## 5. 枚举与闭包的再生方法
 
 本清单的所有符号枚举可用下列命令在 pin 上机械复算（`<NWM>` = NWM 仓路径，`8ae9b8f2` = 锚点）：
