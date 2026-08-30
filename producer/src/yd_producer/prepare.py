@@ -112,7 +112,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
-from yd_producer.config import Config, LocalConfig
+from yd_producer.config import Config, LocalConfig, variant_relative_violation
 from yd_producer.geometry import GeometryError, write_viewer_geojson
 from yd_producer.raw.source_identity import normalize_source_id
 from yd_producer.state import cfg_ic
@@ -287,11 +287,10 @@ def _resolve_variant_relative(field: str, value: str, yd_root: Path) -> Path:
     不是同一棵。规范化只做**词法**折叠（`os.path.normpath`），不 `resolve()`——后者会
     跟随 symlink 触碰文件系统，而这是一个在任何写入之前运行的纯函数闸门。
 
-    `..` 的判据是**任一 `os.pardir` 组件**，而非"规范化后是否逃出 `yd_root`"：
-    `specs/prepare-variants/spec.md`「拒绝覆盖已有产物」写的是「绝对路径或含 `..` 的路径
-    MUST 拒绝执行」，而只查规范化结果会放行 `input/../input/models/yd_gfs` 这类词法上
-    含 `..`、折叠后又落回根内的值。`variants.*` 没有任何需要 `..` 的正当理由，收紧到
-    组件级判据让规范文本与实现同时为真，且仍是纯词法、仍在任何写入之前。
+    两条相对性判据本身在 `config.variant_relative_violation`，与 `init` 的
+    `VARIANT_PATH_INVALID` 闸门**共用同一份实现**（compute-loop §6.2 逐字要求；复制第二
+    份判据即两侧迟早分叉）；本函数只负责把违规转成 `PrepareError`，并另加两条**本模块
+    专有**的检查（空值、指向 `yd_root` 自身）——它们只对写侧有意义。
 
     pinned: test_absolute_variant_path_is_refused、test_escaping_variant_path_is_refused、
     test_any_pardir_component_in_a_variant_path_is_refused（第三条含"折叠后落回根内"那一
@@ -299,16 +298,9 @@ def _resolve_variant_relative(field: str, value: str, yd_root: Path) -> Path:
     """
     if not value:
         raise PrepareError(f"配置项 `{field}` 不得为空")
-    candidate = Path(value)
-    if candidate.is_absolute():
-        raise PrepareError(
-            f"配置项 `{field}` 必须是相对 `yd_root` 的路径，不得为绝对路径：{value}"
-        )
-    if os.pardir in candidate.parts:
-        raise PrepareError(
-            f"配置项 `{field}` 不得含 `..` 组件（规范化后是否仍落在 `yd_root` 内都一样"
-            f"拒绝）：{value}"
-        )
+    violation = variant_relative_violation(field, value)
+    if violation is not None:
+        raise PrepareError(violation)
     normalized = os.path.normpath(value)
     parts = Path(normalized).parts
     if normalized == os.curdir or not parts:

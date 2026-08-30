@@ -22,9 +22,8 @@ test_database_url_guard_wins_before_parsing、test_run_rejects_missing_states_di
   test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code；后两条同时钉住
   `except BuilderUnavailableError` 必须先于 `except PrepareError`）。「归属**任务号**」
   这一措辞对 `prepare` 已由 33edb44 放宽为「无编号任务时指名承接阶段」（本模块此处的
-  措辞滞后，不在本轮改动范围；`init`/`run` 两支仍是任务号，pinned:
-  test_init_reaches_staged_unimplemented、
-  test_run_with_non_empty_states_reaches_staged_unimplemented）。
+  措辞滞后，不在本轮改动范围；`init` 自任务 11.1 落地后已不再走此码，`run` 一支仍是
+  任务号，pinned: test_run_with_non_empty_states_reaches_staged_unimplemented）。
 
 **守卫位置**：`DATABASE_URL` 检查是 `main()` 的第一件事，先于 `parse_args` 与任何配置
 装载（agent-ops §2.2 把"不连 NWM 数据库"列为硬约束，环境本身有缺陷时最 fail-closed 的
@@ -55,10 +54,15 @@ import argparse
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from yd_producer import nwm
 from yd_producer.config import Config, ConfigError, LocalConfig, load_config, load_local
+
+# 只导入 `bootstrap` 这一个符号：`from yd_producer import init` 会用模块对象遮蔽本模块
+# 的 `init()` 委托目标，`main` 的按名解析随即失效。
+from yd_producer.init import bootstrap
 from yd_producer.prepare import BuilderUnavailableError, PrepareError, run_prepare
 
 __all__ = ["build_parser", "main"]
@@ -171,8 +175,31 @@ def prepare(local: LocalConfig, config: Config, baseline_root: Path) -> int:
 
 
 def init(local: LocalConfig, config: Config) -> int:
-    """`init`：业务体（非全新根拒绝、7 天窗定首轮、率定末态重戳）归任务 11.1。"""
-    return _unimplemented("init", "11.1（init 编排：首态建链）")
+    """`init`：薄委托到 `yd_producer.init.bootstrap`（非全新根拒绝、7 天窗定首轮、重戳）。
+
+    入口体只做三件事：把「执行时刻」注入业务体（`now` 可注入是 `bootstrap` 的契约，7 天
+    扫描窗对它有语义依赖）、把拒绝转成退出码 `1` 与 stderr 文本、把成功的落盘路径打到
+    stdout。判定与落盘一律在 `yd_producer.init`，本函数 MUST NOT 自行解析 `YD_ROOT` 之外
+    的任何路径。
+
+    `bootstrap` 抛的 `ConfigError`（naive `now` 不可能在此发生；`rawscan.judge` 的配置类
+    拒绝会）由 `main` 统一转成退出码 `1`，MUST NOT 在此吞掉。
+    """
+    report = bootstrap(local=local, config=config, now=datetime.now(UTC))
+    if report.refusal is not None:
+        # 部分落盘（`WRITE_FAILED`）时 `written` 非空且 `refusal` 非 None 同时成立，
+        # 故成败一律以 `refusal` 判，MUST NOT 以 `written` 是否为空判。
+        return _fail(f"init 拒绝执行（{report.refusal.value}）：{report.detail}")
+    for path in report.written:
+        print(path)
+    # 成功理由走 **stderr**（round 5 R5-F）：`bootstrap` 的成功 `detail` 会点名被跳过候选上
+    # 无法访问的 raw——链起点因此比 raw 实际到达情况更晚，而 init 一生只跑一次，落盘后重跑
+    # 必被 `STATES_NOT_EMPTY` 拒绝，静默偏移没有自愈路径。此前本分支只 `print(path)`，那条
+    # 规范里写着 MUST 的运维信号在端到端上被整个丢弃：终端输出与「不存在任何无法访问的
+    # raw」时逐字节相同。走 stderr 而非 stdout 是为了不污染可管道消费的落盘路径列表。
+    if report.detail:
+        print(report.detail, file=sys.stderr)
+    return 0
 
 
 def run(local: LocalConfig, config: Config) -> int:

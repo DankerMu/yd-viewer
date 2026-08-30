@@ -160,6 +160,13 @@
         }
       ]
     },
+    "21": {
+      "ceilingPrs": [
+        92
+      ],
+      "gateEntries": 2,
+      "closed": []
+    },
     "7": {
       "ceilingPrs": [
         65
