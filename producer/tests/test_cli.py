@@ -21,6 +21,7 @@ from cli_fixtures import write_config, write_fake_interpreter, write_local
 from yd_producer import cli, nwm
 from yd_producer import prepare as prepare_module
 from yd_producer.config import load_config, load_local
+from yd_producer.init import InitReport
 
 # --- 记录型 fake -------------------------------------------------------------
 
@@ -690,3 +691,36 @@ def test_init_reaches_the_real_business_body(capsys, tmp_path):
     assert "variant_missing" in err
     assert "11.1" not in err  # 已不再是分阶段未实现的外壳
     assert "尚未落地" not in err
+
+
+def test_init_success_detail_reaches_the_operator_on_stderr(capsys, monkeypatch):
+    """[桶 C-12] `init` 成功时的运维理由 MUST 在 CLI 边界外露（round 5 R5-F）。
+
+    `bootstrap` 的成功 `detail` 会点名被跳过候选上无法访问的 raw——链起点因此比 raw 实际
+    到达情况更晚。init 一生只跑一次，落盘之后重跑必被 `STATES_NOT_EMPTY` 拒绝，静默偏移
+    没有自愈路径，所以 `specs/init-bootstrap/spec.md` 把「成功理由 MUST 点名」写成 MUST。
+
+    round 4 的修复把该 MUST 的 oracle 落在 `InitReport.detail`（库边界）上，而
+    `cli.init` 的成功分支只 `print(path)`、从不外露 `detail`：库层合规、用户可观测行为
+    逐字节未变，MUST 在端到端上归零。本行把 oracle 挪到**用户边界**上。
+
+    落盘路径列表走 stdout（可管道消费），理由走 stderr，两者 MUST 分列。
+
+    判别变异体：删掉 `cli.init` 里那句 `print(report.detail, file=sys.stderr)` ->
+    本行必红。
+    """
+    detail = "ifs 首轮 T=2026082512；ifs 的链起点跳过了更早的候选，那些候选上有 1 个预期 raw 文件**无法访问**"
+    written = (Path("/yd/states/ifs/2026082512.cfg.ic"),)
+    monkeypatch.setattr(
+        cli,
+        "bootstrap",
+        lambda **_: InitReport(written=written, refusal=None, detail=detail),
+    )
+
+    assert cli.init(local=None, config=None) == 0
+
+    captured = capsys.readouterr()
+    # 落盘路径在 stdout，且**只有**它——理由不得污染可管道消费的路径列表。
+    assert captured.out.splitlines() == [str(written[0])]
+    # 理由在 stderr，逐字外露。
+    assert detail in captured.err

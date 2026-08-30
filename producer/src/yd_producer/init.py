@@ -146,6 +146,7 @@ import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 from yd_producer import rawscan
 from yd_producer.config import (
@@ -375,12 +376,25 @@ def _candidate_cycles(
     return tuple(sorted(candidates))
 
 
+class Unreachable(NamedTuple):
+    """被跳过候选上**无法访问**的 raw：给运维看的位置清单 + 预期文件计数。
+
+    `count` 是预期 raw 文件数，`locations` 是给出这些文件的位置——整个候选都探不动时是该
+    候选的**目录**（共同位置），部分探不动时是具体文件路径。两者分开存是因为
+    `rawscan._check` 的语义是「不可访问」而非「存在」：cycle 目录自身 `0o000` 时每个预期路
+    径的 `stat` 都拿 `EACCES`，逐条列举等于断言一批可能并不存在的文件存在（round 5 R5-J）。
+    """
+
+    locations: tuple[Path, ...]
+    count: int
+
+
 def _first_complete_cycle(
     raw_root: str,
     source: str,
     candidates: tuple[datetime, ...],
     config: Config,
-) -> tuple[datetime | None, tuple[Path, ...], tuple[Path, ...]]:
+) -> tuple[datetime | None, Unreachable, tuple[Path, ...]]:
     """升序取第一个完整 cycle，并带回被跳过候选上的**不可读**与**缺失** raw 文件。
 
     `rawscan.judge` 抛的 `ConfigError`（配置取值域 / 请求校验 / 模式校验）**原样上抛**，
@@ -403,21 +417,38 @@ def _first_complete_cycle(
 
     **`missing` 同样 MUST 带回**（round 4 R4-B）：只带回 `unreadable` 时，调用方的
     「不是缺数据」这个**全称否定**在混合态（同一候选既缺文件又有不可读文件）上为假，而
-    混合态在生产 NFS 上是主导形态。**整目录缺席的候选不计入 `missing`**
-    （`verdict.missing_files == verdict.expected_files`）：`rawscan.judge` 自陈 cycle 目录
-    整体不存在时返回「全部缺失」，而 7 天扫描窗的绝大多数候选正落在这里，把它们计进来会
-    让每一次纯不可读的拒绝都退化成混合态、并在 `detail` 里刷出上百条路径。
+    混合态在生产 NFS 上是主导形态。
+
+    **「预期文件全部缺失」的候选不计入 `missing`**（`verdict.missing_files ==
+    verdict.expected_files`）。这个判据的**真实语义**必须照实说（round 5 R5-I）：
+    `ScanVerdict` 四个字段全是文件级，接口不暴露目录存在性，所以它同时命中「cycle 目录整体
+    不存在」与「目录存在但一个预期文件都没落地」两种情形，**在消费侧结构性不可逆**。前者是
+    7 天扫描窗的绝大多数候选（`rawscan.judge` 自陈），计进来会让每一次纯不可读的拒绝都退化
+    成混合态并在 `detail` 里刷出上百条路径；后者是发布中途崩溃这一**真实数据缺口**，被同一
+    个判据一并抹掉。删掉这个过滤器不是合法修法（纯不可读的拒绝理由会结构性不可达），要真正
+    分开两者需要 `rawscan.judge` 带上目录存在性信号——那是 Must-preserve 面，须先改文档。
+    在那之前，调用方 MUST NOT 因为 `missing` 为空就断言「不是缺数据」。
     """
-    unreadable: list[Path] = []
+    locations: list[Path] = []
+    unreadable_count = 0
     missing: list[Path] = []
     for cycle in candidates:
         verdict = rawscan.judge(raw_root, source, cycle, config)
         if verdict.complete:
-            return cycle, tuple(unreadable), tuple(missing)
-        unreadable.extend(verdict.unreadable_files)
+            return cycle, Unreachable(tuple(locations), unreadable_count), tuple(missing)
+        if verdict.unreadable_files:
+            unreadable_count += len(verdict.unreadable_files)
+            if verdict.unreadable_files == verdict.expected_files:
+                # 整个候选都探不动。逐条列举它的**预期**路径会断言这些文件「存在」，而
+                # `rawscan._check` 的语义只是「不可访问」——cycle 目录自身 `0o000` 时每个
+                # 预期路径的 `stat` 都拿 `EACCES`，无论盘上有没有这些文件（round 5 R5-J）。
+                # 故以该候选的目录作为**共同位置**给出，不逐条列举。
+                locations.append(verdict.unreadable_files[0].parent)
+            else:
+                locations.extend(verdict.unreadable_files)
         if verdict.missing_files != verdict.expected_files:
             missing.extend(verdict.missing_files)
-    return None, tuple(unreadable), tuple(missing)
+    return None, Unreachable(tuple(locations), unreadable_count), tuple(missing)
 
 
 # --- 编排 --------------------------------------------------------------------
@@ -450,32 +481,59 @@ def _probe_partial_residue(target: Path) -> str | None:
     )
 
 
-def _foreign_entry_blocks(path: Path) -> bool:
-    """no-follow **盘上探测**：`path` 上是否坐着一个持久的、非目录的外来条目。
+def _first_foreign_component(yd_root: Path, directory: Path) -> Path | None:
+    """no-follow **逐级盘上探测**：自 `yd_root` 起走查 `directory` 的每一级分量，返回第一个
+    非目录条目的路径；没有则返回 `None`。
 
-    专供 `ensure_directory_no_follow` 腿的收尾分流（round 4 R4-A）。判据 MUST 是盘上有
-    什么，而不是 `SafeFilesystemError.kind`（同模块头：`safe_fs` 把「分量是 symlink」与
-    「父目录 open 拿 `EACCES`」包成同一个类型）：
+    专供 `ensure_directory_no_follow` 腿的收尾分流。判据 MUST 是盘上有什么，而不是
+    `SafeFilesystemError.kind`（同模块头：`safe_fs` 把「分量是 symlink」与「父目录 open 拿
+    `EACCES`」包成同一个类型）。
 
-    - **探到非目录条目**（symlink——含悬垂、FIFO、普通文件）→ `True`，走第三路。这类条目
-      不是本次写入产生，不 `chmod` 也不删除它就重跑，必然以同样理由再次失败。
-    - **`FileNotFoundError`** → `False`：分量根本不存在，是权限或 I/O 故障，走第二路。
-    - **探到真实目录** → `False`：目录不是阻塞物（`ensure_directory_no_follow` 对既存目录
-      是空操作成功），失败来自更上层的权限，走第二路。
-    - **`lstat` 自身失败**（如 `states/` 置 `0o600`，探针穿不过去）→ `False`：这里
-      fail-open 到第二路是**刻意**的，且与「探测失败 fail closed」的半写判据不冲突——两者
-      的保守方向相反。半写探测的风险是漏报盘上残留（下一次 init 会撞
-      `STATES_NOT_EMPTY`），故宁可多报；本探测的风险是错误地要求运维去移除一个并不存在的
-      条目，而 `states/` 探不动本身恰恰就是权限故障的证据，第二路的「排掉根因后直接重跑」
-      正是对的指令。
+    **探测面 MUST 与失败面同宽**（round 5 R5-G）：`ensure_directory_no_follow` 逐 `part` 做
+    `O_DIRECTORY|O_NOFOLLOW` 的 open，可在**任一**分量上失败；只 `lstat` 末分量的探测比失败
+    面窄一层，且 `os.lstat` 对中间分量是**跟随** symlink 的——`states/` 自身是 symlink 或
+    FIFO 时，对 `states/<source>` 的 lstat 会穿过去拿到 `FileNotFoundError`（symlink 载体）
+    或 `ENOTDIR`（FIFO 载体），两者都被判成「无外来条目」而落到第二路，实测重跑逐字节复现
+    同一失败。仅把 `ENOTDIR`/`ELOOP` 翻成 `True` 不足以修复：symlink 载体上该翻译根本不触
+    发，而 FIFO 载体上第三路会点名一个盘上并不存在的 `states/<source>`，使「点名被占住的那
+    个路径本身」在下一层再次为假。故必须逐级走查并返回**真正被占住的那一级**。
+
+    走查自 `yd_root` **本身**起（而非自 `states/` 起）：`yd_root` 自己是 symlink 时同样让整
+    条写入路径恒失败，不含它则该载体仍落第二路。
+
+    - **探到非目录条目**（symlink——含悬垂、FIFO、普通文件）→ 返回该分量，走第三路。这类条
+      目不是本次写入产生，不移除它就重跑，必然以同样理由再次失败。
+    - **`FileNotFoundError`** → `None`：该分量不存在，更深的分量也不存在，是权限或 I/O 故
+      障，走第二路。
+    - **走完全部分量都是真实目录** → `None`：目录不是阻塞物（`ensure_directory_no_follow`
+      对既存目录是空操作成功），失败来自权限，走第二路。
+    - **`lstat` 自身失败**（如 `states/` 置 `0o600`，探针穿不过去）→ `None`：这里 fail-open
+      到第二路是**刻意**的，且与「探测失败 fail closed」的半写判据不冲突——两者的保守方向相
+      反。半写探测的风险是漏报盘上残留（下一次 init 会撞 `STATES_NOT_EMPTY`），故宁可多报；
+      本探测的风险是错误地要求运维去移除一个并不存在的条目，而探不动本身恰恰就是权限故障的
+      证据，第二路的「排掉根因后直接重跑」正是对的指令。**注意 `ENOTDIR`/`ELOOP` 不走这条
+      臂**：它们是「更高分量上坐着非目录外来条目」的结构性证据，方向与 `EACCES` 相反；逐级
+      走查使它们在**更早的一级**就以「探到非目录条目」命中，不会落到这里。
     """
     try:
-        entry = os.lstat(path)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return False
-    return not stat.S_ISDIR(entry.st_mode)
+        parts = directory.relative_to(yd_root).parts
+    except ValueError:  # pragma: no cover - 调用点恒以 yd_root 为前缀构造 directory
+        parts = ()
+    probe = yd_root
+    probes = [probe]
+    for part in parts:
+        probe = probe / part
+        probes.append(probe)
+    for path in probes:
+        try:
+            entry = os.lstat(path)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+        if not stat.S_ISDIR(entry.st_mode):
+            return path
+    return None
 
 
 def _write_failed(
@@ -613,7 +671,7 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
     # 4. 逐源在扫描窗内定首轮 T；任一源无完整 cycle 即整体拒绝（fail closed）。
     candidates = _candidate_cycles(window_start, now_utc, config.cycle.hours)
     frontier: dict[str, datetime] = {}
-    skipped_unreadable: dict[str, tuple[Path, ...]] = {}
+    skipped_unreadable: dict[str, Unreachable] = {}
     for source in rawscan.SOURCES:
         cycle, unreadable, missing = _first_complete_cycle(
             local.nwm.raw_root, source, candidates, config
@@ -626,11 +684,11 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
             # 分支优先级固定：不可读优先于纯缺文件。「等待 raw 补齐后重跑 init」是**只**
             # 对纯缺文件成立的补救指令（compute-loop §6.2 逐字），MUST NOT 出现在下面
             # 任何一条含不可读文件的腿上——包括混合态。
-            if unreadable:
-                listed = "、".join(str(path) for path in unreadable[:3])
+            if unreadable.count:
+                listed = "、".join(str(path) for path in unreadable.locations[:3])
                 head = (
-                    f"{reason}；窗内有 {len(unreadable)} 个 raw 文件**存在但不可读**"
-                    f"（如 {listed}）"
+                    f"{reason}；窗内有 {unreadable.count} 个预期 raw 文件**无法访问**"
+                    f"（权限或 I/O，存在性未知；位置：{listed}）"
                 )
                 if missing:
                     # 混合态：MUST 并列点名两者。全称否定「不是缺数据」在这里为假，
@@ -645,15 +703,15 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
                     )
                 return _refuse(
                     InitRefusal.NO_COMPLETE_RAW_CYCLE,
-                    f"{head}：这是权限或 I/O 故障，不是缺数据，"
-                    "重跑 init 之前须先修复这些文件的可读性",
+                    f"{head}：这是权限或 I/O 故障，"
+                    "重跑 init 之前须先修复这些位置的可访问性",
                 )
             return _refuse(
                 InitRefusal.NO_COMPLETE_RAW_CYCLE,
                 f"{reason}，等待 raw 补齐后重跑 init",
             )
         frontier[source] = cycle
-        if unreadable:
+        if unreadable.count:
             skipped_unreadable[source] = unreadable
 
     # 5. 逐源重戳并渲染字节。到这里为止仍然零写入。
@@ -678,20 +736,22 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
         # 两次调用**分别** try：目录腿失败时 `os.open(target...)` 结构性地**从未被调用
         # 过**，零残留是事实而非推断，故不必也不该去探测 **target**（`chmod 0o500 states/`
         # 就是这种终态）。合在一个 try 里会把写入腿的探测语义套到一条与目标无关的失败上。
-        # 但这条腿仍必须探测 **target_dir**：`states/<source>` 被 symlink/FIFO/普通文件
-        # 占住时它同样在这里失败，而那是一个持久外来条目，收尾 MUST 走第三路并点名
-        # `target_dir` 本身（round 4 R4-A；判据是盘上探测，不是异常类型/`kind`）。
+        # 但这条腿仍必须探测**写入路径的每一级分量**：`yd_root`、`states/`、
+        # `states/<source>` 中任意一级被 symlink/FIFO/普通文件占住时它都在这里失败，而那是
+        # 一个持久外来条目，收尾 MUST 走第三路并点名**真正被占住的那一级**（round 4 R4-A、
+        # round 5 R5-G；判据是逐级盘上探测，不是异常类型/`kind`，也不是末分量）。
         try:
             safe_fs.ensure_directory_no_follow(target_dir)
         except (OSError, safe_fs.SafeFilesystemError) as error:
+            blocker = _first_foreign_component(yd_root, target_dir)
             return _write_failed(
                 source,
                 target,
                 written,
                 error,
                 partial_note=None,
-                blocked_by_foreign_entry=_foreign_entry_blocks(target_dir),
-                blocking_path=target_dir,
+                blocked_by_foreign_entry=blocker is not None,
+                blocking_path=blocker if blocker is not None else target_dir,
             )
         try:
             safe_fs.write_bytes_no_follow_exclusive(target, payloads[source])
@@ -727,13 +787,13 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
         for source in rawscan.SOURCES
     ]
     for source in rawscan.SOURCES:
-        skipped = skipped_unreadable.get(source, ())
-        if skipped:
-            listed = "、".join(str(path) for path in skipped[:3])
+        skipped = skipped_unreadable.get(source)
+        if skipped is not None:
+            listed = "、".join(str(path) for path in skipped.locations[:3])
             detail_parts.append(
-                f"{source} 的链起点跳过了更早的候选，那些候选上有 {len(skipped)} 个 raw "
-                f"文件**存在但不可读**（如 {listed}）：链起点已因此后移，"
-                "init 不会重跑，须人工确认这些文件的可读性"
+                f"{source} 的链起点跳过了更早的候选，那些候选上有 {skipped.count} 个预期 "
+                f"raw 文件**无法访问**（权限或 I/O，存在性未知；位置：{listed}）："
+                "链起点已因此后移，init 不会重跑，须人工确认这些位置的可访问性"
             )
     return InitReport(
         written=tuple(written),

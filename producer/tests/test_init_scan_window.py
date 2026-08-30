@@ -119,12 +119,18 @@ def test_unreadable_raw_is_not_disguised_as_a_missing_raw_refusal(
 
     assert report.refusal is InitRefusal.NO_COMPLETE_RAW_CYCLE
     assert "ifs" in report.detail
-    # 点明「存在但不可读」，并带上数目与路径。
-    assert "不可读" in report.detail
-    assert "2 个 raw 文件" in report.detail
-    assert str(bundles[0]) in report.detail
+    # 点明**无法访问**（可访问性口径，不断言存在性），并带上数目与位置。
+    assert "无法访问" in report.detail
+    assert "2 个预期 raw 文件" in report.detail
+    # 本候选的预期文件全部探不动（`unreadable_files == expected_files`），故位置塌成该候选
+    # 的**目录**这一共同位置，MUST NOT 逐条列举可能并不存在的文件（round 5 R5-J）。
+    assert str(bundle_dir) in report.detail
+    assert str(bundles[0]) not in report.detail
     # 缺数据的补救话术 MUST NOT 被复用到权限故障上。
     assert "等待 raw 补齐" not in report.detail
+    # 全称否定 MUST NOT 出现在**任何**腿上：`missing` 为空只是「预期文件全部缺失的候选被
+    # 过滤掉了」，不等于盘上没有数据缺口（round 5 R5-I）。
+    assert "不是缺数据" not in report.detail
     assert_zero_write(tree, before_states, before_output)
 
 
@@ -159,9 +165,10 @@ def test_mixed_missing_and_unreadable_raw_are_both_named(tmp_path: Path) -> None
 
     assert report.refusal is InitRefusal.NO_COMPLETE_RAW_CYCLE
     assert "ifs" in report.detail
-    # 并列点名：不可读侧带数目与路径，缺失侧同样带数目。
-    assert "不可读" in report.detail
-    assert "1 个 raw 文件" in report.detail
+    # 并列点名：无法访问侧带数目与位置，缺失侧同样带数目。
+    assert "无法访问" in report.detail
+    assert "1 个预期 raw 文件" in report.detail
+    # 本候选只有部分探不动，位置就是具体文件路径（未塌成目录）。
     assert str(present[0]) in report.detail
     assert "缺失" in report.detail
     assert "1 个预期 raw 文件" in report.detail
@@ -206,13 +213,89 @@ def test_unreadable_raw_on_a_skipped_candidate_is_named_in_the_success_detail(
         "2026082512" + STATE_SUFFIX,
         "2026082512" + STATE_SUFFIX,
     ]
-    # 成功理由 MUST 点名被跳过候选上的不可读文件（数目 + 路径）。
-    assert "不可读" in report.detail
-    assert "1 个 raw 文件" in report.detail
+    # 成功理由 MUST 点名被跳过候选上无法访问的 raw（数目 + 位置）。
+    assert "无法访问" in report.detail
+    assert "1 个预期 raw 文件" in report.detail
     assert str(bundles[0]) in report.detail
     # 只有 ifs 被跳过；gfs 一次跳过也没有，MUST NOT 被牵连点名。
-    assert report.detail.count("存在但不可读") == 1
+    assert report.detail.count("无法访问") == 1
     assert "ifs 的链起点跳过了更早的候选" in report.detail
+
+
+def test_an_existing_but_empty_cycle_dir_must_not_be_denied_as_absent(
+    tmp_path: Path,
+) -> None:
+    """[桶 C-10] 「目录存在但零文件落地」的候选与「整目录缺席」不可区分，故拒绝理由
+    MUST NOT 作出「不是缺数据」这类全称否定（round 5 R5-I）。
+
+    构造：ifs 窗内两个候选——`2026082500` 的**目录存在但一个预期文件都没落地**（发布中途
+    崩溃的真实形态），`2026082512` 的预期文件全部 `chmod 0o000`。`rawscan.judge` 对前者
+    返回 `missing_files == expected_files`，与「cycle 目录整体不存在」**返回同值**：
+    `ScanVerdict` 四个字段全是文件级，接口不暴露目录存在性，该判据在消费侧结构性不可逆。
+    `_first_complete_cycle` 的过滤器因此把这个真实数据缺口一并抹掉，`missing` 为空。
+
+    本行钉死的是**在该不可逆性之下仍然成立**的那一半：`missing` 为空 MUST NOT 被升格成
+    「不是缺数据」。真正分开两种情形需要 `rawscan.judge` 带上目录存在性信号，那是
+    Must-preserve 面、须先改文档，已另行记账。
+
+    判别变异体：在纯不可读腿上恢复「不是缺数据」的全称否定 -> 本行必红。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    empty_cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    unreadable_cycle = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    tree.write_cycle("gfs", empty_cycle)
+    # 目录存在、零文件——不是缺席，是发布中途崩溃。
+    tree.cycle_dir("ifs", empty_cycle).mkdir(parents=True, exist_ok=True)
+    bundle_dir = tree.write_cycle("ifs", unreadable_cycle)
+    bundles = sorted(path for path in bundle_dir.iterdir() if path.is_file())
+    before_states = snapshot(tree.states)
+    before_output = snapshot(tree.output)
+
+    with unreadable(bundles[0]), unreadable(bundles[1]):
+        report = tree.run()
+
+    assert report.refusal is InitRefusal.NO_COMPLETE_RAW_CYCLE
+    assert "不是缺数据" not in report.detail
+    assert "等待 raw 补齐" not in report.detail
+    assert_zero_write(tree, before_states, before_output)
+
+
+def test_an_unreadable_cycle_dir_is_named_instead_of_its_expected_files(
+    tmp_path: Path,
+) -> None:
+    """[桶 C-11] cycle **目录自身**探不动时 MUST 点名该目录，MUST NOT 逐条列举预期文件
+    （round 5 R5-J）。
+
+    构造：ifs 的 `2026082500` 是一个 `chmod 0o000` 的**空目录**，`2026082512` 完整。
+    `rawscan._check` 对每个**预期**路径 `stat()`，`EACCES` 不在 `FS_MISSING_ERRORS` 内，
+    故每个预期路径都落进 `unreadable_files`——**无论盘上有没有这些文件**。逐条列举它们等
+    于断言一批并不存在的文件「存在但不可读」，而真正的阻塞物（目录权限位）一次都没被点名。
+
+    判别变异体：把 `unreadable_files == expected_files` 的塌缩去掉、退回逐条列举 ->
+    本行必红。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    blocked_cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    good_cycle = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    tree.write_cycle("gfs", good_cycle)
+    tree.write_cycle("ifs", good_cycle)
+    blocked_dir = tree.cycle_dir("ifs", blocked_cycle)
+    blocked_dir.mkdir(parents=True, exist_ok=True)
+    expected_inside = blocked_dir / (
+        "ifs.t00z.f000.bundle.grib2"
+    )
+
+    with unreadable(blocked_dir):
+        report = tree.run()
+
+    assert report.refusal is None
+    assert "无法访问" in report.detail
+    # 点名的是**目录**这一共同位置。
+    assert str(blocked_dir) in report.detail
+    # MUST NOT 逐条列举那些盘上并不存在的预期文件。
+    assert str(expected_inside) not in report.detail
 
 
 def test_window_lower_bound_is_closed(tmp_path: Path) -> None:

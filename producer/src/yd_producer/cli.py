@@ -192,6 +192,13 @@ def init(local: LocalConfig, config: Config) -> int:
         return _fail(f"init 拒绝执行（{report.refusal.value}）：{report.detail}")
     for path in report.written:
         print(path)
+    # 成功理由走 **stderr**（round 5 R5-F）：`bootstrap` 的成功 `detail` 会点名被跳过候选上
+    # 无法访问的 raw——链起点因此比 raw 实际到达情况更晚，而 init 一生只跑一次，落盘后重跑
+    # 必被 `STATES_NOT_EMPTY` 拒绝，静默偏移没有自愈路径。此前本分支只 `print(path)`，那条
+    # 规范里写着 MUST 的运维信号在端到端上被整个丢弃：终端输出与「不存在任何无法访问的
+    # raw」时逐字节相同。走 stderr 而非 stdout 是为了不污染可管道消费的落盘路径列表。
+    if report.detail:
+        print(report.detail, file=sys.stderr)
     return 0
 
 
