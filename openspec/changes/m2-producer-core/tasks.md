@@ -3149,8 +3149,8 @@ Review focus:
 ## 13. run-controller（二）：发布、失败与清理
 
 - [x] 13.1 实现发布器：T+12 checkpoint 重戳到绝对 T+12（复用 4.3）→ DONE 前契约检查（v2、`forecast_days*24` 行、数据列数等于 `reach_count` 且等于变体 reach 数、T+12 可读、合并日志可用）→ DAT 原子 rename 为 `yd.rivqdown.dat` → 状态 rename → `DONE` 最后写 → 删旧状态只留两份 → 删本轮 work；正式文件不继承 scratch uid/gid/mode；记录型文件操作测试顺序与终名
-- [ ] 13.2 实现失败处理（合并日志、删 work、不推进；复用 12.2 判定，仅接入失败/重跑路径）
-- [ ] 13.3 实现 14 天保留清理（`realpath` 圈定 yd 根、symlink 越界拒删）
+- [x] 13.2 实现失败处理（合并日志、删 work、不推进；复用 12.2 判定，仅接入失败/重跑路径）
+- [x] 13.3 实现 14 天保留清理（`realpath` 圈定 yd 根、symlink 越界拒删）
 
 依赖：组 4（重戳）、组 12
 §13.1 归属：发布（无 DONE 崩溃恢复/DONE 最后写/状态只留两份）
@@ -3498,7 +3498,13 @@ Domain packs:
 - 状态链 / warm-start 定戳一致性: selected —— 失败与清理都必须让 states/DONE/前沿逐项不变
 - NWM 快照溯源与 DB-free 隔离: selected —— stdlib-only、零 NWM import/DB/scheduler 调用
 
-Required evidence（`producer/tests/test_cleanup.py`，真实 tmp 目录树；期望 cycle/路径由构造期独立登记，不由被测计划回读）:
+Required evidence（真实 tmp 目录树；期望 cycle/路径由构造期独立登记，不由被测计划回读）:
+
+测试布局（Phase 6.2 收尾时发现项目级 `large-file-guard` 默认硬上限 1000 行，原单文件 1505 行不可提交；这是 docs-first 的布局纠正，不是放宽 guard）：
+- `producer/tests/cleanup_fixtures.py`：只放共享独立 oracle 字面量、JobSpec/JobRecord/目录树构造器与断言 helper，不含 `test_*` 用例
+- `producer/tests/test_cleanup_failure.py`：13.2 失败日志/work/错误域与大日志流式证据
+- `producer/tests/test_cleanup_retention.py`：13.3 窗口、身份绑定、realpath/symlink/TOCTOU、幂等与完整矩阵
+- 三文件各自 MUST ≤1000 行；MUST NOT 给 `.large-file-guard.json` 增 exclude，也不得删/弱化断言凑行数。拆分前 59 个用例的函数体/参数化腿/断言集合必须逐项守恒，拆分后 pytest collected count 仍为 59；只有 import、helper 引用与模块归属可机械变化
 - spec「失败轮产物」：FAILED 与 TIMEOUT 各一条；日志 JSON 精确字段/值，后缀逐字等于含非法 UTF-8 的原始 stdout/stderr，work 不存在，`output/`/`states/` 快照逐项不变，且该 cycle 日志恰一份
 - 同 T 预置旧普通日志再失败 -> 原子替换为新 job ID/字节，不留下 `.tmp` 或第二份日志
 - 让日志提交失败（目标 symlink/目录）-> work 与 output/states 全部不变；证明“先日志后删除”而非只看 happy path
@@ -3526,6 +3532,7 @@ Known limits / routed deferrals:
 - #47：退出码如何由 Slurm/主循环取得；本 issue 只消费显式非空 `exit_code`
 - #108：post-`DONE` 历史孤儿 work 扫描，不属于当前失败 job 的精确 work 删除
 - #94：发布器自身 `work_dir` 形状守卫；本 issue 的 FailureInputs 独立守住自己的删除入口，不代修 `PublishInputs`
+- #112：Phase 6.2 核实的既存 `ResiduePlan` 手工清单身份缺口（可夹带兄弟 source 删除目标）；`residue.py` 不在本 issue 改动面，已由 issue-scribe 独立建档
 
 Non-goals:
 - `run_once`、双源并行、多轮追赶、崩溃残留执行接线（#26/#28）
