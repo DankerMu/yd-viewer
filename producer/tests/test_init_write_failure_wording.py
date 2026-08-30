@@ -170,3 +170,53 @@ def test_write_failed_lists_every_landed_source_not_just_the_first(
     # `written` 非空 -> 第一路，MUST NOT 退化成「根仍是全新根」。
     assert CLEANUP_CLAIM in report.detail
     assert FRESH_CLAIM not in report.detail
+
+
+@pytest.mark.parametrize("carrier", ["symlink-to-dir", "fifo"])
+def test_foreign_entry_higher_up_the_write_path_is_named_at_its_own_level(
+    tmp_path: Path, carrier: str
+) -> None:
+    """[桶 C-13] 阻塞物在 `states/` **这一级**时同样走第三路，且点名的是这一级
+    （round 5 R5-G CONFIRMED/P2）。
+
+    构造：把 `states/` **自身**（而非 `states/ifs`）预置成 symlink→空目录 / FIFO，其余为
+    合法全新根。阶段 A 放行——`_entry_names` 对 `FileNotFoundError`/`NotADirectoryError`
+    一律返回空集，symlink 载体 `os.listdir` 跟随后得空集，FIFO 载体得 `ENOTDIR` 视作空集。
+
+    本行钉死的是**探测面必须与失败面同宽**：`ensure_directory_no_follow` 逐 `part` 做
+    `O_DIRECTORY|O_NOFOLLOW` 的 open，可在**任一**分量上失败；而只 `lstat` 末分量的探测
+    比失败面窄一层，且 `os.lstat` 对中间分量是**跟随** symlink 的——对 `states/ifs` 的
+    lstat 会穿过 `states` 拿到 `FileNotFoundError`（symlink 载体）或 `ENOTDIR`（FIFO 载
+    体），两者都被判成「无外来条目」而落到第二路，而重跑逐字节复现同一失败。
+
+    点名的 MUST 是 `states` 这一级：`states/ifs` 在这两个载体上盘上根本不存在，点名它会让
+    「点名被占住的那个路径本身」在下一层再次为假。
+
+    判别变异体：把逐级走查退回只 `lstat(target_dir)` 的单分量探测 -> 本行必红。
+    """
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    tree.states.rmdir()
+    if carrier == "symlink-to-dir":
+        foreign_dir = tree.root / "foreign_states"
+        foreign_dir.mkdir()
+        tree.states.symlink_to(foreign_dir)
+    else:
+        os.mkfifo(tree.states)
+    before_output = snapshot(tree.output)
+
+    report = tree.run()
+
+    assert report.refusal is InitRefusal.WRITE_FAILED
+    assert report.written == ()
+    # 第三路，且点名的是**被占住的那一级**（`states`），不是它下面那个并不存在的分量。
+    assert f"写入路径 {tree.states} 上" in report.detail
+    assert f"写入路径 {tree.states / 'ifs'} 上" not in report.detail
+    assert FOREIGN_ENTRY_CLAIM in report.detail
+    assert REMOVE_DEMAND in report.detail
+    assert FRESH_CLAIM not in report.detail
+    assert PARTIAL_CLAIM not in report.detail
+    assert CLEANUP_CLAIM not in report.detail
+    assert snapshot(tree.output) == before_output
