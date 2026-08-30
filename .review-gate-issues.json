@@ -183,6 +183,11 @@
           "rounds": 4
         }
       ]
+    },
+    "24": {
+      "ceilingPrs": [],
+      "gateEntries": 2,
+      "closed": []
     }
   }
 }

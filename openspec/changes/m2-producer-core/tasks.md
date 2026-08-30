@@ -2887,7 +2887,7 @@ Review focus:
 
 ## 13. run-controller（二）：发布、失败与清理
 
-- [ ] 13.1 实现发布器：T+12 checkpoint 重戳到绝对 T+12（复用 4.3）→ DONE 前契约检查（v2、`forecast_days*24` 行、数据列数等于 `reach_count` 且等于变体 reach 数、T+12 可读、合并日志可用）→ DAT 原子 rename 为 `yd.rivqdown.dat` → 状态 rename → `DONE` 最后写 → 删旧状态只留两份 → 删本轮 work；正式文件不继承 scratch uid/gid/mode；记录型文件操作测试顺序与终名
+- [x] 13.1 实现发布器：T+12 checkpoint 重戳到绝对 T+12（复用 4.3）→ DONE 前契约检查（v2、`forecast_days*24` 行、数据列数等于 `reach_count` 且等于变体 reach 数、T+12 可读、合并日志可用）→ DAT 原子 rename 为 `yd.rivqdown.dat` → 状态 rename → `DONE` 最后写 → 删旧状态只留两份 → 删本轮 work；正式文件不继承 scratch uid/gid/mode；记录型文件操作测试顺序与终名
 - [ ] 13.2 实现失败处理（合并日志、删 work、不推进；复用 12.2 判定，仅接入失败/重跑路径）
 - [ ] 13.3 实现 14 天保留清理（`realpath` 圈定 yd 根、symlink 越界拒删）
 
@@ -2895,6 +2895,270 @@ Review focus:
 §13.1 归属：发布（无 DONE 崩溃恢复/DONE 最后写/状态只留两份）
 Suggested fixture level: expanded - 多状态目录树与记录型发布器
 Minimal mergeable slice: 发布器（13.1）——发布顺序与契约检查对记录型文件操作独立可验证；失败与清理为后继
+
+### Issue #24 fixture（任务 13.1：发布器）
+
+Fixture level: expanded
+Upstream suggested level: expanded（不覆盖：正面命中 `openspec/project-profile.md` 的 domain expanded-triggers `DONE`、`cycle`、`T+12`、`checkpoint`、状态链/重戳、NFS，且本 issue 是 M2 里**第一处向 `YD_ROOT` 提交正式产物**的代码）
+Repair intensity: high（发布/删除/权限三面同时命中 Phase 0.5 step 3 的 high 判据：`DONE` 写早一步即让 viewer 读到半成品；旧状态删多一份即断链且不可逆；正式文件继承 scratch 0600 即让 node-27 读不到。适用 `Invariant Matrix`）
+Project profile: yd-viewer
+
+**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：
+
+1. issue #24 的 `Depends on` 只列 #9 / #2，但验收标准里的「数据列数等于 `reach_count` 且等于**变体 reach 数**」需要一个「变体 reach 数」的来源符号，仓内不存在（`geometry.py:164` 逐字把「要素数是否符合业务预期」推给 prepare-variants，`src/` 全域无 `.riv` 解析）。缺失的 seam 本 issue **不自行补齐**，按裁决 1 收敛为调用方入参（`variant_reach_count: int`），并按核心规则「needed-but-missing seam is a reported deviation」记录在此；该入参的真实来源（prepare 侧变体 reach 计数）归 #20 / 14.1 接线。
+2. `tasks.md:169` 把 `forecast_days` 与 `reach_count` 的**正数约束**逐字路由到「#24 task 13.1，DONE 前行数/列数校验」。本 fixture 消费该路由并按裁决 4 落地（期望行数与期望列数 MUST > 0，否则 `PublishError`），使该路由不再是孤儿。
+3. `specs/run-controller/spec.md` 的「NFS 提交顺序与 DONE 语义」步骤 1 把重戳列在契约检查之前，issue 正文的箭头序同向；本 fixture 照此落地（裁决 2），并把「T+12 状态可按分段格式读取」这一检查明确定义为**对重戳后文档**的检查——否则该检查会放行一份重戳后才损坏的状态。
+4. `docs/products-contract.md` §5.2 要求数据区第 0 列逐值为 `0, 60, …, 10020`，但 spec 与 issue 的 DONE 前契约检查清单**都不含**该项。本 issue 按 spec 与 issue 正文的清单落地，不擅自加检查项（加了会让「检查清单」在两份文档间分叉）；该缺口按「out-of-scope findings: report, don't fix」记入下方 Known limits 并路由。
+
+**核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
+
+1. **输入面全部由调用方交来，发布器零发现、零推导**。落 `producer/src/yd_producer/publish.py` 新模块（`yd_producer.publish`，issue 正文的 Module/Scope）。入参以一个 frozen dataclass `PublishInputs` 表达：`yd_root`、`source`、`cycle`（待跑 T）、`scratch_dat`（作业产出的 DAT）、`scratch_checkpoint`（tracker 捕获的 T+12 checkpoint，**未重戳**）、`merged_log`（本轮合并 stdout/stderr）、`work_dir`（本轮 scratch `work/<source>/<T>`）、`expected_rows`（= `config.forecast_days * 24`）、`reach_count`（= `config.reach_count`）、`variant_reach_count`。**MUST NOT** 在发布器里读 `config.toml`、扫 `states/`、猜 T、或从 DAT 自己的列编号表反推「变体 reach 数」（后者是循环论证：那张表就是被校验的对象，只能做**内部一致性**校验，见裁决 4）。理由：本模块要在 14.1 之前独立可测，且 issue 的 PR Boundary 就是「publish 模块与记录型文件操作测试」。
+   **`source` 与 `cycle` 的输入域 MUST 在入口 fail closed**（复用 #23 裁决 2 的同一条实测教训）：`source` 为空串、`.`、`..`、含 `/` 的任一形态 MUST 抛 `ValueError` 且零文件系统副作用——`output/<T>/""` 会塌回 `output/<T>/`，`..` 会把删除/写入面抬到另一源。
+2. **执行序逐字钉死，且「检查」与「提交」严格分离**。公开两个符号：`check_publish_contract(inputs) -> None`（**零写入**，只读 scratch 侧）与 `publish(inputs) -> PublishResult`（先调前者，再按序提交）。`publish` 的序列 MUST 逐字是：
+   1. 读 `scratch_checkpoint` -> `state.parse` -> `restamp_to_absolute_time(doc, T+12h)` -> 渲染出**内存中的**重戳字节（**MUST NOT** 回写 scratch 原文件：原文件是失败路径要回收的证据）；
+   2. `check_publish_contract`（对 scratch DAT、上一步的重戳字节、`merged_log` 三者，外加 NFS 侧 `DONE(T)` 的**不存在**前置，见裁决 7）；
+   3. DAT 写入 `output/<T>/<source>/` 的临时文件并在**同目录内**原子 rename 为 `yd.rivqdown.dat`；
+   4. 重戳字节写入 `states/<source>/` 的临时文件并原子 rename 为 `<T+12>.cfg.ic`；
+   5. `output/<T>/<source>/DONE` 以 `O_EXCL` 原子创建（最后写）；
+   6. 删除 `states/<source>/` 下 cycle **严格早于** T 的合法状态文件（裁决 5）；
+   7. 删除 `work/<source>/<T>`（裁决 6）。
+   步骤 2 失败时 **NFS 侧零字节变更**（这是 fail-closed 的全部含义：`PublishError` 抛出后 `output/<T>/<source>/` 与 `states/<source>/` 的递归快照与调用前逐项相等，`DONE` 不存在，`work` **不删**——work 的失败侧回收归 13.2）。
+3. **步骤 3–7 中途失败不回滚，按 §11.2 的恢复模型留半成品**。任一步抛错时 `publish` 让错误向外传播、**MUST NOT** 反手删除已 rename 的 DAT 或已写的状态，也 MUST NOT 补写 `DONE`。理由是硬的：`docs/compute-loop-design.md` §11.2 的恢复协议就是「无 `DONE` 即半成品，下次由 12.2 判定清理后整轮重跑」；发布器自己做补偿删除等于在崩溃恢复之外发明第二套协议，且它自己的补偿动作同样可能在中途死掉。**唯一例外是步骤 3/4 各自的临时文件**：`safe_fs` 的原子写原语在 rename 前失败时自行清理其 `.tmp`，这是原语的既有行为，不是发布器的补偿逻辑。
+   **但「`DONE` 之前失败」与「`DONE` 之后失败」对调用方 MUST 可分辨**（fixture 复核 P2）：`DONE` 已写成之后（步骤 6/7）抛出的错误 MUST 携带一个显式标志，让 14.1 知道**本轮已完成**、MUST NOT 触发 13.2 的失败侧回收（那会删掉一份已被 `DONE` 承诺的产物的 work 证据，并把一个成功 cycle 记成失败）。落地形式钉死为**两个异常类型**：`PublishError`（`DONE` 之前，本轮未完成）与 `PublishCleanupError`（`DONE` 之后的旧状态/work 清理失败，本轮已完成，`.done_path` 指向已写成的 `DONE`）；后者 MUST NOT 是前者的子类——子类关系会让 14.1 的 `except PublishError` 把它一起吞成失败。
+4. **契约检查的判据逐条钉死，全部 fail-closed，且全部在 scratch 侧完成**：
+   - **期望值正数闸**（消费偏离 2 的路由）：`expected_rows <= 0`、`reach_count <= 0`、`variant_reach_count <= 0` 三者任一 -> `PublishError`。这条**先于**读文件，理由：`expected_rows == 0` 会让「行数相等」在一个空数据区上恒真。
+   - **`reach_count == variant_reach_count`** 否则 `PublishError`（issue 正文的「且等于」是两两相等，不是二选一）。
+   - **DAT 为 v2**：v2 布局按 `rSHUD/R/readout.R:26-31` 与 `SHUD/src/classes/Model_Control.cpp:254-259` 双向核对得到，逐字是 `[0:1024)` 文本头 + `st`(float64) + `nc`(float64) + `nc` 个列编号(float64) + 数据区，数据区每行 `nc+1` 个 float64。v2 判据 MUST 是**文本头形状**：`[0:1024)` 必须是「可打印 ASCII 前缀 + 其后全 NUL」（SHUD 侧 `char header[1024] = {}` + `strcpy` 的必然形态），任一不满足 -> `PublishError` 指名「非 v2」。**MUST NOT** 用「文件够大」或「`nc` 恰好等于 `reach_count`」当 v2 判据：v1 布局（`nc` 在 offset 0）在 `nc == 3988` 时前 8 字节是 `3988.0` 的 little-endian 表示，两者都放行它。
+   - **列数**：`nc` MUST 是有限、整数值、且 `== reach_count`；列编号表 MUST 完整存在（`DAT_FIXED_HEADER_BYTES + 8*nc <= size`），否则 `PublishError`。
+   - **行数**：数据区字节数 MUST 恰好等于 `expected_rows * (nc + 1) * 8`。**残行一律拒绝**（`docs/products-contract.md` §5.1 逐字「不规定残行修复」；`readout.R:41` 对残行只 `message` 不报错，那份宽容不得进入 producer 的写 `DONE` 闸）。多一行、少一行、多半行三种形态都 -> `PublishError`。
+   - **T+12 状态可读**：对**重戳后**字节（裁决 2 步骤 1 的产物）`state.parse` 成功，且 `state_ic_structure_complete(payload, expected_river_count=reach_count)` 判为完整——**MUST 传权威计数**（round 1 verifier 裁定，cand-04 CONFIRMED/FIX_NOW）：不传时 `state_qc._check_row_counts` 对每一类都 `if expected is None: continue`，唯一还生效的结构闸只剩「分段存在」，于是一份 river 段被截断的 checkpoint（tracker 在 SHUD 非原子改写 `cfg.ic.update` 期间捕获，正是 `state_qc.py:474-481` docstring 点名的形态）照样拿到 `DONE`，下一轮从中毒 IC 起跑且下游无人复检（`residue.plan_residue` 在 `DONE(T)` 存在时清单整体为空）。本条按治理不变量（「`DONE` 一旦存在，状态就已是**完整**的正式产物」）而非本裁决的原措辞裁定：`tasks.md:806`/`:840` 与 `state_qc.py:399` 两处独立锚点都**指名**把权威 `reach_count` 接进来是 #21 init / **#24 发布器**的领域，而本 fixture 的 Known limits 从未记录放弃这条路由——故原先的不传计数是**未记录的偏离**，不是被钉死的决定。计数取 `PublishInputs.reach_count`（`_check_positive_expectations` 已强制它等于 `variant_reach_count`，故 #20 变体计数的来源歧义在本调用点是 moot 的）；且 header 的绝对时间 MUST 对应 T+12——判据 MUST 与 `controller._classify_state` 逐字同构（`round(cfg_ic_header_minute_time(tokens)) == round((T+12).timestamp()/60)`），**MUST NOT** 接受相对分钟。这条是本 fixture 的治理不变量在发布侧的自闭合：写出去的那份状态，正是下一轮前沿闸门要读的那份。
+   - **合并日志可用**：`merged_log` MUST 存在、是普通文件、非空（`st_size > 0`）。目录、FIFO、symlink、零字节四种形态都 -> `PublishError`。理由：失败时要回收的就是它，一份 0 字节日志等于没有。
+   - 全部检查 MUST 在**第一处 NFS 写入之前**跑完，`check_publish_contract` 自身 MUST 零写入（递归快照证明）。
+5. **旧状态删除集合：cycle 严格早于 T 的合法状态文件，且仅此**。可见性判据（10 位数字、`%Y%m%d%H` 可解析、`cycle+12h` 不溢出、`.cfg.ic` 后缀）MUST 从 `controller` 导入既有符号（`visible_state_cycles` / `parse_cycle_id`），**MUST NOT** 重写一份。边界方向：`== T` 与 `== T+12` 永不删（spec 步骤 5 的「最终保留 T 与 T+12 两份」正是这条的直接后果）；`> T+12` 的更晚状态**也不删**（那是 12.2 的残留集合，发布器越界删它等于把两处删除面耦合起来）。删除原语用 `unlink_no_follow(path, containment_root=Path(yd_root).resolve())`：状态文件只由本发布器以「普通文件原子 rename」写入，遇 symlink 即抛 `SafeFilesystemError`（与 #23 裁决 6 的状态侧策略逐字一致）。`containment_root` MUST 是 `Path(yd_root).resolve()`——#23 裁决 6 增补的前置条件（`safe_fs.py:824-843` 会把 root 自身逐分量过 `O_NOFOLLOW`），该前置 MUST 写进 `publish.py` 模块头。
+   **且「入口 resolve 一次，全部 NFS 目标路径由该值派生」**（fixture 复核 P2）：`safe_fs._relative_parts_under_root`（`safe_fs.py:944-960`）是**纯词法** `relative_to`，只 `_expand_path` 不 `resolve`；若 `containment_root` 传 resolve 后的值而目标路径仍由未 resolve 的 `yd_root` 拼出，一个含 symlink 分量的 `yd_root` 会让每一次 unlink/写入都在 containment 处 fail closed。故 `PublishInputs` 的入口 MUST 计算一次 `root = Path(yd_root).resolve()`，`output/`、`states/` 两棵子树的**全部**路径由 `root` 派生，MUST NOT 再出现第二个 `yd_root` 的用法。测试种子 `tmp_path.resolve()` 对这一点**没有判别力**，故另需一条以 symlink 形态 `yd_root` 传入的正例（见 Required evidence）。
+6. **work 删除用 `remove_tree_allow_symlinks`，`containment_root` 是 scratch work 根而不是 `YD_ROOT`**。理由两条：其一，`work/<source>/<T>` 在 scratch 上，不在 `YD_ROOT` 内，传 `YD_ROOT` 会被 `safe_fs` 直接拒；其二，该树的内容按构造不可信（作业自己写的 raw 副本/canonical/forcing/registry，可能含 symlink），拒 symlink 会 permanently lock 住每一轮成功发布——这正是 `remove_tree_allow_symlinks` docstring 描述的场景，与 #23 裁决 6 的半成品侧策略同向。`work_dir` 的父链 MUST 由调用方交来一个显式的 `work_root`（`PublishInputs.work_root`），发布器 MUST NOT 用 `work_dir.parent.parent` 反推——反推在 `work_dir` 被构造成 `.../work/ifs/T/..` 时会把 containment 抬到任意高度。
+7. **`DONE` 双闸：前置不存在 + `O_EXCL` 创建**。`products-contract.md` §4.4 逐字「重复运行看到 `DONE` 时视为已完成，不覆盖正式产物」。故：契约检查阶段 stat `output/<T>/<source>/DONE`，存在（任何类型）即 `PublishError` 且零 NFS 写入；步骤 5 仍以 `O_EXCL` 创建，作为「检查到创建」之间的竞态兜底，`FileExistsError` MUST 收敛为 `PublishError` 而不是穿透。两道闸都要，缺任一条都有判别器（见 Required evidence）。**前置探测的实现 MUST 让 symlink 形态也收敛为 `PublishError`**（fixture 复核 Note）：`stat_no_follow` 对 symlink 抛的是 `SafeFilesystemError` 而不是「存在」，该异常 MUST 被捕获并收敛，MUST NOT 穿透。
+8. **正式文件按发布权限创建，不继承 scratch 的 uid/gid/mode**（`docs/agent-ops.md` §10「不用 `cp -a` 把计算节点 uid/gid/模式带入 NFS；由控制器按发布权限创建」）。模块常量 `PUBLISH_FILE_MODE = 0o644`（node-27 以 `nwm` 身份只需读；§10 的「共享组 + setgid」是现场目录策略，不由本模块设置 gid）。落地方式 MUST 是**读字节 -> 新建文件写入**：DAT 与状态都走 `atomic_write_bytes_no_follow(..., mode=PUBLISH_FILE_MODE)`（该原语在 `os.open` 之后额外 `fchmod`，故落地位不受 umask 削弱）。**MUST NOT** 用 `shutil.copy2` / `copystat` / `os.link` / `Path.rename` 跨设备搬运——前两者的全部作用就是把源的 mode/时间带过去，后两者会把 scratch inode（连同其 uid/gid/mode）直接接进 NFS。目录 `output/<T>/<source>/` 用 `ensure_directory_no_follow` 创建，**随后 MUST 显式放宽到 `PUBLISH_DIR_MODE = 0o755`**（fixture 复核 P1）：该原语逐字拒绝 `fchmod`（`safe_fs.py:107-131`：「the umask may further restrict a safe_fs directory, it may never loosen it」），故在 umask 0o077 的现场它落地即 0o700，node-27 连**穿越**都做不到——文件位设成 0o644 也白设。放宽方式 MUST 是 fd 绑定的：`fd = open_directory_no_follow(dir, containment_root=root)` 后 `os.fchmod(fd, PUBLISH_DIR_MODE)`，且该 fd MUST 在 `try/finally` 里 `os.close`（原语交回的是裸 fd，不是上下文管理器）；正是 `safe_fs.py:129-131` 注释里点名的「caller needing cross-uid access has to widen after creation」这一既定模式；MUST NOT 用跟随 symlink 的 `<dir>.chmod(...)`。
+   **放宽面 = 本次发布在 `output` 子树上自建的每一级目录，含 `output/` 自身**（fixture 复核 round 2 的 P1）：`output/` 这一级在全新根上同样由本发布器补建——`atomic_write_bytes_no_follow(..., create=True)` 经 `ensure_directory_no_follow` 逐分量 `mkdir`，而 `tasks.md` 全文无任何上游任务负责创建它（11.1 的 init 只写 `states/`）。umask 0o077 下漏掉它，node-27 连 `output/` 都穿不进去，下面两级的 0o755 全部白设。故放宽序列逐字是 `output/` -> `output/<T>/` -> `output/<T>/<source>/` 三级，**逐级、非递归**：MUST NOT 递归 walk 已存在的历史 cycle 目录，MUST NOT 触碰 `states/`、`logs/` 或 `YD_ROOT` 自身（agent-ops §10：`a+rX` 只作用于发布目录，不递归开放模型、状态和日志）。**MUST 先 stat 再决定**（round 1 cand-02 CONFIRMED/FIX_NOW，实测 `output/` 预置为 `0o2750` 时被改成 `0o755`）：三级各自在 `ensure_directory_no_follow` **之前** stat，只对**本次调用之前不存在**的层级 `fchmod`；已存在的层级一律不动。原措辞「对已存在且 mode 已合规的目录重复 `fchmod` 是幂等的」只在「已合规」这个前提成立时才成立，而现场按 `docs/agent-ops.md` §10 的**首选**做法把 `output/` 设成共享组 + setgid（如 `2750`）时前提不成立——`fchmod` 可观测地**改变**了 mode，且清掉 setgid 不是「放宽」而是收紧。此外任何确实要做的 `fchmod` MUST **保留高位**（`S_ISGID`/sticky）：`chmod` 写的是整个 mode 字，直接写 `0o755` 会让其后在该目录下新建的每一个条目都不再继承共享 gid，运维手动 `chmod g+s` 的补救每轮都被抹掉。
+   **且「只放宽自建层级」MUST 配一道 fail-closed 的可穿越后置断言**（round 2 cand-02 CONFIRMED/FIX_NOW/P1，verifier 实测两条探针）：「本次调用之前不存在」不是可持久化的属性——三级 stat 完成到 `fchmod` 循环跑完之间任何一次失败（NFS EIO/ESTALE，或 SIGKILL/节点重启），已 `mkdir` 的层级就以 umask 0o077 下的 `0o700` **永久闩死**，因为其后每一轮都把它看作「已存在」而不动；实测「首轮 widen 抛 EIO -> 次轮干净重跑」得到 `DONE=True` 且三级全是 `0o700`，实测「预置 `0o700` 的 `output/`」得到 `DONE=True` 且 `output/` 仍是 `0o700`。canonical 恢复路径救不回来：`residue._half_product_dirs`（`residue.py:296-311`）只删 `output/<T>/<source>/`，从不碰它的父级，故重跑只重建并放宽叶子，`output/` 与 `output/<T>/` 照旧 `0o700`——而任一父级不可穿越就等于 node-27 什么都看不到，同时状态链照常推进、无任何信号。这直接违反治理不变量的「node-27 **可读**」半边，literal 合规于本裁决前半段不构成豁免。故 MUST 逐级复 stat 并施加下述判据，任一级不满足即在**第一处 NFS 写入之前**抛 `PublishError` 指名该层级与其 mode。
+   **判据 MUST 由消费者契约推导，MUST NOT 再写一个掩码字面值**（round 3 cand-01 CONFIRMED/FIX_NOW/P2，以及本 PR 的 Review Failure Retro 认定的根因）。权威出处是 `docs/products-contract.md` §8：node-27 的 `nwm` 「只需对 `input/viewer` 和 `output` 有目录**遍历与读取**权限」——**遍历与读取两个词都在**，`docs/agent-ops.md` §10 第二条同样并列写了「`output` 的**读**/遍历权限」。故判据逐字是「**组或其他之中，至少有一类同时具备 `r` 与 `x`**」：
+   ```python
+   (mode & 0o050) == 0o050 or (mode & 0o005) == 0o005
+   ```
+   owner 位不得计入：发布进程自己永远进得去，算上它这条断言即恒真（变异体 (aq)）。
+   本条前后共写坏两次，两次都是**拿上一轮的反例去调掩码字面值**而不是回头读契约，故此处把推导链写死以免第四次：初稿的 `& 0o055` 放行 `0o744`（能列名字、进不去）；round 2 修复轮改成的 `& 0o011` 放行 `0o711`/`0o710`/`0o701`（进得去、列不出名字），是同一个洞的镜像——而 `output/` 恰恰是 viewer 必须 `readdir` 才能枚举 cycle 的那一级（`products-contract.md` §7.1 逐字「锚点是最新 `DONE` cycle，不是墙钟」，§7.3 要求算停后仍可显示，两条都堵死了按墙钟猜候选路径的退路）。r+x 判据同时拒掉这两组，且经 verifier 实测不拒任何一种有文档依据的现场配置：§10 首选的共享组 + setgid `0o2750` 通过（`& 0o050 == 0o050`），`a+rX` 得到的 `0o755` 通过。高位不受影响——两个掩码都在低 9 位，`S_ISGID`/sticky 经 `stat.S_IMODE` 原样穿过。**且断言 MUST 跑两趟**：已存在的层级在 `ensure_directory_no_follow` **之前**先断言一次，三级全部创建并放宽之后再整体断言一次。只留后置那趟不可满足——一个 `0o700` 的 `output/` 会先让下面两级被 `mkdir` 出来，与证据行「自建层级不可穿越即拒」要求的「`YD_ROOT` 递归快照逐项不变」直接冲突。两趟 MUST 共用同一个判据函数，避免两处实现漂移。该后置断言与本裁决前半段无冲突：现场按 §10 首选设的 `0o2750` 满足 `(mode & 0o050) == 0o050` 而原样通过，被闩死的 `0o700` 则以 pre-`DONE` 的响亮失败暴露，而不是封一个不可读的 `DONE`。**MUST NOT** 改成「发现不可穿越就放宽已存在的层级」——那会把 cand-02 原样放回来（现场的 `2750` 会被改写）。
+9. **`DONE` 的 mode 需要一处 `safe_fs` 扩展，且是本 issue 唯一的共享 helper 改动**。`write_bytes_no_follow_exclusive` 当前以硬编码 `0o666` 打开、无 `fchmod`，落地位是 `0o666 & ~umask`——在 umask 0077 的现场会得到 0600 的 `DONE`，node-27 读不到，直接违反裁决 8 与 §10。故给它加一个 `mode: int | None = None` 关键字参数，语义**逐字镜像** `atomic_write_bytes_no_follow`（`os.open` 传 mode，随后 `fchmod` 以抵消 umask）；`None` 时行为与今日**逐字节相同**，既有调用方与 `test_safe_fs*.py` 零改动。MUST NOT 在 `publish.py` 里自己 `os.open(O_EXCL)` 绕开 `safe_fs`（会丢掉父目录的 `O_NOFOLLOW` 锚定与 `containment_root`），也 MUST NOT 改 `atomic_write_bytes_no_follow` 去支持 `O_EXCL`（它的语义是 replace，掺进 no-clobber 会让既有调用方的失败模式漂移）。
+10. **顺序可观测性的 seam 是 `safe_fs` 调用边界，用 monkeypatch 录制，零生产面**。spec Scenario「提交顺序可观测」要求「以可记录文件系统操作的发布器完成一轮成功发布」。落地方式：测试侧 monkeypatch `yd_producer.publish` 模块内绑定的 `safe_fs` 函数名，包一层记录器后转调真实实现（真实文件系统动作照常发生，录的是调用序与终名）。**MUST NOT** 为此在生产代码里加 recorder 参数、hook 列表或事件回调——那是把测试脚手架焊进发布路径。断言的是**终名序**：`yd.rivqdown.dat` 的 rename 早于 `<T+12>.cfg.ic` 的 rename，`DONE` 的创建晚于两者，旧状态 unlink 晚于 `DONE`，work 删除最末。
+11. **uid/gid 的可测边界**：非 root 身份下测试无法制造跨 uid/gid 的源文件，故「不继承 uid/gid」由**结构**满足（裁决 8 的「新建写入，禁 `copy2`/`copystat`/`link`」）并由一条源码机检钉住（`publish.py` 文本中不出现 `copy2`/`copystat`/`os.link`/`shutil`）；可断言的行为面是 **mode 不继承**：scratch DAT 与 checkpoint 置 0600 -> NFS 侧三份产物 mode 均为 0o644。另 MUST 在一个显式 `os.umask(0o077)` 的用例里重跑该断言——不设这条，`fchmod` 与「裸 `os.open(mode)`」两种写法在默认 umask 022 下不可分辨。
+12. **零新增依赖**：`struct`/`os`/`pathlib`/`datetime` 全在 stdlib，`numpy` **不引入**（列数/行数校验是整除与相等判定，读的是定长 float64 头部与文件大小，不需要把 168×3989 的数据区读进内存）。**有界读的 MUST 只约束契约检查阶段**（fixture 复核 P1：与裁决 8 的 `atomic_write_bytes_no_follow(content: bytes)` 曾表面冲突，此处划清）：`check_publish_contract` 读 DAT 时 MUST 只取 `[0, DAT_FIXED_HEADER_BYTES + 8*nc)` 这段头部（两趟：先以模块常量 `DAT_FIXED_HEADER_BYTES = 1040`（= 1024 文本头 + `st` + `nc` 两个 float64）读出 `nc`，再读列编号表），原语用 `read_bytes_limited_no_follow`，文件大小走 `stat_no_follow`，行数由 `st_size` 算术得出，MUST NOT 在检查阶段把数据区读进内存——`expected_rows` 是配置驱动的，检查阶段的无界读会把一处配置错误放大成 OOM，而检查的全部目的正是挡住这类输入。**步骤 3 的复制读全量字节是允许且必需的**（`safe_fs` 无 fd 流式写原语，`atomic_write_bytes_no_follow` 只收 `bytes`），其上界已由前置契约检查钉死的 `st_size == DAT_FIXED_HEADER_BYTES + 8*nc + expected_rows*(nc+1)*8` 约束——即「先证明大小合法，再整读」，顺序不得颠倒。**且整读之后 MUST 复核长度**（round 1 cand-08 PLAUSIBLE/FIX_NOW）：`_check_dat` MUST 把 `expected_size` 交回，`_publish_dat` MUST 断言 `len(payload) == expected_size` 后才写，否则 `DONE` 会封住一份**从未被校验过**的字节——校验读的是发布前那一刻的 `st_size`，整读是另一次独立的 open，两者之间 scratch 上若有滞留/重投的作业写入（裁决 6 自己把 scratch 树称作「按构造不可信」，且没有任何 spec 条款保证 scratch 静默），落地的就是一份带半行尾巴的 DAT。这条**不是**裁决 12 字面顺序的违反（顺序是遵守的），被违反的是本模块自己写下的那句「整读的上界已由 `_check_dat` 钉死的 `st_size` 等式约束」前提。零额外 IO。
+14. **scratch 侧只有一条 symlink 策略，且 `work_root` 与 `work_dir` MUST 一起 resolve**（round 1 cand-05 与 cand-06 双双 CONFIRMED/FIX_NOW；两者是**相反极性**的同一处失配，必须一并收口）。当前状态是三种策略并存：NFS 根入口 resolve 一次；scratch DAT / 日志 / work 严格 no-follow（`containment_root=None` 时 `safe_fs._anchor_for` 从 `/` 起把**每一个**祖先分量过 `O_NOFOLLOW`，故 scratch 路径上任何一节 symlink 都致命——实测 `/scratch -> /mnt/scratch` 这类布局下每轮 pre-`DONE` 失败，而只有 work 一条腿走 symlink 时更糟：`DONE`/DAT/状态全部正常落地，随后步骤 7 抛 `PublishCleanupError`，于是**每一个成功轮**都以清理错误收尾并留下无人回收的孤儿 work）；而 checkpoint 经 `state.parse(Path)` 走 `cfg_ic.py:504-513` 的裸 `open()`，**跟随** symlink——实测把 `scratch_checkpoint` 换成指向 scratch 树外的 symlink，那份外来文件会被重戳后发布成正式的 `{T+12}.cfg.ic`，而同样构造在 `scratch_dat` 上被拒。
+    落地要求：(a) checkpoint MUST 改为 no-follow 有界读后再解析（`parse(read_bytes_limited_no_follow(checkpoint, max_bytes=MAX_STATE_IC_BYTES))`，`parse` 的 `bytes` 分支保留尺寸闸）——它是唯一会变成正式 NFS 产物的 scratch 输入，却是唯一没有 no-follow 保护的读；(b) scratch 侧路径的策略（入口 resolve，还是要求调用方交已 resolve 的路径）MUST 二选一并写进模块头与 `PublishInputs` 的字段 docstring，参照姊妹模块 `residue.py:69-76,227` 的既有写法；(c) 若选入口 resolve，`work_root` 与 `work_dir` MUST **一起** resolve——`safe_fs._relative_parts_under_root`（`:944-960`）是纯词法 `relative_to`，只 resolve 其中一个会让 containment 判定当场断裂，制造出一个每轮必现的新 `PublishCleanupError`。`cfg_ic.py:305-310` 那条「刻意宽容」注释不构成反驳：它讲的是快照层可信 staged 文件与 symlink **祖先**目录（macOS `/tmp`），没有覆盖一个逃出 scratch 树的 symlink **叶子**。
+15. **不接线 `run` CLI、不碰 `controller.py` / `residue.py`**。本 issue 交付一个纯被调用的发布器；`cli.py` 的 `run` 仍是 `_unimplemented`（接线归 14.1）。
+
+Invariant Matrix
+Governing invariant: `DONE(T)` 一旦存在，`output/<T>/<source>/yd.rivqdown.dat` 与 `states/<source>/<T+12>.cfg.ic` 就已是完整、合约达标、node-27 可读的正式产物，且 `states/<source>/<T>.cfg.ic` 与 `<T+12>.cfg.ic` 两份俱在——即「`DONE` 之前无正式承诺，`DONE` 之后无删除本轮所需状态」。
+Source-of-truth identity/contract: `output/<T>/<source>/DONE` 这一空普通文件（`products-contract.md` §4：唯一完成判据），及其守护的二元组「v2 DAT（`expected_rows` 行 × `reach_count` 列）+ 时间头对应绝对 T+12 的 `cfg.ic`」。
+Surfaces:
+- Producers: `publish.publish` 的步骤 3/4/5（`atomic_write_bytes_no_follow` × 2、`write_bytes_no_follow_exclusive` × 1）
+- Validators/preflight: `publish.check_publish_contract`（v2/行/列/状态可读/日志可用/`DONE` 不存在/期望值正数）
+- Storage/cache/query: `output/<T>/<source>/`、`states/<source>/`（NFS 侧）；`work/<source>/<T>`（scratch 侧）
+- Public routes/entrypoints: `yd_producer.publish` 的 `PublishInputs` / `PublishResult` / `check_publish_contract` / `publish` / `PublishError` / `PublishCleanupError`；`cli.py` **不在本 issue 内**（14.1）
+- Frontend/downstream consumers: 下一轮 `controller.decide_frontier`（读 `DONE` 与 `states/<source>/<T+12>.cfg.ic` 的绝对时间头）；`residue.plan_residue`（以「无 `DONE`」判半成品）；viewer（只枚举带 `DONE` 的 source 目录）
+- Failure paths/rollback/stale state: 契约检查失败（零 NFS 变更，`PublishError`）；步骤 3–5 中途失败（pre-`DONE`：留无 `DONE` 半成品，`PublishError`，交 12.2 判定清理后整轮重跑）；**步骤 6/7 失败（post-`DONE`：本轮已完成，`PublishCleanupError`，MUST NOT 触发 13.2/12.2 的失败侧回收）。残留归属逐条点名（fixture 复核 round 2 更正）：未删净的**旧状态**由**下一轮发布的步骤 6** 收（裁决 5 的「严格早于 T'」自然覆盖它），**不是** 12.2——`residue.plan_residue` 在 `DONE(T)` 存在时清单整体为空（`residue.py:227-237`）且 `_later_state_files` 只取严格晚于 T 的状态（`:272-286`）；孤儿 `work/<source>/<T>` **当前无归属**，见 Known limits**；`DONE` 已存在（拒绝且零变更，`PublishError`）
+- Evidence/audit/readiness: `merged_log` 的可用性检查；`PublishResult` 交回的终名路径集合（供 14.1 写运行报告）
+Error-domain invariant（round 1 pattern escalation 追加）: `check_publish_contract` 与 `publish` 的公共边界上，**每一个**逃出的异常 MUST 恰好是 `PublishError`（本轮未完成）或 `PublishCleanupError`（本轮已完成）；且「已完成」的判据是 **`DONE` 在盘上存在**，不是「`_create_done` 返回了」。根因是一条可复用的错误假设：本模块曾假定 `safe_fs` 把一切失败都包成 `SafeFilesystemError`，而实际上 `open_file_no_follow` 对非 `ELOOP` 的 `OSError` 与 `FileNotFoundError` 是**裸抛**（`safe_fs.py:340-341,349-355`），`stat_no_follow` 对 symlink 抛 `SafeFilesystemError`，`controller.DiscoveryUnreadableError` 根本不是 `OSError` 的子类。该不变量在 round 1 于四个独立点同时失守（cand-01 `_create_done`、cand-03 两处检查期有界读、cand-10 `merged_log` symlink 臂、cand-09 步骤 6 的 `DiscoveryUnreadableError` 臂），故按 high 强度触发 pattern escalation，修复 MUST 是跨切面收口而非逐行打补丁。
+**round 2 该类复发，追加一条极性 MUST（cand-01 CONFIRMED/FIX_NOW）**：「`DONE` 在盘上存在」这一判据的**复探原语 MUST 是裸 `os.lstat(done_path)`——成功即 `True`，任何 `OSError` 即 `False`**，与姊妹模块 `controller.done_cycles`（`controller.py:308-317`）、`residue._half_product_dirs`（`residue.py:302-309`）同一高度。根因与 round 1 是**同一条**可复用错误假设的反面：round 1 假定「`safe_fs` 把一切失败都包成 `SafeFilesystemError`」，round 2 的复探则假定「抛出 `SafeFilesystemError` 就意味着条目存在」——同样是假的。`stat_no_follow` 把 EACCES/EIO/ESTALE 一律包成 `SafeFilesystemError(kind="io")`（`safe_fs.py:369-397`），`_open_child_dir` 把父链上的一切非 `FileNotFoundError` 失败包成 `SafeFilesystemError`（`:795-811`），于是 `except SafeFilesystemError: return True` 把「测不出来」翻译成「本轮已完成」，而 `except OSError: return False` 那条臂实际是死代码。verifier 实测：`chmod 0o000` 于 `output/<T>/<source>/` 且 `DONE` 不存在 -> 复探返回 `True` -> 公共边界抛 `PublishCleanupError`（本轮已完成）。**按 `kind` 分支（`unsafe` -> True，`io` -> False）已被实测证伪**：父级被换成普通文件时 `kind` 是默认的 `unsafe`，而 `DONE` 按构造不可能存在，仍得到错误的 `True`。裸 `lstat` 同时保住 docstring 要求的「任何条目（含 symlink、目录）都算在盘」。该缺陷的下游后果按 verifier 实测**止于误报**而非丢轮：`decide_frontier` 只认 `DONE`（`controller.py:200-217`，两条分支都回到 T，且已 rename 的 `<T+12>` 进的是 `min` 不是 `max`），`plan_residue` 照常把半成品与更晚状态判入清单，下一轮干净重跑——故定级 P2 而非 P1。
+Regression rows:
+- 公共边界的任一失败输入 -> 只抛两个声明类型之一，绝不逃出裸 `OSError`/`SafeFilesystemError`/`ValueError`/`DiscoveryUnreadableError`
+- **本轮自建的** `DONE` 已在盘 + 其后任一步失败 -> `PublishCleanupError` 且带正确的 `done_path`。**「本轮自建的」这个限定不可省**（round 3 cand-04 CONFIRMED/FIX_NOW）：裁决 7 对**外来 writer** 在契约检查之后抢先创建 `DONE` 的那条臂钉的是相反结论（`FileExistsError` MUST 收敛为 `PublishError`），而那条臂里「`DONE` 在盘」与「某一步失败」两个前件同时成立，按原措辞两行对同一个状态要求相反的异常类型。实现遵循裁决 7 且是对的：把竞争者的 `DONE` 当成 `PublishCleanupError`，等于告诉 14.1 一轮它从未完成的作业成功了，而步骤 6 的旧状态清理根本没跑、`work` 也不会被回收。反向也安全——报 `PublishError` 时 `residue.plan_residue` 在 `DONE(T)` 存在的前提下清单整体为空（`residue.py:227-237`），竞争者的产物不会被毁
+- `DONE` 未在盘 + 任一步失败 -> `PublishError`，`work_dir` 仍在；**「`YD_ROOT` 递归快照不变」这一子句只对契约检查阶段的失败成立**（round 2 cand-04b CONFIRMED/FIX_NOW）：步骤 4 失败时 DAT 已 rename 且按裁决 3 **刻意保留**（见下方步骤 4 那行），此时快照必然已变。原措辞把上一行只适用于检查阶段的子句泛化到「任一步失败」，照字面实现会去补一段回滚——正是裁决 3 明令禁止、变异体 (v) 专门要杀的东西
+- 合法一轮（scratch DAT 168×3988、checkpoint header 相对 720 分钟、非空日志）-> 五个终名按序落地，`DONE` 最后，`states/` 只剩 T 与 T+12，`work/<source>/<T>` 不存在，三份 NFS 文件 mode 0o644
+- 发布后对同一棵树调用 `controller.decide_frontier` -> 返回 T+12 且无 `stop_reason`（治理不变量的端到端判别器：写出去的状态正是下一轮读的那份）
+- 行数少一行 / 多半行 / `nc != reach_count` / v1 布局 / 日志 0 字节 / `merged_log` 是目录 -> 各自 `PublishError`，且 `output/<T>/<source>/` 与 `states/<source>/` 递归快照与调用前逐项相等（`DONE` 不存在、DAT 不存在、`work` 仍在）
+- `DONE(T)` 已存在 -> `PublishError`，既有 `DONE` 与 `yd.rivqdown.dat` 字节不变
+- 步骤 4 失败（`states/<source>/<T+12>.cfg.ic` 位置预置为 symlink）-> 抛错，DAT 已 rename 且**保留**，`DONE` 不存在，`work` 仍在；随后 `residue.plan_residue` 把该半成品判入清单（与 12.2 的接缝对得上）
+- 未改动的姊妹消费者：`controller.decide_frontier` 与 `residue.plan_residue` 全套既有用例逐字通过；`store/safe_fs.py` 既有调用方（`mode=None` 默认路径）行为逐字节不变
+
+Boundary-surface checklist（high 强度必需）:
+- 共享 helper 根：`store/safe_fs.py` —— **有改动**，仅 `write_bytes_no_follow_exclusive` 新增可选 `mode`（裁决 9）；`state/*`、`controller.py`、`residue.py` —— 零改动，只作为消费者导入
+- 公共入口：`yd_producer.publish` 六个符号（`PublishInputs`、`PublishResult`、`check_publish_contract`、`publish`、`PublishError`、`PublishCleanupError`）；`cli.py` 不动
+- 读面：scratch DAT（有界读头部）、scratch checkpoint（`state.parse`）、`merged_log`（只 stat）、NFS `DONE` 前置探测
+- 写/删/覆盖面：`output/<T>/<source>/{.tmp, yd.rivqdown.dat, DONE}`、`states/<source>/{.tmp, <T+12>.cfg.ic}`、旧状态 unlink、`work/<source>/<T>` 整树；`output/`、`output/<T>/`、`output/<T>/<source>/` **三级**目录的创建与 mode 放宽（裁决 8）
+- staging/publish/rollback 面：同目录临时文件 + 原子 rename；无回滚（裁决 3）
+- producer/consumer 证据边界：`DONE` ↔ `decide_frontier` / `plan_residue` / viewer
+- 陈旧态/幂等边界：`DONE` 已存在即拒（裁决 7）；同一 `PublishInputs` 第二次调用 MUST 稳定拒绝而不是二次提交
+- 未改动的下游消费者：`controller`、`residue`、`geometry`、viewer 侧读路径
+
+Must-preserve behavior:
+- `store/safe_fs.py` 现有全部导出的行为在 `mode` 缺省时逐字节不变；`producer/tests/test_safe_fs.py` / `test_safe_fs_refusals.py` 零断言改动
+- `controller.py`、`residue.py`、`state/**` 零改动，其全套既有用例通过
+- 「前沿只由 `DONE` 推进」：发布器 MUST NOT 写除上述五个终名之外的任何 NFS 路径（尤其不写 `status.json` / `meta.json`，`products-contract.md` §4.5）
+- `states/<source>/<T>.cfg.ic`（本轮起跑状态）在任何路径上都不被删除
+- 已带 `DONE` 的历史 `output/<cycle>/<source>/` 在任何路径上都不被读改删
+
+Seams under test:
+- 目录树 fixture（`tmp_path.resolve()` 下的合成 `YD_ROOT` + 独立 scratch 根；`resolve()` 的理由同 #23 裁决 6 末条：macOS `/var -> /private/var` 会让 `containment_root` 的逐分量 `O_NOFOLLOW` 锚定失败）
+- 合成 v2 DAT 构造器（`producer/tests/` 新增 fixture helper：给定 `nc`/`rows`/header 文本产出字节；v1 与残行两种反例由同一构造器的参数产出）
+- checkpoint `cfg.ic` 复用 `producer/tests/cfg_ic_fixtures.py` 既有构造器，不新造第二份
+- 顺序录制：monkeypatch `publish` 模块内的 `safe_fs` 绑定名（裁决 10），无注入式生产参数
+- 时间/cycle：直接构造 `datetime`，不注入时钟
+
+Risk packs considered (core):
+- Public API / CLI / script entry: selected —— 新增 `yd_producer.publish` 公共面；`cli.py` 不动
+- File IO / path safety / overwrite: selected —— 本 issue 的主面（原子 rename、`O_EXCL`、symlink 拒绝、containment、整树删除）
+- Schema / columns / units / field names: selected —— v2 DAT 布局与列数/行数即 schema 判定
+- Auth / permissions / secrets: selected —— 发布权限位与「不继承 scratch uid/gid/mode」
+- Error handling / rollback / partial outputs: selected —— fail-closed 检查与「不回滚、留半成品」的恢复模型
+- Concurrency / shared state / ordering: selected —— 提交顺序是 spec 的核心 Requirement；`DONE` 检查到创建的竞态
+- Resource limits / large input / discovery: selected —— DAT 有界读（裁决 12）
+- Legacy compatibility / examples: not selected —— `products-contract.md` §5.1 逐字「不要求兼容 v1」；v1 只作为**被拒绝**的反例出现
+- Config / project setup: not selected —— 发布器不读 `config.toml`（裁决 1），配置校验归 #2/#32
+- Release / packaging / dependency compatibility: not selected —— 零新增依赖（裁决 12）
+- Documentation / migration notes: not selected —— 无对外文档契约变化（spec 既有 Requirement 已覆盖本 issue 全部七类 Scenario，故本 issue **无 spec delta**）
+
+Required evidence（每条一个用例，`producer/tests/test_publish.py`）:
+- **顺序可观测**（spec Scenario 逐字）：一轮成功发布 -> 录得的终名序为 `yd.rivqdown.dat` rename < `<T+12>.cfg.ic` rename < `DONE` 创建 < 旧状态 unlink < `work` 删除；每对相邻关系各自断言（合成一条「序列相等」断言会在只错一处时给不出定位）
+- **checkpoint 发布前定戳**（spec Scenario 逐字）：checkpoint header 为相对 720 分钟 -> 发布后 `states/<source>/<T+12>.cfg.ic` 的 header 分钟对应绝对 T+12
+- **链闭合**（治理不变量的端到端判别器）：发布完成后对同一棵树调用 `controller.decide_frontier` -> `cycle == T+12` 且 `stop_reason is None`
+- **行数不足不写 DONE**（spec Scenario 逐字）：`expected_rows - 1` 行 -> `PublishError`，`DONE` 不存在，且 `output/<T>/<source>/` 与 `states/<source>/` 递归快照与调用前逐项相等
+- **行数边界三向**：`expected_rows + 1` 行、`expected_rows` 行 + 半行尾巴（多 8 字节）-> 均 `PublishError`；恰好 `expected_rows` 行 -> 通过。第三条是反向配重，缺了它「一律拒绝」这种恒假实现也能全绿
+- **reach 数不符不写 DONE**（spec Scenario 逐字）：`nc = reach_count - 1` -> `PublishError`；另一条 `reach_count != variant_reach_count`（DAT 本身与 `reach_count` 一致）-> 同样 `PublishError`，两条各自的错误消息 MUST 可区分
+- **v2 判据有判别力**：v1 布局（无 1024 文本头，`nc` 在 offset 0，且 `nc == reach_count`）-> `PublishError` 指名非 v2。这条是变异体 (c) 的唯一判别器
+- **文本头形状**：`[0:1024)` 含 NUL 之后又出现非 NUL 字节 -> 拒；含非可打印字节 -> 拒；全 NUL（空 header）-> 接受（SHUD 的 `char header[1024] = {}` 允许空描述）
+- **期望值正数闸**（消费偏离 2）：`expected_rows = 0`、`reach_count = 0`、`variant_reach_count = 0` 三条参数化 -> 各自 `PublishError`；`expected_rows = 0` 那条 MUST 用一个数据区为空的 DAT 构造，否则它会被行数判据顺带挡住而失去判别力
+- **状态不可读不写 DONE**：重戳后文档缺一个分段（`state_ic_structure_complete` 判不完整）-> `PublishError`，零 NFS 变更；header 形状非法（2 token）-> `restamp_to_absolute_time` 的 `ValueError` MUST 收敛为 `PublishError` 而不是穿透
+- **日志可用五形态**：`merged_log` 不存在 / 是目录 / 是 FIFO / **是 symlink（断链与指向真实非空文件各一）** / 0 字节 -> 各自 `PublishError`，零 NFS 变更。symlink 那条是 round 1 的 cand-10（CONFIRMED/FIX_NOW）：裁决 4 逐字写了四形态含 symlink，本行原先把 symlink 悄悄换成了「不存在」，测试跟着弱的这行走，于是 `stat_no_follow` 抛 `SafeFilesystemError` 的那条臂**一次都没被执行过**（目录与 FIFO 的 lstat 是成功的，失败发生在其后的 `S_ISREG`）。裁决是更高的 oracle 层级，本行按裁决订正
+- **零 NFS 变更是逐项快照**：上述每一条失败用例共用一个断言 helper——对 `YD_ROOT` 整棵做递归快照（路径、类型、大小、mode、mtime）并逐项相等，且 `work_dir` 仍存在。**MUST NOT** 以「`DONE` 不存在」单条断言代替（那放行「DAT 已 rename 但没写 DONE」这种真实缺陷）
+- **`check_publish_contract` 零写入**：单独调用它，前后 `YD_ROOT` 与 scratch 两棵树的递归快照均逐项相等（含通过与失败两种入参）
+- **`DONE` 前置闸**：`output/<T>/<source>/DONE` 已存在（普通文件）-> `PublishError`，既有 `DONE` 与既有 `yd.rivqdown.dat` 字节不变；`DONE` 是**目录**、是 symlink 两种形态同样拒
+- **`O_EXCL` 兜底闸**（前置闸的独立判别器）：monkeypatch 让前置探测恒报「不存在」，树上真有 `DONE` -> 步骤 5 抛 `FileExistsError` 并被收敛为 `PublishError`，既有 `DONE` 字节不变。缺这条，删掉 `O_EXCL` 的变异体存活
+- **状态只保留两份**（spec Scenario 逐字）：树上预置 `T-24`、`T-12`、`T` 三份状态 -> 发布后只剩 `T` 与 `T+12`
+- **旧状态删除的边界方向**：`== T` 的状态永不删（变异体 (i) 的判别器）；`> T+12` 的更晚状态**不删**（变异体 (j) 的判别器，越界删它是把 12.2 的面吃进来）
+- **不可见条目永不删**：`states/<source>/` 下预置 `2026082612.cfg.ic.tmp`、`nine.cfg.ic`、`9999123123.cfg.ic`、`.DS_Store`，**外加 `2026-08-25.cfg.ic`** -> 发布后逐个仍在。最后一条是变异体 (k) 的唯一判别器（fixture 复核 P2 实测的方向更正）：`nine.cfg.ic` 与 `9999123123.cfg.ic` 在字符串序下都**晚于**任何 2026 cycle（`'n'`=0x6e、`'9'`=0x39 均 > `'2'`=0x32），字符串比较的错误实现照样不删它们；`'-'`=0x2d < `'0'`=0x30，故 `2026-08-25.cfg.ic` 是唯一会被字符串序误判为「更旧」而删掉的形态
+- **逐源隔离**：GFS 侧同 cycle 有更旧状态与产物 -> 发布 IFS 后 GFS 侧递归快照逐项不变
+- **成功轮 work 被删除**（spec Scenario 逐字）：发布后 `work/<source>/<T>` 不存在，且 `work/<source>/` 父目录与另一 cycle 的 work 仍在
+- **work 树含越界 symlink 仍可删**：树内一个指向 scratch 根外的 symlink 条目 -> 链接被 unlink、其**目标存活**（`remove_tree_allow_symlinks` 的 unlink-not-traverse 语义，与 #23 同一条判据）
+- **work containment 不反推**：构造 `work_dir` 为 `<work_root>/<source>/<T>` 但 `work_root` 传一个不含它的根 -> `safe_fs` 拒绝，抛错且零删除（变异体 (o) 的判别器）
+- **发布文件不带 scratch 权限**（spec Scenario 逐字）：scratch DAT 与 checkpoint mode 0600 -> `yd.rivqdown.dat`、`<T+12>.cfg.ic`、`DONE` 三者 mode 均 `0o644`；**同一断言在 `os.umask(0o077)` 下重跑一次**（裁决 11）
+- **发布目录可穿越 / 自建面**（裁决 8 的目录侧，第一条）：在 `os.umask(0o077)` 下、从一棵**不含 `output/`** 的根发布 -> `output/`、`output/<T>/`、`output/<T>/<source>/` **三级**目录 mode 均为 `0o755`（三级各自单独断言；缺 `output/` 那级正是 round 1 P1 的形态）；同一用例断言 `states/<source>/`、`logs/`、`YD_ROOT` 自身的 mode **未被本次发布改动**（放宽面既不外溢也不递归）
+- **发布目录可穿越 / 已存在面**（裁决 8 的目录侧，第二条；round 2 cand-04a CONFIRMED/FIX_NOW）：预置一个历史 `output/<T-12>/` 且把 `output/` 设为 `0o2750` -> 发布后 `output/` 仍逐位是 `0o2750`，历史 `output/<T-12>/` 的 mode 未被改动。**这两条 MUST 是两个用例，MUST NOT 合并**：原措辞要求「同一用例」同时断言「从不含 `output/` 的根发布」与「预置历史 `output/<T-12>/` 未被改动」，而预置历史目录**必然创建 `output/`**，在裁决 8 下它就成了已存在层级、不再被放宽——两半在一个用例里互斥，原行不可满足
+- **可穿越判据的验收形式 = 穷举真值表 + 独立措辞 oracle**（裁决 8 的判据侧；round 4 的第二份 Review Failure Retro 认定的核心产出，**本条是本 fixture 里判据类断言的验收形式**）：
+  1. **穷举**：一条纯函数用例，对 `m in range(0o1000)` 全部 512 个低九位 mode，外加 `S_ISUID`/`S_ISGID`/`S_ISVTX` 的**全部 8 种组合**（512 × 8 = 4096，恰好是 `stat.S_IMODE` 能返回的每一个值），断言 `_is_readable_and_traversable(m)` 与一份**独立措辞**的 oracle 逐值相等。**MUST 是 8 种组合而不是三种单叠**：只叠单个高位会漏掉「setgid + sticky」这类形态，而形如「…且不得同时置 setgid 与 sticky」的错判据能从那个洞里钻过去——见变异体 `(aq9)`，它的唯一杀手就是 8 组合版本（round 5 cand-02 CONFIRMED/DEFER/P2；原措辞的 2048 值域被 shipped 测试超覆盖，此处是把 fixture 补齐到实测形式，不是放宽）。
+  2. **独立措辞 MUST 可验证**：该 oracle MUST 写成按类循环的自然语言直译——「`{group, other}` 中存在某一类，同时具备 `r` 与 `x`」——**MUST NOT** 是 shipped 掩码表达式（`(mode & 0o050) == 0o050 or (mode & 0o005) == 0o005`）的改写或复制。实现方 MUST 在 PR 报告中说明它为何不是同义反复。这一条是本行的承重条款：一份抄自被测实现的 oracle 使整条用例退化为恒真。
+  3. **端到端十三格降级为接线证据**（证明判据真的被 `publish()` 调用、拒绝真的发生在第一处 NFS 写入之前）：放行 `0o755`、`0o750`、`0o705`、`0o2750`、`0o2751`、**`0o2770`**；拒绝 `0o700`、`0o744`、`0o710`、`0o711`、`0o701`、**`0o741`**、**`0o714`**。三个加粗格是 round 4 的判别器：`0o2770` 是 `docs/agent-ops.md` §10 首选的共享组 + setgid 形态（误拒方向 = 该源永久停摆），`0o741`/`0o714` 是 `r` 与 `x` 分处两类的形态。
+  4. **逐级断言**：另加一条预置**不合规中间层级**的用例（`output/` 合规、`output/<T>/` 为 `0o700`）-> `PublishError` 指名该中间层级，且 `output/<T>/<source>/` **未被创建**、`YD_ROOT` 递归快照逐项不变。
+  为什么不再是「逐格枚举」：round 3 的第一份 retro 把「覆盖整个输入域」落成了十个手写 mode 字面值，而 round 4 的 verifier 实测证明那与「拿反例调掩码」是同一个错误高了一层——三条自然变异体在十格下全部存活，且**即使扩到十三格，对自然掩码族做暴力扫描仍有 94 个变异体存活**。样本永远追不上域；只有穷举加独立 oracle 能真正关掉这条复发路径
+- **DAT 短于定长头部即拒**（裁决 4 的 v2 判据侧，round 3 cand-03 CONFIRMED/FIX_NOW/P2）：`scratch_dat` 字节数少于 `DAT_FIXED_HEADER_BYTES`（边界值 1039，另可加一条 ~100 字节）-> `PublishError` 且消息含「非 v2」与「定长头部不足」，`YD_ROOT` 递归快照逐项不变。断言 MUST 钉住异常**类型**是 `PublishError`（而不只是「抛了错」）——被违反的正是「公共边界只抛两个声明类型之一」那条，删掉该闸后逃出来的是 `struct.error`。用例的期望长度 MUST 从 `publish.DAT_FIXED_HEADER_BYTES` 推出，不得写死 1040。既有的 `test_column_table_read_error_converges_to_publish_error` 对这条**没有判别力**：它在 1040 字节定长前缀**之后**截断，根本走不到这条臂；文本头形状闸也拦不住——被截断的 v2 前缀仍然是「可打印 ASCII + 其后全 NUL」，照样通过
+- **自建层级不可穿越即拒**（裁决 8 的后置断言，round 2 cand-02 CONFIRMED/FIX_NOW/P1）：在 `os.umask(0o077)` 下预置 `output/` 为 `0o700`（无组/其他 `x`）-> `PublishError` 指名该层级，`DONE` **不存在**，`YD_ROOT` 递归快照逐项不变。今日行为是 `DONE=True` 且 `output/` 留在 `0o700`，故这条是该修复的唯一判别器
+- **闩死态在下一轮仍被拒**（同上，第二个入口）：monkeypatch 令首轮的目录放宽抛 `OSError(EIO)`（`os.fchmod` 层，而非整个 `_widen_publish_dir`，以贴近真实失败面）-> 首轮 `PublishError`；恢复真实实现后对**同一轮**重跑 -> 仍 `PublishError` 且无 `DONE`，而不是把 `DONE` 封在一棵 `0o700` 的树上。`output/<T>/` 这一级另跑一次同形态（verifier 实测该级同样会闩死，「只有 `output/` 会永久闩住、cycle 目录会自愈」的说法被 PROBE1 证伪）
+- **源码机检**：`publish.py` 文本中不出现 `copy2`、`copystat`、`os.link`、`shutil`（裁决 8 的结构判据）；另对 `.chmod(` 做匹配并**显式排除 `os.fchmod(`** —— 生产代码里跟随 symlink 的写法是 `some_dir.chmod(0o755)`，文本中根本不出现 `Path.chmod` 这个串，按字面禁 `Path.chmod` 对它要防的构造零判别力（fixture 复核 round 2）。断言形式：源码去掉全部 `os.fchmod(` 出现后，剩余文本中 `.chmod(` 的计数为 0
+- **`yd_root` 经 symlink 到达时发布仍成功**（裁决 5 增补，fixture 复核 P2）：以 `link -> real` 构造根并把未 resolve 的 `link/yd` 传给 `publish` -> 五个终名照常落地，删除与写入结果与直接传 `real/yd` 一致。测试种子 `tmp_path.resolve()` 对这条无判别力，故必须单列
+- **`DONE` 之后失败可分辨**（裁决 3 增补，fixture 复核 P2）：令步骤 6 的旧状态 unlink 抛错（预置一份旧状态为 symlink）-> 抛 `PublishCleanupError` 而非 `PublishError`，`DONE` 与 `yd.rivqdown.dat` 与 `<T+12>.cfg.ic` 三者俱在且字节正确；另断言 `PublishCleanupError` **不是** `PublishError` 的子类（`issubclass` 直接断言），否则 14.1 的 `except PublishError` 会把已完成轮吞成失败
+- **`source` / `cycle` 输入域**：`source` 参数化跑 `["", ".", "..", "a/b", "ifs/"]` 五形态 -> 各自 `ValueError`，且两棵树递归快照逐项不变
+- **中途失败留半成品且可被 12.2 接手**：`states/<source>/<T+12>.cfg.ic` 位置预置为 symlink -> 步骤 4 抛 `SafeFilesystemError`（收敛为 `PublishError`），DAT 已在且 `DONE` 不存在；随后 `residue.plan_residue` 对同一棵树把 `output/<T>/<source>/` 判入 `half_product_dirs`
+- **幂等/重入**：同一 `PublishInputs` 连调两次 -> 第二次因 `DONE` 前置闸拒绝，第一次的产物字节不变，`states/` 仍是两份
+- **`safe_fs` 既有行为不变**：`write_bytes_no_follow_exclusive` 不传 `mode` 时落地位与改动前一致（在 `os.umask(0o077)` 与 `0o022` 两种环境各断言一次），传 `mode=0o644` 时抵消 umask
+- **`DONE` 复探失败时收敛为「未完成」**（round 2 cand-01/03a CONFIRMED/FIX_NOW）：令步骤 5 的写入抛错**且**同时把 `output/<T>/<source>/` 置为 `0o000`（`finally` 里恢复，否则 tmp 清理会卡住），`DONE` 不创建 -> 抛 `PublishError` 而不是 `PublishCleanupError`。今日行为是 `PublishCleanupError`，故这条是该修复的唯一判别器；与既有的「`DONE` 已落盘后失败 -> `PublishCleanupError`」构成一对反向配重，缺任一条都放行一个恒定实现
+- **`DONE` 是 symlink 时复探仍判在盘**（同上的反向半边）：`DONE` 位置是一条 symlink 且步骤 5 之后失败 -> `PublishCleanupError`（裸 `lstat` 的语义：任何条目都算在盘）
+- **checkpoint 不可解析收敛为 `PublishError`**（round 2 cand-03c CONFIRMED/FIX_NOW）：`scratch_checkpoint` 为二进制垃圾字节（另一条为零字节）-> `PublishError` 指名「无法解析」，零 NFS 变更。既有的 header 形状用例走的是重戳臂，从未执行到 `parse` 的 `except` 臂；`parse` 的契约是「任何结构性不可用一律抛 `ValueError`」（`cfg_ic.py:290-291`），该 `ValueError` 若穿透，14.1 的 `except PublishError` 接不住
+- **`nc` 必须是有限整数值**（round 1 cand-12，round 2 cand-04c 补登记）：把 offset 1032 处的 `nc` 改写为 `NaN` 与 `8.5` 两形态 -> 各自 `PublishError` 指名「不是有限整数值」，零 NFS 变更
+- **aware 非 UTC 的 `cycle` 归一到 UTC 路径**（round 1 cand-11，round 2 cand-04c 补登记）：`cycle` 传 `+08:00` 的 20:00 -> 产物落在 `output/2026082612/` 与 `states/<source>/2026082700.cfg.ic`，且 `output/2026082620/` **不存在**。「往返相等」那类断言对这条无判别力
+- **`output/<T>/<source>/` 内容逐项精确**（round 1 cand-14，round 2 cand-04c 补登记）：成功轮后该目录 `iterdir()` 排序后**恰好**等于 `["DONE", "yd.rivqdown.dat"]`。缺这条，遗留的 `.tmp` 或多写一份 `meta.json`（违反 `products-contract.md` §4.5）都能全绿
+- 预登记必须被杀死的变异体（按 `openspec/project-profile.md` 的 "Mutation-testing hazards" 执行：`rsync --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache'` 到含 `issue-24` 唯一标识的 scratch 目录、副本内 `rm -rf .venv && uv sync`、副本须同时带上 `openspec/` 与 `docs/`、先断言 `yd_producer.__file__` 落在副本内、每个变异体之间 `PYTHONDONTWRITEBYTECODE=1` 并清 `__pycache__`、跑法用 `uv run python -m pytest` 而非 `uv run pytest`、另跑一个必然变红的控制变异校准）：
+  (a) `DONE` 创建移到状态 rename 之前 -> 顺序用例变红；
+  (b) `DONE` 创建移到 DAT rename 之前 -> 顺序用例变红；
+  (c) v2 判据从「文本头形状」改为「`size >= 1040`」-> v1 布局用例变红；
+  (d) 行数判据 `==` 改为 `>=` -> `expected_rows + 1` 用例变红；
+  (e) 行数判据改为 `bytes // (8*(nc+1)) == expected_rows`（整除，容忍残行）-> 半行尾巴用例变红；
+  (f) `nc == reach_count` 判据删除（只留 `reach_count == variant_reach_count`）-> reach 数不符用例变红；
+  (g) `reach_count == variant_reach_count` 判据删除 -> 第二条 reach 用例变红；
+  (h) 期望值正数闸删除 -> `expected_rows = 0` 用例变红；
+  (i) 旧状态删除的 `<` 改 `<=` -> 「`== T` 永不删」用例变红（这条一旦漏网即断链且不可逆）；
+  (j) 旧状态删除改为「除 T 与 T+12 之外全删」-> 「`> T+12` 不删」用例变红；
+  (k) 可见性判据改为「文件名字符串比较」而非解析后 cycle 比较 -> 不可见条目用例变红，**唯一判别器是 `2026-08-25.cfg.ic`**（`'-'`=0x2d < `'0'`=0x30，字符串序下排在任何 2026 cycle 之前而被误判为「更旧」删掉）。`nine.cfg.ic` 与 `9999123123.cfg.ic` 对这条**没有**判别力：`'n'`=0x6e、`'9'`=0x39 都 > `'2'`=0x32，字符串序下它们排在更后，错误实现照样不删（round 2 复核更正）；
+  (l) 旧状态删除移到 `DONE` 创建之前 -> 顺序用例变红；
+  (m) work 删除移到旧状态删除之前 -> 顺序用例变红；
+  (n) `remove_tree_allow_symlinks` 换成 `rmtree_no_follow` -> work 含越界 symlink 用例变红；
+  (o) `work_root` 参数改为 `work_dir.parent.parent` 反推 -> containment 不反推用例变红；
+  (p) `atomic_write_bytes_no_follow` 的 `mode=PUBLISH_FILE_MODE` 改为 `mode=None` -> umask 0o077 下的 mode 用例变红（默认 umask 022 下 0o666&~022 == 0o644，**与期望值撞车**，这正是裁决 11 要求另跑一个 umask 的原因）；
+  (q) `write_bytes_no_follow_exclusive` 的 `fchmod` 删除（只留 `os.open` 的 mode 实参）-> umask 0o077 下 `DONE` 的 mode 用例变红；
+  (r) `DONE` 前置存在性闸删除 -> `DONE` 已存在用例变红（`O_EXCL` 会在步骤 5 拒绝，但此时 DAT 与状态**已经 rename 落地**，快照断言变红）；
+  (s) 步骤 5 的 `O_EXCL` 换成 `O_CREAT|O_TRUNC` -> `O_EXCL` 兜底用例变红；
+  (t) 契约检查移到 DAT rename 之后 -> 任一失败用例的递归快照断言变红；
+  (u) 契约检查失败时补一句 `work` 删除 -> 失败用例的 `work_dir` 仍存在断言变红；
+  (v) 步骤 3–7 中途失败时补一句「删掉已 rename 的 DAT」-> 中途失败留半成品用例变红；
+  (w) `restamp_to_absolute_time` 的 target 由 `T+12h` 改为 `T` -> 定戳用例与链闭合用例双双变红；
+  (x) 重戳后的 header 绝对时间校验删除 -> 需另造一个「重戳后 header 仍不对应 T+12」的判别器；若造不出（重戳成功即蕴含对应），如实记为等价变异体并说明，MUST NOT 默默重掷；
+  (y) `merged_log` 的 `st_size > 0` 判据改为「存在即可」-> 0 字节日志用例变红；
+  (z) `source` 输入域闸删除 -> `source` 五形态用例变红；
+  (aa) 目录创建后的 `fchmod(PUBLISH_DIR_MODE)` 删除 -> umask 0o077 下的目录 mode 用例变红（默认 umask 022 下 `ensure_directory_no_follow` 已落地 0o755，与期望值撞车，故该用例 MUST 在 0o077 下跑）；
+  (ab) 目录 mode 放宽改为递归作用于 `output/` 整棵 -> 「放宽面不外溢」断言变红；
+  (ac) 入口的一次性 `Path(yd_root).resolve()` 删除（全部路径由原始 `yd_root` 拼出）-> symlink 形态 `yd_root` 用例变红；
+  (ad) `PublishCleanupError` 改为继承 `PublishError` -> `issubclass` 断言变红；
+  (ae) 步骤 6/7 的错误改抛 `PublishError` -> `DONE` 之后失败可分辨用例变红；
+  (ag) `_create_done` 失败时不再复探 `done_path`（一律 `PublishError`）-> `DONE` 已落盘后失败的用例变红（round 1 cand-01）；
+  (ah) `_read_dat_head` / `_check_dat` 的 `except` 收窄回只有 `SafeFilesystemError` -> `chmod 0o000` scratch DAT 的用例变红（round 1 cand-03）；
+  (ai) 目录放宽恢复为无条件 `fchmod`（不先 stat） -> 预置 `0o2750` 的 `output/` 用例变红（round 1 cand-02）；
+  (aj) 目录 `fchmod` 丢掉高位保留（直接写 `0o755`）-> setgid 存活断言变红（round 1 cand-02）；
+  (ak) `state_ic_structure_complete` 的 `expected_river_count` 参数去掉 -> river 段截断的 checkpoint 用例变红（round 1 cand-04）；
+  (al) `_publish_dat` 的 `len(payload) == expected_size` 断言删除 -> 整读长度复核用例变红（round 1 cand-08）；
+  (am) checkpoint 改回 `parse(Path)`（跟随 symlink）-> 指向 scratch 树外的 symlink checkpoint 用例变红（round 1 cand-06）；
+  (an) scratch 侧只 resolve `work_dir` 不 resolve `work_root`（或反之）-> symlink scratch 根的用例变红（round 1 cand-05 的反向配重：该变异体正是 verifier 点名的「修一半反而制造每轮 `PublishCleanupError`」形态）；
+  **等价变异体（如实登记，不追判别器）**：`nc <= 0` 判据与 DAT 的 `S_ISREG` 判据各自删除后均无法构造判别器（round 1 verifier 实证）——`_check_positive_expectations` 先跑保证 `reach_count > 0`，故任何 `nc <= 0` 必先撞上 `nc != reach_count`；而 `open_file_no_follow` 自身即拒非普通文件（`safe_fs.py:345-346`）并已在 `publish.py:319-320` 被转换，故目录/FIFO 形态的 `scratch_dat` 照样得到 `PublishError` 且不会在 FIFO 上挂死。按本 fixture 变异体 (x) 的既定惯例「如实记为等价变异体并说明」处理。**round 2 追加第三条等价变异体**：`_entry_exists` 的 `except (SafeFilesystemError, OSError): return True` 翻成 `return False` 无判别器（round 2 cand-03b REFUTED，verifier 实测）——`stat_no_follow` 与 `ensure_directory_no_follow` 共用同一条 `_open_parent_dir`/`_open_child_dir` 走链，故任何**持久**的探测失败形态（`output/` 是 symlink、叶子是 symlink、父级 `0o000`）在其后的 `ensure_directory_no_follow` 上同样失败，翻转后的实现根本走不到 `fchmod`；两者只在「一次调用中途的瞬时故障」下可分辨，与上面两条同属一个等价类。MUST NOT 为它编一段 mock 编排充数。
+  (ao) `_done_is_on_disk` 的复探恢复为 `except SafeFilesystemError: return True`（或按 `kind` 分支）-> 「复探失败时收敛为未完成」用例变红（round 2 cand-01）；
+  (ap) 可穿越断言整体删除（前置与后置两趟一并删）-> 预置 `0o700` `output/` 的用例变红（round 2 cand-02）。**MUST 删两趟**：只删后置那趟按设计存活（round 3 cand-02 REFUTED，verifier 实测 `(ap-post-only)` 全绿；`(ap-pre-only)` 被杀。**杀手计数是随轮次变的量，此处不再固化**：round 3 测得它只被 `自建层级不可穿越即拒` 一条杀死，round 4 加宽格子后测得 `KILLED | 9 failed`、日志列出六个具名杀手（round 5 cand-04 CONFIRMED/DEFER/P3：原括注是 round-3 的一次性测量，已过期）。本条承重的是 `(ap-post-only)` **按设计存活**这半句，它在 round 4 日志中仍为 `SURVIVED | 129 passed`）。后置那趟唯一独占的场景是「`fchmod` 返回成功却不生效」，全项目文档无此机制、最接近的真实类比（父目录 default POSIX ACL clamp）已由 Known limits 路由到 M4 现场验证，故后置那趟按 belt-and-braces 保留而不追判别器，**MUST NOT** 为它编一段 `os.fchmod` 静默空转的 mock 编排（与本节三条等价变异体同一条惯例）；
+  (aq) 可穿越判据放松为「只要 owner 有 `r`+`x`」-> 预置 `0o700` 的用例变红（防止把断言写成恒真：发布进程自己永远进得去）；
+  (aq2) 判据放松回「组或其他有 `x` 即可」（丢掉 `r` 的要求）-> `0o710`/`0o711`/`0o701` 三格变红（round 3 cand-01 的直接判别器）；
+  (aq3) 判据放松为「组或其他有 `r` 即可」（丢掉 `x` 的要求）-> `0o744` 格变红（(aq2) 的反向配重）。**原措辞「这两条合起来钉死『r 与 x 必须同类兼备』」按 round 4 verifier 实测为假，已删除**：跨类合取变异体同时保留 `r` 与 `x` 两项要求、只丢掉「同类」耦合，(aq2)/(aq3) 都杀不掉它，见 (aq4)；
+  (aq4) 判据放松为「组/其他里有 `r`，且组/其他里有 `x`」（**不要求同类**，`(mode & 0o044) != 0 and (mode & 0o011) != 0`）-> `0o741`/`0o714` 两格变红，穷举表变红（round 4 cand-01a；该变异体与 shipped 判据在 512 个低九位 mode 中有 64 个分歧，误放行方向）；
+  (aq5) 判据改为**整位段相等** `(mode & 0o070) == 0o050 or (mode & 0o007) == 0o005` -> `0o2770` 格变红，穷举表变红（round 4 cand-01c；误**拒** `0o2770`/`0o770`/`0o707`，即 §10 首选形态被永久拒绝，该源停摆）；
+  (aq6) 判据改为 `(mode & 0o050) == 0o050 or (mode & 0o007) == 0o005`（只有 other 位段相等）-> 穷举表变红（round 4 verifier 构造的第四轴；误拒 `0o707`/`0o2707`，十三格全部看不见它）；
+  (aq7) 判据改为 `(mode & 0o054) == 0o050 or (mode & 0o005) == 0o005`（group 子句附加禁 other-`r`）-> 穷举表变红（同上第四轴；误拒 `0o754`，十三格同样看不见）；
+  (aq9) 判据附加「不得同时置 setgid 与 sticky」（`… and not (mode & S_ISGID and mode & S_ISVTX)`）-> 穷举表变红（round 4 修复实施方自行构造并登记；**唯一杀手是 8 种高位组合的穷举表**，三种单叠版本对它零判别力——这是本条第 1 小项要求 8 组合的实证依据）；
+  **(aq4)–(aq7) 四条 MUST 全部被杀**，这是本轮验收的可机检事实：前两条由端到端格子加穷举表共同杀死，后两条**只有穷举表杀得掉**——它们正是「样本追不上域」的实证。
+  (aq8) 前置那趟只断言首级（`for directory in levels[:1]`）-> 预置不合规中间层级的用例变红（round 4 cand-01b；该变异体不落入等价类，存在自然、无 mock 的判别器）；
+  (av) `_read_dat_head` 的 `len(head) < DAT_FIXED_HEADER_BYTES` 长度闸删除 -> DAT 短于定长头部的用例变红（round 3 cand-03 CONFIRMED/FIX_NOW/P2；verifier 实测删掉后 `struct.error` 直接穿透 `publish` 与 `check_publish_contract` 两个公共入口——它既不是 `OSError` 也不是 `ValueError`，沿途两处 `except (SafeFilesystemError, OSError)` 都接不住，14.1 的 `except PublishError` 更接不住）；
+  (ar) `_restamped_bytes` 中 `parse(raw)` 外的 `except ValueError` 删除 -> checkpoint 垃圾字节用例变红（round 2 cand-03c）；
+  (as) `nc` 的有限/整数判据删除 -> `NaN` 与 `8.5` 用例变红（round 1 cand-12，本轮补登记）；
+  (at) `_normalize_cycle` 改为 `replace(tzinfo=UTC)`（丢弃 offset 而非换算）-> aware 非 UTC 用例变红（round 1 cand-11，本轮补登记）；
+  (au) 步骤 3 的临时文件不 rename 而是留下 -> `output/<T>/<source>/` 精确内容用例变红（round 1 cand-14，本轮补登记）；
+  (af) 契约检查阶段的 `read_bytes_limited_no_follow` 换成 `read_bytes_no_follow`（整读）-> 需一条「检查阶段峰值内存与头部同量级」的 `tracemalloc` 断言（构造一个 `st_size` 巨大但头部合法的 DAT），照 #22 的既有做法登记；该断言 MUST 用从 `publish` 导入的 `DAT_FIXED_HEADER_BYTES` 推出期望量级（`DAT_FIXED_HEADER_BYTES + 8*nc`），不得写死 1040 或 5.4 MB 这类字面量
+
+Verification（本 issue 合并前逐条跑）:
+- `cd producer && uv run pytest` -> 退出码 0
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
+- `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
+- `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
+
+Known limits（合并时按此验收）:
+- **跨 source 在共享 `output/<T>/` 层级上的放宽竞态**（round 5 cand-06 PLAUSIBLE/DEFER/P3）：`_prepare_output_dir` 先 stat 定「自建层级」、再 mkdir、再 fchmod，无锁。并发发布者落进他人的 `mkdir`→`fchmod` 窗口即把该层级误判为已存在，抛一次 `DONE` 前的 `PublishError`。响亮、零 NFS 损伤、下一 tick 自愈；仅当 14.3 双源并行后可达。tracked issue：**#106**，其中钉死约束：无条件 `fchmod` 是被禁的变异体 `(ai)`（round 1 cand-02 P1），修法不得重提。
+- `docs/products-contract.md` §5.2 的「数据区第 0 列逐值为 `0, 60, …, 10020`」不在 spec 与 issue 的 DONE 前检查清单内（偏离 4），本 issue 不实现；一份分钟列错乱但行列数正确的 DAT 仍会被写 `DONE`。按「out-of-scope findings: report, don't fix」路由为独立 issue：**#109**（Phase 8 deferral routing 已出链接）。
+- 「不继承 uid/gid」只有结构证明与源码机检，无跨 uid 行为断言（裁决 11）；真实 NFS 上的 uid/gid 落点归 M4 现场验证。
+- 裁决 8 的目录放宽只解决 umask 造成的收紧；`safe_fs.py:124-131` 点名的另一条路径——父目录带 default POSIX ACL 时 mode 实参会 clamp 掉继承的 ACL mask——本模块不处理（`fchmod` 到 0o755 同样不恢复被 clamp 的 `#effective` 位）。现场若采用 ACL 而非共享组 setgid，属部署侧配置，归 M4 现场验证与 `docs/agent-ops.md` §10 的部署约定。
+- `PublishCleanupError`（`DONE` 之后的清理失败）遗留的孤儿 `work/<source>/<T>` **当前无回收归属**（fixture 复核 round 2）：`residue.plan_residue` 的清单在 `DONE(T)` 存在时整体为空且全程不碰 scratch，13.3 的面是 `output` 的 14 天保留窗，两者都收不到它。这违反 `docs/compute-loop-design.md` §12「每轮成功或失败收尾后删除」，但补一处 scratch 侧的孤儿扫描属 13.2/14.1 的收尾面，本 issue 不越界实现。按「out-of-scope findings: report, don't fix」路由为独立 issue：**#108**（Phase 8 deferral routing 已出链接）。#108 另记录了同一缺口的第二个入口：步骤 5 与 6/7 之间进程被硬杀会留下同样的孤儿且**零异常**，故「14.1 捕获 `PublishCleanupError` 重试」单独收不了口。
+- **`work_dir` 的形状未被校验**（round 1 cand-07 CONFIRMED/**DEFER**，路由到 14.1）：`_remove_work` 只校 containment，不校 `work_dir` 是否真的等于 `work_root / source / cycle_id(cycle)`。实测传 `work_dir = work_root / SOURCE`（少一节、单个干净分量、确在 `work_root` 内）时 `publish()` **返回成功**，整棵按源 work 树被删——含另一 cycle 的 work，即 `test_publish.py:271` 明确断言必须存活的那个目录；且发生在 `DONE` 之后，重跑救不回来。DEFER 的依据是 fixture 把这层校验分给了调用方（裁决 1 只 fail-close `source`/`cycle`，裁决 6 只钉「containment 不得反推」）且 `cli.py run` 仍是 `_unimplemented`、无生产暴露面。该 DEFER **以路由成立为条件**：必须在 14.1 落一条入口守卫 `work_dir == work_root / source / cycle_id(cycle)`（落在 `PublishInputs.__post_init__` 亦可），并配一条「传少一节路径 -> 姊妹 cycle 的 work 存活」的回归用例。tracked issue：**#94**。
+- spec Scenario「状态只保留两份」的字面 WHEN 是「连续发布两轮成功」，本 issue 无 `run_once`，以「预置三份历史状态 + 一轮发布」这一等价树形式验收；两轮连跑的端到端形式归 14.1。
+- **`reach_count` 与真实 `cfg.ic` river 段行数的恒等式由测试构造断言，未经真实数据验证**（round 2 cand-05 PLAUSIBLE/**DEFER**，本行即该 DEFER 的成立条件）：裁决 4 的 `expected_river_count=reach_count` 把一条无任何仓内文件明说的恒等式变成了硬闸，而 `test_publish.py` 全套由单个 `REACH_COUNT` 常量同时喂 `build_dat_bytes(nc=...)` 与 `build_cfg_ic(river_count=...)`，对真实分叉零判别力（套件里没有任何一份真实 yd `cfg.ic`）。失败方向是**对的**：若真实 `cfg.ic` 的 river 段行数不等于 3988，结果是每轮 pre-`DONE` 响亮 `PublishError`、零 NFS 损伤、该源永久停在原地重试，而不是 round 1 那种静默中毒。故本 issue 不补代码；该恒等式的真实数据验证归 M4 现场验证与 14.1 的配置接线（与本节 uid/gid、ACL 两条同一路由）。
+
+Non-goals:
+- 失败处理（合并日志生成、失败侧删 work、不推进）：任务 13.2，issue 待定
+- 14 天保留窗清理与字面 `realpath` 圈定 yd 根：任务 13.3，issue #25
+- `run_once` 编排、把发布器接进 `cli.py run`、运行报告：任务 14.1
+- checkpoint 的**捕获**（tracker）：issue #16；本 issue 只消费一个已捕获的路径
+- 变体 reach 数的真实来源（prepare 侧计数）：#20 / 14.1 接线（偏离 1）
+- `residue.plan_residue` / `decide_frontier` / `state/**` 的任何改动
+- 真实 NFS/Slurm 行为、DAT 数值正确性：归 M4
+
+Review focus:
+- 契约检查是否**真的**全部先于第一处 NFS 写入（看调用顺序，不看注释）；失败路径的 `YD_ROOT` 递归快照是否真的逐项不变
+- 五个终名的相对序是否逐对被钉住；有没有把顺序断言退化成「都发生了」
+- 旧状态删除集合是否**严格**等于「cycle 严格早于 T 的合法状态」——多一类（`> T+12`、不可见条目、另一源）或少一类都是缺陷；`<` / `<=` 与「字符串比较 vs 解析后比较」两处边界要当作缺陷主动查
+- `containment_root` 两处是否各自正确（NFS 侧 `Path(yd_root).resolve()`、work 侧显式 `work_root`），有没有出现 `shutil` / 裸 `Path.unlink` / `copy2` / `os.link`
+- `safe_fs` 的 `mode` 扩展是否**只**新增可选参数、缺省路径逐字节不变；既有用例有没有被改动（oracle 完整性）
+- DAT 读取是否真的有界（有没有 `read()` 整个文件、有没有把数据区读进内存）
+- v2 判据是否有判别力（能否分辨 v1），还是退化成「文件够大」
+- `DONE` 的两道闸是否都在，`FileExistsError` 有没有穿透
+- 有没有越界落地 13.2 的失败处理、13.3 的保留窗，或 14.1 的编排（含"顺手先放着"的死代码）
 
 ## 14. run-controller（三）：主循环集成
 
