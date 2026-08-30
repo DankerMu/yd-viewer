@@ -5,7 +5,7 @@
 ## ADDED Requirements
 
 ### Requirement: 运行期 T+12 捕获
-tracker MUST 在 SHUD 运行期间轮询 `<project>.cfg.ic.update` 的 header 时间，命中 relative 720 分钟（或等价的 T+12 绝对分钟）时复制为独立 checkpoint 文件，并确认副本可按原生分段格式读取；SHUD 继续运行不受影响。捕获产物的时间头保持原样（相对分钟），发布前的绝对定戳属 run-controller 发布路径（compute-loop §9.2）。
+tracker MUST 在 SHUD 运行期间轮询 `<project>.cfg.ic.update` 的 header 时间，命中 relative 720 分钟时复制为独立 checkpoint 文件，并确认副本可按原生分段格式读取；SHUD 继续运行不受影响。捕获产物的时间头保持原样（相对分钟），发布前的绝对定戳属 run-controller 发布路径（compute-loop §9.2）。**绝对（epoch）分钟形式的 header 不在 tracker 的接受域内**：运行中的 SHUD 写进 `cfg.ic.update` 的是相对分钟，epoch 形式只出现在 warm-start 初态与重戳后的正式状态上，其判定与产生归 state-tools 重戳与发布路径。tracker 见到 epoch 形式的 header MUST 判为未命中（fail closed，如实进入漏采路径），MUST NOT 为兼容它而引入 `start_time` 与绝对时间换算。
 
 #### Scenario: 正常捕获
 - **WHEN** 模拟的 `cfg.ic.update` 覆写序列包含 header=720 分钟的版本

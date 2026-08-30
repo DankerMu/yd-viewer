@@ -36,12 +36,22 @@
 
 **D8 基建在 change 外**（grill 用户拍板）：仓库 public、CI（ruff+pytest、Py3.12、openspec validate、stage-pipeline-log 锚）、双骨架已随 commit `3f18de8` 落地，不进本 change 的 spec/tasks。
 
+
+**D9 tracker 快照分次落地（issue #16 捕获半 / #17 补跑半）**：`nwm-snapshot-inventory.md` §1 第 6/7 行（`workers/shud_runtime/runtime.py` → `producer/src/yd_producer/tracker/checkpoint_tracker.py`，`tests/test_shud_runtime.py` → `producer/tests/test_checkpoint_tracker.py`）的抽取集横跨 compute-loop §9.2 捕获与 §9.3 补跑两半，对应任务 9.1 与 9.2、issue #16 与 #17。两半**分两个 PR 落进同一个文件**：#16 落捕获，#17 落补跑。这是 spec `checkpoint-tracker` 的 `快照可追溯` Requirement 所要求的「显式偏离记录」——该 Requirement 的原意是「无法快照时须记录」，此处不是无法快照而是**分次快照**，同样在此显式记录，以免 `落地状态` 列被读成「第 6 行抽取集已搬完」。
+
+配套的取舍，逐条（细则见 tasks.md `### Issue #16 fixture（任务 9.1）` §F）：捕获半按 D4 零默认改写——目标小时取 `Config.checkpoint_hours` 显式入参而非 manifest 的三路 fail-open 解析，`project_name`/`run_dir` 为显式入参而非 pin 的四路 fallback，**不含轮询循环与 `time.sleep`**（观测由调用方驱动，连带消掉 pin 的 `0.01` 秒轮询默认），只接受相对分钟 header（epoch 形式归 #9 重戳与发布路径，本模块对其 fail closed），结构校验复用本仓 `state.parse` 而非 pin 的 `state_ic_structure_complete`（后者属任务 4.2/issue #9），IO 原语全部复用 `store/safe_fs` 而不移植 pin 的 staged-IO 族。因此**捕获半零环境变量读取**，第 6 行 D4 段声明为「合法保留项」的两处 `SLURM_*` 读取（随 `write_manifest` → `_manifest_provenance` → `_task_outcome_attempt_identity`）在 #16 完全不涉及，其去留由 #17 定夺。
+
+**D9 补记（2026-08-28，越界撤回）**：#16 起初还在 `state/cfg_ic.py` 新增了 `header_minute_time` 与 `_header_minute_index` 两个 pin 移植（理由是避免「哪个 token 是 minute-time」出现双权威），属对 issue "PR Boundary: tracker 模块与测试" 的刻意越界。评审期间 issue #22（任务 12.1）在 master 落了 `state/header_time.py`，含同一 pin 行段的同两个符号，落点更宽更正。#16 据此**撤回全部越界改动**，改为消费 `yd_producer.state.cfg_ic_header_minute_time`：越界归零，双权威顾虑由单一权威模块彻底解决。裁决细则见 tasks.md `### Issue #16 fixture` 的「落点裁决修订 R1」。
+
+**D9 补记 2（欠 #17 的文件体量裁决）**：本条写下的「两半分两个 PR 落进**同一个文件**」在 #17 落地时会与项目级 `large-file-guard`（`maxLines: 1000`）对撞——`producer/tests/test_checkpoint_tracker.py` 落地即 806 行，而 cap 6 行强制随搬的闭包（8 helper + 13 项模块级常量，pin 上约 458 行）单独就超出 194 行余量。#17 的 fixture MUST 在动码前于「拆文件并修订本条 MUST / 加第四条 exclude（issue #82 模式的第四次复发，须同步登记）/ 拆分闭包进独立 fixture 模块」三者中显式择一，MUST NOT 默认走第二条。逐条依据见 tasks.md `### Issue #16 fixture` 的「欠 #17 fixture 的一项显式裁决」。
+
 ## Sketch seams under test
 
 测试行使的公共边界，从高到低（每 seam 一行理由）：
 
 1. `controller.run_once(cfg, executor) -> RunReport`（对 tmp 目录树 + fake executor）——最高可本地行使的 seam，一次覆盖 §13.1 控制器行与发布行（前沿、双源并行、raw 缺口、单源失败、无 DONE 崩溃恢复、DONE 最后写、状态保留两份）。
 2. `rawscan.judge(raw_root, source, cycle, config) -> ScanVerdict`（目录 fixture）——完整性规则与 f000 特例的判定边界，独立于控制器演进。（本行于 issue #6 修订：原写作 `raw_scan.scan(raw_root, source, cycle) -> Manifest | Incomplete`。三处修订理由——模块名以 issue #6 的 `yd_producer.rawscan` 为准；规则全集在 `Config` 内，故 `config` 必须是显式形参而非隐式全局；返回 `Manifest` 与 tasks.md 组 3 的切分冲突——manifest 结构归 3.2，3.1 只返回判定结果 `ScanVerdict`。复制与 manifest 生成的 seam 由 3.2 另行钉定。）
+2b. `rawcopy.stage_raw(verdict, raw_root, work_dir, source, cycle, config) -> StagedRaw`（目录 fixture + 合成源 manifest）——issue #7 按上一行的交接钉定：只读复制与临时 `raw-manifest.json` 生成的边界。独立成 seam 而不并入 `judge` 的三个理由——判定是纯函数、staging 是写面，两者的失败语义不同（不完整不是异常 vs 写面失败即异常）；staging 需要 `work_dir` 与源 manifest 两个 `judge` 不需要的入参；produce→converter 的产物契约（entry 逐变量扇出、`idx_selector` 累积语义、manifest 级 forecast hours）只在此边界可断言。编号取 2b 而非重排后续各行，避免与既有引用（本文件与 tasks.md 多处按序号引用 seam 3–7）产生第二份编号。
 3. `state` 模块文件级纯函数（parse/restamp/negative-residual/check，file→file）——格式正确性是状态链安全的根，必须在最细边界钉死。
 4. `forcing.build(work, manifest) -> ForcingPackage` 与 `assemble(work, variant, forcing, state_path) -> RunDir`（合成 canonical/变体 fixture）——§13.1 "DB-free 链"行的验收边界；`state_path` 显式入参保证 warm-start 初态覆盖变体自带率定末态可被断言；快照模块另带 NWM 来源最小测试。
 5. `tracker.capture(shud_dir, target_minute) -> CheckpointResult`（模拟 `cfg.ic.update` 覆写序列）——轮询竞态只能在此边界确定性重放。

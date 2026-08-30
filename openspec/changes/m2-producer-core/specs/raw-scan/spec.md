@@ -28,7 +28,7 @@
 - **THEN** 拒绝并报错，不进行文件检查
 
 ### Requirement: raw 只读与临时副本
-完整判定后，控制器 MUST 把清单内文件复制到本轮 `work/raw/`；复制前后 NWM 原件的内容与元数据 MUST 保持不变；副本 MUST NOT 写入 `YD_ROOT` 或跨轮保留。
+完整判定后，控制器 MUST 把清单内文件复制到本轮 `work/raw/`；复制前后 NWM 原件的内容与元数据 MUST 保持不变；副本 MUST NOT 写入 `YD_ROOT` 或跨轮保留。完整判定是复制的**必要而非充分**条件：复制侧另有自己的准入条件（源侧链接形态、bundle 布局、调用参数与判定结果的一致性、**以及调用参数彼此之间的关系**），其中任一条不成立时 MUST 拒绝复制并报错，即便判定结果为完整；拒绝时 MUST NOT 留下任何部分产物。
 
 #### Scenario: 复制不改动源
 - **WHEN** 将 fixture raw 根中的文件复制到 work
@@ -38,9 +38,84 @@
 - **WHEN** 复制完成
 - **THEN** `YD_ROOT` 模拟根内不出现任何 raw 副本
 
+#### Scenario: 源根与 work 目录互相包含时拒绝复制
+- **WHEN** 以互相包含的 `raw_root` 与 `work_dir` 请求复制（任一为另一的祖先，含经 `..` 段、大小写别名或 symlink 形成的等价形态）
+- **THEN** 在任何写入之前拒绝并报错，NWM 源树下零新增、零删除、零改名
+
+#### Scenario: 解析后互不包含的两根正常产出
+- **WHEN** 以词法上看似包含、但解析后互不包含的两根请求复制（例如 `work_dir` 写作 `<raw_root>/../work`）
+- **THEN** 正常完成复制并产出本轮 manifest，不因词法形态被误拒
+
+#### Scenario: 判定不完整时零写入
+- **WHEN** 以 `complete=False` 的判定结果请求复制
+- **THEN** 拒绝并报错，work 根内不出现任何新增路径（含目录与半个 manifest）
+
+#### Scenario: 复制中途源被改动
+- **WHEN** 某个源文件在复制窗口内被替换，复制前后的 `lstat` 元组不一致
+- **THEN** 报错停止，work 内不留半套副本
+
+#### Scenario: 不覆盖已存在的目标
+- **WHEN** 目标副本路径上已存在同名文件
+- **THEN** 报错停止，不覆盖该文件
+
+#### Scenario: 源侧 symlink 拒绝
+- **WHEN** 待复制的源文件路径自身、或其在 raw 根之下的任一祖先目录段是 symlink
+- **THEN** 拒绝并报错，不跟随该链、不复制，work 根内不出现任何新增路径
+
 ### Requirement: 本轮临时 raw manifest
-扫描器 MUST 在 work 内生成 NWM-compatible `raw-manifest.json`，包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息；entry 路径 MUST 只引用 `work/raw/` 临时副本。
+扫描器 MUST 在 work 内生成 NWM-compatible `raw-manifest.json`，包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息；entry 路径 MUST 只引用 `work/raw/` 临时副本。entry MUST 逐变量扇出，同一 `(lead, bundle)` 的各变量 entry 共享同一路径键；manifest 声明的 `(lead, variable)` 集合 MUST 与判定结果的预期变量集**相等**。变量与 bundle 的归属关系无处可查时（一个 lead 对应多于一个 bundle 文件模式）MUST 拒绝生成 manifest，MUST NOT 任选一个 bundle 承担全部变量。
 
 #### Scenario: manifest 结构与路径
 - **WHEN** 对完整 cycle 生成 manifest
 - **THEN** JSON 含 source/cycle/forecast hours/变量/filter 字段，且所有 entry 路径位于 `work/raw/` 之下
+
+#### Scenario: 逐变量扇出与预期集相等
+- **WHEN** 对单一 bundle 模式的完整 cycle 生成 manifest
+- **THEN** entry 的 `(lead, variable)` 集合与判定结果的预期变量集相等，且同一 `(lead, bundle)` 的各变量 entry 共享同一路径键
+
+#### Scenario: 多 bundle 模式拒绝生成
+- **WHEN** 该 source 声明了多于一个 bundle 文件模式
+- **THEN** 拒绝并报错，work 根内不出现任何新增路径
+
+### Requirement: manifest 语义键承接与 fail-closed
+manifest 的 entry 级语义键（GRIB filter、累积语义、时间标记）MUST 逐条承接自 NWM 源 manifest，MUST NOT 在本仓发明或以默认值补齐。降水累积语义缺失或越域时 MUST 报错停止。承接进来的 entry 级时间标记 MUST 与本轮自算的时间一致——`cycle_time` MUST 等于本轮 cycle，`valid_time` MUST 等于本轮 cycle 加该 entry 的 lead；比较 MUST 在**时刻**上做而非文本上做（同一时刻的不同时区写法视为一致）。不一致时 MUST 报错停止，MUST NOT 承接一个与本轮自算值矛盾的时间标记。源 manifest MUST 声明其 forecast hours 全集，且该全集 MUST 覆盖本轮预期的全部 lead；本仓产出的 manifest MUST 自行显式写出 forecast hours 相关键，MUST NOT 从源 manifest 转抄、也 MUST NOT 依赖消费端由实际 entry 反推。
+
+#### Scenario: 源 manifest 不可用
+- **WHEN** 源 manifest 缺失、不可解析，或其 entry 无法覆盖本轮预期的 `(lead, variable)` 全集
+- **THEN** 报错停止，不以空值或推导补齐
+
+#### Scenario: 承接的 entry 时间与本轮自算不一致
+- **WHEN** 源 manifest 某条 entry 的 `cycle_time` 不等于本轮 cycle，或其 `valid_time` 不等于本轮 cycle 加该 entry 的 lead
+- **THEN** 报错停止，work 根内不出现任何新增路径
+
+#### Scenario: 时间一致性按时刻比较而非文本比较
+- **WHEN** 源 manifest 的 entry 时间写成与本轮 cycle 不同的时区偏移，但指向同一时刻
+- **THEN** 视为一致，正常生成 manifest
+
+#### Scenario: 降水累积语义缺失
+- **WHEN** 某条降水变量 entry 的累积类型缺失
+- **THEN** 报错停止，MUST NOT 静默默认为「自起报累积」
+
+#### Scenario: 累积类型取值越域
+- **WHEN** 累积类型取声明取值域之外的值
+- **THEN** 报错停止
+
+#### Scenario: 区间累积缺少区间范围
+- **WHEN** 累积类型为区间桶但区间范围键缺失
+- **THEN** 报错停止
+
+#### Scenario: 源 manifest 缺少 forecast hours 全集
+- **WHEN** 源 manifest 缺少 manifest 级 forecast hours 全集键，或其值不是列表
+- **THEN** 报错停止，不落到消费端「由实际 entry 反推应有小时表」的自证式回退
+
+#### Scenario: 源 manifest 的 forecast hours 覆盖不全
+- **WHEN** 源 manifest 声明的 forecast hours 全集不包含本轮预期的某个 lead
+- **THEN** 报错停止，不以副本存在为由声明该轮齐全
+
+#### Scenario: 源侧未声明「请求小时表」不构成失败
+- **WHEN** 源 manifest 只声明 forecast hours 全集而未声明「请求小时表」键
+- **THEN** 正常产出，本仓产出的 manifest 自行写出该键，取值为本轮预期 lead 全集
+
+#### Scenario: 产出 manifest 的结构可回读
+- **WHEN** 对完整 cycle 生成 manifest
+- **THEN** 该 JSON 可被 NWM 快照的 manifest 结构原样回读，source 身份段取该源的存储身份拼法，且未经校验的校验和/大小/清单 URI 三个字段留空而非填入本仓臆造的值

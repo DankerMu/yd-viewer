@@ -11,6 +11,13 @@ TOML 逐字写出而非由 dict 渲染：入口层测试不校验 schema，写�
 用的 module 名取自 `config.toml`"这条断言的期望值与一个把 module 名写死回代码的实现产出
 完全相同（实测：把 `config.nwm_mapping_builder_module` 换成字面量后全套仍全绿）。故该行
 从模板里拆出来单独参数化——不用 `str.format`：TOML 里 `bundles` 含 `{lead}` 占位符。
+
+`nwm_canonical_grid_id.gfs` / `.ifs` 走**同一条纪律的两个方向**（issue #20）：
+
+* 两者 MUST 互不相同。`prepare` 的"两次 builder 调用的 `grid_id` 不同"这条断言，在两个
+  值相同时退化成永真式——一个把 `grid_id` 写死成同一个常量的实现照样绿。
+* 两者都 MUST 能取第二组值（`ALT_CANONICAL_GRID_IDS`），否则"`grid_id` 取自
+  `config.toml`"与"取自代码里的字面量"两种实现产出完全相同。
 """
 
 import os
@@ -19,6 +26,12 @@ from pathlib import Path
 MAPPING_BUILDER_MODULE = "workers.mapping_builder.cli"
 # 第二个点分名，与上面**必须不同**：判别性期望值，不是"另一个合法配置"。
 ALT_MAPPING_BUILDER_MODULE = "other.builder.entry"
+
+# 逐 source 的 NWM canonical grid 标识。两个值**必须互不相同**（见模块头）；生产取值的
+# 复核归 #29，这里是合成值。
+CANONICAL_GRID_IDS = {"gfs": "fixture-grid-gfs", "ifs": "fixture-grid-ifs"}
+# 第二组值，与上面逐键**必须不同**：判别性期望值。
+ALT_CANONICAL_GRID_IDS = {"gfs": "alt-grid-gfs", "ifs": "alt-grid-ifs"}
 
 # `nwm_mapping_builder_module` 是 issue #3 随 #32 三步落地的必需键；缺它则装载即 fail closed
 _CONFIG_HEAD = """\
@@ -83,10 +96,38 @@ def _quote(value: str | os.PathLike[str]) -> str:
     return f'"{text}"'
 
 
-def render_config(module: str = MAPPING_BUILDER_MODULE) -> str:
-    """渲染一份齐备 `config.toml` 文本，`nwm_mapping_builder_module` 取 `module`。"""
+def render_config(
+    module: str = MAPPING_BUILDER_MODULE,
+    *,
+    grid_ids: dict[str, str] | None = None,
+    variants: dict[str, str] | None = None,
+    reach_count: int | None = None,
+) -> str:
+    """渲染一份齐备 `config.toml` 文本。
+
+    `module` / `grid_ids` 是判别性参数（见模块头）。`variants` 与 `reach_count` 供
+    `prepare` 编排用例改写变体相对路径与 reach 期望值——两者都必须能取非默认值，否则
+    "守卫跟着 config 走"与"守卫钉死字面量"两种实现产出完全相同。
+    """
+    grids = CANONICAL_GRID_IDS if grid_ids is None else grid_ids
+    body = (
+        _CONFIG_HEAD
+        if reach_count is None
+        else _CONFIG_HEAD.replace("reach_count = 3988", f"reach_count = {reach_count}")
+    )
+    tail = _CONFIG_TAIL
+    if variants is not None:
+        tail = tail.replace(
+            'gfs = "input/models/yd_gfs"\nifs = "input/models/yd_ifs"',
+            f"gfs = {_quote(variants['gfs'])}\nifs = {_quote(variants['ifs'])}",
+        )
     return (
-        _CONFIG_HEAD + f"nwm_mapping_builder_module = {_quote(module)}\n" + _CONFIG_TAIL
+        body
+        + f"nwm_mapping_builder_module = {_quote(module)}\n"
+        + "\n[nwm_canonical_grid_id]\n"
+        + f"gfs = {_quote(grids['gfs'])}\n"
+        + f"ifs = {_quote(grids['ifs'])}\n"
+        + tail
     )
 
 
@@ -95,9 +136,17 @@ def write_config(
     name: str = "config.toml",
     *,
     module: str = MAPPING_BUILDER_MODULE,
+    grid_ids: dict[str, str] | None = None,
+    variants: dict[str, str] | None = None,
+    reach_count: int | None = None,
 ) -> Path:
     path = tmp_path / name
-    path.write_text(render_config(module), encoding="utf-8")
+    path.write_text(
+        render_config(
+            module, grid_ids=grid_ids, variants=variants, reach_count=reach_count
+        ),
+        encoding="utf-8",
+    )
     return path
 
 

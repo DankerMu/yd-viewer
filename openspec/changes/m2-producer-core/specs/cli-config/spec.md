@@ -15,8 +15,12 @@
 - **WHEN** 执行 `yd-producer bootstrap`
 - **THEN** 以非零退出码报错，不执行任何业务逻辑
 
+#### Scenario: prepare 的基线包路径必需
+- **WHEN** 执行 `yd-producer prepare` 而不给 `--baseline`
+- **THEN** 以 argparse 用法错误退出，不装载配置、不执行任何业务逻辑（基线包路径只经调用传入，代码 MUST NOT 内置默认路径，compute-loop §6.1）
+
 ### Requirement: config.toml 装载与校验
-装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构、NWM mapping-builder module 点分名 `nwm_mapping_builder_module`（版本化快照事实，非现场值）；任何必需字段缺失或类型错误 MUST fail closed。
+装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构、NWM mapping-builder module 点分名 `nwm_mapping_builder_module` 与每 source 的 NWM canonical grid 标识 `nwm_canonical_grid_id.gfs`/`.ifs`（两者均为版本化快照事实，非现场值）；任何必需字段缺失或类型错误 MUST fail closed。装载器只校验存在性与类型，MUST NOT 做取值域校验（取值域约束归各自的下游 fail-closed 闸门）。
 
 #### Scenario: 完整配置装载成功
 - **WHEN** 载入包含全部必需字段的 `config.toml`
@@ -54,6 +58,21 @@
 #### Scenario: 以精确解释器调用
 - **WHEN** 解释器路径指向可执行文件（测试用假解释器脚本）
 - **THEN** 薄外壳以该路径调用 `config.toml` 的 `nwm_mapping_builder_module` 所指 module，调用命令中不出现其它解释器，module 解析上下文（cwd/`PYTHONPATH`）来自 `local.toml` 的 NWM checkout 字段
+
+### Requirement: prepare 的清理告警与残留证据 MUST 到达运维
+`prepare` 收集到的清理/回滚失败是总不变量被破坏时的**唯一证据**（agent-ops §8.1 要求每次 `prepare` 调用留 receipt）。CLI MUST 把它们打到 stderr：失败路径上 MUST 渲染在途异常的 `__notes__`（`str(exc)` 不含 notes），成功路径上 MUST 渲染报告的 `cleanup_warnings`。退出码 MUST NOT 因此改变，且 MUST NOT 打印 traceback。
+
+#### Scenario: 失败路径的清理失败随错误一并打印
+- **WHEN** `main(["prepare", ...])` 走生产 builder 绑定且清理原语注入失败
+- **THEN** 退出码仍为 `3`，stderr 同时含 `BuilderUnavailableError` 消息与该清理失败文本，且不含 `Traceback`
+
+#### Scenario: 成功路径的清理告警打印且不改退出码
+- **WHEN** 注入的 `run_prepare` fake 返回带非空 `cleanup_warnings` 的报告
+- **THEN** 退出码为 `0`，stderr 含每条告警文本
+
+#### Scenario: 退出码 1 的失败路径同样渲染 notes
+- **WHEN** 注入的 `run_prepare` fake 抛出带 `__notes__` 的 `PrepareError`（note 文本 MUST NOT 是 `str(exc)` 的子串，否则 `_fail` 单独即可满足断言、不具判别性）
+- **THEN** 退出码为 `1`，stderr 同时含异常消息与 note 文本，且不含 `Traceback`
 
 ### Requirement: 拒绝 NWM 数据库环境
 producer 任一入口启动时检测到 `DATABASE_URL` 环境变量 MUST 视为配置错误并拒绝执行（agent-ops §2.2）。

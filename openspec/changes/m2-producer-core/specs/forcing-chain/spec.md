@@ -11,6 +11,14 @@ canonical converter MUST 以本轮临时 raw manifest 与 `work/raw/` 副本为�
 - **WHEN** 对合成 raw fixture 与对应 manifest 运行 converter
 - **THEN** work object-store 内生成 canonical NetCDF 与 catalog，且过程无任何数据库连接
 
+#### Scenario: 真实 GRIB 读路径被覆盖
+- **WHEN** 对**合成 GRIB2 样本**（非 NetCDF 替身）与携带 `metadata.grib_short_name` 的 manifest entry 运行 converter
+- **THEN** converter 经 cfgrib 后端读取该样本并产出 canonical NetCDF 与 catalog；**MUST NOT** 静默回退到 netcdf4 后端——回退是生产路径未被覆盖的假绿形态，测试 MUST 能把回退判红
+
+#### Scenario: 运行期无出站连接
+- **WHEN** 在拦截出站 socket 连接的闸门下执行完整的 manifest 转换（读 raw → 转换 → 写产物 → 写 catalog）
+- **THEN** 闸门一次都不被触发；converter 的构造签名内**不存在** repository 形参，模块内**不存在** `CanonicalRepository` 协议
+
 ### Requirement: source-specific direct-grid forcing
 forcing 生产 MUST 将 canonical 格点直接作为 SHUD forcing 站点（binding 权重恒为 1，不走 105 站 IDW）；生成的 forcing 首行 `Time_Day=0` MUST 锚定 cycle 时刻；IFS 与 GFS 使用各自 canonical grid 的 binding。
 
