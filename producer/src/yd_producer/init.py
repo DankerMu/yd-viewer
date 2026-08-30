@@ -1,8 +1,9 @@
 """`yd-producer init`：只在全新根建立首态（任务 11.1）。
 
-契约来源：`docs/compute-loop-design.md` §6.2、`openspec/changes/m2-producer-core/specs/
-init-bootstrap/spec.md` 的三条 Requirement（「只在全新根执行」「扫描窗内确定各源首轮」
-「率定末态定位」「首态生成」）。
+契约来源：`docs/compute-loop-design.md` §6.2 与
+`openspec/changes/m2-producer-core/specs/init-bootstrap/spec.md`。**这里只给路径、不复述
+条数、也不复述 Requirement 名字清单**：复述会随规范增删而静默过期（实测该清单曾写「三条」
+却列了四个名字，两者又都与 spec 的实际条目对不上），规范文件本身是唯一真源。
 
 **中心不变量**：`init` 要么让 `YD_ROOT` 从「全新根」转到「每个 source 恰有一份重戳到其
 首轮 T 的首态」，要么**一个字节都不写**；除阶段 B 内的写入失败外没有第三种终态，且任何
@@ -59,9 +60,12 @@ init-bootstrap/spec.md` 的三条 Requirement（「只在全新根执行」「�
   MUST **hedge**——点名探测本身失败，MUST NOT 宣称「已被排他创建」。
 
 `FileExistsError`（类一）走**自己的**分支且**先于**该臂捕获，故预置条目永远不会被误认成
-本模块自己的半写产物。`ensure_directory_no_follow` 的失败同样不探测：那条腿上**对 target 的**
-`os.open(..., O_CREAT|O_EXCL, ...)` 从未被调用过（它只开/建目录分量），target 侧零残留
-是结构性事实。
+本模块自己的半写产物。`ensure_directory_no_follow` 的失败**不做半写探测**：那条腿上**对
+target 的** `os.open(..., O_CREAT|O_EXCL, ...)` 从未被调用过（它只开/建目录分量），target
+侧零残留是结构性事实。但它 MUST 做**另一种**探测——no-follow `os.lstat(target_dir)`，用来
+分流下面收尾话术的第二路与第三路（:func:`_foreign_entry_blocks`）：`states/<source>` 本身
+被一个 symlink/FIFO/普通文件占住时该腿同样失败，而那是一个**持久外来条目**，与终名被占
+逐字节同构。
 
 **收尾话术是三路**（`docs/compute-loop-design.md` §6.2 逐字；MUST NOT 退化成两路，更 MUST
 NOT 退化成单看 `written`）：
@@ -70,15 +74,30 @@ NOT 退化成单看 `written`）：
    人工清理 `states/`」。判据不能只看 `written`：首个 source 就写中途失败时 `written` 为
    空、盘上却已有一份截断文件，只看 `written` 会报「根仍是全新根」而下一次 init 必然
    `STATES_NOT_EMPTY`，两条话术直接矛盾。
-2. 零落盘、零残留、且目标路径上**无任何条目**（阶段 B 首个 `ensure_directory_no_follow`
-   抛 `EACCES`，或 `O_EXCL` 的 `os.open` 拿 `EACCES` 而探测干净地得 `FileNotFoundError`）
-   → 根仍是全新根，MUST NOT 宣称需要清理，把根因放在首位并报「零写入，根仍是全新根」。
-   这句话是一条可执行的运维指令：实测恢复权限后**直接重跑** `bootstrap` 即成功。
-3. 零落盘、零残留、但目标被一个**外来**条目占住（类一的 `FileExistsError`）→ 点名该条目
-   路径、声明它**不是**本次写入产生（故不必也不该删 `states/` 整树），并要求重跑前先确认
-   并移除它。这条腿 MUST NOT 说「根仍是全新根」——实测不移除该条目时 run 2 与 run 1 的
-   `detail` 逐字节相同，「直接重跑」的承诺在这里为假；也 MUST NOT 说「可能已被部分写入」
-   ——该条目不是本模块的产物。
+2. 零落盘、零残留、且**写入路径上不存在持久外来条目**（`states/` 置 `0o500`/`0o600` 使
+   父目录 open 拿 `EACCES`，或 `O_EXCL` 的 `os.open` 拿 `EACCES` 而探测干净地得
+   `FileNotFoundError`）→ 根仍是全新根，MUST NOT 宣称需要清理，把根因放在首位并报「零
+   写入，根仍是全新根」。这句话是一条可执行的运维指令：实测恢复权限后**直接重跑**
+   `bootstrap` 即成功。
+3. 零落盘、零残留、但**写入路径上被一个持久外来条目挡住** → 点名**被占住的那个路径本身**、
+   声明它**不是**本次写入产生（故不必也不该删 `states/` 整树），并要求重跑前先确认并移除
+   它。这条腿 MUST NOT 说「根仍是全新根」——实测不移除该条目时 run 2 与 run 1 的 `detail`
+   逐字节相同，「直接重跑」的承诺在这里为假；也 MUST NOT 说「可能已被部分写入」——该条目
+   不是本模块的产物。
+
+**第二路与第三路的判据是「阻塞物是否为持久外来条目」**，MUST NOT 由「哪条腿抛的异常」或
+「条目是否恰好落在终名 `target` 上」决定（round 4 R4-A）。外来条目有两种载体，运维后果
+逐字节相同（重跑复现同一失败，必须先移除该条目），故 MUST 走同一路：
+
+- **占住终名 `target`**：`O_CREAT|O_EXCL` 撞已存在条目得 `EEXIST`，话术点名 `target`；
+- **占住父目录分量 `states/<source>`**（symlink / FIFO / 普通文件）：
+  `ensure_directory_no_follow` 抛 `NotADirectoryError`/`ELOOP`（`store/safe_fs.py`），
+  话术点名 `target_dir`。
+
+与之相对，权限类失败（`states/` 的 `0o500`/`0o600`）盘上并没有外来条目，`chmod` 后直接
+重跑即可成功，仍走第二路。分流判据同样是**盘上探测**而非 `SafeFilesystemError.kind`：
+`safe_fs` 把「父目录分量是 symlink」与「父目录 open 拿 `EACCES`」包成同一个类型，只有
+no-follow `os.lstat(target_dir)` 能把它们分开（:func:`_foreign_entry_blocks`）。
 
 **可见性判据取「宽」，与 `controller` 的前沿可见集刻意不同**：`controller.decide_frontier`
 （issue #22）对不可解析的条目判「不可见」，为的是不让一次崩溃的发布永久砖化该源；本模块
@@ -361,8 +380,8 @@ def _first_complete_cycle(
     source: str,
     candidates: tuple[datetime, ...],
     config: Config,
-) -> tuple[datetime | None, tuple[Path, ...]]:
-    """升序取第一个完整 cycle，并带回扫描过程中遇到的**不可读** raw 文件。
+) -> tuple[datetime | None, tuple[Path, ...], tuple[Path, ...]]:
+    """升序取第一个完整 cycle，并带回被跳过候选上的**不可读**与**缺失** raw 文件。
 
     `rawscan.judge` 抛的 `ConfigError`（配置取值域 / 请求校验 / 模式校验）**原样上抛**，
     MUST NOT 被吞成「不完整」——那会把一个配置错误伪装成「等 raw 补齐」，让运维永远重跑
@@ -375,14 +394,30 @@ def _first_complete_cycle(
     raw 补齐」这一句，把一次权限故障伪装成缺数据，运维会对着已在盘上的数据永远重跑
     （本模块已在 `cycle.hours` 路径上禁止了同一伪装）。方向不变——两种情形都 fail closed
     地整体拒绝、零写入，区别只在**给运维的下一步动作**。
+
+    **命中完整 cycle 时同样 MUST 带回累积的 `unreadable`**（round 4 R4-C）：先前这里
+    `return cycle, ()` 把此前候选上的不可读文件整个丢掉，于是一次 raw 权限故障会把链起点
+    **静默**推后一个 cycle 步长**并落盘**；落盘后根已非全新，重跑必被 `STATES_NOT_EMPTY`
+    拒绝——静默偏移没有自愈路径。方向仍不变（照样建链，MUST NOT 改成拒绝），只是把它变成
+    成功理由里可观测的一句话。
+
+    **`missing` 同样 MUST 带回**（round 4 R4-B）：只带回 `unreadable` 时，调用方的
+    「不是缺数据」这个**全称否定**在混合态（同一候选既缺文件又有不可读文件）上为假，而
+    混合态在生产 NFS 上是主导形态。**整目录缺席的候选不计入 `missing`**
+    （`verdict.missing_files == verdict.expected_files`）：`rawscan.judge` 自陈 cycle 目录
+    整体不存在时返回「全部缺失」，而 7 天扫描窗的绝大多数候选正落在这里，把它们计进来会
+    让每一次纯不可读的拒绝都退化成混合态、并在 `detail` 里刷出上百条路径。
     """
     unreadable: list[Path] = []
+    missing: list[Path] = []
     for cycle in candidates:
         verdict = rawscan.judge(raw_root, source, cycle, config)
         if verdict.complete:
-            return cycle, ()
+            return cycle, tuple(unreadable), tuple(missing)
         unreadable.extend(verdict.unreadable_files)
-    return None, tuple(unreadable)
+        if verdict.missing_files != verdict.expected_files:
+            missing.extend(verdict.missing_files)
+    return None, tuple(unreadable), tuple(missing)
 
 
 # --- 编排 --------------------------------------------------------------------
@@ -415,6 +450,34 @@ def _probe_partial_residue(target: Path) -> str | None:
     )
 
 
+def _foreign_entry_blocks(path: Path) -> bool:
+    """no-follow **盘上探测**：`path` 上是否坐着一个持久的、非目录的外来条目。
+
+    专供 `ensure_directory_no_follow` 腿的收尾分流（round 4 R4-A）。判据 MUST 是盘上有
+    什么，而不是 `SafeFilesystemError.kind`（同模块头：`safe_fs` 把「分量是 symlink」与
+    「父目录 open 拿 `EACCES`」包成同一个类型）：
+
+    - **探到非目录条目**（symlink——含悬垂、FIFO、普通文件）→ `True`，走第三路。这类条目
+      不是本次写入产生，不 `chmod` 也不删除它就重跑，必然以同样理由再次失败。
+    - **`FileNotFoundError`** → `False`：分量根本不存在，是权限或 I/O 故障，走第二路。
+    - **探到真实目录** → `False`：目录不是阻塞物（`ensure_directory_no_follow` 对既存目录
+      是空操作成功），失败来自更上层的权限，走第二路。
+    - **`lstat` 自身失败**（如 `states/` 置 `0o600`，探针穿不过去）→ `False`：这里
+      fail-open 到第二路是**刻意**的，且与「探测失败 fail closed」的半写判据不冲突——两者
+      的保守方向相反。半写探测的风险是漏报盘上残留（下一次 init 会撞
+      `STATES_NOT_EMPTY`），故宁可多报；本探测的风险是错误地要求运维去移除一个并不存在的
+      条目，而 `states/` 探不动本身恰恰就是权限故障的证据，第二路的「排掉根因后直接重跑」
+      正是对的指令。
+    """
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    return not stat.S_ISDIR(entry.st_mode)
+
+
 def _write_failed(
     source: str,
     target: Path,
@@ -423,13 +486,18 @@ def _write_failed(
     *,
     partial_note: str | None,
     blocked_by_foreign_entry: bool = False,
+    blocking_path: Path | None = None,
 ) -> InitReport:
     """阶段 B 的失败收尾，结尾话术**三路**（compute-loop §6.2）。
 
     `partial_note` 是 :func:`_probe_partial_residue` 的探测结论：非 `None` 即「盘上可能
     留下了半写目标」，其文本已按探测结果（探到 / 探测失败）分好话术。
-    `blocked_by_foreign_entry` 只在 `FileExistsError` 腿为真：目标路径上坐着一个**不是
-    本次写入产生**的条目。
+    `blocked_by_foreign_entry` 为真表示**写入路径上**坐着一个不是本次写入产生的持久外来
+    条目。它有两种载体：`FileExistsError` 腿（占住终名 `target`）与 ensure 腿
+    （占住父目录分量 `states/<source>`，由 :func:`_foreign_entry_blocks` 盘上探到）。
+    `blocking_path` 是**被占住的那个路径本身**，第三路话术 MUST 插值它而不是 `target`
+    ——ensure 腿上 `target` 只是一个从未被创建的终名，点名它会让「点名该条目路径」的承诺
+    在下一层再次为假（round 4 R4-A）。缺省回落到 `target`（终名腿）。
 
     三路互斥且顺序固定：
 
@@ -439,10 +507,12 @@ def _write_failed(
         `STATES_NOT_EMPTY`。
     (b) 零落盘、零残留、且目标路径上**无任何条目**（open 期失败）→ 「零写入，根仍是全新
         根」，根因放在首位。这句话是一条运维指令（直接重跑即可），实测成立。
-    (c) 零落盘、零残留、但目标被一个**外来**条目占住（`O_EXCL` 撞 `EEXIST`）→ 点名该条目
-        并要求重跑前先确认并移除它。这里 MUST NOT 说「根仍是全新根」（不移除该条目，重跑
-        必然以同样理由再次失败——实测 run 1 与 run 2 的 detail 逐字节相同），也 MUST NOT
-        说「可能已被部分写入」（该条目不是本次写入产生，把 `states/` 整树删掉是过度动作）。
+    (c) 零落盘、零残留、但**写入路径上被一个持久外来条目挡住**（终名被占 → `O_EXCL` 撞
+        `EEXIST`；父目录分量被占 → ensure 腿抛 `NotADirectoryError`/`ELOOP`）→ 点名
+        `blocking_path` 并要求重跑前先确认并移除它。这里 MUST NOT 说「根仍是全新根」
+        （不移除该条目，重跑必然以同样理由再次失败——实测 run 1 与 run 2 的 detail 逐字节
+        相同），也 MUST NOT 说「可能已被部分写入」（该条目不是本次写入产生，把 `states/`
+        整树删掉是过度动作）。
     """
     parts = [f"{source} 的首态写入 {target} 失败：{error}"]
     if partial_note is not None:
@@ -453,8 +523,9 @@ def _write_failed(
         # 半写产物同样让根不再全新，即使它不在 `written` 里。
         parts.append("根已非全新，重跑 init 前需人工清理 `states/`")
     elif blocked_by_foreign_entry:
+        blocker = target if blocking_path is None else blocking_path
         parts.append(
-            f"本次没有任何首态落盘，但目标路径 {target} 上已有一个**非本次写入产生**的"
+            f"本次没有任何首态落盘，但写入路径 {blocker} 上已有一个**非本次写入产生**的"
             "条目：它既不是半写产物、也不该连同 `states/` 整树一起删除；"
             "重跑 init 之前须人工确认该条目的来源并移除它，否则重跑必然以同样理由再次失败"
         )
@@ -542,8 +613,9 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
     # 4. 逐源在扫描窗内定首轮 T；任一源无完整 cycle 即整体拒绝（fail closed）。
     candidates = _candidate_cycles(window_start, now_utc, config.cycle.hours)
     frontier: dict[str, datetime] = {}
+    skipped_unreadable: dict[str, tuple[Path, ...]] = {}
     for source in rawscan.SOURCES:
-        cycle, unreadable = _first_complete_cycle(
+        cycle, unreadable, missing = _first_complete_cycle(
             local.nwm.raw_root, source, candidates, config
         )
         if cycle is None:
@@ -551,12 +623,29 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
                 f"{source} 在扫描窗 [{window_start.isoformat()}, "
                 f"{now_utc.isoformat()}] 内没有完整 cycle；整体拒绝、不写任何状态"
             )
+            # 分支优先级固定：不可读优先于纯缺文件。「等待 raw 补齐后重跑 init」是**只**
+            # 对纯缺文件成立的补救指令（compute-loop §6.2 逐字），MUST NOT 出现在下面
+            # 任何一条含不可读文件的腿上——包括混合态。
             if unreadable:
                 listed = "、".join(str(path) for path in unreadable[:3])
+                head = (
+                    f"{reason}；窗内有 {len(unreadable)} 个 raw 文件**存在但不可读**"
+                    f"（如 {listed}）"
+                )
+                if missing:
+                    # 混合态：MUST 并列点名两者。全称否定「不是缺数据」在这里为假，
+                    # 而给缺失侧补一句「等 raw 补齐」又会把权限故障的补救指令稀释掉，
+                    # 故两侧都只陈述事实（round 4 R4-B）。
+                    listed_missing = "、".join(str(path) for path in missing[:3])
+                    return _refuse(
+                        InitRefusal.NO_COMPLETE_RAW_CYCLE,
+                        f"{head}；同时另有 {len(missing)} 个预期 raw 文件**缺失**"
+                        f"（如 {listed_missing}）：这是权限/IO 故障与数据缺口**并存**，"
+                        "重跑 init 之前两者都须逐一确认",
+                    )
                 return _refuse(
                     InitRefusal.NO_COMPLETE_RAW_CYCLE,
-                    f"{reason}；窗内有 {len(unreadable)} 个 raw 文件**存在但不可读**"
-                    f"（如 {listed}）：这是权限或 I/O 故障，不是缺数据，"
+                    f"{head}：这是权限或 I/O 故障，不是缺数据，"
                     "重跑 init 之前须先修复这些文件的可读性",
                 )
             return _refuse(
@@ -564,6 +653,8 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
                 f"{reason}，等待 raw 补齐后重跑 init",
             )
         frontier[source] = cycle
+        if unreadable:
+            skipped_unreadable[source] = unreadable
 
     # 5. 逐源重戳并渲染字节。到这里为止仍然零写入。
     payloads: dict[str, bytes] = {}
@@ -585,12 +676,23 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
             frontier[source].strftime(rawscan.CYCLE_DIR_FORMAT) + STATE_SUFFIX
         )
         # 两次调用**分别** try：目录腿失败时 `os.open(target...)` 结构性地**从未被调用
-        # 过**，零残留是事实而非推断，故不必也不该去探测目标（`chmod 0o500 states/` 就是
-        # 这种终态）。合在一个 try 里会把写入腿的探测语义套到一条与目标无关的失败上。
+        # 过**，零残留是事实而非推断，故不必也不该去探测 **target**（`chmod 0o500 states/`
+        # 就是这种终态）。合在一个 try 里会把写入腿的探测语义套到一条与目标无关的失败上。
+        # 但这条腿仍必须探测 **target_dir**：`states/<source>` 被 symlink/FIFO/普通文件
+        # 占住时它同样在这里失败，而那是一个持久外来条目，收尾 MUST 走第三路并点名
+        # `target_dir` 本身（round 4 R4-A；判据是盘上探测，不是异常类型/`kind`）。
         try:
             safe_fs.ensure_directory_no_follow(target_dir)
         except (OSError, safe_fs.SafeFilesystemError) as error:
-            return _write_failed(source, target, written, error, partial_note=None)
+            return _write_failed(
+                source,
+                target,
+                written,
+                error,
+                partial_note=None,
+                blocked_by_foreign_entry=_foreign_entry_blocks(target_dir),
+                blocking_path=target_dir,
+            )
         try:
             safe_fs.write_bytes_no_follow_exclusive(target, payloads[source])
         except FileExistsError as error:
@@ -617,11 +719,24 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
             )
         written.append(target)
 
+    # 成功理由：两源的首轮 T，外加**被跳过候选上的不可读 raw**（round 4 R4-C）。后者不改
+    # 方向（照样建链），但链起点因此比 raw 实际到达情况更晚，而 init 一生只跑一次——落盘
+    # 之后重跑必被 `STATES_NOT_EMPTY` 拒绝，静默偏移没有自愈路径，故 MUST 在这里点名。
+    detail_parts = [
+        f"{source} 首轮 T={frontier[source].strftime(rawscan.CYCLE_DIR_FORMAT)}"
+        for source in rawscan.SOURCES
+    ]
+    for source in rawscan.SOURCES:
+        skipped = skipped_unreadable.get(source, ())
+        if skipped:
+            listed = "、".join(str(path) for path in skipped[:3])
+            detail_parts.append(
+                f"{source} 的链起点跳过了更早的候选，那些候选上有 {len(skipped)} 个 raw "
+                f"文件**存在但不可读**（如 {listed}）：链起点已因此后移，"
+                "init 不会重跑，须人工确认这些文件的可读性"
+            )
     return InitReport(
         written=tuple(written),
         refusal=None,
-        detail="；".join(
-            f"{source} 首轮 T={frontier[source].strftime(rawscan.CYCLE_DIR_FORMAT)}"
-            for source in rawscan.SOURCES
-        ),
+        detail="；".join(detail_parts),
     )

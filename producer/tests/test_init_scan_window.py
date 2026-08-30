@@ -128,6 +128,93 @@ def test_unreadable_raw_is_not_disguised_as_a_missing_raw_refusal(
     assert_zero_write(tree, before_states, before_output)
 
 
+def test_mixed_missing_and_unreadable_raw_are_both_named(tmp_path: Path) -> None:
+    """[桶 C-9] 缺文件与不可读**同时存在**时 MUST 并列点名（round 4 R4-B）。
+
+    构造：ifs 窗内唯一存在的候选 `complete=False`（少铺最后一个预期文件 -> `missing_files`
+    非空），再把它剩下的那个文件 `chmod 0o000`（-> `unreadable_files` 非空）。`judge` 因此
+    同时返回两类非空集合，这是生产 NFS 上的主导形态（`rawscan.py` 自陈 7 天窗的绝大多数
+    请求落在缺文件一侧）。
+
+    方向不变（仍整体拒绝、仍零写入），但 detail MUST 并列点名两者：
+    - MUST NOT 出现「不是缺数据」这类**全称否定**——混合态下它字面为假；
+    - 仍 MUST NOT 出现「等待 raw 补齐后重跑」——`§6.2` 逐字限定该提示只在**确为纯缺文件**
+      时才允许，给混合态补一句「补齐 missing」会把权限故障的补救指令稀释掉。
+
+    判别变异体：把并列措辞退回全称否定（即 `_first_complete_cycle` 丢弃 `missing_files`、
+    分支固定说「不是缺数据」）-> 本行必红。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    tree.write_cycle("gfs", cycle)
+    bundle_dir = tree.write_cycle("ifs", cycle, complete=False)
+    present = sorted(path for path in bundle_dir.iterdir() if path.is_file())
+    assert len(present) == 1  # 少铺的那个即 `missing_files`
+    before_states = snapshot(tree.states)
+    before_output = snapshot(tree.output)
+
+    with unreadable(present[0]):
+        report = tree.run()
+
+    assert report.refusal is InitRefusal.NO_COMPLETE_RAW_CYCLE
+    assert "ifs" in report.detail
+    # 并列点名：不可读侧带数目与路径，缺失侧同样带数目。
+    assert "不可读" in report.detail
+    assert "1 个 raw 文件" in report.detail
+    assert str(present[0]) in report.detail
+    assert "缺失" in report.detail
+    assert "1 个预期 raw 文件" in report.detail
+    # 混合态下这两句都 MUST NOT 出现。
+    assert "不是缺数据" not in report.detail
+    assert "等待 raw 补齐" not in report.detail
+    assert_zero_write(tree, before_states, before_output)
+
+
+def test_unreadable_raw_on_a_skipped_candidate_is_named_in_the_success_detail(
+    tmp_path: Path,
+) -> None:
+    """[桶 C-8] 被跳过候选上的不可读 raw MUST 在**成功**理由中点名（round 4 R4-C）。
+
+    构造：ifs 在 `T0 = 08-25 00Z` 与 `T0 + 12h` 各有一轮完整 raw，但把 `T0` 的一个 bundle
+    文件 `chmod 0o000` —— 该候选因此判不完整而被跳过，ifs 首轮 T 落在 `T0 + 12h`。
+
+    方向 MUST NOT 变：init **照样建链**（改成 fail-closed 拒绝会让一次 raw 权限故障阻断
+    整次建链，与 `§6.2` 的「方向不变、区别只在给运维的下一步动作」冲突），也 MUST NOT 扩
+    词表。但链起点被静默推后 12h **并落盘**之后根已非全新，重跑必被 `STATES_NOT_EMPTY`
+    拒绝——静默偏移没有自愈路径，故成功 detail MUST 点名这些不可读文件。
+
+    判别变异体：恢复 `_first_complete_cycle` 命中时的 `return cycle, ()` 丢弃行为 -> 本行
+    必红。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    skipped_cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    chosen_cycle = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    tree.write_cycle("gfs", chosen_cycle)
+    skipped_dir = tree.write_cycle("ifs", skipped_cycle)
+    tree.write_cycle("ifs", chosen_cycle)
+    bundles = sorted(path for path in skipped_dir.iterdir() if path.is_file())
+    assert len(bundles) == 2
+
+    with unreadable(bundles[0]):
+        report = tree.run()
+
+    # 方向不变：照样建链，两源首态都落盘，T 取更晚的那个 cycle。
+    assert report.refusal is None
+    assert [path.name for path in report.written] == [
+        "2026082512" + STATE_SUFFIX,
+        "2026082512" + STATE_SUFFIX,
+    ]
+    # 成功理由 MUST 点名被跳过候选上的不可读文件（数目 + 路径）。
+    assert "不可读" in report.detail
+    assert "1 个 raw 文件" in report.detail
+    assert str(bundles[0]) in report.detail
+    # 只有 ifs 被跳过；gfs 一次跳过也没有，MUST NOT 被牵连点名。
+    assert report.detail.count("存在但不可读") == 1
+    assert "ifs 的链起点跳过了更早的候选" in report.detail
+
+
 def test_window_lower_bound_is_closed(tmp_path: Path) -> None:
     """回归行 13a：唯一完整 cycle 恰好落在 `now - 7 天` -> 被接受。"""
     tree = Tree(tmp_path)
@@ -175,17 +262,25 @@ def test_future_cycle_is_not_a_candidate(tmp_path: Path) -> None:
 
 
 def test_future_cycle_does_not_win_the_first_frontier(tmp_path: Path) -> None:
-    """回归行 15 的**日期网格上界**侧：`now + 12h` 与 `now - 12h` 并存 -> T 取 `now - 12h`。
+    """回归行 15 的**日期网格上界**侧：`now + 12h`、`now - 12h`、`now` 并存 -> T 取 `now - 12h`。
 
     本行约束的**不是** `cycle <= now` 这个比较：`NOW` 是 12Z、恰在候选网格最高点上，
     `NOW + 12h` 落到 08-28，而 `_candidate_cycles` 的 `span = (now.date() - start_date)`
     根本不枚举那一天。枚举序也不作数——`_candidate_cycles` 返回 `tuple(sorted(...))`。
     真正钉死 `cycle <= now` 的是下面两条 off-grid 用例。
+
+    [桶 C-6]（round 4 R4-D）：本构造此前只铺 `NOW ± 12h`，而 `NOW + 12h` 在**进入选取
+    循环之前**就被日期网格排除，剩下的 complete 候选集是**单元素** `{NOW - 12h}`——「升序
+    取第一个」与「取窗内最晚」在单元素集上恒等，本行对选取分支毫无判别力。故额外铺一轮
+    `NOW`（它落在候选网格最高点上、`cycle <= now` 取等号，是合法候选），使 complete 候选
+    集含**两个**元素，本行才真正行使选取分支。判别变异体：把「升序取第一个 complete」改为
+    「取窗内最晚 complete」-> 本行必红（T 会变成 `NOW`）。
     """
     tree = Tree(tmp_path)
     for source in WRITE_ORDER:
         tree.write_cycle(source, NOW + timedelta(hours=12))
         tree.write_cycle(source, NOW - timedelta(hours=12))
+        tree.write_cycle(source, NOW)
 
     report = tree.run()
 
@@ -307,10 +402,17 @@ def test_same_day_future_cycle_does_not_win_over_an_earlier_one(
     把该比较整条删掉后 08-26T12Z 仍排在 08-27T12Z 之前，本用例仍绿（实测该变异下唯一转红的
     是上一条）。过滤器的判别证据由兄弟用例
     `test_same_day_future_cycle_is_excluded_by_the_now_comparison` 单独承担。
+
+    [桶 C-6]（round 4 R4-D）：本构造此前只铺 08-27T12Z 与 08-26T12Z，而前者被 `cycle <= now`
+    在**进入选取循环之前**滤掉，剩下的 complete 候选集是**单元素**，本行对选取分支毫无判别
+    力。故额外铺一轮 08-27T00Z（`<= now = 08-27T06Z`，是合法候选），使 complete 候选集含
+    **两个**元素。判别变异体：把「升序取第一个 complete」改为「取窗内最晚 complete」-> 本行
+    必红（T 会变成 08-27T00Z）。
     """
     tree = Tree(tmp_path)
     for source in WRITE_ORDER:
         tree.write_cycle(source, datetime(2026, 8, 27, 12, tzinfo=UTC))
+        tree.write_cycle(source, datetime(2026, 8, 27, 0, tzinfo=UTC))
         tree.write_cycle(source, datetime(2026, 8, 26, 12, tzinfo=UTC))
 
     report = tree.run(now=NOW_OFF_GRID)
