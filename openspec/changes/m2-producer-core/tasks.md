@@ -2087,7 +2087,12 @@ Required evidence（每条一个用例，`producer/tests/test_publish.py`）:
 - **发布文件不带 scratch 权限**（spec Scenario 逐字）：scratch DAT 与 checkpoint mode 0600 -> `yd.rivqdown.dat`、`<T+12>.cfg.ic`、`DONE` 三者 mode 均 `0o644`；**同一断言在 `os.umask(0o077)` 下重跑一次**（裁决 11）
 - **发布目录可穿越 / 自建面**（裁决 8 的目录侧，第一条）：在 `os.umask(0o077)` 下、从一棵**不含 `output/`** 的根发布 -> `output/`、`output/<T>/`、`output/<T>/<source>/` **三级**目录 mode 均为 `0o755`（三级各自单独断言；缺 `output/` 那级正是 round 1 P1 的形态）；同一用例断言 `states/<source>/`、`logs/`、`YD_ROOT` 自身的 mode **未被本次发布改动**（放宽面既不外溢也不递归）
 - **发布目录可穿越 / 已存在面**（裁决 8 的目录侧，第二条；round 2 cand-04a CONFIRMED/FIX_NOW）：预置一个历史 `output/<T-12>/` 且把 `output/` 设为 `0o2750` -> 发布后 `output/` 仍逐位是 `0o2750`，历史 `output/<T-12>/` 的 mode 未被改动。**这两条 MUST 是两个用例，MUST NOT 合并**：原措辞要求「同一用例」同时断言「从不含 `output/` 的根发布」与「预置历史 `output/<T-12>/` 未被改动」，而预置历史目录**必然创建 `output/`**，在裁决 8 下它就成了已存在层级、不再被放宽——两半在一个用例里互斥，原行不可满足
-- **可穿越判据的 mode 域逐格枚举**（裁决 8 的判据侧；round 3 的 Review Failure Retro 认定的核心产出，**本条是本 fixture 里判据类断言的验收形式，不得退回「每轮补一格」**）：一条参数化用例，对预置的已存在 `output/` 逐个跑完下列十个 mode 并断言放行或拒绝——放行：`0o755`、`0o750`、`0o705`、`0o2750`、`0o2751`；拒绝：`0o700`、`0o744`、`0o710`、`0o711`、`0o701`。理由写在裁决 8：该判据的输入域是一个可枚举的小集合，而本 PR 三轮里每一轮都只为**当轮那一个反例 mode** 补了一条用例，于是每次改判据都只能等下一轮 review 发现新漏的那一格；逐格枚举让这个模式本身不可能重演。`0o744` 与 `0o710` 两格分别是初稿 `0o055` 与 round-2 `0o011` 各自漏掉的那一格，MUST 各自单列
+- **可穿越判据的验收形式 = 穷举真值表 + 独立措辞 oracle**（裁决 8 的判据侧；round 4 的第二份 Review Failure Retro 认定的核心产出，**本条是本 fixture 里判据类断言的验收形式**）：
+  1. **穷举**：一条纯函数用例，对 `m in range(0o1000)` 全部 512 个低九位 mode，外加 `S_ISGID`/`S_ISVTX`/`S_ISUID` 三种高位叠加，断言 `_is_readable_and_traversable(m)` 与一份**独立措辞**的 oracle 逐值相等。
+  2. **独立措辞 MUST 可验证**：该 oracle MUST 写成按类循环的自然语言直译——「`{group, other}` 中存在某一类，同时具备 `r` 与 `x`」——**MUST NOT** 是 shipped 掩码表达式（`(mode & 0o050) == 0o050 or (mode & 0o005) == 0o005`）的改写或复制。实现方 MUST 在 PR 报告中说明它为何不是同义反复。这一条是本行的承重条款：一份抄自被测实现的 oracle 使整条用例退化为恒真。
+  3. **端到端十三格降级为接线证据**（证明判据真的被 `publish()` 调用、拒绝真的发生在第一处 NFS 写入之前）：放行 `0o755`、`0o750`、`0o705`、`0o2750`、`0o2751`、**`0o2770`**；拒绝 `0o700`、`0o744`、`0o710`、`0o711`、`0o701`、**`0o741`**、**`0o714`**。三个加粗格是 round 4 的判别器：`0o2770` 是 `docs/agent-ops.md` §10 首选的共享组 + setgid 形态（误拒方向 = 该源永久停摆），`0o741`/`0o714` 是 `r` 与 `x` 分处两类的形态。
+  4. **逐级断言**：另加一条预置**不合规中间层级**的用例（`output/` 合规、`output/<T>/` 为 `0o700`）-> `PublishError` 指名该中间层级，且 `output/<T>/<source>/` **未被创建**、`YD_ROOT` 递归快照逐项不变。
+  为什么不再是「逐格枚举」：round 3 的第一份 retro 把「覆盖整个输入域」落成了十个手写 mode 字面值，而 round 4 的 verifier 实测证明那与「拿反例调掩码」是同一个错误高了一层——三条自然变异体在十格下全部存活，且**即使扩到十三格，对自然掩码族做暴力扫描仍有 94 个变异体存活**。样本永远追不上域；只有穷举加独立 oracle 能真正关掉这条复发路径
 - **DAT 短于定长头部即拒**（裁决 4 的 v2 判据侧，round 3 cand-03 CONFIRMED/FIX_NOW/P2）：`scratch_dat` 字节数少于 `DAT_FIXED_HEADER_BYTES`（边界值 1039，另可加一条 ~100 字节）-> `PublishError` 且消息含「非 v2」与「定长头部不足」，`YD_ROOT` 递归快照逐项不变。断言 MUST 钉住异常**类型**是 `PublishError`（而不只是「抛了错」）——被违反的正是「公共边界只抛两个声明类型之一」那条，删掉该闸后逃出来的是 `struct.error`。用例的期望长度 MUST 从 `publish.DAT_FIXED_HEADER_BYTES` 推出，不得写死 1040。既有的 `test_column_table_read_error_converges_to_publish_error` 对这条**没有判别力**：它在 1040 字节定长前缀**之后**截断，根本走不到这条臂；文本头形状闸也拦不住——被截断的 v2 前缀仍然是「可打印 ASCII + 其后全 NUL」，照样通过
 - **自建层级不可穿越即拒**（裁决 8 的后置断言，round 2 cand-02 CONFIRMED/FIX_NOW/P1）：在 `os.umask(0o077)` 下预置 `output/` 为 `0o700`（无组/其他 `x`）-> `PublishError` 指名该层级，`DONE` **不存在**，`YD_ROOT` 递归快照逐项不变。今日行为是 `DONE=True` 且 `output/` 留在 `0o700`，故这条是该修复的唯一判别器
 - **闩死态在下一轮仍被拒**（同上，第二个入口）：monkeypatch 令首轮的目录放宽抛 `OSError(EIO)`（`os.fchmod` 层，而非整个 `_widen_publish_dir`，以贴近真实失败面）-> 首轮 `PublishError`；恢复真实实现后对**同一轮**重跑 -> 仍 `PublishError` 且无 `DONE`，而不是把 `DONE` 封在一棵 `0o700` 的树上。`output/<T>/` 这一级另跑一次同形态（verifier 实测该级同样会闩死，「只有 `output/` 会永久闩住、cycle 目录会自愈」的说法被 PROBE1 证伪）
@@ -2148,8 +2153,14 @@ Required evidence（每条一个用例，`producer/tests/test_publish.py`）:
   (ao) `_done_is_on_disk` 的复探恢复为 `except SafeFilesystemError: return True`（或按 `kind` 分支）-> 「复探失败时收敛为未完成」用例变红（round 2 cand-01）；
   (ap) 可穿越断言整体删除（前置与后置两趟一并删）-> 预置 `0o700` `output/` 的用例变红（round 2 cand-02）。**MUST 删两趟**：只删后置那趟按设计存活（round 3 cand-02 REFUTED，verifier 实测 `(ap-post-only)` 全绿、`(ap-pre-only)` 只被 `自建层级不可穿越即拒` 一条杀死）。后置那趟唯一独占的场景是「`fchmod` 返回成功却不生效」，全项目文档无此机制、最接近的真实类比（父目录 default POSIX ACL clamp）已由 Known limits 路由到 M4 现场验证，故后置那趟按 belt-and-braces 保留而不追判别器，**MUST NOT** 为它编一段 `os.fchmod` 静默空转的 mock 编排（与本节三条等价变异体同一条惯例）；
   (aq) 可穿越判据放松为「只要 owner 有 `r`+`x`」-> 预置 `0o700` 的用例变红（防止把断言写成恒真：发布进程自己永远进得去）；
-  (aq2) 判据放松回「组或其他有 `x` 即可」（丢掉 `r` 的要求）-> mode 域枚举用例里的 `0o710`/`0o711`/`0o701` 三格变红（round 3 cand-01 的直接判别器）；
-  (aq3) 判据放松为「组或其他有 `r` 即可」（丢掉 `x` 的要求）-> 同一枚举用例里的 `0o744` 格变红（(aq2) 的反向配重；这两条合起来钉死「r 与 x 必须同类兼备」，单独任一条都放行一半的洞）；
+  (aq2) 判据放松回「组或其他有 `x` 即可」（丢掉 `r` 的要求）-> `0o710`/`0o711`/`0o701` 三格变红（round 3 cand-01 的直接判别器）；
+  (aq3) 判据放松为「组或其他有 `r` 即可」（丢掉 `x` 的要求）-> `0o744` 格变红（(aq2) 的反向配重）。**原措辞「这两条合起来钉死『r 与 x 必须同类兼备』」按 round 4 verifier 实测为假，已删除**：跨类合取变异体同时保留 `r` 与 `x` 两项要求、只丢掉「同类」耦合，(aq2)/(aq3) 都杀不掉它，见 (aq4)；
+  (aq4) 判据放松为「组/其他里有 `r`，且组/其他里有 `x`」（**不要求同类**，`(mode & 0o044) != 0 and (mode & 0o011) != 0`）-> `0o741`/`0o714` 两格变红，穷举表变红（round 4 cand-01a；该变异体与 shipped 判据在 512 个低九位 mode 中有 64 个分歧，误放行方向）；
+  (aq5) 判据改为**整位段相等** `(mode & 0o070) == 0o050 or (mode & 0o007) == 0o005` -> `0o2770` 格变红，穷举表变红（round 4 cand-01c；误**拒** `0o2770`/`0o770`/`0o707`，即 §10 首选形态被永久拒绝，该源停摆）；
+  (aq6) 判据改为 `(mode & 0o050) == 0o050 or (mode & 0o007) == 0o005`（只有 other 位段相等）-> 穷举表变红（round 4 verifier 构造的第四轴；误拒 `0o707`/`0o2707`，十三格全部看不见它）；
+  (aq7) 判据改为 `(mode & 0o054) == 0o050 or (mode & 0o005) == 0o005`（group 子句附加禁 other-`r`）-> 穷举表变红（同上第四轴；误拒 `0o754`，十三格同样看不见）；
+  **(aq4)–(aq7) 四条 MUST 全部被杀**，这是本轮验收的可机检事实：前两条由端到端格子加穷举表共同杀死，后两条**只有穷举表杀得掉**——它们正是「样本追不上域」的实证。
+  (aq8) 前置那趟只断言首级（`for directory in levels[:1]`）-> 预置不合规中间层级的用例变红（round 4 cand-01b；该变异体不落入等价类，存在自然、无 mock 的判别器）；
   (av) `_read_dat_head` 的 `len(head) < DAT_FIXED_HEADER_BYTES` 长度闸删除 -> DAT 短于定长头部的用例变红（round 3 cand-03 CONFIRMED/FIX_NOW/P2；verifier 实测删掉后 `struct.error` 直接穿透 `publish` 与 `check_publish_contract` 两个公共入口——它既不是 `OSError` 也不是 `ValueError`，沿途两处 `except (SafeFilesystemError, OSError)` 都接不住，14.1 的 `except PublishError` 更接不住）；
   (ar) `_restamped_bytes` 中 `parse(raw)` 外的 `except ValueError` 删除 -> checkpoint 垃圾字节用例变红（round 2 cand-03c）；
   (as) `nc` 的有限/整数判据删除 -> `NaN` 与 `8.5` 用例变红（round 1 cand-12，本轮补登记）；
