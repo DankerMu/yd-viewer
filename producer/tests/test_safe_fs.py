@@ -37,6 +37,7 @@ from yd_producer.store.safe_fs import (
     ensure_directory_no_follow,
     read_bytes_limited_no_follow,
     rmtree_no_follow,
+    verify_tree_no_symlinks,
 )
 
 
@@ -119,6 +120,123 @@ def test_directory_identity_refuses_symlink_components(
 
     with pytest.raises(SafeFilesystemError):
         directory_identity_no_follow(probed)
+
+
+# Read-only formal-tree preflight (#25).
+
+
+def _tree_snapshot(root: Path) -> dict[str, tuple[str, int, bytes | str]]:
+    snapshot: dict[str, tuple[str, int, bytes | str]] = {}
+    for path in sorted(root.rglob("*")):
+        info = path.lstat()
+        relative = str(path.relative_to(root))
+        if stat.S_ISLNK(info.st_mode):
+            payload: bytes | str = os.readlink(path)
+            kind = "symlink"
+        elif stat.S_ISREG(info.st_mode):
+            payload = path.read_bytes()
+            kind = "file"
+        elif stat.S_ISDIR(info.st_mode):
+            payload = b""
+            kind = "dir"
+        else:
+            payload = b""
+            kind = "special"
+        snapshot[relative] = (kind, info.st_mode, payload)
+    return snapshot
+
+
+def test_verify_tree_no_symlinks_accepts_real_nested_tree_without_mutation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    target = root / "nested" / "deeper"
+    target.mkdir(parents=True)
+    (root / "first.bin").write_bytes(b"first\x00")
+    (target / "last.bin").write_bytes(b"last\xff")
+    fifo = root / "stream"
+    os.mkfifo(fifo)
+    before = _tree_snapshot(root)
+
+    verify_tree_no_symlinks(root)
+
+    assert _tree_snapshot(root) == before
+    assert stat.S_ISFIFO(fifo.lstat().st_mode)
+    assert (target / "last.bin").read_bytes() == b"last\xff"
+
+
+def test_verify_tree_no_symlinks_refuses_mixed_tree_without_mutation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    before_link = root / "before.bin"
+    before_link.write_bytes(b"before\x00")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside\xff")
+    linked = root / "middle-link"
+    linked.symlink_to(outside)
+    after_link = root / "after.bin"
+    after_link.write_bytes(b"after\x01")
+    before = _tree_snapshot(root)
+    outside_before = outside.read_bytes()
+
+    with pytest.raises(SafeFilesystemError) as info:
+        verify_tree_no_symlinks(root)
+
+    assert info.value.kind == "unsafe"
+    assert _tree_snapshot(root) == before
+    assert linked.is_symlink()
+    assert before_link.read_bytes() == b"before\x00"
+    assert after_link.read_bytes() == b"after\x01"
+    assert outside.read_bytes() == outside_before
+
+
+@pytest.mark.parametrize("shape", ["root", "intermediate"])
+def test_verify_tree_no_symlinks_refuses_symlink_path_components(
+    tmp_path: Path, shape: str
+) -> None:
+    real = tmp_path / "real"
+    target = real / "nested"
+    target.mkdir(parents=True)
+    (target / "payload.bin").write_bytes(b"payload\xff")
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+    checked = linked if shape == "root" else linked / "nested"
+    before = _tree_snapshot(real)
+
+    with pytest.raises(SafeFilesystemError) as info:
+        verify_tree_no_symlinks(checked)
+
+    assert info.value.kind == "unsafe"
+    assert _tree_snapshot(real) == before
+    assert linked.is_symlink()
+    assert (target / "payload.bin").read_bytes() == b"payload\xff"
+
+
+def test_verify_tree_no_symlinks_wraps_traversal_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    payload = root / "payload.bin"
+    payload.write_bytes(b"payload")
+    before = _tree_snapshot(root)
+    original_listdir = os.listdir
+
+    def unreadable_listdir(path: int | str | os.PathLike[str]) -> list[str]:
+        if isinstance(path, int):
+            raise OSError("synthetic directory read failure")
+        return original_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", unreadable_listdir)
+
+    with pytest.raises(SafeFilesystemError) as info:
+        verify_tree_no_symlinks(root)
+
+    assert info.value.kind == "io"
+    assert _tree_snapshot(root) == before
+    assert payload.read_bytes() == b"payload"
 
 
 # Directory-mode determinism (#1513).

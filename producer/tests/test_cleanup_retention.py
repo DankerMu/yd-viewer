@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import stat
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -298,7 +299,17 @@ def test_hand_built_plan_rejects_illegal_cycle_name(tmp_path: Path) -> None:
     assert builder.source_output_dir(D, SIBLING).joinpath("DONE").is_file()
 
 
-def test_hand_built_plan_rejects_mismatched_cutoff(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("cutoff", "case"),
+    [
+        (parse_cycle(D_MINUS_14D) - timedelta(hours=12), "earlier"),
+        (parse_cycle(D_MINUS_14D) + timedelta(hours=12), "later"),
+    ],
+    ids=["earlier", "later"],
+)
+def test_hand_built_plan_rejects_mismatched_cutoff_in_both_directions(
+    tmp_path: Path, cutoff, case: str
+) -> None:
     root = _yd_root(tmp_path)
     builder = _seed_identity_tree(root)
     doomed = builder.source_output_dir(OLDER, SOURCE)
@@ -311,14 +322,87 @@ def test_hand_built_plan_rejects_mismatched_cutoff(tmp_path: Path) -> None:
             **_windowed_plan_kwargs(  # type: ignore[arg-type]
                 root,
                 output_dirs=(doomed,),
-                cutoff=parse_cycle(D_MINUS_14D_12H),
+                cutoff=cutoff,
             )
+        )
+
+    _assert_not_leaked(info.value)
+    assert info.value.phase == "validate", case
+    assert info.value.path is None
+    assert snapshot_tree(doomed) == before
+
+
+def test_nonempty_hand_built_plan_without_current_done_is_rejected(
+    tmp_path: Path,
+) -> None:
+    root = _yd_root(tmp_path)
+    builder = YdRootBuilder(root=root)
+    doomed = builder.source_output_dir(OLDER, SOURCE)
+    doomed.mkdir(parents=True)
+    (doomed / "yd.rivqdown.dat").write_bytes(b"doomed-output\xff")
+    doomed_log = _write_log(root, SOURCE, OLDER, b"doomed-log\xff")
+    before_root = snapshot_tree(root)
+    before_doomed = snapshot_tree(doomed)
+    before_log = snapshot_tree(doomed_log)
+
+    with pytest.raises(cleanup.CleanupError) as info:
+        cleanup.RetentionPlan(
+            yd_root=root,
+            source=SOURCE,
+            latest_done=parse_cycle(D),
+            cutoff=parse_cycle(D_MINUS_14D),
+            output_dirs=(doomed,),
+            log_files=(doomed_log,),
         )
 
     _assert_not_leaked(info.value)
     assert info.value.phase == "validate"
     assert info.value.path is None
-    assert snapshot_tree(doomed) == before
+    assert snapshot_tree(root) == before_root
+    assert snapshot_tree(doomed) == before_doomed
+    assert snapshot_tree(doomed_log) == before_log
+
+
+def test_older_hand_built_anchor_remains_a_conservative_replay(tmp_path: Path) -> None:
+    root = _yd_root(tmp_path)
+    builder = _seed_identity_tree(root)
+    older_anchor = parse_cycle(D) - timedelta(hours=12)
+    conservative_cutoff = older_anchor - timedelta(days=14)
+    conservative_cycle = "2026081100"
+    conservatively_doomed = builder.source_output_dir(conservative_cycle, SOURCE)
+    conservatively_doomed.mkdir(parents=True)
+    (conservatively_doomed / "yd.rivqdown.dat").write_bytes(b"drop\xff")
+    conservatively_doomed_log = _write_log(
+        root, SOURCE, conservative_cycle, b"drop-log\xff"
+    )
+    current_only = builder.source_output_dir(D_MINUS_14D_12H, SOURCE)
+    current_only.mkdir(parents=True)
+    (current_only / "yd.rivqdown.dat").write_bytes(b"current-window-only\xff")
+    current_only_log = _write_log(
+        root, SOURCE, D_MINUS_14D_12H, b"current-window-only-log\xff"
+    )
+    current_before = snapshot_tree(current_only)
+    current_log_before = snapshot_tree(current_only_log)
+    sibling_before = snapshot_tree(builder.source_output_dir(D, SIBLING))
+
+    plan = cleanup.RetentionPlan(
+        yd_root=root,
+        source=SOURCE,
+        latest_done=older_anchor,
+        cutoff=conservative_cutoff,
+        output_dirs=(conservatively_doomed,),
+        log_files=(conservatively_doomed_log,),
+    )
+    cleanup.execute_retention_plan(plan)
+
+    assert not conservatively_doomed.exists()
+    assert not conservatively_doomed_log.exists()
+    assert snapshot_tree(current_only) == current_before
+    assert snapshot_tree(current_only_log) == current_log_before
+    assert snapshot_tree(builder.source_output_dir(D, SIBLING)) == sibling_before
+    assert (current_only / "yd.rivqdown.dat").read_bytes() == b"current-window-only\xff"
+    assert current_only_log.read_bytes() == b"current-window-only-log\xff"
+    assert builder.source_output_dir(D, SOURCE).joinpath("DONE").is_file()
 
 
 def test_empty_window_plan_cannot_carry_targets(tmp_path: Path) -> None:
@@ -558,6 +642,53 @@ def test_execute_rebinds_identity_after_post_construction_tampering(
     assert (sibling / "yd.rivqdown.dat").read_text(encoding="utf-8") == "gfs\n"
 
 
+@pytest.mark.parametrize("entrypoint", ["construct", "execute"])
+def test_future_retention_anchor_is_rejected_before_any_target_mutates(
+    tmp_path: Path, entrypoint: str
+) -> None:
+    root = _yd_root(tmp_path)
+    builder = _seed_identity_tree(root)
+    protected = builder.source_output_dir("2026081300", SOURCE)
+    protected.mkdir(parents=True)
+    (protected / "yd.rivqdown.dat").write_bytes(b"protected-output\xff")
+    (protected / "DONE").write_bytes(b"")
+    protected_log = _write_log(root, SOURCE, "2026081300", b"protected-log\xff")
+    sibling = builder.source_output_dir("2026081300", SIBLING)
+    sibling.mkdir(parents=True)
+    (sibling / "yd.rivqdown.dat").write_bytes(b"sibling-output\xff")
+    latest = parse_cycle(D) + timedelta(days=2)
+    kwargs = {
+        "yd_root": root,
+        "source": SOURCE,
+        "latest_done": latest,
+        "cutoff": latest - timedelta(days=14),
+        "output_dirs": (protected,),
+        "log_files": (protected_log,),
+    }
+    before = snapshot_tree(root)
+
+    with pytest.raises(cleanup.CleanupError) as info:
+        if entrypoint == "construct":
+            cleanup.RetentionPlan(**kwargs)  # type: ignore[arg-type]
+        else:
+            plan = cleanup.RetentionPlan(
+                **_windowed_plan_kwargs(root)  # type: ignore[arg-type]
+            )
+            for name, value in kwargs.items():
+                object.__setattr__(plan, name, value)
+            cleanup.execute_retention_plan(plan)
+
+    _assert_not_leaked(info.value)
+    assert info.value.phase == "validate"
+    assert info.value.path is None
+    assert snapshot_tree(root) == before
+    assert (protected / "yd.rivqdown.dat").read_bytes() == b"protected-output\xff"
+    assert (protected / "DONE").is_file()
+    assert protected_log.read_bytes() == b"protected-log\xff"
+    assert (sibling / "yd.rivqdown.dat").read_bytes() == b"sibling-output\xff"
+    assert builder.source_output_dir(D, SOURCE).joinpath("DONE").is_file()
+
+
 # --- spec「symlink 越界拒删」 ---
 
 
@@ -661,32 +792,50 @@ def test_execute_full_precheck_refuses_toctou_swap_before_any_delete(
     assert (target / "keep.txt").read_text(encoding="utf-8") == "nwm\n"
 
 
-def test_internal_symlink_in_output_tree_is_refused_by_rmtree_no_follow(
+def test_static_internal_symlink_refuses_full_plan_before_any_deletion(
     tmp_path: Path,
 ) -> None:
     root = _yd_root(tmp_path)
     builder = YdRootBuilder(root=root)
     builder.write_done(D, SOURCE)
     builder.write_output_dat(D, SOURCE)
-    doomed = builder.source_output_dir(D_MINUS_14D_12H, SOURCE)
-    doomed.mkdir(parents=True)
+    valid = builder.source_output_dir(OLDER, SOURCE)
+    valid.mkdir(parents=True)
+    (valid / "yd.rivqdown.dat").write_bytes(b"valid-output\xff")
+    poisoned = builder.source_output_dir(D_MINUS_14D_12H, SOURCE)
+    poisoned.mkdir(parents=True)
+    before_link = poisoned / "before.bin"
+    before_link.write_bytes(b"before\x00")
     outside = _base(tmp_path) / "outside"
     outside.mkdir()
     target = outside / "raw.dat"
-    target.write_text("nwm\n", encoding="utf-8")
-    (doomed / "linked.dat").symlink_to(target)
+    target.write_bytes(b"outside\xff")
+    linked = poisoned / "linked.dat"
+    linked.symlink_to(target)
+    after_link = poisoned / "after.bin"
+    after_link.write_bytes(b"after\x01")
+    doomed_log = _write_log(root, SOURCE, D_MINUS_14D_12H, b"old-log\xff")
     plan = cleanup.plan_retention(root, SOURCE)
-    assert plan.output_dirs == (doomed,)
+    assert plan.output_dirs == (valid, poisoned)
+    assert plan.log_files == (doomed_log,)
+    valid_before = snapshot_tree(valid)
+    poisoned_before = snapshot_tree(poisoned)
+    log_before = snapshot_tree(doomed_log)
+    outside_before = target.read_bytes()
 
     with pytest.raises(cleanup.CleanupError) as info:
         cleanup.execute_retention_plan(plan)
 
     _assert_not_leaked(info.value)
     assert info.value.phase == "retention-execute"
-    assert info.value.path == doomed
-    assert doomed.is_dir()
-    assert (doomed / "linked.dat").is_symlink()
-    assert target.read_text(encoding="utf-8") == "nwm\n"
+    assert info.value.path == poisoned
+    assert snapshot_tree(valid) == valid_before
+    assert snapshot_tree(poisoned) == poisoned_before
+    assert snapshot_tree(doomed_log) == log_before
+    assert linked.is_symlink()
+    assert before_link.read_bytes() == b"before\x00"
+    assert after_link.read_bytes() == b"after\x01"
+    assert target.read_bytes() == outside_before
 
 
 @pytest.mark.parametrize("shape", ["file", "fifo"])

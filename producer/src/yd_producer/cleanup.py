@@ -41,6 +41,7 @@ from yd_producer.store.safe_fs import (
     rmtree_no_follow,
     stat_no_follow,
     unlink_no_follow,
+    verify_tree_no_symlinks,
 )
 
 __all__ = [
@@ -328,6 +329,43 @@ def _require_log_identity(
         )
 
 
+def _require_current_retention_anchor(
+    root: Path, source: str, latest: datetime
+) -> None:
+    """拒绝晚于当前该源普通文件 DONE 集合的公开 plan 锚点。"""
+
+    output_root = root / "output"
+    try:
+        current_done = done_cycles(output_root, source)
+    except (DiscoveryUnreadableError, OSError, ValueError) as error:
+        raise CleanupError(
+            f"{source}: 当前 DONE 锚点无法确定（{error}）",
+            phase="validate",
+            path=None,
+        ) from error
+    if not current_done:
+        raise CleanupError(
+            f"{source}: 当前没有可用的普通文件 DONE 锚点",
+            phase="validate",
+            path=None,
+        )
+    current_latest = max(current_done)
+    try:
+        _precheck_anchor(output_root, source, current_latest, root)
+    except CleanupError as error:
+        raise CleanupError(
+            f"{source}: 当前 DONE 锚点不安全（{error}）",
+            phase="validate",
+            path=None,
+        ) from error
+    if latest > current_latest:
+        raise CleanupError(
+            f"latest_done {cycle_id(latest)} 晚于当前 DONE {cycle_id(current_latest)}",
+            phase="validate",
+            path=None,
+        )
+
+
 def _bind_retention_plan(plan: RetentionPlan) -> None:
     """把公开 RetentionPlan 的每一个字段绑定到 (root, source, cutoff) 身份。"""
 
@@ -381,6 +419,7 @@ def _bind_retention_plan(plan: RetentionPlan) -> None:
         _require_log_identity(log_file, resolved, plan.source, cutoff)
     _require_sorted_unique(plan.output_dirs, label="output_dirs")
     _require_sorted_unique(plan.log_files, label="log_files")
+    _require_current_retention_anchor(resolved, plan.source, latest)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -807,6 +846,14 @@ def _precheck_existing_targets(plan: RetentionPlan, *, phase: CleanupPhase) -> N
         if info is None:
             continue
         _precheck_output_dir(directory, plan.yd_root, phase=phase)
+        try:
+            verify_tree_no_symlinks(directory, containment_root=plan.yd_root)
+        except (SafeFilesystemError, OSError) as error:
+            raise CleanupError(
+                f"output 删除目标树不可安全预检：{error}",
+                phase=phase,
+                path=directory,
+            ) from error
     for log_file in plan.log_files:
         info = _lstat_determined(log_file, phase=phase)
         if info is None:
