@@ -283,9 +283,7 @@ def test_an_unreadable_cycle_dir_is_named_instead_of_its_expected_files(
     tree.write_cycle("ifs", good_cycle)
     blocked_dir = tree.cycle_dir("ifs", blocked_cycle)
     blocked_dir.mkdir(parents=True, exist_ok=True)
-    expected_inside = blocked_dir / (
-        "ifs.t00z.f000.bundle.grib2"
-    )
+    expected_inside = blocked_dir / ("ifs.t00z.f000.bundle.grib2")
 
     with unreadable(blocked_dir):
         report = tree.run()

@@ -435,7 +435,11 @@ def _first_complete_cycle(
     for cycle in candidates:
         verdict = rawscan.judge(raw_root, source, cycle, config)
         if verdict.complete:
-            return cycle, Unreachable(tuple(locations), unreadable_count), tuple(missing)
+            return (
+                cycle,
+                Unreachable(tuple(locations), unreadable_count),
+                tuple(missing),
+            )
         if verdict.unreadable_files:
             unreadable_count += len(verdict.unreadable_files)
             if verdict.unreadable_files == verdict.expected_files:
