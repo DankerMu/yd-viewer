@@ -1671,6 +1671,12 @@ Project profile: yd-viewer
     - **MUST（冻结期机械复算，不得手抄）**：冻结 SHA 之后、发证据之前，PR body 的每一条可机械核验的断言 MUST 对着**冻结头**重新求值一遍，逐项包括：`冻结提交` 行、五条命令的验证表（**重跑，不得复制上一轮的数字**）、偏离条目里的行数/计数、以及 fixture Known limits 与 body Known limits 的逐条对应。
     - **MUST**：任何 yd 自撰的注释、用例名、docstring 与 PR 文本，其宣称范围 MUST 不超过同处断言实际覆盖的范围；宣称一条不变量却不检查它，按裁决 13 的病史判为缺陷，不算命名裕度。
     - **MUST**：把 round-3 的三条值断言红证明与本轮改名的证据落成 `implementer-evidence.md` 的 section C，使记录自立——现有红证据散在 PR body 偏离 8、`809163f` 提交信息与两份 reviewer 报告里（verifier 已订正 round-3 reviewer 的过度声明：红值**确有**两处持久化，缺的是逐条变异的原始 transcript）。
+    - **【round-4 补强 · 执行钩子】** round-4 reviewer 的判词照录：「作为规范它成立，作为机制它不成立」——本裁决 MUST #1 是本 fixture 里**唯一没有文件落点**的义务，也是**唯一失败的那条**。实证：添加偏离 11 的那次 body 编辑**引用了本裁决、并把 `冻结提交` 指向上一个头列为第 4 个失败实例**，却仍旧没改那一行；规则由其作者在同一次编辑里写下、引用、违反。故补一条机械钩子，冻结期 MUST 实跑并留证：
+      ```bash
+      BODY_SHA=$(gh pr view <PR> --json body -q .body | /usr/bin/grep -o '冻结提交：`[0-9a-f]\{40\}`' | /usr/bin/grep -o '[0-9a-f]\{40\}')
+      test "$BODY_SHA" = "$(git rev-parse HEAD)" && test "$(git rev-parse HEAD)" = "$(git rev-parse origin/<branch>)"
+      ```
+      同批记录一条工具面硬约束：本仓 shell 的 `grep` 是过滤 gitignore 路径的包装器，而 `.workplans/` 被 gitignore——凡声称「全仓已核」的记录扫描 MUST 用 `/usr/bin/grep`（实测：某次旧用例名扫描用包装器只得 1 处，实为 9 处）。
     - **本裁决的自指条款**：本条同样约束 fixture 自身。裁决 12 的 §3.2 越权引用就是这条不变量在 orchestrator 侧的实例，已按 round-2 勘误订正。
 
 Change surface:
