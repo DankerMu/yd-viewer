@@ -778,10 +778,15 @@ def _done_is_on_disk(inputs: PublishInputs) -> bool:
     unlink 会改变既有 `mode=None` 调用方的失败路径）。于是文件可能已经对 node-27 可见，
     错误却是「创建失败」。故失败后 MUST 复探：在盘即 :class:`PublishCleanupError`。
 
-    复探原语 MUST 是**裸 `os.lstat`**：成功即 `True`，任何 `OSError` 即 `False`——与姊妹
-    模块 `controller.done_cycles`（`controller.py:308-317`）、`residue._half_product_dirs`
-    （`residue.py:302-309`）同一高度。MUST NOT 走 `stat_no_follow`：它把 EACCES/EIO/ESTALE
-    一律包成 `SafeFilesystemError(kind="io")`（`store/safe_fs.py:369-397`），`_open_child_dir`
+    复探原语 MUST 是**裸 `os.lstat`**：成功即 `True`，任何 `OSError` 即 `False`。与姊妹模块
+    `controller.done_cycles`（`controller.py:308-317`）、`residue._half_product_dirs`
+    （`residue.py:302-310`）共享的是**原语高度**——同样绕开 `safe_fs`、直接读裸 `os.stat` /
+    `os.lstat` 的 errno；**极性则不同，且必须不同**：那两处只把 `ENOENT`/`ENOTDIR` 当「不
+    存在」，其余 `OSError` 一律抬成 `DiscoveryUnreadableError`（`controller.py:313-316`、
+    `residue.py:306-309`）——发现（discovery）里「读不出来」必须吵，静默掉出集合会让前沿倒退
+    回更旧的 cycle。此处是清理归类，方向相反：「读不出来」必须保守收敛成 `False`。
+    MUST NOT 走 `stat_no_follow`：它把 EACCES/EIO/ESTALE 一律包成
+    `SafeFilesystemError(kind="io")`（`store/safe_fs.py:369-397`），`_open_child_dir`
     把父链上的一切非 `FileNotFoundError` 失败同样包起来（`:795-811`），于是
     `except SafeFilesystemError: return True` 会把「测不出来」翻译成「本轮已完成」——实测
     `output/<T>/<source>/` 被 `chmod 0o000` 且 `DONE` 不存在时得到错误的 `True`。按 `kind`
@@ -789,10 +794,24 @@ def _done_is_on_disk(inputs: PublishInputs) -> bool:
     这与 round 1 的「`safe_fs` 把一切失败都包成 `SafeFilesystemError`」是同一条可复用错误
     假设的反面。
 
-    任何条目（含 symlink、目录）都算「在盘」——viewer 与 `decide_frontier` 判的就是条目
-    存在与否，裸 `lstat` 正好保住这条。复探失败返回 `False`（收敛为 `PublishError`）：
-    不能凭一次失败的探测宣布本轮已完成。此处不需要 `safe_fs` 的 containment/no-follow
-    保护：只读一个 `st_mode` 都不看的存在性判定，不打开、不写入、不跟随任何东西。
+    任何条目（含 symlink、目录）都算「在盘」，这条**有意宽于消费者**。本函数只在
+    `_create_done` 的 `except (SafeFilesystemError, OSError)` 臂里被调用（`:905-911`），
+    回答的是**清理归类**问题——「本次调用是否已经在 `done_path` 上留下了东西，以致后续失败
+    必须按『已完成』上报」——而不是消费者的「这一轮算不算完成」。保守是对的方向：那里只要
+    有东西，本发布者就不能再声称本轮 untouched。
+
+    生产上这条臂按构造也见不到非普通文件：预先存在的条目（symlink 在内）已被
+    `_check_done_absent`（`:328-347`）拒掉，并发新建的条目让 `O_EXCL` 的 `os.open` 抛
+    `FileExistsError`，`store/safe_fs.py:313-315` 把它**原样重抛**（不包成
+    `SafeFilesystemError`），再由排在 `OSError` 臂**之前**的 `except FileExistsError`
+    （`:899-904`）收敛为 `PublishError`，根本走不到复探。消费者侧 `controller.done_cycles`
+    要求 `stat.S_ISREG`（`controller.py:308-317`，`docs/products-contract.md` §4.1「`DONE`
+    是空文件」），**严于**本探测；这个不对称是有意的，且方向安全——本探测至多多报「在盘」，
+    多报的后果是走更响的 :class:`PublishCleanupError`。
+
+    复探失败返回 `False`（收敛为 `PublishError`）：不能凭一次失败的探测宣布本轮已完成。
+    此处不需要 `safe_fs` 的 containment/no-follow 保护：只读一个 `st_mode` 都不看的存在性
+    判定，不打开、不写入、不跟随任何东西。
     """
     try:
         os.lstat(inputs.done_path)

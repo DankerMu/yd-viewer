@@ -1768,7 +1768,8 @@ def test_unstattable_scratch_dat_converges_to_publish_error(tmp_path: Path) -> N
 
 #: 逐位分解表：只登记 `stat` 模块的**具名单比特**常量，不含任何组合掩码。
 #: 被测实现用的是模块级组合常量 `_GROUP_READ_TRAVERSE`/`_OTHER_READ_TRAVERSE`（`0o050`/
-#: `0o005`），两边没有任何共享的字面值或常量——改坏其中一处不会传染到另一处。
+#: `0o005`）。两边的单比特常量同源，但**不共享组合常量、也不共享组合逻辑**——改坏其中一处
+#: 不会传染到另一处。
 _NAMED_PERMISSION_BITS = (
     stat.S_ISUID,
     stat.S_ISGID,
@@ -1832,7 +1833,8 @@ def test_traversability_predicate_matches_an_independent_oracle() -> None:
 
     1. **运算形状不同**——oracle 先逐位拆成具名 `stat` 常量再做集合成员判定，被测是组合掩码
        自等比较；
-    2. **常量不共享**——oracle 只用 `stat.S_IRGRP`/`S_IXGRP`/`S_IROTH`/`S_IXOTH`，被测用
+    2. **组合常量不共享**——oracle 只用 `stat.S_IRGRP`/`S_IXGRP`/`S_IROTH`/`S_IXOTH` 这些
+       单比特常量（被测的组合常量也由它们拼出，同源的是单比特，不是组合），被测用
        `_GROUP_READ_TRAVERSE`/`_OTHER_READ_TRAVERSE`（`0o050`/`0o005`）。把被测的组合常量
        改成 `0o054` 之类不会传染到 oracle（这正是变异体 (aq7)）；
     3. **第三方配重**——放行格数由组合数**手算**得出并单独断言：owner 三位自由（8 种），
