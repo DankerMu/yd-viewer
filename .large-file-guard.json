@@ -4,10 +4,13 @@
   "exclude": [
     "openspec/changes/m2-producer-core/tasks.md",
     "producer/src/yd_producer/canonical/converter.py",
+    "producer/src/yd_producer/forcing/producer.py",
+    "producer/src/yd_producer/forcing/file_store.py",
     "producer/src/yd_producer/rawcopy.py",
     "producer/tests/test_canonical_converter.py",
     "producer/tests/test_cfg_ic.py",
     "producer/tests/test_config.py",
+    "producer/tests/test_forcing_producer.py",
     "producer/tests/test_geometry.py",
     "producer/tests/test_prepare.py",
     "producer/tests/test_publish.py",
