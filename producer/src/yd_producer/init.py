@@ -63,13 +63,22 @@ init-bootstrap/spec.md` 的三条 Requirement（「只在全新根执行」「�
 `os.open(..., O_CREAT|O_EXCL, ...)` 从未被调用过（它只开/建目录分量），target 侧零残留
 是结构性事实。
 
-**收尾话术随「`written` 非空 **或** 探到半写目标」这个析取分支**（MUST NOT 退化成单看
-`written`）：任一为真才说「根已非全新，重跑 init 前需人工清理 `states/`」——首个 source 就
-写中途失败时 `written` 为空、盘上却已有一份截断文件，只看 `written` 会报「根仍是全新根」
-而下一次 init 必然 `STATES_NOT_EMPTY`，两条话术直接矛盾。两者皆假（如阶段 B 首个
-`ensure_directory_no_follow` 就抛 `EACCES`，或 `O_EXCL` 的 `os.open` 拿 `EACCES` 而探测
-干净地得 `FileNotFoundError`）时根仍是全新根，MUST NOT 宣称需要清理，而是把根因放在首位
-并报「零写入，根仍是全新根」。
+**收尾话术是三路**（`docs/compute-loop-design.md` §6.2 逐字；MUST NOT 退化成两路，更 MUST
+NOT 退化成单看 `written`）：
+
+1. 「`written` 非空 **或** 探到半写目标」这个**析取**为真 → 「根已非全新，重跑 init 前需
+   人工清理 `states/`」。判据不能只看 `written`：首个 source 就写中途失败时 `written` 为
+   空、盘上却已有一份截断文件，只看 `written` 会报「根仍是全新根」而下一次 init 必然
+   `STATES_NOT_EMPTY`，两条话术直接矛盾。
+2. 零落盘、零残留、且目标路径上**无任何条目**（阶段 B 首个 `ensure_directory_no_follow`
+   抛 `EACCES`，或 `O_EXCL` 的 `os.open` 拿 `EACCES` 而探测干净地得 `FileNotFoundError`）
+   → 根仍是全新根，MUST NOT 宣称需要清理，把根因放在首位并报「零写入，根仍是全新根」。
+   这句话是一条可执行的运维指令：实测恢复权限后**直接重跑** `bootstrap` 即成功。
+3. 零落盘、零残留、但目标被一个**外来**条目占住（类一的 `FileExistsError`）→ 点名该条目
+   路径、声明它**不是**本次写入产生（故不必也不该删 `states/` 整树），并要求重跑前先确认
+   并移除它。这条腿 MUST NOT 说「根仍是全新根」——实测不移除该条目时 run 2 与 run 1 的
+   `detail` 逐字节相同，「直接重跑」的承诺在这里为假；也 MUST NOT 说「可能已被部分写入」
+   ——该条目不是本模块的产物。
 
 **可见性判据取「宽」，与 `controller` 的前沿可见集刻意不同**：`controller.decide_frontier`
 （issue #22）对不可解析的条目判「不可见」，为的是不让一次崩溃的发布永久砖化该源；本模块
@@ -86,6 +95,19 @@ init-bootstrap/spec.md` 的三条 Requirement（「只在全新根执行」「�
 **分层切分**：`DISCOVERY_UNREADABLE` 专指「集合无法枚举 / 条目无法判定」；率定末态**本身**
 被定位成功之后的读失败（含 mode 000 的 `EACCES`）由 `state.parse` 收敛为 `ValueError`，
 一律归 `CALIBRATION_STATE_UNREADABLE`。
+
+**`variants.<source>` 先过相对性闸门再拼接**（compute-loop §6.2）：取值是绝对路径、或含
+`..` 分量时，判 `VARIANT_PATH_INVALID` 整体拒绝、零写入，MUST NOT 拼接后读取——否则整条
+状态链的**起点**会取自 `YD_ROOT` 之外（写入面恒为 `yd_root/"states"`，故这是越界**读**）。
+判据本身在 `config.variant_relative_violation`，与 `prepare._resolve_variant_relative`
+**共用同一份实现**，MUST NOT 复制第二份。
+
+**`NO_COMPLETE_RAW_CYCLE` 区分「缺数据」与「不可读」**：`rawscan.ScanVerdict` 把
+`missing_files` 与 `unreadable_files` 分开，本模块 MUST NOT 只取 `.complete`。生产 raw 根
+是 NFS 上由另一 uid 写入的树，权限故障同样使 cycle 判不完整；此时提示「等待 raw 补齐后重
+跑」是把权限故障伪装成缺数据，运维会对着已在盘上的数据永远重跑（同一伪装已在
+`cycle.hours` 路径上被禁）。方向不变——两种情形都整体拒绝、零写入，区别只在给运维的下一
+步动作：确为缺文件才提示等 raw 补齐，存在不可读文件时 MUST 点明并要求先修复可读性。
 
 **non-goals**（越界即偏离）：MUST NOT 运行 SHUD（本模块无任何 subprocess 面）、MUST NOT
 写任何 `DONE`、MUST NOT 触碰 `output/`；不做状态 QC 与负残差归零（`state_qc` 的两个入口在
@@ -107,7 +129,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from yd_producer import rawscan
-from yd_producer.config import Config, ConfigError, LocalConfig
+from yd_producer.config import (
+    Config,
+    ConfigError,
+    LocalConfig,
+    variant_relative_violation,
+)
 from yd_producer.controller import STATE_SUFFIX
 from yd_producer.state import parse, render, restamp_to_absolute_time
 from yd_producer.store import safe_fs
@@ -127,7 +154,7 @@ DONE_NAME = "DONE"
 
 
 class InitRefusal(enum.StrEnum):
-    """`init` 的拒绝理由。闭合词表（9 项），逐项可区分，MUST NOT 以异常逃逸。"""
+    """`init` 的拒绝理由。闭合词表（10 项），逐项可区分，MUST NOT 以异常逃逸。"""
 
     #: `states/` 树下存在任一普通文件（含不合命名规则的残留）。
     STATES_NOT_EMPTY = "states_not_empty"
@@ -135,6 +162,9 @@ class InitRefusal(enum.StrEnum):
     DONE_PRESENT = "done_present"
     #: 变体目录不存在 / 不是目录。
     VARIANT_MISSING = "variant_missing"
+    #: `config.variants.<source>` 是绝对路径或含 `..` 分量（`detail` 带 source 与原始
+    #: 取值）。相对性闸门跑在拼接之前，MUST NOT 拼接后再读。
+    VARIANT_PATH_INVALID = "variant_path_invalid"
     #: 变体**顶层**的 `*.cfg.ic` 普通文件命中数 ≠ 1（`detail` 带命中数与路径）。
     CALIBRATION_STATE_AMBIGUOUS = "calibration_state_ambiguous"
     #: 率定末态定位成功但 `state.parse` 抛 `ValueError`（超界、非 UTF-8、结构不可用、
@@ -331,18 +361,28 @@ def _first_complete_cycle(
     source: str,
     candidates: tuple[datetime, ...],
     config: Config,
-) -> datetime | None:
-    """升序取第一个完整 cycle。
+) -> tuple[datetime | None, tuple[Path, ...]]:
+    """升序取第一个完整 cycle，并带回扫描过程中遇到的**不可读** raw 文件。
 
     `rawscan.judge` 抛的 `ConfigError`（配置取值域 / 请求校验 / 模式校验）**原样上抛**，
     MUST NOT 被吞成「不完整」——那会把一个配置错误伪装成「等 raw 补齐」，让运维永远重跑
     init。只有 `complete is False` 走「继续找下一个候选」（cycle 目录整体不存在**不是**
     错误，见 `rawscan.judge` 的 docstring）。
+
+    **返回值 MUST NOT 塌缩成 `complete` 一个 bool**：`rawscan.ScanVerdict` 把
+    `missing_files` 与 `unreadable_files` 分得很清楚，而生产 raw 根是 NFS 上由 NWM 以另一
+    uid 写入的目录树——权限故障同样让 cycle 判不完整。丢掉这条信息，拒绝理由就只剩「等
+    raw 补齐」这一句，把一次权限故障伪装成缺数据，运维会对着已在盘上的数据永远重跑
+    （本模块已在 `cycle.hours` 路径上禁止了同一伪装）。方向不变——两种情形都 fail closed
+    地整体拒绝、零写入，区别只在**给运维的下一步动作**。
     """
+    unreadable: list[Path] = []
     for cycle in candidates:
-        if rawscan.judge(raw_root, source, cycle, config).complete:
-            return cycle
-    return None
+        verdict = rawscan.judge(raw_root, source, cycle, config)
+        if verdict.complete:
+            return cycle, ()
+        unreadable.extend(verdict.unreadable_files)
+    return None, tuple(unreadable)
 
 
 # --- 编排 --------------------------------------------------------------------
@@ -382,13 +422,27 @@ def _write_failed(
     error: BaseException,
     *,
     partial_note: str | None,
+    blocked_by_foreign_entry: bool = False,
 ) -> InitReport:
-    """阶段 B 的失败收尾。
+    """阶段 B 的失败收尾，结尾话术**三路**（compute-loop §6.2）。
 
     `partial_note` 是 :func:`_probe_partial_residue` 的探测结论：非 `None` 即「盘上可能
-    留下了半写目标」，其文本已按探测结果（探到 / 探测失败）分好话术。收尾判据是
-    「`written` 非空 **或** `partial_note is not None`」这个析取，MUST NOT 单看 `written`
-    （见模块头）。
+    留下了半写目标」，其文本已按探测结果（探到 / 探测失败）分好话术。
+    `blocked_by_foreign_entry` 只在 `FileExistsError` 腿为真：目标路径上坐着一个**不是
+    本次写入产生**的条目。
+
+    三路互斥且顺序固定：
+
+    (a) `written` 非空 **或** `partial_note is not None` → 「需人工清理 `states/`」。判据
+        MUST 是这个析取而非单看 `written`：首个 source 就写中途失败时 `written` 为空、盘
+        上却已有一份截断文件，只看 `written` 会报「根仍是全新根」而下一次 init 必然
+        `STATES_NOT_EMPTY`。
+    (b) 零落盘、零残留、且目标路径上**无任何条目**（open 期失败）→ 「零写入，根仍是全新
+        根」，根因放在首位。这句话是一条运维指令（直接重跑即可），实测成立。
+    (c) 零落盘、零残留、但目标被一个**外来**条目占住（`O_EXCL` 撞 `EEXIST`）→ 点名该条目
+        并要求重跑前先确认并移除它。这里 MUST NOT 说「根仍是全新根」（不移除该条目，重跑
+        必然以同样理由再次失败——实测 run 1 与 run 2 的 detail 逐字节相同），也 MUST NOT
+        说「可能已被部分写入」（该条目不是本次写入产生，把 `states/` 整树删掉是过度动作）。
     """
     parts = [f"{source} 的首态写入 {target} 失败：{error}"]
     if partial_note is not None:
@@ -398,6 +452,12 @@ def _write_failed(
     if written or partial_note is not None:
         # 半写产物同样让根不再全新，即使它不在 `written` 里。
         parts.append("根已非全新，重跑 init 前需人工清理 `states/`")
+    elif blocked_by_foreign_entry:
+        parts.append(
+            f"本次没有任何首态落盘，但目标路径 {target} 上已有一个**非本次写入产生**的"
+            "条目：它既不是半写产物、也不该连同 `states/` 整树一起删除；"
+            "重跑 init 之前须人工确认该条目的来源并移除它，否则重跑必然以同样理由再次失败"
+        )
     else:
         parts.append("零写入，根仍是全新根")
     return InitReport(
@@ -439,7 +499,17 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
         # 2. 逐源定位率定末态（变体顶层恰一个 `.cfg.ic` 普通文件）。
         calibration: dict[str, Path] = {}
         for source in rawscan.SOURCES:
-            variant_dir = yd_root / getattr(config.variants, source)
+            # 相对性闸门跑在 join **之前**：绝对路径或含 `..` 的取值一旦被拼接后读取，
+            # 链起点就取自 `YD_ROOT` 之外。判据与 `prepare` 共用同一份实现。
+            variant_value = getattr(config.variants, source)
+            violation = variant_relative_violation(f"variants.{source}", variant_value)
+            if violation is not None:
+                return _refuse(
+                    InitRefusal.VARIANT_PATH_INVALID,
+                    f"{source} 的变体路径越出 `yd_root`：{violation}"
+                    "（链起点必须取自 `YD_ROOT` 之内，故拒绝拼接后读取）",
+                )
+            variant_dir = yd_root / variant_value
             if not _is_directory(variant_dir):
                 return _refuse(
                     InitRefusal.VARIANT_MISSING,
@@ -473,13 +543,25 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
     candidates = _candidate_cycles(window_start, now_utc, config.cycle.hours)
     frontier: dict[str, datetime] = {}
     for source in rawscan.SOURCES:
-        cycle = _first_complete_cycle(local.nwm.raw_root, source, candidates, config)
+        cycle, unreadable = _first_complete_cycle(
+            local.nwm.raw_root, source, candidates, config
+        )
         if cycle is None:
+            reason = (
+                f"{source} 在扫描窗 [{window_start.isoformat()}, "
+                f"{now_utc.isoformat()}] 内没有完整 cycle；整体拒绝、不写任何状态"
+            )
+            if unreadable:
+                listed = "、".join(str(path) for path in unreadable[:3])
+                return _refuse(
+                    InitRefusal.NO_COMPLETE_RAW_CYCLE,
+                    f"{reason}；窗内有 {len(unreadable)} 个 raw 文件**存在但不可读**"
+                    f"（如 {listed}）：这是权限或 I/O 故障，不是缺数据，"
+                    "重跑 init 之前须先修复这些文件的可读性",
+                )
             return _refuse(
                 InitRefusal.NO_COMPLETE_RAW_CYCLE,
-                f"{source} 在扫描窗 [{window_start.isoformat()}, "
-                f"{now_utc.isoformat()}] 内没有完整 cycle；"
-                "整体拒绝、不写任何状态，等待 raw 补齐后重跑 init",
+                f"{reason}，等待 raw 补齐后重跑 init",
             )
         frontier[source] = cycle
 
@@ -513,8 +595,16 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
             safe_fs.write_bytes_no_follow_exclusive(target, payloads[source])
         except FileExistsError as error:
             # 类一：`O_EXCL` 拒绝覆盖。盘上的条目是**别人**预置的，不是本模块的半写产物，
-            # 故本臂 MUST 先于下面的探测臂捕获，且不走探测。
-            return _write_failed(source, target, written, error, partial_note=None)
+            # 故本臂 MUST 先于下面的探测臂捕获，且不走探测；但它同样让「直接重跑」这条
+            # 运维承诺为假，故走收尾话术的第三路。
+            return _write_failed(
+                source,
+                target,
+                written,
+                error,
+                partial_note=None,
+                blocked_by_foreign_entry=True,
+            )
         except (OSError, safe_fs.SafeFilesystemError) as error:
             # 写入腿的其余失败：open 期（零残留）与写中途（半写）在异常类型与 `kind` 上
             # 不可区分，只有盘上探测能分开，见 `_probe_partial_residue`。

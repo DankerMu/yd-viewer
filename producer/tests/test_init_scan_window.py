@@ -26,7 +26,9 @@ from init_bootstrap_fixtures import (
     assert_zero_write,
     expected_bytes,
     make_config,
+    skip_if_root,
     snapshot,
+    unreadable,
 )
 
 from yd_producer.config import ConfigError
@@ -81,6 +83,48 @@ def test_one_source_without_complete_cycle_refuses_the_whole_run(
     assert "ifs" in report.detail
     assert WINDOW_START.isoformat() in report.detail
     assert NOW.isoformat() in report.detail
+    # 确为**缺文件**时才提示等 raw 补齐——这是不可读腿 MUST NOT 复用的那句话。
+    assert "等待 raw 补齐后重跑 init" in report.detail
+    assert_zero_write(tree, before_states, before_output)
+
+
+def test_unreadable_raw_is_not_disguised_as_a_missing_raw_refusal(
+    tmp_path: Path,
+) -> None:
+    """[桶 C-4] `NO_COMPLETE_RAW_CYCLE` MUST 区分「缺数据」与「不可读」（cand-R3-02）。
+
+    构造：ifs 窗内**唯一**的完整 cycle 的两个 bundle 文件 `chmod 0o000`——`rawscan.judge`
+    因此返回 `missing_files == 0`、`unreadable_files == 2`，cycle 判不完整。方向不变（仍
+    整体拒绝、仍零写入、仍 fail closed），但 `detail` MUST 点明存在**不可读**的 raw 文件，
+    MUST NOT 出现「等待 raw 补齐后重跑 init」：生产 raw 根是 NFS 上由 NWM 以另一 uid 写入
+    的树，权限故障最现实；把它伪装成缺数据，运维会对着**已在盘上**的数据永远重跑。同一
+    伪装本模块已在 `cycle.hours` 路径上禁止（见上面的空 `hours` 一行），本行只是把同一条
+    理由施加到未被守卫的 raw 权限面上。
+
+    判别变异体：把 detail 退回不区分的原话术（即 `_first_complete_cycle` 只返回
+    `.complete`、丢弃 `unreadable_files`）-> 本行必红。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    tree.write_cycle("gfs", cycle)
+    bundle_dir = tree.write_cycle("ifs", cycle)
+    bundles = sorted(path for path in bundle_dir.iterdir() if path.is_file())
+    assert len(bundles) == 2
+    before_states = snapshot(tree.states)
+    before_output = snapshot(tree.output)
+
+    with unreadable(bundles[0]), unreadable(bundles[1]):
+        report = tree.run()
+
+    assert report.refusal is InitRefusal.NO_COMPLETE_RAW_CYCLE
+    assert "ifs" in report.detail
+    # 点明「存在但不可读」，并带上数目与路径。
+    assert "不可读" in report.detail
+    assert "2 个 raw 文件" in report.detail
+    assert str(bundles[0]) in report.detail
+    # 缺数据的补救话术 MUST NOT 被复用到权限故障上。
+    assert "等待 raw 补齐" not in report.detail
     assert_zero_write(tree, before_states, before_output)
 
 

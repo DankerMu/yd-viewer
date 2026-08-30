@@ -11,13 +11,16 @@ from pathlib import Path
 
 import pytest
 from init_bootstrap_fixtures import (
+    DEFAULT_VARIANTS,
     EPOCH_MINUTES_25_00Z,
     STATE_SUFFIX,
     WRITE_ORDER,
     Tree,
     all_files,
     assert_zero_write,
+    default_payload,
     expected_bytes,
+    make_config,
     skip_if_root,
     snapshot,
     stat_hostile,
@@ -154,6 +157,108 @@ def test_variant_without_exactly_one_calibration_state_refuses(
     assert f"命中 {hits} 个" in report.detail
     assert str(variant) in report.detail
     assert_zero_write(tree, before_states, before_output)
+
+
+# --- 变体路径的相对性闸门（[桶 C-5]，裁决 2 的 round 3 补正）----------------
+#
+# 闸门跑在 `yd_root / getattr(config.variants, source)` 这个 join **之前**：绝对路径与含
+# `..` 的取值一旦被拼接后读取，整条状态链的**起点**就取自 `YD_ROOT` 之外。判据与
+# `prepare._resolve_variant_relative` 共用同一份实现（`config.variant_relative_violation`）。
+
+
+@pytest.mark.parametrize("shape", ["absolute", "pardir"])
+@pytest.mark.parametrize("bad_source", WRITE_ORDER)
+def test_variant_path_outside_yd_root_refuses_with_its_own_reason(
+    tmp_path: Path, bad_source: str, shape: str
+) -> None:
+    """[桶 C-5]：绝对路径 / 含 `..` 的变体取值 -> `VARIANT_PATH_INVALID`，零写入。
+
+    两种越界形态 × 两个 source **各自单独**越界（另一源保持合法默认值），故任何只守住
+    一个 source 或只守住一种形态的实现都会在某条参数上必红。
+
+    构造刻意让越界目录**真的存在且持恰一份率定末态**（`Tree` 对绝对值/含 `..` 的值做同一
+    个 join，于是它就落在 `YD_ROOT` 之外）：删掉闸门恢复裸 join 时，实测得 `refusal=None`
+    且两份首态照写、链起点解析到 `YD_ROOT` 之外——本行因此在拒绝枚举项与「零写入」两侧
+    同时必红，而不是只在错误码上必红。
+
+    拒绝理由与「变体缺失」「率定末态不唯一」逐项可区分：这里断言的是**新增的第十项**
+    枚举值，且 `detail` 带 source 与**原始取值**（运维要能一眼看出是哪条配置项写错）。
+    """
+    outside = tmp_path.resolve() / "outside-yd-root" / bad_source
+    value = str(outside) if shape == "absolute" else f"../outside-yd-root/{bad_source}"
+    variants = dict(DEFAULT_VARIANTS)
+    variants[bad_source] = value
+    tree = Tree(tmp_path, config=make_config(variants=variants))
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+    # 越界目录确实存在且持恰一份率定末态：拒绝的原因只能是闸门，不是「找不到」。
+    assert tree.calibration[bad_source].is_file()
+    assert not tree.calibration[bad_source].resolve().is_relative_to(tree.yd_root)
+    before_states = snapshot(tree.states)
+    before_output = snapshot(tree.output)
+
+    report = tree.run()
+
+    assert report.refusal is InitRefusal.VARIANT_PATH_INVALID
+    assert report.refusal is not InitRefusal.VARIANT_MISSING
+    assert report.refusal is not InitRefusal.CALIBRATION_STATE_AMBIGUOUS
+    assert f"variants.{bad_source}" in report.detail
+    assert value in report.detail
+    assert_zero_write(tree, before_states, before_output)
+
+
+def test_shared_variant_dir_with_two_calibration_states_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """[桶 C-5] 的对照行（上半）：`variants.gfs == variants.ifs` 指向同一**合法相对**目录。
+
+    共享目录本身不是越界——闸门只管相对性。逐源命名的两份 `.cfg.ic` 落进同一个顶层，命中
+    数为 2，故判 `CALIBRATION_STATE_AMBIGUOUS` 而**不是** `VARIANT_PATH_INVALID`：这条对照
+    钉死两条判据不得互相顶替。
+    """
+    shared = "input/models/shared"
+    tree = Tree(tmp_path, config=make_config(variants={"gfs": shared, "ifs": shared}))
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+    before_states = snapshot(tree.states)
+    before_output = snapshot(tree.output)
+
+    report = tree.run()
+
+    assert report.refusal is InitRefusal.CALIBRATION_STATE_AMBIGUOUS
+    assert "命中 2 个" in report.detail
+    assert_zero_write(tree, before_states, before_output)
+
+
+def test_shared_variant_dir_with_one_calibration_state_is_accepted(
+    tmp_path: Path,
+) -> None:
+    """[桶 C-5] 的对照行（下半）：同一合法相对目录内**恰一份** `.cfg.ic` -> 被接受。
+
+    两个源因此共用同一个链起点文件。**MUST NOT** 把这条写成「共享变体目录被接受」——被接受
+    的是「顶层恰一份率定末态」这条判据的结果，共享目录只是它的一个实例（上半那条同样是共享
+    目录，却被拒）。
+    """
+    shared = "input/models/shared"
+    payload = default_payload()
+    tree = Tree(
+        tmp_path,
+        config=make_config(variants={"gfs": shared, "ifs": shared}),
+        payloads={source: payload for source in WRITE_ORDER},
+        calibration_names={source: "yd" + STATE_SUFFIX for source in WRITE_ORDER},
+    )
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    # 两条链的起点是**同一个**文件。
+    assert tree.calibration["ifs"] == tree.calibration["gfs"]
+
+    report = tree.run()
+
+    assert report.refusal is None
+    assert report.written == tuple(tree.state_path(name, cycle) for name in WRITE_ORDER)
+    for path in report.written:
+        assert path.read_bytes() == expected_bytes(payload, EPOCH_MINUTES_25_00Z)
 
 
 def test_calibration_state_lookup_is_top_level_only(tmp_path: Path) -> None:

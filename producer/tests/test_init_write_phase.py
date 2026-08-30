@@ -43,6 +43,9 @@ PARTIAL_CLAIM = "可能已被部分写入"
 EXCLUSIVE_CLAIM = "已被排他创建"
 #: 探测自身失败（fail closed）的 hedge 话术。
 HEDGE_CLAIM = "落盘残留无法探测"
+#: 收尾第三路（`FileExistsError` 腿）：目标被**外来**条目占住时才成立的两段措辞。
+FOREIGN_ENTRY_CLAIM = "非本次写入产生"
+REMOVE_DEMAND = "重跑 init 之前须人工确认该条目的来源并移除它"
 
 # --- 成功路径 ----------------------------------------------------------------
 
@@ -208,6 +211,13 @@ def test_write_failure_with_zero_landed_states_does_not_claim_cleanup(
     同时钉死 `detail` 的「列出**全部**前序已落盘 source」不是硬编码某一个源：既有构造只
     堵第二个源，`written` 恒为单元素，把 join 换成 `str(written[0])` 在那条用例上看不出
     区别，本行的空元组会让它直接 `IndexError`。
+
+    收尾话术的期望值在 round 3 被**更正**（cand-R3-01 CONFIRMED，fixture 行 18 的
+    CORRECTION）：本构造走的是 `FileExistsError` 腿，目标上坐着一个外来条目，实测重跑
+    的 `detail` 与首跑逐字节相同——「零写入，根仍是全新根」承诺的运维后果（直接重跑）在
+    这条腿上为假，故期望改为第三路话术。第三路的完整判据（点名条目、移除后可重跑成功、
+    悬垂 symlink 载体）由 `test_foreign_entry_at_the_target_is_named_and_must_be_removed`
+    承担。
     """
     tree = Tree(tmp_path)
     cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
@@ -221,11 +231,118 @@ def test_write_failure_with_zero_landed_states_does_not_claim_cleanup(
     assert report.refusal is InitRefusal.WRITE_FAILED
     assert report.written == ()
     assert "（无）" in report.detail
-    assert FRESH_CLAIM in report.detail
+    assert FOREIGN_ENTRY_CLAIM in report.detail  # 授权更正：原为 `FRESH_CLAIM in`
+    assert FRESH_CLAIM not in report.detail
     assert CLEANUP_CLAIM not in report.detail
     assert PARTIAL_CLAIM not in report.detail
     # 首位失败即整体停手：第二个源的目录从未被创建。
     assert not (tree.states / "gfs").exists()
+    assert all_files(tree.states) == []
+
+
+@pytest.mark.parametrize("carrier", ["empty-dir", "dangling-symlink"])
+def test_foreign_entry_at_the_target_is_named_and_must_be_removed(
+    tmp_path: Path, carrier: str
+) -> None:
+    """[桶 C-3] `FileExistsError` 腿的第三路话术（cand-R3-01 的正向钉死）。
+
+    构造：写入序**首位**（ifs）的目标路径上预置一个**外来**条目——它不是普通文件，故过得
+    了阶段 A 的守卫（守卫只数普通文件），而 `O_CREAT|O_EXCL` 对任何已存在条目都得
+    `EEXIST`。两种载体（空目录 / 悬垂 symlink）实测同构。
+
+    盘上终态是「零普通文件残留、但目标被占」：这既不是「根仍是全新根」（不移除该条目，
+    重跑必然以同样理由再次失败——实测 run 2 与 run 1 的 detail 逐字节相同），也不是「可能
+    已被部分写入」（该条目不是本次写入产生，照那句话清理会把 `states/` 整树删掉）。故
+    收尾 MUST 走第三路：点名条目路径 + 要求先确认并移除。
+
+    判别变异体：把第三路合并回「零写入，根仍是全新根」那一路 -> 本行必红。
+    移除条目后重跑成功这一半，是本行与
+    `test_open_time_failure_with_zero_residue_reports_a_fresh_root` 的重跑断言互为交叉
+    验证的地方：同一条断言在真零残留腿上成立、在本腿上（未移除条目时）必然失败。
+    """
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    blocker = tree.state_path("ifs", cycle)
+    blocker.parent.mkdir(parents=True)
+    if carrier == "empty-dir":
+        blocker.mkdir()
+    else:
+        blocker.symlink_to(tree.root / "never-created.cfg.ic")
+    before_output = snapshot(tree.output)
+
+    report = tree.run()
+
+    assert report.refusal is InitRefusal.WRITE_FAILED
+    assert report.written == ()
+    assert "（无）" in report.detail
+    # 第三路：点名该条目，并要求重跑前先确认来源、移除它。
+    assert str(blocker) in report.detail
+    assert FOREIGN_ENTRY_CLAIM in report.detail
+    assert REMOVE_DEMAND in report.detail
+    # 两句被证伪/不适用的话术都 MUST NOT 出现。
+    assert FRESH_CLAIM not in report.detail
+    assert PARTIAL_CLAIM not in report.detail
+    assert CLEANUP_CLAIM not in report.detail
+    assert all_files(tree.states) == []
+    assert snapshot(tree.output) == before_output
+
+    # 补救（只移除该条目、不动 `states/` 其余部分）之后重跑 MUST 成功——这正是第三路
+    # 话术承诺的运维后果，也是「根仍是全新根」在本腿上为假的直接证据。
+    if carrier == "empty-dir":
+        blocker.rmdir()
+    else:
+        blocker.unlink()
+
+    again = tree.run()
+
+    assert again.refusal is None
+    assert again.written == tuple(tree.state_path(name, cycle) for name in WRITE_ORDER)
+    for name in WRITE_ORDER:
+        assert tree.state_path(name, cycle).read_bytes() == expected_bytes(
+            tree.payloads[name], EPOCH_MINUTES_25_00Z
+        )
+
+
+def test_ensure_leg_probe_unreachable_still_reports_a_fresh_root(
+    tmp_path: Path,
+) -> None:
+    """[桶 C-1] ENSURE 腿的探针不可达 MUST 报全新根（cand-R3-04 的正向钉死）。
+
+    构造：`states/` 置 `0o600`（**可读不可执行**），其余为合法全新根。阶段 A 全过
+    （`listdir(states)` 只要 `r`，且树为空故没有子项要 `lstat`）；阶段 B 的
+    `ensure_directory_no_follow` 在**父目录 open**（`O_DIRECTORY` 需 `x`）上拿 `EACCES`。
+    目标侧零残留是**结构性事实**：那条腿上对 target 的 `os.open(..., O_CREAT|O_EXCL)`
+    从未被调用过。
+
+    与既有两行的差异是**构造差异而非重复**：`0o500` 那行（`r-x`）下探针仍拿得到 `x`、
+    `states/ifs` 从未创建，故得干净的 `FileNotFoundError`，按构造即对本变异不敏感；既有
+    `0o600` 行植的是 `states/ifs/`（不是 `states/`），`ensure` 在既存目录上成功，只走
+    **写**腿。判别变异体（M5）：把两次调用并回同一个 `try` -> 本行必红（该变异在合并前
+    的全套 1225 下存活），因为探针会穿过不可执行的 `states/` 拿到 `EACCES`，从而对一个
+    从未被创建的 inode 吐出 hedge 话术并要求人工清理一个仍然全新的根。
+    """
+    skip_if_root()
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    original = tree.states.stat().st_mode
+    tree.states.chmod(0o600)
+    try:
+        report = tree.run()
+    finally:
+        tree.states.chmod(original)
+
+    assert report.refusal is InitRefusal.WRITE_FAILED
+    assert report.written == ()
+    assert FRESH_CLAIM in report.detail
+    assert PARTIAL_CLAIM not in report.detail
+    assert CLEANUP_CLAIM not in report.detail
+    # 探针根本不该被调用：hedge 与「已被排他创建」两种半写话术都 MUST NOT 出现。
+    assert HEDGE_CLAIM not in report.detail
+    assert EXCLUSIVE_CLAIM not in report.detail
     assert all_files(tree.states) == []
 
 
@@ -299,6 +416,11 @@ def test_mid_write_io_failure_names_the_possibly_partial_target(
     assert gfs_target not in report.written
     assert PARTIAL_CLAIM in report.detail
     assert str(gfs_target) in report.detail
+    # [桶 C-2] 正向钉死**确定性**措辞：残留被正面探到，话术 MUST 说「已被排他创建」，
+    # MUST NOT 退化成「残留无法探测…保守起见」这条对冲文本（cand-R3-05 的判别变异体 S1
+    # 正是把成功臂改吐对冲文本；只断言 `PARTIAL_CLAIM` 与目标路径杀不掉它）。
+    assert EXCLUSIVE_CLAIM in report.detail
+    assert HEDGE_CLAIM not in report.detail
     # 「已落盘的首态」列表只列 ifs——半写的 gfs 目标由上一条话术单独点名。
     landed = report.detail.split("已落盘的首态：")[1]
     assert str(ifs_target) in landed
@@ -351,6 +473,21 @@ def test_open_time_failure_with_zero_residue_reports_a_fresh_root(
     assert CLEANUP_CLAIM not in report.detail
     # 盘上零普通文件：话术与终态一致，下一次 init 仍可干净重跑。
     assert all_files(tree.states) == []
+
+    # [桶 C-1] 把代理量换成承诺本身（cand-R3-06）：「零写入，根仍是全新根」本身就是一条
+    # 运维指令——「排掉根因后直接重跑」。`all_files(...) == []` 只是它的代理量，故在恢复
+    # 权限后**真的再跑一次** `bootstrap`，断言它成功且两源首态都落盘。
+    # 注意本断言只对**真零残留**腿成立：同一断言在 `FileExistsError` 腿上必然失败（不移除
+    # 那个外来条目，重跑会以同样理由再次失败），那条腿由
+    # `test_foreign_entry_at_the_target_is_named_and_must_be_removed` 单独承担。
+    again = tree.run()
+
+    assert again.refusal is None
+    assert again.written == tuple(tree.state_path(name, cycle) for name in WRITE_ORDER)
+    for name in WRITE_ORDER:
+        assert tree.state_path(name, cycle).read_bytes() == expected_bytes(
+            tree.payloads[name], EPOCH_MINUTES_25_00Z
+        )
 
 
 def test_first_source_mid_write_failure_demands_manual_cleanup(

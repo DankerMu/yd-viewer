@@ -21,6 +21,7 @@ import os
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 __all__ = [
@@ -37,6 +38,7 @@ __all__ = [
     "VariantsConfig",
     "load_config",
     "load_local",
+    "variant_relative_violation",
 ]
 
 
@@ -181,6 +183,39 @@ class LocalConfig:
     nwm: NwmLocal
     slurm: dict[str, str | int]
     cron: CronLocal
+
+
+# --- `variants.<source>` 的相对性闸门（`prepare` 与 `init` 共用一份判据）--------
+
+
+def variant_relative_violation(field: str, value: str) -> str | None:
+    """`variants.<source>` 取值的相对性判据：违规返回错误说明，合法返回 `None`。
+
+    判据只有两条，且**只做词法判定**（不 `resolve()`、不触碰文件系统）：绝对路径拒绝，
+    任一 `os.pardir` 组件拒绝。两条都在任何写入/读取之前运行。
+
+    **本函数是这条判据在全仓的唯一实现**（compute-loop §6.2「该闸门与 `prepare` 侧的
+    同名判据必须是同一份实现」）：`prepare._resolve_variant_relative` 用它把违规转成
+    `PrepareError`（写侧：绝对路径会把产物写到运行根之外，`..` 逃逸会让"拒绝覆盖"守卫
+    保护的树和实际写入的树不是同一棵）；`init` 用它把违规转成
+    `InitRefusal.VARIANT_PATH_INVALID`（读侧：越界取值会让状态链的起点读自 `YD_ROOT`
+    之外）。复制第二份判据即两侧迟早分叉。
+
+    `..` 的判据是**任一 `os.pardir` 组件**，而非"规范化后是否逃出 `yd_root`"：只查规范化
+    结果会放行 `input/../input/models/yd_gfs` 这类词法上含 `..`、折叠后又落回根内的值，
+    而 `variants.*` 没有任何需要 `..` 的正当理由。
+
+    调用方各自负责本判据之外的检查（`prepare` 另拒空值与指向 `yd_root` 自身的取值）。
+    """
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return f"配置项 `{field}` 必须是相对 `yd_root` 的路径，不得为绝对路径：{value}"
+    if os.pardir in candidate.parts:
+        return (
+            f"配置项 `{field}` 不得含 `..` 组件（规范化后是否仍落在 `yd_root` 内都一样"
+            f"拒绝）：{value}"
+        )
+    return None
 
 
 # --- 显式校验原语 ------------------------------------------------------------
