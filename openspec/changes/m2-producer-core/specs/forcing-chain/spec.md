@@ -43,6 +43,22 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 - **WHEN** binding 引用 canonical 中不存在的 `grid_cell_id`，或 binding 的 source/grid identity 与 canonical 不一致
 - **THEN** forcing 生产在 ready 输出前稳定失败，不回退 IDW，也不留下 ready forcing package/version
 
+#### Scenario: 非法 cycle 不得碰撞合法 ready 状态
+- **WHEN** 已存在合法 12Z ready 后，以 06Z、12:30、非零秒或非零微秒调用公开 forcing seam
+- **THEN** 请求在任何 repository lookup/write/cleanup 前稳定失败，既不得生成非法 cycle 产物，也不得改变原 12Z version、sidecar、handoff 或 cycle-ready 证据
+
+#### Scenario: catalog row 与 canonical 对象身份联合校验
+- **WHEN** catalog row 的 `object_uri`/checksum 指向另一 source、另一 cycle、另一 variable 或与 row 身份不一致的 NetCDF，或 dataset 的 data variable、`cycle_time`、`valid_time`、`lead_time_hours`、`unit`、`grid_id` 任一不一致
+- **THEN** forcing 生产在读取值与写 ready 前 fail closed；object key MUST 逐字对应 row 的 source/cycle/variable/canonical product id
+
+#### Scenario: canonical NetCDF 累计读取有界
+- **WHEN** catalog 指向大于 536870912 bytes 的 regular/sparse canonical NetCDF
+- **THEN** descriptor-bound gateway 在 xarray 打开与完整 checksum 扫描前按同一 fd 的大小/累计字节上限稳定拒绝、关闭 fd，且不留下 ready 输出
+
+#### Scenario: 输出配置漂移不得复用 ready
+- **WHEN** 同一 source/cycle/model 已 ready 后，`rn_shortwave_factor` 或其它影响 package bytes/shape/path/选择策略的 forcing config 发生变化但 `producer_version` 不变
+- **THEN** stable output-config identity 不匹配，producer 重算或 fail closed，不得返回旧 `already_done`
+
 ### Requirement: work 内临时 registry
 快照 file backend 要求 NWM 结构的 registry/model manifest 时，控制器 MUST 依据 TOML 配置在本轮 work 内临时生成，并随 work 删除；项目 MUST NOT 维护跨轮动态 registry。
 

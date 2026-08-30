@@ -49,7 +49,11 @@
 
 本 issue 中「站点集合等于格点集合」按 direct-grid binding 的权威定义解释：输出站点与 binding 声明的 canonical `grid_cell_id` 集合一一对应，canonical 中未被 binding 引用的额外格点不成为站点，也不读取其值；这与 pin 的「Required grid cells are subset before value extraction」一致，不恢复旧 105 站 IDW。GFS/IFS 各用自己的 contract、grid id 和 cell id，禁止跨 source 复用 binding。
 
-`Time_Day` 的零点由调用参数 `cycle_time` 决定，不由最早可产出的 `valid_time` 反推。00Z/12Z 都要求首个 SHUD 行在 cycle；若输入不能产出 cycle 行，producer fail closed 且不写 ready package，不能把 T+3/T+12 重标为 `Time_Day=0`。
+`Time_Day` 的零点由调用参数 `cycle_time` 决定，不由最早可产出的 `valid_time` 反推。00Z/12Z 都要求首个 SHUD 行在 cycle；若输入不能产出 cycle 行，producer fail closed 且不写 ready package，不能把 T+3/T+12 重标为 `Time_Day=0`。公开 seam 在任何 repository lookup/write/cleanup 前拒绝 06Z、非整点或非零秒/微秒，避免按小时命名的 storage identity 与合法 00Z/12Z ready 状态碰撞。
+
+canonical catalog 是产品清单，但 row metadata、精确 object key 与 NetCDF 自描述 identity 必须联合一致：对象 key 由 row 的 source/cycle/variable/canonical product id 唯一导出；dataset 的 data variable、`cycle_time`、`valid_time`、`lead_time_hours`、`unit`、`grid_id` 必须与 row 相同。descriptor gateway 对单个 canonical NetCDF 采用版本化 512 MiB 上限（`MAX_CANONICAL_NETCDF_BYTES = 536870912`），在同一 no-follow fd 上先以 `fstat` 拒绝已知超限 regular file，并在 checksum 流式读取中再次按累计字节 fail closed；该数值覆盖当前 5,000,000-cell 单变量产品预算，不引入环境变量或第二份 config authority。
+
+forcing ready currency 除 `producer_version` 外还记录一个 canonical-JSON stable output-config identity，至少覆盖 `rn_shortwave_factor`、三个输出文件名、output/required variable 集、ERA5 latency policy 与 `min_lead_hours`。只要其中会改变 package bytes、shape、path 或选择策略的字段变化，同 `(source, cycle, model)` 就必须重算/拒绝，不能返回旧 `already_done`。
 
 快照 DB-free 守卫检查真实外部耦合（数据库驱动/URL、scheduler 或 registry 包 import、环境读取），不再把普通标识符或错误消息里的裸 `scheduler`/`registry` 单词当成耦合。显式注入、只服务本轮 work 的 file manifest adapter 是 forcing-chain spec 明文允许且 issue #15 负责生成/清理的内部文件契约，不是外部 registry 服务。
 
