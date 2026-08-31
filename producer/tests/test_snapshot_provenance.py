@@ -657,9 +657,22 @@ def test_each_forbidden_surface_is_individually_enforced(
     可达且无覆盖。本条给每一项配一个注入式 fixture，`test_forbidden_surfaces_match_
     the_declared_grep` 负责词表本身不被删项。
 
-    注入点是**普通字符串字面量**而不是行尾注释：扫描口径收紧后（注释与 docstring 属惰性
-    散文，不再计为命中，见 `_code_lines`），注释形态的注入不再可达，用例会永远绿。
+    AST 语义（issue #14 迁移）：`psycopg`/`scheduler`/`registry`/`journal`/
+    `reservation` 只在 dotted import module path 成分命中；`DATABASE_URL` 只在
+    精确 Name 或 `os.environ` 环境访问 key 命中；`os.getenv`/`os.environ` 只在
+    对应 AST Call/Attribute/Subscript 路径命中。注入点用真实 import/name/call 形态。
     """
+
+    injection = {
+        "psycopg": "import psycopg\n",
+        "DATABASE_URL": "DATABASE_URL = 'postgres://x'\n",
+        "scheduler": "from app.scheduler import run\n",
+        "registry": "from app.registry import models\n",
+        "journal": "from app.journal import write\n",
+        "reservation": "from app.reservation import reserve\n",
+        "os.getenv": "import os\nx = os.getenv('DATABASE_URL')\n",
+        "os.environ": "import os\nx = os.environ.get('DATABASE_URL')\n",
+    }
 
     targets = {
         "producer/src/yd_producer/store/safe_fs.py": "packages/common/safe_fs.py"
@@ -668,13 +681,32 @@ def test_each_forbidden_surface_is_individually_enforced(
         tmp_path,
         {
             "producer/src/yd_producer/store/safe_fs.py": "x = 1\n",
-            "producer/src/yd_producer/store/leaked.py": f'y = "{token}"\n',
+            "producer/src/yd_producer/store/leaked.py": injection[token],
         },
     )
 
     hits = _forbidden_hits(tmp_path, _scan_files(tmp_path, targets))
 
-    assert hits == [f"producer/src/yd_producer/store/leaked.py:1: {token}"]
+    expected_line = (
+        1
+        if token
+        in {
+            "psycopg",
+            "DATABASE_URL",
+            "scheduler",
+            "registry",
+            "journal",
+            "reservation",
+        }
+        else 2
+    )
+    expected_tokens = (
+        ("DATABASE_URL", token) if token in {"os.getenv", "os.environ"} else (token,)
+    )
+    assert hits == [
+        f"producer/src/yd_producer/store/leaked.py:{expected_line}: {expected_token}"
+        for expected_token in expected_tokens
+    ]
 
 
 def _fake_repo(tmp_path: Path, files: Mapping[str, str]) -> Path:
@@ -723,7 +755,7 @@ def test_db_free_scan_catches_unregistered_files_inside_a_snapshot_package(
         tmp_path,
         {
             "producer/src/yd_producer/store/safe_fs.py": "import os\n",
-            "producer/src/yd_producer/store/helper.py": "from app import scheduler\n",
+            "producer/src/yd_producer/store/helper.py": "from app.scheduler import run\n",
         },
     )
 
@@ -838,6 +870,7 @@ def test_db_free_scan_still_sees_code_that_precedes_a_trailing_comment(
         "import os\n"
         'URL = os.getenv("DATABASE_URL")  # 说明：这里读环境变量\n'
         'Q = "psycopg"  # tail\n'
+        'R = "registry"  # tail\n'
     )
     # 构造自检：正常路径确实**只**抹掉注释、保留其左侧的可执行字节（不走 fail-closed
     # 回退，也不是整行原样保留）。
@@ -859,10 +892,10 @@ def test_db_free_scan_still_sees_code_that_precedes_a_trailing_comment(
 
     hits = _forbidden_hits(tmp_path, _scan_files(tmp_path, targets))
 
+    # AST 语义: Q="psycopg" 与 R="registry" 是普通字面量,不命中。
     assert hits == [
         "producer/src/yd_producer/store/inline.py:2: DATABASE_URL",
         "producer/src/yd_producer/store/inline.py:2: os.getenv",
-        "producer/src/yd_producer/store/inline.py:3: psycopg",
     ]
 
 

@@ -20,6 +20,7 @@ generated/vendored/data，手写测试套件不属于那一类。导入惯例照
 
 from __future__ import annotations
 
+import ast
 import io
 import re
 import tokenize
@@ -362,19 +363,142 @@ def _code_lines(text: str) -> list[str]:
 
 
 def _forbidden_hits(repo_root: Path, files: Iterable[Path]) -> list[str]:
-    """扫描集上的禁区面命中；注释与 docstring 不计（口径见 :func:`_code_lines`）。"""
+    """扫描集上的禁区面命中。
+
+    语义（issue #14 迁移为 AST/import/call 判别）：
+    - ``psycopg`` 与 ``scheduler``/``registry``/``journal``/``reservation``
+      仅在 dotted import module path（模块名与导入成分）中按成分命中；
+    - ``DATABASE_URL`` 只在精确 Name 或环境访问 key 中命中；
+    - ``os.getenv`` 只在对应 Call path 命中；
+    - ``os.environ`` 只在对应 Attribute/Subscript path 命中。
+    普通变量名（如 ``registry_manifest``）、错误消息/路径字符串与显式
+    work-local file adapter 不命中。
+    AST 解析失败时 fail closed：回退到 :func:`_code_lines` 的 8-token 裸行扫描。
+    """
 
     hits: list[str] = []
     for path in files:
-        for number, line in enumerate(
-            _code_lines(path.read_text(encoding="utf-8")), start=1
-        ):
-            for token in FORBIDDEN_SURFACES:
-                if token in line:
-                    hits.append(
-                        f"{path.relative_to(repo_root).as_posix()}:{number}: {token}"
-                    )
+        text = path.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError, TypeError):
+            for number, line in enumerate(_code_lines(text), start=1):
+                for token in FORBIDDEN_SURFACES:
+                    if token in line:
+                        hits.append(
+                            f"{path.relative_to(repo_root).as_posix()}:{number}: {token}"
+                        )
+            continue
+        for number, token in _ast_forbidden_hits(tree):
+            hits.append(f"{path.relative_to(repo_root).as_posix()}:{number}: {token}")
     return hits
+
+
+_IMPORT_SURFACES = ("psycopg", "scheduler", "registry", "journal", "reservation")
+
+
+def _ast_forbidden_hits(tree: ast.AST) -> list[tuple[int, str]]:
+    """AST 级禁区面判别，返回排序后的 ``(行号, token)`` 命中。
+
+    - ``psycopg`` / ``scheduler`` / ``registry`` / ``journal`` / ``reservation``
+      只在 dotted import module path 的成分中命中；
+    - ``DATABASE_URL`` 只在精确 Name 或 ``os.environ`` 环境访问 key 中命中；
+    - ``os.getenv`` / ``os.environ`` 只在对应 AST Call/Attribute/Subscript 路径命中。
+    """
+
+    found: set[tuple[int, str]] = set()
+
+    def add(lineno: int, token: str) -> None:
+        found.add((lineno, token))
+
+    def module_components(module: str) -> list[str]:
+        return [component for component in module.split(".") if component]
+
+    def check_import_module(lineno: int, module: str) -> None:
+        for component in module_components(module):
+            for token in _IMPORT_SURFACES:
+                if token.lower() in component.lower():
+                    add(lineno, token)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                check_import_module(node.lineno, alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            check_import_module(node.lineno, module)
+        elif isinstance(node, ast.Name):
+            if node.id == "DATABASE_URL":
+                add(node.lineno, "DATABASE_URL")
+        elif isinstance(node, ast.Attribute):
+            if (
+                isinstance(node.value, ast.Name)
+                and node.value.id == "os"
+                and node.attr == "environ"
+            ):
+                add(node.lineno, "os.environ")
+        elif isinstance(node, ast.Subscript):
+            if isinstance(node.value, ast.Attribute):
+                value = node.value
+                if (
+                    isinstance(value.value, ast.Name)
+                    and value.value.id == "os"
+                    and value.attr == "environ"
+                ):
+                    add(node.lineno, "os.environ")
+                    key = node.slice
+                    if (
+                        isinstance(key, ast.Constant)
+                        and isinstance(key.value, str)
+                        and key.value == "DATABASE_URL"
+                    ):
+                        add(node.lineno, "DATABASE_URL")
+            if (
+                isinstance(node.value, ast.Name)
+                and node.value.id == "os"
+                and node.slice
+                and isinstance(node.slice, ast.Constant)
+            ):
+                # os["DATABASE_URL"] — Count as env access key only when os["..."], not arbitrary dict.
+                pass
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                if isinstance(func.value, ast.Attribute):
+                    inner = func.value
+                    if (
+                        isinstance(inner.value, ast.Name)
+                        and inner.value.id == "os"
+                        and inner.attr == "environ"
+                        and func.attr == "get"
+                    ):
+                        add(node.lineno, "os.environ")
+                if (
+                    isinstance(func.value, ast.Name)
+                    and func.value.id == "os"
+                    and func.attr == "getenv"
+                ):
+                    add(node.lineno, "os.getenv")
+                    if (
+                        node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value == "DATABASE_URL"
+                    ):
+                        add(node.lineno, "DATABASE_URL")
+                if (
+                    isinstance(func.value, ast.Attribute)
+                    and isinstance(func.value.value, ast.Name)
+                    and func.value.value.id == "os"
+                    and func.value.attr == "environ"
+                    and func.attr == "get"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "DATABASE_URL"
+                ):
+                    add(node.lineno, "DATABASE_URL")
+
+    token_rank = {token: index for index, token in enumerate(FORBIDDEN_SURFACES)}
+    return sorted(found, key=lambda item: (item[0], token_rank[item[1]]))
 
 
 # --- 溯源标记命中（正反向共用的唯一谓词） ------------------------------------

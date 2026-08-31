@@ -41,3 +41,16 @@ testpaths = ["tests"]
 # 只对清单 §1 登记的快照目标生效，yd 自撰代码不豁免。
 "src/yd_producer/canonical/converter.py" = ["BLE001", "C409", "TRY201"]
 "tests/test_canonical_converter.py" = ["RUF012", "RUF015"]
+"src/yd_producer/forcing/producer.py" = [
+    "B023",
+    "BLE001",
+    "F401",
+    "F841",
+    "FURB192",
+    "I001",
+    "RUF046",
+    "SIM103",
+    "UP035",
+]
+"src/yd_producer/forcing/file_store.py" = ["BLE001", "F401", "I001", "PIE810"]
+"tests/test_forcing_producer.py" = ["F401", "FLY002", "RUF034"]

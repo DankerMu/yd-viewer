@@ -1853,7 +1853,7 @@ Review focus:
 
 ## 8. forcing-chain（四）：direct-grid forcing 与 SHUD 输入组装
 
-- [ ] 8.1 快照 file-backend direct-grid forcing 生产（格点即站点、binding 权重 1、`Time_Day=0` 锚 cycle）
+- [x] 8.1 快照 file-backend direct-grid forcing 生产（格点即站点、binding 权重 1、`Time_Day=0` 锚 cycle）
 - [ ] 8.2 实现 work 内临时 registry/model manifest 生成与随 work 清理
 - [ ] 8.3 实现 SHUD 输入组装：变体 + forcing + `states/<source>/<T>.cfg.ic` → 运行目录；warm-start 状态 MUST 覆盖变体自带率定末态（可区分 IC fixture 断言）；固定覆盖六项参数（START=0/END=7/DT_QR_DOWN=60/Update_IC_STEP=720/BINARY_OUTPUT=1/ASCII_OUTPUT=0），00Z/12Z 同参数测试
 
@@ -1861,6 +1861,137 @@ Review focus:
 §13.1 归属：DB-free 链
 Suggested fixture level: compact - 合成 canonical NetCDF、合成变体目录与可区分状态文件即可
 Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 canonical 独立可验证；registry 与组装为后继
+
+### Issue #14 fixture（任务 8.1）
+
+**风险分级**：fixture level = **expanded**；repair intensity = **high**；project profile = `yd-viewer`。上游建议 `compact`，本 issue 上调：profile 的 mandatory expanded triggers 明列 `forcing`、`canonical`、NetCDF 与 `cycle`，且本 PR 新增 file/JSON/NetCDF 读面、SHUD forcing 格式和跨 source 时间/网格身份。Blast radius = high（错误 forcing 会让整轮 SHUD 数值链失真；M2 只以合成 fixture 证明结构/管线，不声明真实数值正确）。
+
+**PR 边界与落点裁决**：
+- 本 issue **只做 8.1**。公开验收 seam 是 `yd_producer.forcing.ForcingProducer.produce(...) -> ForcingProductionResult`；design.md D10 覆盖旧草图 `forcing.build(...)`。不新增 build facade，不生成临时 registry，不组装 SHUD 运行目录。
+- 快照目标按 `nwm-snapshot-inventory.md` §1 第 36/37/38/42/43/53 行落地：`forcing/{producer,file_store,canonical_json,direct_grid_contract,shud_forcing_contract}.py` 与抽取式 `tests/test_forcing_producer.py`；`forcing/__init__.py`、grid-identity/no-follow 适配 helper 与 yd 验收测试为本仓自撰，不带 NWM 溯源头。
+- 上述六条清单行的 `落地状态` 必须与对应文件在**同一实现提交**翻为 `本 issue 落地`；fixture-first 文档提交仍保持 `待落地`。
+- `producer.py`、`file_store.py`、抽取式 `test_forcing_producer.py` 保持 pin 文件边界。实际超过 1000 行时只允许把这三份逐文件加入 `.large-file-guard.json`；yd 自撰测试/helper 必须拆分在 1000 行内。若发生豁免，Phase 8 路由一条规模 follow-up；不扩大既有 glob/目录豁免。
+- 不改 `config.py`/`cli.py`/`controller.py`/`assemble`、viewer、依赖版本或 lockfile。构造参数由测试/后继编排显式提供；config 接线归 #15/#26。
+
+**Must preserve**：
+- `producer/tests/test_canonical_db_free.py::test_product_catalog_pins_the_inherited_payload_and_row_schema` 钉住的 catalog payload 4 键、product row 16 键与 GFS/IFS 小写 `source_id`；forcing 只消费，不改 catalog schema。
+- 现有 `LocalObjectStore` key/atomic-write/checksum 合同与 `safe_fs` no-follow 原语；不在 forcing 内手搓第二套路径 containment。
+- pin 的 canonical→SHUD 单位/派生语义：PRCP `mm/day`、TEMP `degC`、RH `0-1`、wind `sqrt(u²+v²)`、RN `W/m²`；Press 可保留 timeseries，但 SHUD station CSV 仍只有 `Time_Day/Precip/Temp/RH/Wind/RN`。
+- NWM pin 的 package manifest canonical JSON 字节与 checksum。`canonical_json.py` 的 `_json_bytes` 保持 `json.dumps(..., sort_keys=True, separators=(",", ":"), default=_json_default)` 的默认 `ensure_ascii=True`；`file_store.py` 自带的本地 `_json_bytes` 保持 `ensure_ascii=False`。两者对含 Unicode 的 payload 字节不等价，MUST NOT 合并；合并会改变 `forcing_domain_package.json` / handoff payload checksum。
+- direct-grid lineage 只保留 `payload["contract_grid_signature"] == contract.grid_signature`；随重算传参链删除的 `payload["grid_signature"]` 与 `payload["validated_grid_signature"]` 不得继续生成或断言。生产路径对 contract signature 的真实性校验由 yd 纯 grid-identity helper 承担，lineage 键只记录合同值、不冒充重算证据。
+- IFS grid-definition URI 的已知大小写裂口按 #104 现状消费；本 PR 不改 canonical producer，也不得仅按小写前缀枚举而漏掉 catalog 给出的精确 URI。
+- 所有现有 producer 测试、ruff、OpenSpec 与 stage-pipeline 锚保持绿色；不删/弱化任何既有 oracle。
+
+**Must add/change**：
+- Direct-grid station set = binding 声明的 grid-cell set：每个 binding station/每个 forcing variable 恰一条 `method="direct_grid"`、`weight=1.0` mapping；station id、index、filename 与 `grid_cell_id` 一一对应。canonical 中未绑定的额外 cell 不读、不输出；模块内不存在可调用的 `compute_idw_weights`/105 站 fallback。
+- GFS 与 IFS 各用自己的 `applicable_source_ids`、`grid_id`、ordered grid cells 与 binding；任一身份跨 source/跨 grid 复用都在 ready 写入前失败。
+- grid identity 保护不得因剥离 NWM grid-registry 面而净损失：yd 自撰纯 helper 对 ordered `(grid_cell_id, round(lon, 12), round(lat, 12))` canonical JSON 求 SHA-256，与 contract `grid_signature` 比较；不 import NWM/grid-registry。此裁决**覆盖**清单第 42 行旧备注的「惰性字段 / 不再参与生产校验」：字段解析/记录仍逐字保留，且生产路径 MUST 重新验证其值，只是不恢复被剥离的 NWM helper/import/bbox 链。
+- `ForcingProducerConfig` 改为 frozen + kw-only；`workspace_root`、`object_store_root`、`object_store_prefix` 无默认必填，`ForcingProducer.__init__` 的 config 也无默认必填。删除 `ForcingProducerConfig.__post_init__` 的空 `object_store_root -> workspace_root` 回退。五个版本化保护默认逐字保留 pin 数值：`max_station_count=10000`、`max_timestep_count=10000`、`max_grid_cell_count=5000000`、`max_timeseries_row_count=10000000`、`max_manifest_bytes=33554432`；`min_lead_hours: int | None = None`。pin 保留构造点只补缺少的 `object_store_root`/`object_store_prefix`，其中 L4229 原有 `max_manifest_bytes=16` 继续保留。
+- `Time_Day=0` 绑定显式 `cycle_time`：00Z/12Z 的第一行都恰为 cycle。最早可产出 valid time 晚于 cycle 时 fail closed，不得把它重新标零；无 ready package/version/cycle 状态。
+- `FileForcingRepository` 只接受显式、无默认、object-store 相对 key 的 work-local manifest，例如 `models/<model_id>/registry.json`；拒绝绝对路径、S3 manifest URI、`..` 与未知 prefix。删除 `from_env`、宿主 `Path.read_*` 和 object-store 失败后的裸路径 fallback。
+- registry/model manifest 与 canonical catalog 经一个 bounded/no-follow JSON helper 读取：最多 16 MiB、最大深度 64、最多 250000 个 JSON container/scalar node；invalid UTF-8、malformed JSON、`RecursionError`、超深/超宽/超限均映射成稳定 `ForcingStoreError`，不得产生 ready 输出。
+- binding 与 `.sp.att` 读取/校验和受 `ForcingProducerConfig.max_manifest_bytes` 限制；非 UTF-8 `.sp.att`、checksum mismatch、unsafe member、missing FORC index 均在 ready 输出前失败。
+- canonical NetCDF 读必须 descriptor-bound：先经 `safe_fs.open_file_no_follow(..., containment_root=object_store.root)` 打开普通文件，再在 fd 生命周期内用 Linux `/proc/self/fd/<fd>` 或 Darwin `/dev/fd/<fd>` 交给 xarray；symlink leaf/ancestor、FIFO/目录/设备与别名不可用都稳定失败，绝不回退裸 Path。单对象版本化上限固定为 `MAX_CANONICAL_NETCDF_BYTES = 536870912`（512 MiB）：同一 fd 先以 `fstat` 拒绝已知超限文件，checksum 流式读取再按累计字节作第二道 fail-closed guard；不新增环境变量或第二份配置来源。
+- identity owner 分两层且不得循环作证：(1) catalog constructor 独立要求 `valid_time - cycle_time` 是非负整小时并等于整型 `lead_time_hours`，且 `canonical_product_id` 逐字等于 `<normalized-source>_<YYYYMMDDHH>_<variable>_f<lead:03d>`；(2) 精确 canonical object key 再由已验证 row 的 normalized source、compact cycle、variable、product id 唯一导出，dataset 只接受逐字匹配的 data variable、不保留 singleton fallback，并逐项核对 `cycle_time`、`valid_time`、`lead_time_hours`、`unit`、`grid_id`。任何 row 自相矛盾、foreign source/cycle/variable/object 或 attrs mismatch 在 `CanonicalProduct` construction/value extraction/ready 前失败。
+- public `produce` 在任何 repository lookup/write/cleanup 前验证 cycle 为 UTC 整点且 hour 恰为 00/12；06Z、非零 minute/second/microsecond 稳定映射为 `ForcingProductionError`，不得碰撞或清理同小时的合法 ready evidence。`ForcingProducer._resolve_forcing_mapping_contract` 在每个 repository 返回值上独立要求 normalized `contract.applicable_source_ids == (requested_source,)`；file parser 的同名检查只是早失败，不得成为 production source isolation 的唯一 owner。
+- Round 2 boundary corrective action：public request preflight 在零 repository call 前额外拒绝 forcing path component 的 literal `.`/`..`，并只接受 `max_lead_hours is None` 或 `type(max_lead_hours) is int and max_lead_hours >= 0`；bool/string/float/negative 全部稳定失败，`0` 与合法大整数无额外上限。随后只读解析 model identity/contract，在 `get_forcing_version`、failure-status write 与 cleanup 前验证 repository `basin_version_id` 路径和完整 returned-contract structure。前两段失败必须保持任一已 ready sibling 的 record/package/domain/sidecar/handoff/cycle-ready bytes 不变；catalog/binding/NetCDF authority drift 仍在 existing lookup 后校验并撤销已失效 ready，不能用“preservation”掩盖 stale output。
+- 抽取一个 direct-grid shared semantic validator，parser 构造后与 producer 每个 repository return 都必须调用。它覆盖 task 8.1 dataclass 语义：direct mode/current-source singleton；nonblank top-level identity；non-empty 且至多 `MAX_DIRECT_GRID_STATION_BINDINGS` 的 station tuple；每站 nonblank/unique `station_id` 与 `grid_cell_id`；strict positive-int、unique、contiguous `shud_forcing_index=1..N`；safe `.csv` 且 casefold-unique filename；station `grid_id == contract.grid_id`；finite canonical longitude/latitude/x/y/z（bool 拒绝、longitude 为 parser-normalized `[-180,180)`、latitude `[-90,90]`）；`properties` 为 Mapping。JSON Mapping/list extraction继续 parser-only，source-less parser 的 multi-source compatibility保留，binding/`.sp.att`/grid资产真实性继续由既有 production owner负责；不得新增 standalone binding artifact parser或重开 #15。
+- forcing lineage/package 记录 stable output-config identity（canonical JSON + SHA-256），覆盖所有影响 package bytes/shape/path/选择策略的 config：`rn_shortwave_factor`、`forcing_filename`、`csv_filename`、`package_manifest_filename`、`output_variables`、`required_canonical_variables`、`era5_latency_fallback_hours`、`min_lead_hours`。existing-ready 同时比较 record 与 manifest identity；任一漂移必须重算/拒绝，不返回旧 `already_done`。
+- DB-free 守卫改为 AST/import/call 语义，但**不另立声明集**：任务 2.3 第 443 行现有且唯一的禁区声明锚、8 项词表和 `_declared_forbidden_surfaces()` 解析合同原样保留；#14 的 evidence 不复述该锚前缀。`_forbidden_hits` 对这 8 个 token 的执行语义写死：`psycopg` 与 `scheduler/registry/journal/reservation` 仅在 dotted import module path 中按成分命中（因此 `grid_registry_bbox_guard` 仍命中）；`DATABASE_URL` 只在精确 Name 或环境访问 key 中命中；`os.getenv` 只在对应 Call path 命中；`os.environ` 只在对应 Attribute/Subscript path 命中。普通 `registry_manifest` Name、错误消息、路径字符串与显式 work-local file adapter 不命中。同步迁移**全部现有判别器**，不只参数化用例：`test_each_forbidden_surface_is_individually_enforced` 的每项注入改成真实 import/name/call；`test_db_free_scan_catches_unregistered_files_inside_a_snapshot_package` 的 `from app import scheduler` 改成 import module path 自身含 `scheduler`（如 `from app.scheduler import run`）；散文/真实代码、行尾注释、tokenize 行号与不可解析源码的 sibling 用例按新 AST 语义重写期望。AST parse 失败时 MUST fail closed 到旧的 `_code_lines`/8-token raw 扫描，故不可解析真代码仍命中。另加正对照证明 `registry_manifest` 与 `models/demo/registry.json` 不误报。不得通过删 token、删用例或改弱唯一锚点让现有用例转绿。
+
+**Seams under test（由高到低，implementer 消费，不重议）**：
+1. `ForcingProducer.produce`（合成 object-store + 显式 file repository）——验收站点/格点值、权重、source isolation、00Z/12Z、失败不 ready。
+2. `FileForcingRepository(object_store=..., registry_manifest=...)`——验收 catalog/manifest/binding/.sp.att 的 bounded/no-follow 与无宿主路径 fallback。
+3. `parse_direct_grid_forcing_contract`——保留 pin 的字段、source、index、filename、资源上限拒绝矩阵；不另写第二个 parser。
+4. `test_snapshot_provenance.py` 的 AST 级 DB-free 与清单正反向守卫——验收溯源/禁 import，不把词面当行为。
+5. 自撰纯 helper 可单测 grid signature canonical bytes 与 descriptor alias 选择；这些单测是公共 seam 1/2 的错误路径支撑，不能取代 produce 端到端。
+
+**Risk packs considered（core）**：
+- Public API / CLI / script entry: selected - 新增 `yd_producer.forcing` 公开包与 `ForcingProducer.produce`；不接 CLI。
+- Config / project setup: selected - 路径字段显式 kw-only，资源上限是版本化默认；无环境 fallback。
+- File IO / path safety / overwrite: selected - manifest/catalog/binding/.sp.att/NetCDF 读与 forcing package 原子写；no-follow、bounded、失败无 ready。
+- Schema / columns / units / field names: selected - canonical catalog、direct-grid contract、`.tsd.forc` 与 station CSV 列/单位。
+- Auth / permissions / secrets: not selected - 无凭据/租户/权限模型；文件 mode 与 no-follow 归 File IO。
+- Concurrency / shared state / ordering: selected - file repository 进程内 ready 状态与输出顺序；单线程、无跨进程共享，失败必须先于 ready/finalize。
+- Resource limits / large input / discovery: selected - station/timestep/row/JSON/asset byte limits，canonical 只保留 bound cells；目录 fallback discovery 删除。
+- Legacy compatibility / examples: selected - NWM pin 抽取闭包与 package shape；IDW 作为 yd 非目标被结构性剥离。
+- Error handling / rollback / partial outputs: selected - 所有合同/IO/identity/time 错误稳定收敛且无 ready；work 内失败中间物由 #15 生命周期清理，本 PR 不跨边界删目录。
+- Release / packaging / dependency compatibility: selected - 新包导出与现有 numpy/xarray/netCDF4 依赖；无新增依赖、`uv sync --frozen` 无 drift。
+- Documentation / migration notes: selected - snapshot inventory 状态/剥离点、D10、spec 场景与大文件例外记录。
+
+**Domain packs（project profile）**：
+- Geospatial / CRS / shapefile sidecars: selected - ordered grid cell id/lon/lat 与 source grid identity；无 CRS 转换/shapefile。
+- Time series / forcing / temporal boundaries: selected - cycle 00/12、GFS interval row、IFS valid time、`Time_Day=0`。
+- 状态链 / warm-start 定戳一致性: not selected - 本 PR 不读写 `cfg.ic`；组装归 #15。
+- NWM 快照溯源与 DB-free 隔离: selected - 六个快照目标、抽取闭包、禁外部运行面。
+
+**Invariant Matrix**：
+- Governing invariant: 对 `(source, cycle, model)` 的每个输出站点，身份和值只能来自同 source 的 binding 所指 canonical cell；时间零点只能是显式 cycle；任何不匹配/不安全读都不得产生 ready 输出。
+- Source-of-truth identity/contract: `DirectGridForcingContract` 的 `applicable_source_ids/grid_id/grid_signature/stations[*].grid_cell_id` + canonical catalog row 的 `source_id/cycle_time/grid_id/grid_definition_uri/object_uri/checksum` + `cycle_time` 调用参数。
+- Producers: `ForcingProducer.produce`、direct-grid weight materialization、SHUD package formatter。
+- Validators/preflight: direct-grid parser、binding/.sp.att checksum/index validation、yd grid-signature helper、unit/time/limit guards、bounded JSON、descriptor-bound NetCDF。
+- Storage/cache/query: `FileForcingRepository` work-local object-store；无 DB、无环境发现、无跨轮动态 registry。
+- Public routes/entrypoints: `yd_producer.forcing` exports；CLI/controller = none（#15/#26）。
+- Frontend/downstream consumers: #15 SHUD input assembler 消费 `ForcingProductionResult.forcing_package_uri` 与 package files；现阶段以 package shape 测试替代接线。
+- Failure paths/rollback/stale state: invalid contract/source/grid/cycle/cell/unit/path/JSON/asset -> `ForcingProductionError`/`ForcingStoreError`，cycle failed 可记录但 ready/finalize 不发生；重跑同输入保持 pin idempotency。
+- Evidence/audit/readiness: snapshot provenance inventory + 13 个 pin 保留种子 + yd 验收/安全测试 + red proof/mutation matrix + full producer suite。
+- Regression rows:
+  - GFS 00Z + 两个 bound cells/一个 unbound cell -> 两站、逐值等于 bound cells、每 mapping 权重 1；每份 station CSV 第 1 行为 `<row-count>\t6\t<start-date>\t<end-date>`，第 2 行逐字为 `Time_Day\tPrecip\tTemp\tRH\tWind\tRN`，第 3 行是首个数据行且 `Time_Day=0`，合成 `u=3,v=4` 的 Wind 字段为手算字面值 `5`（另一站 `u=6,v=8` -> `10`），不用 production helper 重算期望。
+  - IFS 12Z + 可区分 grid/cells -> 只消费 IFS binding，首行 Time_Day 0，无 0.5 日偏移。
+  - 最早 valid time > cycle -> 稳定失败，无 ready package/version。
+  - binding missing cell / source-grid-signature mismatch / `.sp.att` missing index 或 non-UTF-8 -> 稳定失败，无 IDW fallback、无 ready；`applicable_source_ids` 在生产解析时必须是只含当前 normalized source 的单例，`[IFS]`→GFS 与 `[GFS,IFS]` 共享 binding 均拒绝；有效包 lineage 恰含 `contract_grid_signature == contract.grid_signature`，不含 `grid_signature`/`validated_grid_signature` 两键。
+  - symlink leaf/ancestor、FIFO、oversize/deep/wide/malformed JSON、oversize binding、超过 536870912 bytes 的 sparse canonical NetCDF -> 稳定失败，无根外读取、无 ready。
+  - catalog row 自身 `valid_time-cycle_time` 与 lead 不一致、product id 与 source/cycle/variable/lead 不一致、row 指向 foreign source/cycle/variable/object、singleton wrong data variable 或 NetCDF `cycle_time/valid_time/lead_time_hours/unit/grid_id` mismatch -> `CanonicalProduct` construction/value extraction 前稳定失败；checksum-correct row+NetCDF dual forgery 也不得通过，正常 GFS/IFS canonical writer 形状继续通过。
+  - 注入式 protocol repository 返回 source-less parser 产生的 `[GFS,IFS]` contract -> producer post-repository guard 在 mapping/output 写入前拒绝；file repository 与未来 repository 共享该唯一生产 owner。
+  - 合法 12Z ready 后调用 06Z、12:30、非零秒/微秒 -> public request validation 失败，原 12Z record checksum 与 sidecar/domain/handoff/cycle-ready bytes 保持逐字不变。
+  - IFS factor 1.0 ready 后仅改 `rn_shortwave_factor=0.5`（`producer_version` 不变）-> output-config identity 改变并重算，RN bytes 相应改变；另以输出 filename/variable policy sibling 证明 fingerprint 不是 factor 特判。
+  - `ForcingProducerConfig` 缺 `object_store_root` 或 `object_store_prefix` -> 构造期 `TypeError`；显式三路径构造 -> 五个上限为 `10000/10000/5000000/10000000/33554432` 且 `min_lead_hours is None`；传空 `object_store_root` 不再回退到 workspace。
+  - `canonical_json._json_default(object())` -> `TypeError`；naive `2026-05-07 00:00` 与 `+08:00` aware datetime -> 分别归一成末尾 `Z` 的 ISO8601；含 Unicode/时间 payload 的 `_json_bytes` -> 逐字节等于 `json.dumps(..., sort_keys=True, separators=(",", ":"), default=_json_default).encode("utf-8")`。
+  - 同一含 Unicode payload 分别过 `canonical_json._json_bytes` 与 `file_store._json_bytes` -> 前者输出 `\u` 转义、后者输出原生 UTF-8，字节明确不等；两者各自 checksum 固定，不得共享实现。
+  - unchanged canonical/catalog/store tests -> 全绿，schema/oracle 未改弱。
+
+**Boundary-surface checklist**：
+- Shared helper roots: `store/{object_store,safe_fs,object_path}.py` 只消费，MUST NOT 修改；forcing 自撰 grid identity/descriptor helper 单 owner。
+- Public entrypoints: `yd_producer.forcing`；无 CLI/controller 接线。
+- Read surfaces: work-local registry/model manifest、canonical catalog/NetCDF/grid definition、binding、`.sp.att`。
+- Write/delete/overwrite surfaces: work object-store 的 forcing package/version sidecars；无 NFS、无跨 work 删除。
+- Staging/publish/rollback: package finalize 前失败不 ready；NFS publish/cleanup 归 #24/#15。
+- Producer/consumer evidence: canonical catalog → forcing package；forcing package → #15 assembler（package contract 测试钉形状）。
+- Stale-state/idempotency: 同 source/cycle/model 与同 binding identity 重跑不得重复 ready；identity drift 必须重算/拒绝，不复用 stale ready。
+- Unchanged downstream consumers: canonical converter、publish、prepare、state/tracker、viewer 均不改。
+
+**Required evidence（input -> expected output）**：
+- `openspec validate m2-producer-core --strict --no-interactive` 与 `openspec validate --all` -> 退出码 0。
+- `bash scripts/check-stage-pipeline-log.sh origin/master` -> `m2-producer-core` 锚存在。
+- `cd producer && uv sync --frozen` -> 退出码 0、lock 无 drift。
+- `cd producer && uv run pytest` -> 全绿；新行为测试先对 pre-change source 做一次批量 red proof，随后恢复 source 全绿，stash 无 `red-proof` 残留。
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0。
+- provenance/DB-free focused suite -> 六行落地状态与文件头双向一致；现有单一禁区声明仍解析为原 8 项；逐项真实 import/name/env-call 注入均变红；仅含 `registry_manifest = "models/demo/registry.json"`、错误消息和普通变量的模块不命中。#14 证据不得创建第二个声明锚。
+- canonical JSON focused tests -> `_json_default(object())` 抛 `TypeError`；naive/aware datetime 均归一成末尾 `Z`；`canonical_json._json_bytes` 与精确 `json.dumps` 字节相等；含 Unicode payload 下 canonical_json（ASCII escape）与 file_store（UTF-8）字节不等且各自 checksum 与独立字面 oracle 相等。
+- D4/config focused tests -> 缺 `object_store_root` 或 `object_store_prefix` 构造期 `TypeError`；显式构造的五个上限/`min_lead_hours` 逐字等于 fixture 数值；空 root 不回退；pin 两个保留构造点仅补两个路径 kwarg且 L4229 继续使用 `max_manifest_bytes=16`。
+- package schema focused tests -> 每份 station CSV 第 1 行为 `<row-count>\t6\t<start-date>\t<end-date>`，第 2 行逐字为 `Time_Day\tPrecip\tTemp\tRH\tWind\tRN`，第 3 行是首个数据行；`u/v=(3,4)` 与 `(6,8)` 的该行 Wind 字段分别为 `5` 与 `10`；lineage 恰保留 `contract_grid_signature` 合同值且不含两个被删重算键。
+- mutation matrix（scratch 必须按 project-profile 的 venv/pyc 纪律）：`weight=1.0→0.5`、cycle formatter 改回 `valid_times[0]`、跳过 source/grid-signature 比较、descriptor helper 回退裸 Path、JSON byte/depth/node guard 各删除一腿、合并两套 `_json_bytes`、恢复 config 空串回退、恢复被删 lineage 键 -> 每个变异体至少一条对应新用例转红；报告实际红用例，不预写计数。Round 1 repair 另须杀死：删除 production-cycle domain guard、恢复 multi-source membership、移除 object-key/NetCDF identity 任一比较、移除 descriptor byte cap、从 output-config identity 删除 `rn_shortwave_factor`、宽松 decode `.sp.att`、删除 station/timestep/row limit guard；12Z expected 与 IFS uppercase URI 必须由 stdlib/字面 fixture 提供，不得复用 production parser/path builder。Phase 6.2 depth retry 再须杀死：(a) 删除 producer post-repository singleton guard而 parser guard仍在；(b) 删除 row 的 `valid-cycle==lead` 独立比较而 NetCDF 与 row 仍一致；(c) 删除 exact canonical product-id derivation而 object key/NetCDF 与伪造 row 仍一致。
+- frozen final head 再跑 producer pytest + ruff + OpenSpec；若 `origin/master` 前进，按 profile 在 merge ref 上再跑同组。
+
+**Known limits / deferral routing**：
+- canonical converter 自身的 unbounded read 与 path-follow 分别由 #102/#103 跟踪；本 PR 只保证 forcing 新读面不复制缺陷，不修改 canonical 源码。
+- IFS grid-definition URI 大小写裂口由 #104 跟踪；本 PR 按 catalog 精确 URI 消费。
+- file-backend handoff package 的完整 parser/receipt 覆盖按 inventory 风险 12 归 #15；本 PR 只钉 forcing package 本身与直接 JSON identity，不恢复 2777 行校验器。
+- 若三份 snapshot 文件触发 large-file exclude，Phase 8 由 issue-scribe 建立/去重规模债 follow-up；#100/#107 仅覆盖既有 rawcopy/canonical 文件，不能假称已覆盖本 PR 新文件。
+- 真实 IFS/GFS 数值与 node-22 运行属 M4；本 PR 只声明合成 fixture 下的结构、映射、时间和 IO 安全。
+
+**Non-goals**：
+- 8.2 work-local registry 生成/清理、8.3 SHUD input 组装（#15）。测试可构造 manifest fixture，但生产代码不生成它。
+- CLI/controller/Slurm/SHUD/checkpoint/NFS publish/retention；不真实连接 NWM、数据库、scheduler 或远端节点。
+- 恢复 IDW、legacy 105 站、ERA5、数据库镜像、grid-registry/bbox preflight。
+- 修改 canonical 物理转换、catalog schema、raw manifest、模型变体或 `cfg.ic`。
+
+**Review focus**：
+- 清单 §1 剥离点与抽取闭包逐项执行，六行状态与文件同提交翻转；无 DB/env/grid-registry 残面。
+- station/grid/source/time 三重身份贯穿 parser → canonical read → mapping → package/lineage，错误均在 ready 前。
+- `Time_Day=0` 是否真的由 cycle 参数约束，12Z 和缺 cycle 行是否能判红旧实现。
+- bounded/no-follow 是否覆盖 manifest/catalog/binding/.sp.att/NetCDF 每个读面，且无裸 Path fallback。
+- tests 的 expected values 是否来自 spec 字面/手算，不从实现重算；mutation/red proof 是否真实咬合。
 
 ## 9. checkpoint-tracker：T+12 捕获与补跑
 

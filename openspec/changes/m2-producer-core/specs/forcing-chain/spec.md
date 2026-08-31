@@ -20,15 +20,66 @@ canonical converter MUST 以本轮临时 raw manifest 与 `work/raw/` 副本为�
 - **THEN** 闸门一次都不被触发；converter 的构造签名内**不存在** repository 形参，模块内**不存在** `CanonicalRepository` 协议
 
 ### Requirement: source-specific direct-grid forcing
-forcing 生产 MUST 将 canonical 格点直接作为 SHUD forcing 站点（binding 权重恒为 1，不走 105 站 IDW）；生成的 forcing 首行 `Time_Day=0` MUST 锚定 cycle 时刻；IFS 与 GFS 使用各自 canonical grid 的 binding。
+forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` 直接作为 SHUD forcing 站点（每个站点/变量恰一条 mapping，权重恒为 1，不走 105 站 IDW）；输出站点集合 MUST 与 binding 的 grid-cell 集合一一对应，未被 binding 引用的 canonical 额外格点不得成为站点。生成的 forcing 首行 `Time_Day=0` MUST 锚定显式传入的 cycle 时刻；IFS 与 GFS MUST 使用各自 canonical grid 的 binding，不得跨 source 复用。
 
 #### Scenario: 合成 canonical 到 forcing 包
-- **WHEN** 对合成 canonical fixture 运行 direct-grid forcing 生产
-- **THEN** 生成 forcing 包，站点集合等于格点集合，binding 权重全为 1
+- **WHEN** 对包含两个 bound grid cells 与一个 unbound extra cell 的合成 canonical fixture 运行 direct-grid forcing 生产，其中两站风分量分别为 `(u,v)=(3,4)` 与 `(6,8)`
+- **THEN** 生成的 forcing 包恰有两个站点，站点值逐项等于各自绑定 canonical cell 的值，每个站点/变量只有一条 `method="direct_grid"`、`weight=1.0` mapping，且不读取或输出额外格点
+- **THEN** 每份 station CSV 第 1 行为 `<row-count>\t6\t<start-date>\t<end-date>`，第 2 行逐字为 `Time_Day\tPrecip\tTemp\tRH\tWind\tRN`，第 3 行是首个数据行且两站该行 Wind 分别为手算值 `5` 与 `10`，Press 不进入 SHUD CSV
+
+#### Scenario: source-specific binding 隔离
+- **WHEN** 以同一 cycle 分别对 grid id/cell id 可区分的 GFS 与 IFS 合成 canonical 和 binding 运行 forcing 生产
+- **THEN** 两个 forcing 包各自只包含本 source binding 的站点、grid-cell 值与 lineage，任一 source 的 binding 都不被另一 source 复用
+
+#### Scenario: repository 返回值不得绕过 source 隔离
+- **WHEN** 注入式 repository 返回一份由 source-less parser 或 direct constructor 产生、同时声明 GFS/IFS 的 contract
+- **THEN** `ForcingProducer` 在 repository 返回边界再次验证当前 source 单例并在任何 mapping/package 写入前拒绝；该约束不得只由 file parser 保证
 
 #### Scenario: 时间零点锚定 cycle
-- **WHEN** 检查生成的 forcing 首行
-- **THEN** `Time_Day=0` 对应 cycle 时刻（无 12Z 偏移）
+- **WHEN** 分别以 UTC 00Z 与 12Z cycle 运行 forcing 生产，并检查每份 SHUD station CSV 的首个数据行
+- **THEN** 首行 `Time_Day=0` 对应显式传入的 cycle 时刻，12Z 不增加 0.5 天偏移
+
+#### Scenario: 缺 cycle 行时拒绝重锚
+- **WHEN** canonical 输入的最早可产出 valid time 晚于显式 cycle
+- **THEN** forcing 生产 fail closed、不得把该 valid time 重标为 `Time_Day=0`，且不得留下 ready forcing package/version
+
+#### Scenario: 绑定格点缺失或身份不匹配
+- **WHEN** binding 引用 canonical 中不存在的 `grid_cell_id`，或 binding 的 source/grid identity 与 canonical 不一致
+- **THEN** forcing 生产在 ready 输出前稳定失败，不回退 IDW，也不留下 ready forcing package/version
+
+#### Scenario: 非法 cycle 不得碰撞合法 ready 状态
+- **WHEN** 已存在合法 12Z ready 后，以 06Z、12:30、非零秒或非零微秒调用公开 forcing seam
+- **THEN** 请求在任何 repository lookup/write/cleanup 前稳定失败，既不得生成非法 cycle 产物，也不得改变原 12Z version、sidecar、handoff 或 cycle-ready 证据
+
+#### Scenario: path identity 与 lead window 在 request boundary fail closed
+- **WHEN** 公开 seam 收到 `model_id="."`、public/repository `basin_version_id="."`，或 `max_lead_hours` 为 string/bool/float/negative；另有一个已 ready 的合法 sibling tuple
+- **THEN** public-only malformed value 在零 repository call 前失败，repository-return path identity 在 `get_forcing_version`/failure-status write/cleanup 前失败，且 sibling 的 record/package/domain/sidecar/handoff/cycle-ready bytes 全部不变
+- **THEN** `max_lead_hours=0`、普通 nonnegative int 与超出可用产品 lead 的任意合法大整数继续按现有可用 lead 截取，不得引入额外上限
+
+#### Scenario: repository 返回 contract 必须重建完整 station/cell 结构语义
+- **WHEN** 注入式 repository 直接构造 frozen `DirectGridForcingContract`，绕过 file parser，并分别给出 duplicate/blank station or cell、bool/zero/gapped index、unsafe/casefold-colliding filename、station/grid mismatch、duplicate cell、non-finite/out-of-range coordinate 或 non-Mapping properties
+- **THEN** parser 与 producer 共用同一个 semantic validator；producer 在 existing lookup、mapping/package write 与 readiness mutation 前稳定拒绝，且不得把 unsafe filename静默替换成 synthetic filename后继续
+- **THEN** source-less parser 仍可保留 pin-compatible multi-source shape，但任何进入指定 source 的生产调用都必须要求 exact current-source singleton
+
+#### Scenario: request preservation 不得掩盖 authoritative drift
+- **WHEN** 合法 tuple 已 ready 后，当前 catalog、binding/`.sp.att` 或 canonical NetCDF/grid authority 发生 identity/checksum/content drift
+- **THEN** producer 在 existing lookup 后证明旧 ready 已 stale 并撤销其 final evidence；不得为了满足 malformed-request preservation 而返回旧 `already_done`
+
+#### Scenario: catalog row 与 canonical 对象身份联合校验
+- **WHEN** catalog row 的 `object_uri`/checksum 指向另一 source、另一 cycle、另一 variable 或与 row 身份不一致的 NetCDF，或 dataset 的 data variable、`cycle_time`、`valid_time`、`lead_time_hours`、`unit`、`grid_id` 任一不一致
+- **THEN** forcing 生产在读取值与写 ready 前 fail closed；object key MUST 逐字对应 row 的 source/cycle/variable/canonical product id
+
+#### Scenario: catalog row 时间与 product id 必须独立自洽
+- **WHEN** checksum 正确的 catalog row 与 NetCDF 被成对修改，使二者彼此相等但 `valid_time - cycle_time != lead_time_hours`，或 `canonical_product_id` 不等于 `<normalized-source>_<YYYYMMDDHH>_<variable>_f<lead:03d>`
+- **THEN** catalog constructor 在构造 `CanonicalProduct`、lead 过滤与 NetCDF 读取前 fail closed；row/NetCDF 的 pairwise agreement 不构成 identity proof
+
+#### Scenario: canonical NetCDF 累计读取有界
+- **WHEN** catalog 指向大于 536870912 bytes 的 regular/sparse canonical NetCDF
+- **THEN** descriptor-bound gateway 在 xarray 打开与完整 checksum 扫描前按同一 fd 的大小/累计字节上限稳定拒绝、关闭 fd，且不留下 ready 输出
+
+#### Scenario: 输出配置漂移不得复用 ready
+- **WHEN** 同一 source/cycle/model 已 ready 后，`rn_shortwave_factor` 或其它影响 package bytes/shape/path/选择策略的 forcing config 发生变化但 `producer_version` 不变
+- **THEN** stable output-config identity 不匹配，producer 重算或 fail closed，不得返回旧 `already_done`
 
 ### Requirement: work 内临时 registry
 快照 file backend 要求 NWM 结构的 registry/model manifest 时，控制器 MUST 依据 TOML 配置在本轮 work 内临时生成，并随 work 删除；项目 MUST NOT 维护跨轮动态 registry。
@@ -69,4 +120,8 @@ forcing 生产 MUST 将 canonical 格点直接作为 SHUD forcing 站点（bindi
 
 #### Scenario: 快照 DB-free 隔离
 - **WHEN** 对已落地的快照模块目录运行禁区检查
-- **THEN** 无任何 `psycopg`、`DATABASE_URL`、scheduler/registry import 与环境变量读取
+- **THEN** 无任何数据库驱动/`DATABASE_URL`、scheduler 或 registry 包 import、journal/reservation import 与环境变量读取；检查 MUST 基于 import/调用结构，不得因普通标识符或错误消息含 `scheduler`/`registry` 单词而误报
+
+#### Scenario: work-local manifest adapter 不等于 registry 服务
+- **WHEN** forcing file backend 以显式构造参数读取本轮 work 内的 model manifest 索引
+- **THEN** 该纯文件 adapter 被允许，且不得从环境变量、NWM scheduler 路径、数据库或跨轮动态 registry 发现 manifest
