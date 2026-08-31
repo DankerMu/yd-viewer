@@ -904,6 +904,21 @@ def _forge_catalog_product_id_incoherence(
     _write_catalog(store, payload)
 
 
+def _forbid_canonical_netcdf_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    from yd_producer.forcing import netcdf_open
+    from yd_producer.forcing import producer as producer_module
+
+    def netcdf_read_must_not_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("incoherent catalog row reached NetCDF read")
+
+    monkeypatch.setattr(netcdf_open, "open_canonical_netcdf", netcdf_read_must_not_run)
+    monkeypatch.setattr(
+        producer_module, "open_canonical_netcdf", netcdf_read_must_not_run
+    )
+    assert netcdf_open.open_canonical_netcdf is netcdf_read_must_not_run
+    assert producer_module.open_canonical_netcdf is netcdf_read_must_not_run
+
+
 def test_public_produce_rejects_source_less_multisource_contract_before_mapping_write(
     tmp_path: Path,
 ) -> None:
@@ -941,13 +956,7 @@ def test_catalog_rejects_dual_forged_time_lead_before_netcdf_read_or_ready(
     producer, repository, store = _prepared_gfs_f003_catalog(tmp_path)
     _forge_catalog_time_lead_incoherence(tmp_path, store)
 
-    def netcdf_read_must_not_run(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("time/lead-incoherent catalog row reached NetCDF read")
-
-    monkeypatch.setattr(
-        "yd_producer.forcing.netcdf_open.open_canonical_netcdf",
-        netcdf_read_must_not_run,
-    )
+    _forbid_canonical_netcdf_open(monkeypatch)
     with pytest.raises(
         ForcingStoreError,
         match="incoherent valid_time/cycle_time/lead_time_hours",
@@ -971,13 +980,7 @@ def test_catalog_rejects_dual_forged_product_id_before_netcdf_read_or_ready(
     producer, repository, store = _prepared_gfs(tmp_path)
     _forge_catalog_product_id_incoherence(tmp_path, store)
 
-    def netcdf_read_must_not_run(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("product-id-incoherent catalog row reached NetCDF read")
-
-    monkeypatch.setattr(
-        "yd_producer.forcing.netcdf_open.open_canonical_netcdf",
-        netcdf_read_must_not_run,
-    )
+    _forbid_canonical_netcdf_open(monkeypatch)
     with pytest.raises(
         ForcingStoreError,
         match="canonical_product_id does not match canonical product identity",
