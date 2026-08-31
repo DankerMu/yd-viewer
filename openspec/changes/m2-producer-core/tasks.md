@@ -3149,8 +3149,8 @@ Review focus:
 ## 13. run-controller（二）：发布、失败与清理
 
 - [x] 13.1 实现发布器：T+12 checkpoint 重戳到绝对 T+12（复用 4.3）→ DONE 前契约检查（v2、`forecast_days*24` 行、数据列数等于 `reach_count` 且等于变体 reach 数、T+12 可读、合并日志可用）→ DAT 原子 rename 为 `yd.rivqdown.dat` → 状态 rename → `DONE` 最后写 → 删旧状态只留两份 → 删本轮 work；正式文件不继承 scratch uid/gid/mode；记录型文件操作测试顺序与终名
-- [ ] 13.2 实现失败处理（合并日志、删 work、不推进；复用 12.2 判定，仅接入失败/重跑路径）
-- [ ] 13.3 实现 14 天保留清理（`realpath` 圈定 yd 根、symlink 越界拒删）
+- [x] 13.2 实现失败处理（合并日志、删 work、不推进；复用 12.2 判定，仅接入失败/重跑路径）
+- [x] 13.3 实现 14 天保留清理（`realpath` 圈定 yd 根、symlink 越界拒删）
 
 依赖：组 4（重戳）、组 12
 §13.1 归属：发布（无 DONE 崩溃恢复/DONE 最后写/状态只留两份）
@@ -3420,6 +3420,139 @@ Review focus:
 - v2 判据是否有判别力（能否分辨 v1），还是退化成「文件够大」
 - `DONE` 的两道闸是否都在，`FileExistsError` 有没有穿透
 - 有没有越界落地 13.2 的失败处理、13.3 的保留窗，或 14.1 的编排（含"顺手先放着"的死代码）
+
+### Issue #25 fixture（任务 13.2/13.3：失败处理与 14 天保留清理）
+
+Fixture level: expanded
+Upstream suggested level: expanded（同意：正面命中 `DONE`、cycle、状态链、文件删除、symlink、path 与失败/重跑路径）
+Repair intensity: high（失败收尾会删除整棵 scratch work，保留器会删除 NFS 正式目录与失败日志；删错即数据损失，适用 `Invariant Matrix` 与 boundary-surface checklist）
+Project profile: yd-viewer
+Minimal mergeable slice: issue #25 的 13.2 + 13.3（接受上游 `merged-tasks` width exception：二者同属 controller 收尾层并共用目录树/安全删除证据；不再拆第三刀）
+
+**上游契约解释与偏离记录**：
+
+1. `specs/run-controller/spec.md` 要求失败日志含退出码，但 `JobRecord` 七字段没有载体，载体裁决仍在 #47。本 issue 不改 frozen executor schema，也不假装能从 `JobState` 反推退出码；失败收尾 seam 把非空 `exit_code: str` 作为显式输入。#26/后继接线如何从 Slurm 取得该值仍归 #47，当前函数本身可独立完整测试。
+2. 任务 13.2 的「复用 12.2 判定」解释为：本模块 MUST NOT 重写残留集合或另立恢复协议；真正的「发现 → 执行 residue plan → 重组装」活接线仍归 #28 的崩溃恢复端到端。本 issue 不加一层只转调 `plan_residue` 的空壳，也不改 `residue.py`。
+3. `PublishCleanupError`/硬杀留下的 post-`DONE` 孤儿 work 已独立路由 #108；它需要按 `DONE(T)` 扫描历史 work，和本 issue 的“当前失败作业精确 work”不是同一集合。本 issue 不偷偷扩 13.3 到 scratch 历史扫描。
+
+**核心设计裁决**：
+
+1. 新增单模块 `producer/src/yd_producer/cleanup.py`，公开 `CleanupError`、`FailureInputs`、`FailureResult`、`finalize_failed_job`、`RetentionPlan`、`plan_retention`、`execute_retention_plan`。不改 `controller.py`、`residue.py`、`publish.py`、`executor.py`、`slurm.py`、`cli.py`；主循环调用顺序归 #26/#28。
+   公共边界的全部预期失败统一抛 `CleanupError`，并带 `phase: Literal["validate", "log", "work", "retention-plan", "retention-execute"]` 与 `path: Path | None` 两个结构化属性：入参/身份/路径形状为 `validate`；失败日志读写/原子替换为 `log`；日志已提交后的当前 work 删除为 `work`；retention 的枚举/锚点/计划期 realpath/type 拒绝为 `retention-plan`；执行前二次预检与删除期 IO 为 `retention-execute`。底层 `ValueError`、`DiscoveryUnreadableError`、`SafeFilesystemError`、`OSError` 不得从上述公开函数穿透；`__cause__` 保留原异常。`MemoryError`、`KeyboardInterrupt`、`SystemExit` 等进程级异常不包。
+2. `FailureInputs` 是 frozen dataclass，字段为 `yd_root`、`work_root`、`source`、`cycle`、`job_spec: JobSpec`、`job_record: JobRecord`、`exit_code: str`。入口在任何 IO 前 fail closed：
+   - `source` 必须是单个非空路径分量；cycle 必须可经 `cycle_id`/`parse_cycle_id` 往返；
+   - record 必须属于同一 `job_spec.name`，且终态只能是 `FAILED` 或 `TIMEOUT`；`exit_code` 必须非空；
+   - `work_root` 解析为实路径，`job_spec.work_dir` 的祖先解析、叶子保留后必须**恰好**等于 `<work_root>/<source>/<cycle_id>`，不得只做宽松 containment；
+   - `job_spec.log_path` 的祖先解析、叶子保留后必须位于该精确 work 目录内且是 no-follow 普通文件。不得跟随 symlink 叶子读取树外日志。
+3. `finalize_failed_job` 的顺序固定为“先原子提交唯一失败日志，成功后才删除当前 work”。日志终名固定为 `YD_ROOT/logs/<source>/<T>.log`，重复失败同一 T 时原子替换旧日志，目录内最终仍只有这一份该 cycle 日志。日志字节格式固定为：第一行一份 canonical JSON（UTF-8、`sort_keys=True`、紧凑分隔符），第二行逐字 `--- stdout/stderr ---`，其后接 job 原始合并日志的**全部原始字节**，不 decode、不改换行；JSON 字段恰为 `schema="yd-failure-log-v1"`、`source`、`cycle`、`job_id`、`job_name`、`state`、`command`（argv JSON 数组）、`submitted_at`、`started_at`（未起跑为 null）、`ended_at`、`exit_code`。时间用 tz-aware `datetime.isoformat()` 的原值。
+4. 合并日志必须流式复制到同目录临时文件，再以目录 fd 绑定的原子 replace 提交；不得把日志全读进内存，不得经 shell 拼接命令。目标既有普通文件可替换；目标是 symlink、目录或其它非普通形态时响亮拒绝。任一日志读/写/rename 失败都保留 work；日志已提交而 work 删除失败时保留已提交日志并向上抛错，便于下次精确重试。
+5. work 删除只走 `remove_tree_allow_symlinks`，`containment_root=resolved work_root`，删除目标从第 2 条的精确形状派生；树内 symlink 只 unlink 链接、不跟随目标。失败收尾不读写 `output/`、`states/`、`DONE`、`status.json` 或失败计数，因此“不推进状态链”由行为快照与结构共同保证。
+6. `plan_retention(yd_root, source)` 是零写入纯计划。`source` 在解析/枚举任何路径之前必须过与 FailureInputs/residue/publish 同构的单分量闸：`""`、`.`、`..`、含 `/`（以及当前平台 `os.sep`）或 NUL 的形态均 `CleanupError(phase="validate")`，不得构造路径；`RetentionPlan.__post_init__` 对手工构造/陈旧 plan 再强制同一条不变量，故 `execute_retention_plan` 不会消费可塌缩的 source。窗口逐 source 独立；**删除窗口的 authority 必须由 cleanup 自己发现，不能消费 `controller.done_cycles` 的已跟随路径结果**（same-invariant depth retro：round 1 cand-01 的标量上界修复仍被 Phase 6.2 audit-cand-01 的中间 cycle symlink 伪造）。cleanup 从已解析 `YD_ROOT` 以 fd 绑定的 `O_NOFOLLOW` 逐分量走 `output/<cycle>/<source>/DONE`，只把在同一次 walk 中钉住的普通文件 `DONE` 计为成功 D；`controller.done_cycles` 的 frontier 语义和代码保持不变。`output` 不存在，或某个真实目录下 source/`DONE` 不存在，只表示该候选未完成；可解析 cycle 路径上的 symlink、非目录分量、非普通 `DONE` 或不可确定 IO 必须响亮拒绝，不能静默忽略。无合法成功 cycle 时返回空计划，绝不以墙钟猜窗口。固定 cutoff = D - 14 days，只有 cycle **严格早于** cutoff 的本源 `output/<cycle>/<source>/` 与 `logs/<source>/<cycle>.log` 进入删除清单；恰好 cutoff 与更晚对象完整保留。非法 cycle 名与不匹配 `.log` 的 clutter 不删，兄弟 source 不碰。
+   **公开 `RetentionPlan` 的每一个字段必须在构造点完整绑定身份，而不是只校 `source` 语法**（Phase 2 审计红探针：手工构造 `source="ifs"` 却把 `output/.../gfs` 塞进 `output_dirs`，今日 `execute_retention_plan` 直接删除 GFS，`sibling_survives=False`，属 P0 数据丢失）：`yd_root` MUST `resolve()` 后写回；`latest_done` 与 `cutoff` 必须同时为 None 或同时为可被 `parse_cycle_id` 认回的 UTC 整点，非空时 `cutoff == latest_done - 14 days`；每个 `output_dirs` 项 MUST **词法精确**等于 `<yd_root>/output/<cycle>/<source>`，每个 `log_files` 项 MUST **词法精确**等于 `<yd_root>/logs/<source>/<cycle>.log`，其中 `<cycle>` 必须可解析且严格 `< cutoff`；元组必须排序、无重复。空窗口（latest/cutoff 为 None）时两个删除元组必须都为空。任一不满足在 `RetentionPlan.__post_init__` 抛 `CleanupError(phase="validate", path=<offending path or None>)`，执行器仍在点-of-use 重复同一结构绑定，防手工伪对象/运行期篡改；containment/type/realpath 是第二层，不能代替身份绑定。
+   **时间锚同样是删除身份，不能只做字段间自洽**（round 1 `data-integrity` cand-01，独立 verifier 实测）：当 `latest_done` 非空时，构造点与执行点 MUST 用上述 cleanup-owned no-follow discovery 重新读取该 source 当前普通文件 `DONE` 集合并校验其最新值 `D_current`；集合为空，或 `latest_done > D_current`，均在任何删除前 `CleanupError(phase="validate", path=None)`。只拒绝“未来/伪造锚”，不要求相等：`latest_done < D_current` 的旧 plan cutoff 更早、删除集是当前合法删除集的严格子集，MUST 允许保守重放。discovery 的 `SafeFilesystemError`/`OSError`/兼容边界注入的 `DiscoveryUnreadableError` 必须保留为 `__cause__` 并收敛为 validate；构造点和执行期重绑都要有独立 oracle。验证裁决的反例为：真实 D=`2026082600`、受保护对象 `2026081300`，手工锚 D+2d 会把 cutoff 推到 `2026081400` 并删除该对象；Phase 6.2 复发现为 `output/2026082800` 指向根内伪造目录时，同样会把 cutoff 推到 `2026081400`。两种形态都必须在构造或执行首删前拒绝。
+7. 当前 `D_current` 的 `output`、cycle、source 与 `DONE` 四个分量在同一次 fd-bound walk 中逐一 no-follow 类型校验：前三者只能是真目录，`DONE` 只能是普通文件；每次向下一层都相对已打开父 fd，不能先用 `Path.iterdir`/`os.stat`/`realpath` 得出候选后再只 `lstat` 末端。指向根内或根外的 symlink 一律因分量类型拒绝；真正缺失的 source/`DONE` 仍是不完成。planner 上的发现/锚点失败归 `CleanupError(phase="retention-plan", path=<可指名的不安全或不可读分量>)`，公开 plan 构造与 execute 重绑上的同类失败归 `CleanupError(phase="validate", path=None)`；底层异常只作为 cause。每个拟删目标在计划期全部完成以下预检，任一失败则**整个计划报错且零删除**：存在性可确定、output 目标是真目录/log 目标是普通文件、`realpath(strict=True)` 位于 `Path(yd_root).resolve()` 之内且不等于根本身。symlink 指向根外必须指名目标并拒绝；symlink 指向根内也因类型不符拒绝，不把正式 lane 的异常形态当正常旧数据。
+8. `execute_retention_plan` 在第一处删除前对**全部仍存在目标**重复第 7 条 realpath/类型预检，并通过 `safe_fs` 的可复用只读 fd-walk 对每棵正式 output 目标树完成一次 no-follow 内容预扫；这是抵御“计划后、执行前换成 symlink”以及“静态树内 symlink 到删除途中才发现”的 point-of-use 闸。预扫 MUST 从 containment root 逐分量 `O_NOFOLLOW` 打开，只 `stat/list`、零 unlink/rmdir；任一树内 symlink 或不安全分量必须在**整批第一处删除之前**拒绝，故静态不安全树的全树字节/类型快照、其它计划目标、链接与根外目标均存活（round 1 `data-integrity` cand-02：现有 `rmtree_no_follow` 会按 `os.listdir` 顺序先删普通兄弟、遇 link 才拒绝，违反 fixture 的“该树存活”）。完整预检之后，output 正式树仍用 `rmtree_no_follow` 作为预扫后 race 的最终 no-follow 防线，失败日志用 `unlink_no_follow`，均带 `containment_root=plan.yd_root` 与 `missing_ok=True`。顺序为 output 后 logs；**只对预检完成后发生的 IO 错误或竞态拒绝**允许部分完成，静态安全拒绝不在此 carve-out 内；旧 plan 重放与重新计划都必须幂等。
+9. 保留器不删除 `output/<cycle>/` 空父目录，不扫 scratch work，不清 states，不引入 wall-clock/配置默认值；这些都不是本 issue 两条 Scenario 的对象。固定 14 天来自现有产品契约，不新增配置旋钮。
+10. 零新增依赖；仅 stdlib + 现有 `executor/controller/store.safe_fs`。不得用 `shutil.rmtree`、裸 `Path.unlink`、跟随 symlink 的 `Path.open/read_bytes`，不得在本模块复制 `safe_fs` 的递归删除实现。
+
+Invariant Matrix
+Governing invariant: 失败收尾只能把“同一 source/T 的完整失败证据”提交后删除“同一 source/T 的精确 work”，而保留清理只能删除由该 source 最新 `DONE` 锚定、严格落在 14 天窗口外且在已解析 `YD_ROOT` 内的对象；两条路径都不得推进/破坏状态链或越到兄弟源/根外。
+Source-of-truth identity/contract: `(source, cycle T)` + terminal `JobRecord.job_id` 标识失败轮；cleanup-owned、从 resolved YD_ROOT fd-bound 逐分量 no-follow 发现的每源最新普通文件 `output/<D>/<source>/DONE` 标识保留窗口锚点；`Path(yd_root).resolve()` / `Path(work_root).resolve()` 标识各自容纳根。
+Surfaces:
+- Producers: `finalize_failed_job` 产出 `logs/<source>/<T>.log`；`plan_retention` 产出不可变删除清单
+- Validators/preflight: `FailureInputs.__post_init__`；失败日志 no-follow 普通文件检查；cleanup-owned current-DONE discovery；计划期与执行期两趟 realpath/type/containment 检查
+- Storage/cache/query: `YD_ROOT/logs`、`YD_ROOT/output`、scratch `work`；无 DB/cache
+- Public routes/entrypoints: `yd_producer.cleanup` 七个公开符号（含结构化 `CleanupError`）；CLI/run_once 不在本 issue
+- Frontend/downstream consumers: 运维读取失败日志；`controller.decide_frontier`/`residue.plan_residue`/viewer 均为未改动消费者
+- Failure paths/rollback/stale state: 日志提交失败保留 work；work 删除失败保留已提交日志；不安全 retention 候选在第一删前整体拒绝；执行期 IO 中断靠幂等重放收敛
+- Evidence/audit/readiness: canonical JSON header + 原始 stdout/stderr；`FailureResult`/`RetentionPlan` 精确列出终名/删除集合
+Regression rows:
+- FAILED/TIMEOUT + 非 UTF-8合并日志 + 合法精确 work -> 唯一日志含完整 metadata/原始字节，work 消失，output/states 逐项不变
+- 当前锚点的 `output`/cycle/source/`DONE` 任一分量是不安全形态，或计划后被换成该形态 -> planner/constructor/execute 在首删前按各自错误域拒绝，整批目标与外部对象存活
+- 日志目标/输入或 retention 候选是根外 symlink，或计划后被换成根外 symlink -> 在任何相关删除前稳定拒绝，链接与根外目标存活
+- D-14d / 兄弟 source / 非法名字 / 无最新 DONE -> 完整保留；D-14d-12h 本源 output 与对应失败日志 -> 删除
+
+Boundary-surface checklist:
+- 共享 helper 根：消费 `store/safe_fs.py` 的 fd/no-follow 原语与只读树预扫；只允许为 cleanup-owned discovery 补一个最小可复用 read-only helper，不能改写既有删除语义
+- 公共入口：`cleanup.py` 七个符号（含结构化 `CleanupError`）；`controller.done_cycles` 及 `residue/publish/executor/slurm/cli` 零改动
+- 读面：当前 work 内合并日志、cleanup-owned fd/no-follow `output/<cycle>/<source>/DONE` 单层 discovery、`logs/<source>/` 单层枚举、删除候选 lstat-realpath
+- 写/删/覆盖面：原子替换一份失败日志；精确当前 work 整树；窗口外本源 output source 树与失败日志
+- staging/publish/rollback：失败日志同目录临时文件 + fd 原子 replace；提交前失败清临时文件但保留 work
+- producer/consumer 证据边界：JobSpec/terminal JobRecord/exit_code -> 失败日志；cleanup-owned fd/no-follow ordinary-file DONE(D) discovery -> cutoff -> RetentionPlan；controller frontier discovery 保持原契约
+- 陈旧态/幂等：同 cycle 重复失败只留一日志；旧 plan 重放 missing_ok；计划与执行间 swap 被二次预检/`O_NOFOLLOW` 挡住
+- 未改动消费者：前沿、残留、发布、viewer 与 source 兄弟 lane
+
+Risk packs considered (core):
+- Public API / CLI / script entry: selected —— 新增 `yd_producer.cleanup` 公共 seam；CLI 不动
+- Config / project setup: not selected —— 14 天是既有固定契约，不新增配置
+- File IO / path safety / overwrite: selected —— 两容纳根、原子替换、整树删除、realpath、symlink/TOCTOU 是主风险
+- Schema / columns / units / field names: selected —— 新增 `yd-failure-log-v1` 的固定 metadata 字段/字节边界
+- Auth / permissions / secrets: not selected —— 无认证/凭据面；命令记录是既有 MUST，不新增 secret 来源
+- Concurrency / shared state / ordering: selected —— 日志必须先于 work 删除；计划与执行间 swap；调用方 runlock 仍是唯一互斥 owner
+- Resource limits / large input / discovery: selected —— 失败日志流式复制；retention 只单层枚举项目自有 output/log namespace，不递归发现
+- Legacy compatibility / examples: selected —— 既有 controller/residue/publish/executor 行为与日志以外对象逐字不变
+- Error handling / rollback / partial outputs: selected —— 日志/work 两阶段失败语义、retention 执行中断的幂等收敛
+- Release / packaging / dependency compatibility: not selected —— 零依赖/包装变化
+- Documentation / migration notes: not selected —— 内部首版 seam，无迁移；既有 spec 已覆盖行为
+Domain packs:
+- Geospatial / CRS / shapefile sidecars: not selected —— 不碰几何产物
+- Time series / forcing / temporal boundaries: selected —— 12h cycle、D-14d 包含边界与逐 source 锚点
+- 状态链 / warm-start 定戳一致性: selected —— 失败与清理都必须让 states/DONE/前沿逐项不变
+- NWM 快照溯源与 DB-free 隔离: selected —— stdlib-only、零 NWM import/DB/scheduler 调用
+
+Required evidence（真实 tmp 目录树；期望 cycle/路径由构造期独立登记，不由被测计划回读）:
+
+测试布局（项目级 `large-file-guard` 默认硬上限 1000 行；布局调整是 docs-first 的机械拆分，不是放宽 guard）：
+- `producer/tests/cleanup_fixtures.py`：只放共享独立 oracle 字面量、JobSpec/JobRecord/目录树构造器与断言 helper，不含 `test_*` 用例
+- `producer/tests/test_cleanup_failure.py`：13.2 失败日志/work/错误域与大日志流式证据
+- `producer/tests/test_cleanup_retention.py`：13.3 既有窗口、身份绑定、realpath/symlink/TOCTOU、幂等矩阵
+- `producer/tests/test_cleanup_retention_anchor.py`：本次 depth retro 新增的 current-DONE authority 四分量/三入口矩阵、discovery 错误映射与 whole-plan killer；不得把它塞回已达 988 行的旧文件
+- `producer/tests/test_safe_fs.py`：只读树预扫的直接契约与 nested-descendant killer
+- 所有文件各自 MUST ≤1000 行；MUST NOT 给 `.large-file-guard.json` 增 exclude，也不得删/弱化断言凑行数。修复前 focused baseline 是 83 个 nodeid（cleanup 64 + safe_fs 19）；原有 nodeid/参数化腿/断言集合必须逐项守恒，新用例只增不减。只有 import、共享 helper 引用与既有测试的模块归属可机械变化
+- spec「失败轮产物」：FAILED 与 TIMEOUT 各一条；日志 JSON 精确字段/值，后缀逐字等于含非法 UTF-8 的原始 stdout/stderr，work 不存在，`output/`/`states/` 快照逐项不变，且该 cycle 日志恰一份
+- 同 T 预置旧普通日志再失败 -> 原子替换为新 job ID/字节，不留下 `.tmp` 或第二份日志
+- 让日志提交失败（目标 symlink/目录）-> work 与 output/states 全部不变；证明“先日志后删除”而非只看 happy path
+- work 内含指向根外的 symlink -> work 整树消失、链接目标字节不变；错形 `job_spec.work_dir`（少/多一层、兄弟 source/cycle）-> 入口拒绝且所有姊妹 work 存活
+- 合并日志叶子是指向根外文件的 symlink -> 拒绝，work 与目标存活；大于读 chunk 多倍的日志 -> 输出逐字相等且 `tracemalloc` 峰值不随日志总大小线性增长
+- spec「14 天窗口」：每源最新成功 D；D-14d-12h 的本源 output 与失败日志删除，D-14d、D、D 之后、兄弟 source 的同 cycle 对象逐项保留
+- 无任何本源 `DONE` -> 空计划、零删除；非法 cycle 名/非法 `.log` 名 -> 不入计划且存活
+- retention `source` 参数化 `['', '.', '..', 'a/b', 'ifs/']`，另手工构造同形态 `RetentionPlan` -> 全部 `CleanupError` 且 `phase == 'validate'`，整棵 `YD_ROOT` 与兄弟 source 的 `DONE`/DAT 逐项不变
+- `RetentionPlan` 身份绑定矩阵（Phase 2 审计 P0 + round 1 cand-01/cand-06 的回归）：`source='ifs'` 夹带 GFS output 或 GFS log、夹带恰好 cutoff/窗口内路径、output/log lane 对调、cycle 非法、`cutoff != latest_done-14d`（MUST 各有早 12h、晚 12h 两个方向，分别杀死两种单边比较）、空窗口带非空目标、未排序/重复目标、目标落在 resolved root 的兄弟路径、真实最新 DONE 为 D 却手工伪造 D+2d 锚 -> 构造或执行首删前 `CleanupError(phase='validate')`，所有目标逐项存活；旧锚 D-12h 对当前 D MUST 允许保守重放；反向正例：一份手工构造且锚不晚于当前普通文件 DONE、其余字段全部自洽的 IFS 窗口外 plan 可执行且只删那两个精确目标
+- current-DONE authority 四分量/三入口矩阵（same-invariant audit-cand-01）：分别把 `output`、可解析 cycle、source、`DONE` 变成根内 symlink，并至少让 cycle symlink 指向含伪造未来普通 `DONE` 的根内目录；每一形态都要覆盖 canonical `plan_retention`、以真实旧锚构造的 `RetentionPlan`、以及构造后/执行前 tamper 的 `execute_retention_plan`。planner 断言 `phase='retention-plan'` 与具体不安全分量；constructor/execute 重绑断言 `phase='validate', path is None`；整棵 YD_ROOT 的独立 snapshot、受保护 output/log、链接与目标逐项存活。移除 cleanup-owned fd/no-follow discovery 或退回 `done_cycles` 必须让 cycle-symlink killer 变红；不得通过改变 `controller.done_cycles` 让测试过。
+- current-DONE ordinary/missing/IO 边界：真实目录下缺 source 或缺 `DONE` 不计完成；FIFO/目录 `DONE`、cycle/source 非目录、不安全 symlink 响亮拒绝；注入 discovery 的 `DiscoveryUnreadableError` 分别覆盖 public constructor 与 execute 重绑，断言精确 `CleanupError`、phase/path/cause 与零 mutation；planner 仍保持 `retention-plan` 错误域。旧锚保守重放的现有正例必须继续通过。
+- spec「symlink 越界拒删」两臂：旧 output source 路径、旧失败日志分别替换成根外 symlink -> `plan_retention` 指名路径拒绝，树内其它原本可删目标尚未删除，链接/根外目标存活
+- TOCTOU：先得到含两个目标的合法 plan，再把排序靠后的目标换成根外 symlink -> `execute_retention_plan` 在第一删前拒绝，排序靠前目标仍在；证明二次**全量**预检而非边删边查
+- 正式 output 目录内部同时放至少三份普通文件、一个**位于嵌套子目录内**且指向根外的 symlink 与一个排序在 link 后的普通文件 -> 执行期全批只读 no-follow 预扫在首删前拒绝，`snapshot_tree` 证明该树所有条目逐项存活，链接/根外目标/其它计划目标同样存活；随后 `rmtree_no_follow` 只承担预扫后 race 防线。独立 safe_fs 用例还须直接钉住只读预扫对嵌套纯目录树通过、对 nested-descendant symlink 零变更拒绝；把 `_verify_tree_no_symlinks_fd` 的递归调用替成 no-op 时，helper 与 cleanup whole-plan 两个新 killer 都必须变红。unexpected regular-file/FIFO lane -> 稳定错误、不阻塞读取
+- `YD_ROOT` 经 `link -> real` 到达 -> 合法计划/执行成功且 `plan.yd_root` 是实路径；同一 plan 重放和重新计划均 no-op
+- 公共错误域矩阵：非法 FailureInputs/RetentionPlan -> `CleanupError(phase='validate')`；日志输入/目标异常 -> `phase='log'`；日志已提交但 work 删除失败 -> `phase='work'` 且日志存活；DONE/候选枚举或计划期 realpath/type 异常 -> `phase='retention-plan'`；二次预检/删除期异常 -> `phase='retention-execute'`。每条断言异常类型、`phase`、涉事时 `path`，并断言底层 `ValueError`/`DiscoveryUnreadableError`/`SafeFilesystemError`/`OSError` 不穿透
+- Batched red proof：新测试对 pre-change source 一次运行必须红（模块不存在即可），随后恢复实现全绿；不得遗留 `red-proof` stash
+
+Verification:
+- `cd producer && uv run pytest`
+- `cd producer && uv run ruff check . && uv run ruff format --check .`
+- `cd producer && uv sync --frozen`
+- `openspec validate m2-producer-core --strict --no-interactive`
+- `bash scripts/check-stage-pipeline-log.sh origin/master`
+
+Known limits / routed deferrals:
+- #47：退出码如何由 Slurm/主循环取得；本 issue 只消费显式非空 `exit_code`
+- #108：post-`DONE` 历史孤儿 work 扫描，不属于当前失败 job 的精确 work 删除
+- #94：发布器自身 `work_dir` 形状守卫；本 issue 的 FailureInputs 独立守住自己的删除入口，不代修 `PublishInputs`
+- #112：Phase 6.2 核实的既存 `ResiduePlan` 手工清单身份缺口（可夹带兄弟 source 删除目标）；`residue.py` 不在本 issue 改动面，已由 issue-scribe 独立建档
+
+Non-goals:
+- `run_once`、双源并行、多轮追赶、崩溃残留执行接线（#26/#28）
+- 真实 Slurm `ExitCode` 查询、生产 node-22/NFS 验证（#47/M4）
+- output 空 cycle 父目录、states、scratch 历史孤儿 work、NWM raw 的扫描/删除
+- 失败计数、退避、`status.json`、日志压缩/轮转、配置化窗口
+
+Review focus:
+- 任何删除是否由精确 `(root, source, cycle)` 身份派生；source/work 形状是否能塌陷到父层或兄弟 lane
+- 日志是否真正先提交、原始字节是否真正完整、命令是否 JSON argv 而非 shell 字符串；大日志是否被全读入内存
+- cutoff 是否由 cleanup-owned、逐分量 fd/no-follow 的最新普通 `DONE` authority 锚定且边界是严格 `< D-14d`；是否仍间接信任 `controller.done_cycles` 或先跟随后只查 leaf；无 DONE 是否 fail closed
+- planner/constructor/execute 是否分别覆盖 `output`/cycle/source/`DONE` 的不安全分量，错误域是否稳定且首删前全批零 mutation
+- realpath 是否计划/执行各跑一遍并在第一删前全量完成，实际删除是否仍走 fd no-follow 原语；nested-descendant symlink killer 是否真正杀掉递归移除
+- 有没有越界实现 #26/#28/#108，或改弱既有 spec/tests/oracle
 
 ## 14. run-controller（三）：主循环集成
 
