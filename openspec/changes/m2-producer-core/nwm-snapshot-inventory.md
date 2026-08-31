@@ -199,6 +199,15 @@ Round 1 修复后的全 sibling audit 证明 §4.1 的两个加固 owner 过低�
 - `workers/forcing_producer/file_store.py` 快照：在 `CanonicalProduct` construction 前独立证明 catalog row 的 `valid_time-cycle_time == lead_time_hours`（非负整小时）及 writer-derived product id `<source>_<YYYYMMDDHH>_<variable>_f<lead:03d>`。object key 与 NetCDF attrs 仍是后续第二层交叉验证，不能与伪造 row 成对互证。该加固不改 4/16 schema、不改 canonical writer、不增加 source attr。
 - yd Round 1 closure test 增加 protocol repository 多源返回值与 checksum-correct row+NetCDF dual forgery 的 public no-ready 判别器；mutation evidence追加 producer post-repository guard、row time/lead guard、product-id guard三腿，不覆盖既有 32 腿。
 
+### 4.3 Issue #14 Round 2 boundary-input corrective action 偏离补记
+
+Round 2 verifier 证明 §4.1/§4.2 仍按 reviewer 示例逐点加 owner，没有封住同一个 pre-side-effect boundary：literal `.` 可让 model/basin 两段路径归一到同一物理 package，invalid `max_lead_hours` 可在 existing lookup 后触发 destructive cleanup，直接构造的 frozen contract 可绕过 parser-only duplicate-cell 等 station结构。第二次 depth retro 因此先持久化完整 Boundary Input Inventory，再做以下同不变量提升；仍只修改第 32/38 行已落地 contract/producer 与 yd 自撰测试，不新增 snapshot 行：
+
+- `workers/forcing_producer/producer.py` 快照：request preflight 在零 repository call 前拒绝 literal `.`/`..` 与非 strict-nonnegative-int lead；repository model/contract 只读解析后，在 `get_forcing_version`、failure-status write 与 cleanup 前完成 basin path 与 returned-contract structure preflight。catalog/binding/NetCDF authority 仍在 existing lookup 后参与 currency proof，真实 drift 继续撤销 stale ready，不能把两种失败语义混成一律 preservation。
+- `workers/forcing_producer/direct_grid_contract.py` 快照：把 parser 内 dataclass semantic checks抽为唯一 shared validator，并由 parser 与每个 producer repository-return boundary共同调用；覆盖 task 8.1 的 mode/source、nonblank identities、station cap、station/index/filename/grid/cell一一对应、finite canonical coordinates与 Mapping properties。JSON envelope/list extraction只留 parser，source-less compatibility保留，不解析 standalone binding artifact。
+- yd tests 使用 direct dataclass/protocol repository而非再次经过 parser，钉住 dot-collision sibling byte preservation、invalid/valid lead family、shared validator全结构差集与 producer/parser双调用；mutation evidence在既有 37 腿后只追加实际运行并捕获红用例的新腿，不覆盖历史账本。
+- inventory 同时把 config constructor grammar路由回 task 1.1/#26，把 registry lifecycle/assembly路由回 #15；不因枚举发现未验证字段而静默扩修 ERA5、DB/grid-registry、shared object-store或 config wiring。
+
 ## 5. 枚举与闭包的再生方法
 
 本清单的所有符号枚举可用下列命令在 pin 上机械复算（`<NWM>` = NWM 仓路径，`8ae9b8f2` = 锚点）：

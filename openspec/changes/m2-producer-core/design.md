@@ -55,6 +55,14 @@ canonical catalog 是产品清单，但 row metadata 必须先独立自洽，再
 
 forcing ready currency 除 `producer_version` 外还记录一个 canonical-JSON stable output-config identity，至少覆盖 `rn_shortwave_factor`、三个输出文件名、output/required variable 集、ERA5 latency policy 与 `min_lead_hours`。只要其中会改变 package bytes、shape、path 或选择策略的字段变化，同 `(source, cycle, model)` 就必须重算/拒绝，不能返回旧 `already_done`。
 
+Round 2 depth corrective action 把 `produce` 的 pre-currency 边界固定为四段，而不是继续逐 finding 补丁：(1) public request preflight 在零 repository call 前验证 source/cycle、forcing-owned model/basin-version path component 与 `max_lead_hours`；(2) 只读解析 repository model identity 与 returned direct-grid contract，在 `get_forcing_version` 前完成 basin path 与完整 task-8.1 contract structure 验证；(3) 读取 existing 后才读取 catalog、binding/`.sp.att` 与 descriptor-bound NetCDF 来证明 authority/currentness；(4) 全部通过后才作 currency decision 与 mapping/package/finalize mutation。前两段失败不得调用 existing lookup、失败状态写或 cleanup，已有合法 sibling 的 record/package/domain/sidecar/handoff/cycle-ready bytes 必须不变；第三段发现 authoritative input drift 时，旧 ready 已不再被当前输入证明，仍必须撤销。不能把 `get_forcing_version` 粗暴挪到所有 object reads 之后，否则会让已变化的 binding/catalog/NetCDF 错误保留 stale ready。
+
+forcing-owned path component grammar 保留现有 ASCII component 约束，只补 literal `.`/`..` 拒绝；不修改 shared object-store/safe-fs，也不发明新的全局 ID grammar。`max_lead_hours` 只接受 `None` 或 strict nonnegative `int`（bool/float/string/negative 均拒绝），`0` 与任意可表达的大整数合法，不设业务无据的上限。
+
+`DirectGridForcingContract`/`DirectGridStationBinding` 是公开 frozen dataclass，故 parser 不是唯一生产 owner。一个 shared semantic validator 同时由 parser 构造后与 `ForcingProducer` 的每个 repository-return boundary 调用：生产传 current source 时要求 mode/source singleton，并重验 non-empty/capped station tuple、nonblank contract/station identity、strict positive contiguous indexes、safe casefold-unique CSV filenames、station/grid coherence、unique station/cell identity、finite canonical coordinates与 Mapping properties。JSON object/list extraction仍是 parser-only；binding/`.sp.att` checksum、canonical grid/signature/cell existence仍由后续 authority owner证明。source-less parser 的 pin-compatible multi-source shape保留，但进入生产必须单 source。独立可执行清单见 `.workplans/14/review/round2-boundary-input-inventory.md`；OpenSpec 本身保留全部规范义务，不依赖该 gitignored evidence 才成立。
+
+上述 inventory 同时列出而不越界修复 task 1.1/#26 拥有的 config constructor grammar（例如 nonfinite factor、malformed output-variable set、negative/wrong-type `min_lead_hours`/resource limits）以及 #15 的 registry/assembly 生命周期；本轮只维持这些 config 对 valid-value output currency 与既有 limit enforcement 的 owner。
+
 快照 DB-free 守卫检查真实外部耦合（数据库驱动/URL、scheduler 或 registry 包 import、环境读取），不再把普通标识符或错误消息里的裸 `scheduler`/`registry` 单词当成耦合。显式注入、只服务本轮 work 的 file manifest adapter 是 forcing-chain spec 明文允许且 issue #15 负责生成/清理的内部文件契约，不是外部 registry 服务。
 
 `producer.py`、`file_store.py` 和抽取式 `test_forcing_producer.py` 保持 pin 的文件边界与溯源身份；若按清单闭包落地后超过项目 1000 行闸门，只把这三份 vendored/snapshot 文件逐文件登记进 `.large-file-guard.json`。yd 自撰验收测试必须拆分在 1000 行内，不得借此扩豁免。

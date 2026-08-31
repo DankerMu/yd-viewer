@@ -51,6 +51,20 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 - **WHEN** 已存在合法 12Z ready 后，以 06Z、12:30、非零秒或非零微秒调用公开 forcing seam
 - **THEN** 请求在任何 repository lookup/write/cleanup 前稳定失败，既不得生成非法 cycle 产物，也不得改变原 12Z version、sidecar、handoff 或 cycle-ready 证据
 
+#### Scenario: path identity 与 lead window 在 request boundary fail closed
+- **WHEN** 公开 seam 收到 `model_id="."`、public/repository `basin_version_id="."`，或 `max_lead_hours` 为 string/bool/float/negative；另有一个已 ready 的合法 sibling tuple
+- **THEN** public-only malformed value 在零 repository call 前失败，repository-return path identity 在 `get_forcing_version`/failure-status write/cleanup 前失败，且 sibling 的 record/package/domain/sidecar/handoff/cycle-ready bytes 全部不变
+- **THEN** `max_lead_hours=0`、普通 nonnegative int 与超出可用产品 lead 的任意合法大整数继续按现有可用 lead 截取，不得引入额外上限
+
+#### Scenario: repository 返回 contract 必须重建完整 station/cell 结构语义
+- **WHEN** 注入式 repository 直接构造 frozen `DirectGridForcingContract`，绕过 file parser，并分别给出 duplicate/blank station or cell、bool/zero/gapped index、unsafe/casefold-colliding filename、station/grid mismatch、duplicate cell、non-finite/out-of-range coordinate 或 non-Mapping properties
+- **THEN** parser 与 producer 共用同一个 semantic validator；producer 在 existing lookup、mapping/package write 与 readiness mutation 前稳定拒绝，且不得把 unsafe filename静默替换成 synthetic filename后继续
+- **THEN** source-less parser 仍可保留 pin-compatible multi-source shape，但任何进入指定 source 的生产调用都必须要求 exact current-source singleton
+
+#### Scenario: request preservation 不得掩盖 authoritative drift
+- **WHEN** 合法 tuple 已 ready 后，当前 catalog、binding/`.sp.att` 或 canonical NetCDF/grid authority 发生 identity/checksum/content drift
+- **THEN** producer 在 existing lookup 后证明旧 ready 已 stale 并撤销其 final evidence；不得为了满足 malformed-request preservation 而返回旧 `already_done`
+
 #### Scenario: catalog row 与 canonical 对象身份联合校验
 - **WHEN** catalog row 的 `object_uri`/checksum 指向另一 source、另一 cycle、另一 variable 或与 row 身份不一致的 NetCDF，或 dataset 的 data variable、`cycle_time`、`valid_time`、`lead_time_hours`、`unit`、`grid_id` 任一不一致
 - **THEN** forcing 生产在读取值与写 ready 前 fail closed；object key MUST 逐字对应 row 的 source/cycle/variable/canonical product id
