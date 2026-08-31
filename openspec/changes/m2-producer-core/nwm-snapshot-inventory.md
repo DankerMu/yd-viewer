@@ -191,6 +191,14 @@ PR #115 Round 1 的独立 verifier 在 yd 新公开 seam 上确认了五类 pin 
 - `tests/test_forcing_producer.py` 保留 seed 中原有 `["GFS", "IFS"]` 若只行使无 current-source 的 parser 兼容 seam；凡进入 yd production 的 fixture 改为 source-specific 单例。新增对象 identity/cycle/output currency/byte cap 与 low-limit 判别器落在 yd 自撰测试，不把 NWM pin 测试伪装成新 oracle。
 - `forcing_fixtures.py` 不再调用 production `parse_cycle_time` 构造 expected；12Z 用 stdlib/literal UTC，IFS grid-definition URI 使用 canonical writer 的精确大写 `canonical/IFS/...`。这两项是 oracle 独立性修复，不改变生产 schema。
 
+### 4.2 Issue #14 Phase 6.2 depth retry 偏离补记
+
+Round 1 修复后的全 sibling audit 证明 §4.1 的两个加固 owner 过低，需再做两项同不变量提升；仍只修改清单第 32/33 行已落地的 producer/file-store 与 yd 自撰测试，不新增快照行：
+
+- `workers/forcing_producer/producer.py` 快照：file parser 的 current-source singleton 只是早失败。`ForcingProducer._resolve_forcing_mapping_contract` 在**每个** `ForcingRepository` 返回 contract 后再验证 normalized `applicable_source_ids == (requested_source,)`，覆盖 pin fake/injected repository、未来 repository 与 direct dataclass 构造；不删除 source-less parser 的 pin 兼容 seam。
+- `workers/forcing_producer/file_store.py` 快照：在 `CanonicalProduct` construction 前独立证明 catalog row 的 `valid_time-cycle_time == lead_time_hours`（非负整小时）及 writer-derived product id `<source>_<YYYYMMDDHH>_<variable>_f<lead:03d>`。object key 与 NetCDF attrs 仍是后续第二层交叉验证，不能与伪造 row 成对互证。该加固不改 4/16 schema、不改 canonical writer、不增加 source attr。
+- yd Round 1 closure test 增加 protocol repository 多源返回值与 checksum-correct row+NetCDF dual forgery 的 public no-ready 判别器；mutation evidence追加 producer post-repository guard、row time/lead guard、product-id guard三腿，不覆盖既有 32 腿。
+
 ## 5. 枚举与闭包的再生方法
 
 本清单的所有符号枚举可用下列命令在 pin 上机械复算（`<NWM>` = NWM 仓路径，`8ae9b8f2` = 锚点）：

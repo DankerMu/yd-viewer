@@ -31,6 +31,10 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 - **WHEN** 以同一 cycle 分别对 grid id/cell id 可区分的 GFS 与 IFS 合成 canonical 和 binding 运行 forcing 生产
 - **THEN** 两个 forcing 包各自只包含本 source binding 的站点、grid-cell 值与 lineage，任一 source 的 binding 都不被另一 source 复用
 
+#### Scenario: repository 返回值不得绕过 source 隔离
+- **WHEN** 注入式 repository 返回一份由 source-less parser 或 direct constructor 产生、同时声明 GFS/IFS 的 contract
+- **THEN** `ForcingProducer` 在 repository 返回边界再次验证当前 source 单例并在任何 mapping/package 写入前拒绝；该约束不得只由 file parser 保证
+
 #### Scenario: 时间零点锚定 cycle
 - **WHEN** 分别以 UTC 00Z 与 12Z cycle 运行 forcing 生产，并检查每份 SHUD station CSV 的首个数据行
 - **THEN** 首行 `Time_Day=0` 对应显式传入的 cycle 时刻，12Z 不增加 0.5 天偏移
@@ -50,6 +54,10 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 #### Scenario: catalog row 与 canonical 对象身份联合校验
 - **WHEN** catalog row 的 `object_uri`/checksum 指向另一 source、另一 cycle、另一 variable 或与 row 身份不一致的 NetCDF，或 dataset 的 data variable、`cycle_time`、`valid_time`、`lead_time_hours`、`unit`、`grid_id` 任一不一致
 - **THEN** forcing 生产在读取值与写 ready 前 fail closed；object key MUST 逐字对应 row 的 source/cycle/variable/canonical product id
+
+#### Scenario: catalog row 时间与 product id 必须独立自洽
+- **WHEN** checksum 正确的 catalog row 与 NetCDF 被成对修改，使二者彼此相等但 `valid_time - cycle_time != lead_time_hours`，或 `canonical_product_id` 不等于 `<normalized-source>_<YYYYMMDDHH>_<variable>_f<lead:03d>`
+- **THEN** catalog constructor 在构造 `CanonicalProduct`、lead 过滤与 NetCDF 读取前 fail closed；row/NetCDF 的 pairwise agreement 不构成 identity proof
 
 #### Scenario: canonical NetCDF 累计读取有界
 - **WHEN** catalog 指向大于 536870912 bytes 的 regular/sparse canonical NetCDF
