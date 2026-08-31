@@ -727,30 +727,18 @@ def test_ifs_grid_read_receives_exact_uppercase_catalog_uri(
     assert set(observed_uris) == {"canonical/IFS/grid/ifs_0p25/grid.json"}
 
 
-# Phase 6.2 depth retry ---------------------------------------------------------
-
-
 _F003_IDENTITIES: dict[str, tuple[str, str]] = {
     "prcp_rate_or_amount": (
         "gfs_2026050700_prcp_rate_or_amount_f003",
-        (
-            "canonical/gfs/2026050700/prcp_rate_or_amount/"
-            "gfs_2026050700_prcp_rate_or_amount_f003.nc"
-        ),
+        "canonical/gfs/2026050700/prcp_rate_or_amount/gfs_2026050700_prcp_rate_or_amount_f003.nc",
     ),
     "air_temperature_2m": (
         "gfs_2026050700_air_temperature_2m_f003",
-        (
-            "canonical/gfs/2026050700/air_temperature_2m/"
-            "gfs_2026050700_air_temperature_2m_f003.nc"
-        ),
+        "canonical/gfs/2026050700/air_temperature_2m/gfs_2026050700_air_temperature_2m_f003.nc",
     ),
     "relative_humidity_2m": (
         "gfs_2026050700_relative_humidity_2m_f003",
-        (
-            "canonical/gfs/2026050700/relative_humidity_2m/"
-            "gfs_2026050700_relative_humidity_2m_f003.nc"
-        ),
+        "canonical/gfs/2026050700/relative_humidity_2m/gfs_2026050700_relative_humidity_2m_f003.nc",
     ),
     "wind_u_10m": (
         "gfs_2026050700_wind_u_10m_f003",
@@ -762,19 +750,14 @@ _F003_IDENTITIES: dict[str, tuple[str, str]] = {
     ),
     "pressure_surface": (
         "gfs_2026050700_pressure_surface_f003",
-        (
-            "canonical/gfs/2026050700/pressure_surface/"
-            "gfs_2026050700_pressure_surface_f003.nc"
-        ),
+        "canonical/gfs/2026050700/pressure_surface/gfs_2026050700_pressure_surface_f003.nc",
     ),
     "shortwave_down": (
         "gfs_2026050700_shortwave_down_f003",
-        (
-            "canonical/gfs/2026050700/shortwave_down/"
-            "gfs_2026050700_shortwave_down_f003.nc"
-        ),
+        "canonical/gfs/2026050700/shortwave_down/gfs_2026050700_shortwave_down_f003.nc",
     ),
 }
+_F003_PROBE_URI = _F003_IDENTITIES["prcp_rate_or_amount"][1]
 
 
 class _ProtocolSourceLessMultiSourceRepository:
@@ -904,12 +887,20 @@ def _forge_catalog_product_id_incoherence(
     _write_catalog(store, payload)
 
 
-def _forbid_canonical_netcdf_open(monkeypatch: pytest.MonkeyPatch) -> None:
+class _ForbiddenCanonicalNetCDFOpen(BaseException):
+    pass
+
+
+def _forbid_canonical_netcdf_open(
+    monkeypatch: pytest.MonkeyPatch, repository: FileForcingRepository
+) -> None:
     from yd_producer.forcing import netcdf_open
     from yd_producer.forcing import producer as producer_module
 
     def netcdf_read_must_not_run(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("incoherent catalog row reached NetCDF read")
+        raise _ForbiddenCanonicalNetCDFOpen(
+            "incoherent catalog row reached NetCDF read"
+        )
 
     monkeypatch.setattr(netcdf_open, "open_canonical_netcdf", netcdf_read_must_not_run)
     monkeypatch.setattr(
@@ -917,6 +908,10 @@ def _forbid_canonical_netcdf_open(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert netcdf_open.open_canonical_netcdf is netcdf_read_must_not_run
     assert producer_module.open_canonical_netcdf is netcdf_read_must_not_run
+    with pytest.raises(_ForbiddenCanonicalNetCDFOpen):
+        repository._read_netcdf_attrs(
+            repository.object_store.resolve_path(_F003_PROBE_URI)
+        )
 
 
 def test_public_produce_rejects_source_less_multisource_contract_before_mapping_write(
@@ -956,7 +951,7 @@ def test_catalog_rejects_dual_forged_time_lead_before_netcdf_read_or_ready(
     producer, repository, store = _prepared_gfs_f003_catalog(tmp_path)
     _forge_catalog_time_lead_incoherence(tmp_path, store)
 
-    _forbid_canonical_netcdf_open(monkeypatch)
+    _forbid_canonical_netcdf_open(monkeypatch, repository)
     with pytest.raises(
         ForcingStoreError,
         match="incoherent valid_time/cycle_time/lead_time_hours",
@@ -980,7 +975,7 @@ def test_catalog_rejects_dual_forged_product_id_before_netcdf_read_or_ready(
     producer, repository, store = _prepared_gfs(tmp_path)
     _forge_catalog_product_id_incoherence(tmp_path, store)
 
-    _forbid_canonical_netcdf_open(monkeypatch)
+    _forbid_canonical_netcdf_open(monkeypatch, repository)
     with pytest.raises(
         ForcingStoreError,
         match="canonical_product_id does not match canonical product identity",
