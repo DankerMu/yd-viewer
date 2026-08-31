@@ -1993,6 +1993,160 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 - bounded/no-follow 是否覆盖 manifest/catalog/binding/.sp.att/NetCDF 每个读面，且无裸 Path fallback。
 - tests 的 expected values 是否来自 spec 字面/手算，不从实现重算；mutation/red proof 是否真实咬合。
 
+### Issue #15 fixture（任务 8.2/8.3：临时 file backend 与 SHUD 输入组装）
+
+**风险分级**：fixture level = **expanded**；repair intensity = **high**；project profile = `yd-viewer`。上游建议 `compact`，本 issue 上调：work-local 临时文件/目录提交与清理、manifest/schema、forcing package consumer、`cfg.ic` warm-start 覆盖、cycle/state 链、SHUD 参数格式均命中 mandatory expanded；错误初态或参数会让整轮 SHUD 数值链从错误状态起跑。M2 只以合成 fixture 证明结构/组装，不声明真实 SHUD 数值正确。
+
+**Width exception**：接受上游 `merged-tasks`。8.2 的临时 file backend 没有独立消费者：它只为同一轮 forcing 提供 file repository，再把结果交给 8.3；拆成两个 PR 会让 registry 侧只能以手抄 fixture 自证，无法覆盖真实 `FileForcingRepository -> ForcingProducer -> assembler` 链。Minimal mergeable slice 是组 8 余量 8.2+8.3；不再拆第三刀。
+
+**PR 边界与文档裁决（D11 为单一设计权威）**：
+
+1. 新增 yd 自撰 `producer/src/yd_producer/assemble.py` 与公开符号：
+   - `AssemblyError(RuntimeError)`，携带 `phase: Literal["validate", "registry-stage", "registry-commit", "assemble-stage", "assemble-commit", "cleanup"]` 与 `path: Path | None`；预期的输入/IO/身份/格式错误均收敛为该类型并保留 `__cause__`，进程级 `BaseException` 不包。
+   - frozen + kw-only `WorkIdentity(source_id, cycle_time, model_id, basin_id, basin_version_id, river_network_version_id, project_name)`。
+   - frozen + kw-only `WorkRegistry(identity, work_dir, object_store_root, registry_manifest, model_package_uri, model_manifest_uri, cleanup_warnings=())`。
+   - frozen + kw-only `RunDirectory(identity, path, project_name, state_path, parameter_path, forcing_index_path, forcing_csv_paths, cleanup_warnings=())`。
+   - `stage_work_registry(*, work_root, identity, contract, binding_content, sp_att_content, max_asset_bytes) -> WorkRegistry`。
+   - `assemble(*, registry, variant_dir, forcing, states_root, state_path) -> RunDirectory`。
+   不新增只转调 `ForcingProducer.produce` 的 `forcing.build` facade；D10/旧 sketch 已由 design.md D11 修订。`WorkRegistry` 只返回既有 `LocalObjectStore` / `FileForcingRepository` 的构造事实，调用方按 `object_store_root` + `registry_manifest` 构造；不在结果里藏可变 repository/cache。
+2. `WorkIdentity` 是 registry/forcing/assembler/tracker 后继接线唯一字符串/时间 owner。`source_id` 必须归一为 `gfs|ifs`；cycle 必须是 tz-aware UTC 00Z/12Z 整点；五个 identity 文本必须是非空 string，`model_id`、`basin_version_id`、`project_name` 还必须是安全单路径分量（拒绝 `.`/`..`、斜杠、反斜杠、NUL、前导 `-` 与非 ASCII allowlist）。不把 naive datetime 解释成宿主时区，不按 variant basename 猜 project/model，不从 `yd.binding` 文本反造 contract。
+3. 现有 `Config` schema 没有 model/basin/project identity，任务 1.1 已完成、#29 只生产其实例。本 issue 不改 `config.py`、`config.toml`、`local.toml` 或 CLI；identity、direct-grid contract 与同一已验证 binding/`.sp.att` bytes 是显式入参。#26/M4 后继从 config、prepare 与现场 builder 结果接线，不能由 #15 发明默认值。
+4. `work_dir` 逐字派生为 `<absolute-existing-work_root>/<source>/<YYYYMMDDHH>`，调用时必须已存在、逐分量 no-follow 且不等于 work_root；其中可已有 raw/canonical/object-store 内容。所有新增 registry/run 产物只能在该 work 内。手工构造 `WorkRegistry` 不能绕过：`__post_init__` 与 `assemble` point-of-use 都重验 identity、物理路径和精确 relative layout。
+
+**8.2 临时 file backend 精确形状**：
+
+5. object-store 根固定 `<work_dir>/object-store`；model 终根固定 `models/<model_id>/`。本次生成的相对 key 恰为：
+   - `models/<model_id>/registry.json`
+   - `models/<model_id>/manifest.json`
+   - `models/<model_id>/direct-grid/binding.json`
+   - `models/<model_id>/package/<contract.sp_att_path>`
+   - `models/<model_id>/package/<project_name>.tsd.forc`
+   contract `binding_uri` 必须逐字等于第三项，`sp_att_path` 必须逐字等于 `input/<project_name>.sp.att`。不接受 caller 自选另一布局、S3 URI、绝对 key 或 `..`。
+6. `contract` 必须是真实 `DirectGridForcingContract` 并经现有 shared validator以 current source重验；本函数不复制 parser、不解析 standalone binding。`binding_content`/`sp_att_content` 必须是 bytes-like、各自 `len <= max_asset_bytes`，`max_asset_bytes` 必须为 strict positive int；SHA-256 依 #14 已接受的 bare/`sha256:`等价语义与 contract 比较，`.sp.att` 还须 strict UTF-8。任一失败在 final model root/staging写入前发生。
+7. registry JSON 恰含顶层 `models` 单元素数组；model 恰含 `model_id/basin_id/basin_version_id/river_network_version_id/model_package_uri/manifest_uri/resource_profile` 七键。resource profile 恰含 `direct_grid_forcing` 与 `shud_input_name`；direct-grid payload 恰序列化 contract 九个顶层字段 + `station_bindings`，每站十个 required 字段，非空 `properties` 才以 Mapping JSON object追加。model manifest 恰为 `{"basin_slug": <project_name>}`。序列化为 UTF-8、sort keys、紧凑 separators、默认 ASCII escaping；不加无消费者 schema/version/receipt 字段。
+8. `<project_name>.tsd.forc` 只由 `contract.stations` 按 `shud_forcing_index` 生成：逐字 header `ID\tLon\tLat\tX\tY\tZ\tFilename`，每站一行 index/lon/lat/x/y/z/filename。它是 file repository 的 station-index兼容读面，按 index/filename/geometry 与 contract 对拍；`FileForcingRepository` 当前会按 `basin_slug` 派生自己的 met station id，故该 index不得反向定义/覆盖 contract `station_id`。
+9. 整个 staged object-store模型树必须在隔离 staging 中构造并用真实 `FileForcingRepository` 读回 model identity、contract、validation assets和station index；全部通过后，final `models/<model_id>` 的首个可见动作是同文件系统 no-follow rename。final model root、staging或其父层是不安全形态/预存条目时拒绝，不覆盖。提交前失败清本次 staging，源 bytes不变；cleanup失败附到原异常。final rename已成功后的wrapper清理失败只进`cleanup_warnings`，不把成功伪报失败。
+10. 本模块不提供 registry 单文件删除 API。任务「随 work 清理」由 containment + 既有整棵 work owner证明：成功发布的 `publish`、失败收尾的 `finalize_failed_job`/后继controller只删精确 `<work_root>/<source>/<T>`，registry位于其内。验收测试实际调用既有 `remove_tree_allow_symlinks`/失败收尾路径删除work并断言work外零副本；不得为#15新增第二套细粒度清理/retention协议。
+11. 承接inventory风险12：以该真实临时 repository完成一轮forcing finalize后，直接 bounded JSON读取并断言 `forcing_domain_handoff.json`、`forcing_domain_package.json`落盘，handoff `payloads.station_timeseries.time_lattice`的每个segment含正确`native_resolution`。不恢复/导入NWM 2777行`forcing_domain_handoff.py` parser，不让产物用同一parser循环自证。
+
+**8.3 SHUD运行目录精确形状**：
+
+12. `assemble` 只接受上述 `WorkRegistry`、绝对no-follow `variant_dir`、显式`states_root`与`state_path`、真实 `ForcingProductionResult`。`state_path` 必须词法精确等于 `<states_root>/<source>/<YYYYMMDDHH>.cfg.ic`，`states_root`/leaf/祖先均逐分量 no-follow；state必须普通文件、≤`MAX_STATE_IC_BYTES`、可经真实`state.parse`解析，header最后数值token必须finite且 `round(token) == round(cycle.timestamp()/60)`。不接受相对720、其它cycle、naive/06Z，不重戳、不做残差归零、不回退较旧state。
+13. variant source必须绝对、已存在、逐分量 no-follow，且顶层恰有一个 `<project_name>.cfg.ic`普通文件与一个`<project_name>.para`普通文件；允许完整真实变体的其它普通文件/目录。树内任何symlink、FIFO/socket/device、不安全component或遍历IO错误均在final提交前拒绝。复制必须descriptor-bound/streaming，不把文件全量读入内存、不继承source mode/uid/gid；源树在组装前后全类型/bytes快照相等。
+14. 运行目录终名固定 `<work_dir>/model`。所有内容先写同work staging；复制variant时**跳过**率定`<project_name>.cfg.ic`，再以T state原始bytes独占写同名。final `model`/staging预存、final为symlink/普通文件/目录一律拒绝，不覆盖；final model首个可见动作是一次no-follow rename。最终IC bytes必须逐字等于state且不等于可区分率定state。
+15. forcing authority只来自 `forcing.file_uris["package_manifest"]`：其key必须在同一WorkRegistry object-store与 `forcing.forcing_package_uri` 内；JSON经现有16 MiB bounded/no-follow loader等价纪律读，SHA-256逐字等于`forcing.checksum`；manifest的`source_id/cycle_time/model_id/forcing_version_id`、package URI与result/identity一致。`status`只接受`forcing_ready|already_done`，checksum/file URI缺失或wrong-type拒绝。
+16. manifest `files` 中必须恰有一个 `role="shud_forcing"`，relative path恰为canonical/legacy index之一；两者同时/零个拒绝。`shud_forcing_csv`项至少一条，每项relative path为安全`shud/<basename>.csv`且basename casefold唯一；每个URI归一后必须等于package prefix + relative path，checksum必须在同一fd streaming copy时验证。index解析出的filename multiset必须与CSV role basename精确相等；不扫描未声明文件、不接受debug `tsd_forc` fallback。运行目录中index改名`<project_name>.tsd.forc`，CSV basename原样落根；debug、package manifest、payload、domain/handoff/sidecar不落run dir。
+17. 六项参数唯一writer为可单测纯函数`render_shud_parameters(content: bytes) -> bytes`（同模块公开，供#17补跑复用）：输入strict UTF-8且≤`MAX_OBJECT_MANIFEST_BYTES`。每个key只识别完整token `{{KEY}}`、`${KEY}`或行级`KEY = value`三类；零命中按输入主行尾风格在EOF追加，恰一命中只替换value/token，多命中（同形或跨形）拒绝，substring/注释里的普通文字不算。值逐字为`0/7/60/720/1/0`；六项之外所有bytes与行尾不变。函数不接cycle，因此同一模板的00Z/12Z bytes必须相等。
+18. forcing/variant/state/registry全部验证完成后才发生assemble staging写。任何静态输入拒绝、copy/parameter写失败或rename前异常都保证final model不存在、四个source全树bytes/类型不变；清理每步互不取消，原始`AssemblyError`为主、cleanup failures进notes。final rename成功后不再回滚，wrapper cleanup失败进入`RunDirectory.cleanup_warnings`。#15不删整棵work；后继publish/cleanup负责。
+
+**Must preserve / unchanged siblings**：
+
+- #14 `ForcingProducer`、`FileForcingRepository`、package manifest/serializers、direct-grid parser/validator与53腿oracle零修改；若实现确需改变这些文件，先回docs并按semantic scope重新review，不能把assembler适配塞进snapshot。
+- prepare的variant路径/三条目合成fixture与真实builder归M4的边界不改；assembler允许完整variant但不让当前合成fixture冒充真实模型包数值完整性。
+- state parse/header判定单一权威复用，不复制header parser；publish/checkpoint重戳与negative residual逻辑不动。
+- shared `safe_fs`/object_store删除/发布语义不改；新copy/rename编排在assemble模块组合既有原语。
+- config/CLI/controller/viewer/依赖/lockfiles不改；无NFS写、SHUD执行、Slurm、checkpoint、DAT、DONE或运行报告。
+- `nwm-snapshot-inventory.md`无#15待翻行；新文件不得带NWM provenance header。8.2/8.3只在实现+测试同一提交翻为`[x]`，共享change不archive。
+
+**Invariant Matrix**：
+
+- Governing invariant: 对一个`(work_root, source, T, model, basin, project)`，临时file backend与run dir的每个identity/path/byte只能来自同一显式WorkIdentity、contract、checksum绑定forcing manifest和精确T状态；任一不一致在final model/model-package终根可见前失败，且不得改变四个输入源或越出本轮work。
+- Source-of-truth identity/contract: `WorkIdentity` + `DirectGridForcingContract` + binding/`.sp.att` SHA-256 + `ForcingProductionResult.checksum`/package manifest + exact state path/header T。
+- Producers: `stage_work_registry`产`object-store/models/<model>`；`assemble`产`work/model`；`render_shud_parameters`产参数bytes。
+- Validators/preflight: WorkIdentity/WorkRegistry双层校验、shared direct-grid validator、真实FileForcingRepository读回、bounded manifest、state parse/header、forcing role/index/CSV checksum与filename set。
+- Storage/cache/query: 单轮`LocalObjectStore`+新建`FileForcingRepository`实例；无跨轮cache/DB/service。
+- Public routes/entrypoints: `yd_producer.assemble`上述类型/函数；CLI/controller无接线。
+- Frontend/downstream consumers: #17显式消费RunDirectory/project_name和参数writer；#26串联registry→forcing→assemble；#24/25既有work删除owner；viewer无消费。
+- Failure paths/rollback/stale state: staging前全预检；rename前失败无终根；成功后warning不降级；预存final永不覆盖；work删除统一回收registry/run。
+- Evidence/audit/readiness: exact JSON/树快照、真实repository/forcing链、handoff/time-lattice直接JSON、mutation receipts、full suite/CI。
+- Regression rows:
+  - GFS/IFS、00Z/12Z、两个可区分contract/variant/state -> 各自registry与run只含本source/model/project；六参数bytes同cycle-independent；IC等于T state。
+  - wrong source/cycle/path/checksum/manifest role/symlink/FIFO/duplicate parameter -> AssemblyError精确phase/path，终根零新增、四源不变。
+  - 完整work删除 -> registry/run/raw/canonical/forcing一起消失，work外variant/state/YD_ROOT兄弟不变。
+  - unchanged #14 forcing + #17/#26 future seam -> public类型/field足够显式，无私有cache/路径猜测。
+
+**Boundary-surface checklist**：
+
+- Shared helper roots: 只消费 `store/{safe_fs,object_store}.py`、`state`、`forcing` public symbols；零修改。
+- Public entrypoints: `stage_work_registry` / `assemble` / `render_shud_parameters`。
+- Read surfaces: explicit binding/`.sp.att` bytes、variant tree、state、forcing package manifest/index/CSVs。
+- Write/delete/overwrite: work内两个staging/终根；不覆盖、不写work外；只删本次staging。
+- Staging/publish/rollback: model-package与run-dir各一次rename；成功后warning与失败前rollback分开；NFS publish无。
+- Producer/consumer evidence: registry→真实FileForcingRepository→ForcingProducer result→checksum manifest→run dir。
+- Stale/idempotency: 同work重复调用因final已存在稳定拒绝，不返回`already_done`假象；新work新实例无cache继承。
+- Unchanged consumers: prepare/init/publish/cleanup/tracker/controller/viewer。
+
+**Required evidence（全部使用真实tmp目录树；expected由fixture/literal构造，不调用production serializer/rewriter回算）**：
+
+- batched pre-change red：overlay最终tests到fixture commit/本分支pre-implementation tree，因`yd_producer.assemble`不存在collection-red；如实记录零行为断言执行。随后current tree控制绿。
+- registry happy path：显式GFS/IFS identity/contract/assets -> exact五个key/JSON keys/bytes；真实FileForcingRepository逐seam读回；binding/`.sp.att`/index bytes与独立literal相等。
+- registry拒绝矩阵：identity各字段wrong-type/blank/dot/path、naive/06Z/12:30、work_root/work_dir symlink/错形、contract多source/direct constructor malformed、URI不等、checksum双向、non-UTF8/oversize、preexisting final/staging -> 零final、源快照不变、phase/path/cause精确。
+- registry commit故障：每个write/validation/rename/cleanup位置注入；rename前无final，清理继续；rename后cleanup warning不抛。
+- lifecycle：真实既有whole-work删除原语/失败收尾删除work -> registry/run无残留；variant/state/work外sentinel保留。不得只手工unlink registry冒充生命周期。
+- finalize handoff：真实临时repository + #14 forcing fixture -> handoff/domain package存在；独立JSON断言time-lattice segment native_resolution，不import NWM parser。
+- assemble happy path：含nested普通文件、可区分calibrated IC、四种参数形态的variant + literal T state + 真实forcing result -> exact run tree；IC逐字state；参数六键；forcing index rename/CSV exact；源树全不变。
+- 00Z/12Z双臂：只换identity/state/header/forcing cycle，同一`.para`模板输出参数bytes逐字相等；恢复cycle-dependent START变异必须红。
+- state拒绝：exact path、header absolute T、relative720、wrong T、malformed、oversize、leaf/ancestor symlink、FIFO/dir；全部final model缺席且不重戳。
+- forcing拒绝：status/checksum/package URI/manifest identity、oversize/deep/wide/malformed JSON、index canonical+legacy双份/零份、unsafe/duplicate CSV、URI外逃、checksum mismatch、index filename差集、debug fallback；全部零final、未声明外部对象不读。
+- variant/commit拒绝：source nested symlink/FIFO/device、preexisting final/staging、parameter duplicate、copy/write/rename/cleanup injected errors；快照逐项证明四源不变与final可见性。
+- 参数纯函数：三种shape、零命中append、CRLF/LF/no-final-newline、substring/comment、duplicate同形/跨形、invalid UTF8/oversize；独立literal bytes。#17只import此函数不复制实现。
+- mutation matrix（独立scratch、unset inherited venv、`uv run python -m pytest`、禁pyc、import provenance、控制变异、每腿独立restore）：至少杀死 WorkIdentity source/cycle guard、work exact path、binding checksum、sp checksum、contract URI、真实repository读回、pre-rename final可见、state path/header、warm-state覆盖退回variant、forcing manifest checksum、role-only选择、index filename set、CSV checksum、六参数每一值/duplicate guard、rename commit与cleanup evidence；报告实际红node与SHA restore，不预写红数。
+- `uv --directory producer sync --frozen`；`uv --directory producer run pytest`；`uv --directory producer run ruff check . && uv --directory producer run ruff format --check .`。
+- viewer frozen/test/Ruff；OpenSpec strict/all；stage anchor；`git diff --check`；lockfiles零diff；large-file guard（新source、fixture、tests各≤1000，无新exclude）。
+
+**测试布局**：
+
+- `producer/tests/assembly_fixtures.py`：只放独立JSON/parameter/variant/state/forcing字面fixture与全树类型快照，无`test_*`。
+- `producer/tests/test_assemble_registry.py`：8.2 schema/identity/staging/repository/finalize/lifecycle。
+- `producer/tests/test_assemble_run.py`：8.3 state/variant/forcing/parameter/commit边界。
+- 每文件≤1000行；不得给`.large-file-guard.json`加exclude，不得删弱#14测试凑行数。
+
+**Risk packs considered（core）**：
+
+- Public API / CLI / script entry: selected —— 新增`yd_producer.assemble`公共seam；CLI不接。
+- Config / project setup: selected —— 明确不扩已冻结schema；显式identity消除默认/猜测。
+- File IO / path safety / overwrite: selected —— 两棵源树、状态、forcing、两次staging/rename/cleanup为主风险。
+- Schema / columns / units / field names: selected —— registry/model/contract JSON、forcing manifest roles、`.tsd.forc`、`.para`六键。
+- Auth / permissions / secrets: not selected —— 无凭据/租户；mode/no-follow归File IO。
+- Concurrency / shared state / ordering: selected —— final不可早见、preexisting不覆盖、同work重复拒绝；调用方runlock仍是唯一互斥owner。
+- Resource limits / large input / discovery: selected —— JSON/parameter/state有界；variant/forcing文件stream copy；目录只扫显式根，不扫兄弟。
+- Legacy compatibility / examples: selected —— canonical+legacy index二选一读；#14 package/current file repository保持。
+- Error handling / rollback / partial outputs: selected —— 两次commit、逐步cleanup、warning/失败分界、四源不变。
+- Release / packaging / dependency compatibility: selected —— 新公开模块，零依赖/lock变化。
+- Documentation / migration notes: selected —— D11/spec/fixture消除旧草图与schema裂口；全新work工件无迁移。
+
+**Domain packs**：
+
+- Geospatial / CRS / shapefile sidecars: not selected —— 只逐字复制model普通文件，不解析/转换几何。
+- Time series / forcing / temporal boundaries: selected —— 00/12 cycle、forcing manifest/time-lattice、state绝对T、参数cycle-independent。
+- 状态链 / warm-start 定戳一致性: selected —— exact T state覆盖、无重戳/旧态fallback。
+- NWM 快照溯源与 DB-free 隔离: selected —— 消费已落file backend，不新增snapshot/provenance/外部服务。
+
+**Known limits / routed deferrals**：
+
+- prepare真实builder当前M4 fail-closed，合成variant只有三条目；#15证明组装算法与显式assets，不声明真实模型包完整性或SHUD可运行，归M4。
+- #17负责job-local补跑，复用参数writer把END改0.5；checkpoint manifest/recovery不在本issue。
+- #26负责controller/config/CLI串联、executor提交与run report；#15不新增config字段。
+- publish/failure/retention的整棵work owner已由#24/#25落地；本issue只验证containment兼容，不改它们。
+- 真实NFS权限、Slurm、SHUD二进制、node-22/node-27 receipt均归M4/M5。
+
+**Non-goals**：
+
+- NWM 2777行handoff parser、数据库/服务型registry、跨轮cache、环境发现。
+- 解析/重构`yd.binding`、生成canonical/forcing数值、恢复IDW/ERA5。
+- SHUD执行、checkpoint捕获/补跑、DAT/状态发布、DONE、日志、整work删除、controller/CLI。
+- 改config schema/生产实例、prepare变体格式、state/forcing/store共享实现、依赖/lockfile、viewer。
+
+**Review focus**：
+
+- WorkIdentity是否真的单owner，registry/manifest/run是否有第二套basename/default/fallback。
+- 所有半可信路径/bytes是否在首写前或point-of-use no-follow/checksum/identity验证，final是否只经rename出现。
+- warm state是否逐字覆盖且cycle绝对时间真实校验；任何路径是否会重戳/读旧态。
+- forcing是否只消费checksum manifest声明的SHUD role，index/CSV集合与checksum能否被错配。
+- parameter三形态与duplicate判据是否有独立字节oracle；00/12是否真的同bytes。
+- failure/cleanup测试是否以全树类型快照证明四源不变，而非单点“不存在”；whole-work生命周期是否用真实owner行使。
+- 是否越界改#14 snapshot/config/controller/#17/M4，或给新文件加large-file例外。
+
 ## 9. checkpoint-tracker：T+12 捕获与补跑
 
 - [x] 9.1 快照并适配 `cfg.ic.update` 轮询捕获（命中 720 分钟复制 + 分段格式校验；产物保持相对时间头），以模拟覆写序列测试正常/漏采/副本损坏三态

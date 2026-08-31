@@ -82,22 +82,44 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 - **THEN** stable output-config identity 不匹配，producer 重算或 fail closed，不得返回旧 `already_done`
 
 ### Requirement: work 内临时 registry
-快照 file backend 要求 NWM 结构的 registry/model manifest 时，控制器 MUST 依据 TOML 配置在本轮 work 内临时生成，并随 work 删除；项目 MUST NOT 维护跨轮动态 registry。
+快照 file backend 要求 NWM 结构的 registry/model manifest 时，组装层 MUST 依据调用方显式提供的本轮 WorkIdentity、direct-grid contract 与已验证 binding/`.sp.att` bytes，在 `<work>/object-store/models/<model_id>/` 先 staging 后一次 rename 提交临时 registry/model package；MUST NOT 从变体 basename、`yd.binding` 文本、环境变量、数据库或外部 registry 服务猜测身份/contract。生成的 registry/model manifest MUST 可由 `FileForcingRepository` 原样消费，且 contract 的 binding/`.sp.att` checksum、source/project/model/basin identity 与本轮 work 必须一致。项目 MUST NOT 维护跨轮动态 registry；整棵 work 的成功/失败清理仍由既有 publish/cleanup owner 负责，组装层不得另建跨 work 删除协议。
 
 #### Scenario: 临时 registry 生命周期
-- **WHEN** forcing 链需要 registry 结构并完成本轮处理
-- **THEN** registry 文件只存在于 work 内，work 清理后不留任何 registry 残留
+- **WHEN** 对显式 WorkIdentity、source-specific contract 与 checksum-correct assets 生成临时 file backend
+- **THEN** registry、manifest、binding、`.sp.att` 与 station index 只落在本轮 `<work>/object-store/models/<model_id>/`，`FileForcingRepository` 能读回同一 model/source/contract；既有 work 删除后无任何 registry 残留或 work 外副本
+
+#### Scenario: 临时 registry 原子提交与身份拒绝
+- **WHEN** final model root/staging 已存在，或 binding/`.sp.att` checksum、contract URI、source/cycle/model/basin/project identity 任一不一致
+- **THEN** 生成器在 final model root 提交前稳定失败，只清理本次 staging，不覆盖既有条目、不写 work 外路径，也不修改输入 assets
+
+#### Scenario: finalize handoff 的直接 JSON 契约仍可证明
+- **WHEN** 由该临时 file backend 完成一轮 direct-grid forcing finalize
+- **THEN** `forcing_domain_handoff.json` 与 `forcing_domain_package.json` 均落在本轮 object-store，handoff 的 `payloads.station_timeseries.time_lattice` 保留逐时段 `native_resolution`；本项目不恢复 NWM 2777 行 parser 来循环证明这些 JSON
 
 ### Requirement: SHUD 输入组装与固定参数
-组装器 MUST 在 work 内由模型变体、forcing 包与本轮 warm-start 状态组装完整 SHUD 运行目录：运行目录的初始条件 MUST 为 `states/<source>/<T>.cfg.ic` 的内容，MUST 覆盖模型变体自带的率定末态 `cfg.ic`；MUST NOT 以变体自带初态运行日常 cycle。组装 MUST 固定覆盖 `START=0`、`END=7`、`DT_QR_DOWN=60`、`Update_IC_STEP=720`、`BINARY_OUTPUT=1`、`ASCII_OUTPUT=0`；00Z 与 12Z MUST 使用同一套参数。
+组装器 MUST 在 work 内由模型变体、checksum 绑定的 forcing package 与本轮 warm-start 状态组装完整 SHUD 运行目录。运行目录终名固定为 `<work>/model` 并经同父目录 staging 一次 rename 提交；运行目录的初始条件 MUST 为 `states/<source>/<T>.cfg.ic` 的原始 bytes，状态必须是 no-follow 普通文件、可按原生分段格式解析且绝对时间头对应 T；该状态 MUST 覆盖模型变体自带率定末态，MUST NOT 被重戳、修正或回退到变体初态。forcing package 只能从 checksum 验证过的 package manifest 的 SHUD role 成员组装：index 在运行目录改名为 `<project_name>.tsd.forc`，station CSV basename 原样保留；debug/payload/handoff/domain-package 产物不得进入模型输入目录。
 
-#### Scenario: 参数覆盖
-- **WHEN** 对合成变体与 forcing 包执行组装（cycle 分别为 00Z 与 12Z）
-- **THEN** 运行目录的 SHUD 参数文件中六项参数为固定值，两种 cycle 无差异
+组装 MUST 在 `<project_name>.para` 上固定覆盖 `START=0`、`END=7`、`DT_QR_DOWN=60`、`Update_IC_STEP=720`、`BINARY_OUTPUT=1`、`ASCII_OUTPUT=0`。参数 writer 只认 `{{KEY}}`、`${KEY}`、`KEY = value` 三种已登记形态：每键零命中则追加，恰一命中则替换，多命中则拒绝；六项之外的 bytes 保持不变。00Z 与 12Z MUST 使用同一套参数 bytes。
+
+#### Scenario: 参数三形态覆盖与 cycle 无关
+- **WHEN** 对含 placeholder、shell-style placeholder、assignment 与缺失键的合成 `.para` 分别以 00Z/12Z 执行组装
+- **THEN** 运行目录六项参数各恰一处且为固定值，两种 cycle 的参数 bytes 相同，未命中的键按原行尾风格追加，其余输入 bytes 不变
 
 #### Scenario: warm-start 状态覆盖变体初态
-- **WHEN** 以内容可区分的 T 状态 fixture 与自带不同内容 `cfg.ic` 的合成变体执行组装
-- **THEN** 运行目录的初始条件文件字节等于 T 状态，不等于变体率定末态
+- **WHEN** 以内容可区分、header 对应 T 的状态 fixture 与自带不同率定 `cfg.ic` 的合成变体执行组装
+- **THEN** `<work>/model/<project_name>.cfg.ic` bytes 逐字等于 T 状态、不等于变体率定末态；状态/变体/forcing 三个源保持逐字不变
+
+#### Scenario: 状态身份与类型 fail closed
+- **WHEN** state path 不等于 `<states_root>/<source>/<T>.cfg.ic`，或其 leaf/ancestor 是 symlink、FIFO/目录、不可解析 cfg.ic、相对 720 minute header、其它 cycle 的绝对 header
+- **THEN** 组装在 final `model` 提交前稳定失败，不重戳、不取旧状态、不产生运行目录终名
+
+#### Scenario: forcing manifest 与角色 fail closed
+- **WHEN** `ForcingProductionResult` 与 package manifest 的 checksum/source/cycle/model/package URI 不一致，或 SHUD index 为零/多份、CSV role/URI/checksum/filename set 与 index 不一致
+- **THEN** 组装在读入不受信 bytes 或提交 final `model` 前拒绝，不回退 debug index、不扫描未声明文件、不留下运行目录终名
+
+#### Scenario: 组装失败保持三源且无终名
+- **WHEN** 复制变体、状态、forcing 或改写参数的任一步骤失败，或 staging 清理本身失败
+- **THEN** final `<work>/model` 不存在，variant/state/forcing package 的全树 bytes/类型快照不变；只允许本次 staging 作为可由整棵 work 清理 owner 回收的残留并把清理失败附到原异常
 
 ### Requirement: 快照模块可追溯
 每个从 NWM 复制的模块 MUST 在文件头部记录来源 `NWM@8ae9b8f2` 与原仓相对路径；快照 MUST NOT 包含 DB/scheduler 分支代码。
