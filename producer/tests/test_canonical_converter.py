@@ -5,8 +5,6 @@ import builtins
 import importlib
 import json
 import math
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,6 +12,7 @@ from typing import Any
 import pytest
 from netcdf_fixture import encode_test_netcdf4
 
+from yd_producer.forcing import CanonicalProduct
 from yd_producer.store.object_store import LocalObjectStore
 
 converter_module = importlib.import_module("yd_producer.canonical.converter")
@@ -195,28 +194,6 @@ def test_canonical_readiness_accepts_complete_gfs_exact_required_variables() -> 
 
 
 def test_canonical_readiness_accepts_forcing_canonical_product_dataclasses() -> None:
-    # 偏离（清单 §1 第 51 行闭包缺口）：pin 此处 import
-    # workers.forcing_producer.producer.CanonicalProduct，其快照目标
-    # producer/src/yd_producer/forcing/producer.py 是清单第 36 行、归组 8 待落地。
-    # 字段表逐字取自 pin workers/forcing_producer/producer.py L251-266。
-    @dataclass(frozen=True)
-    class CanonicalProduct:
-        canonical_product_id: str
-        source_id: str
-        cycle_time: datetime
-        valid_time: datetime
-        variable: str
-        unit: str
-        grid_id: str
-        object_uri: str
-        checksum: str
-        grid_definition_uri: str | None = None
-        native_time_resolution: str | None = None
-        native_spatial_resolution: str | None = None
-        quality_flag: str = "ok"
-        lead_time_hours: int | None = None
-        lineage_json: Mapping[str, Any] = field(default_factory=dict)
-
     cycle_time = parse_cycle_time("2026050700")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {
