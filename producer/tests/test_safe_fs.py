@@ -192,6 +192,34 @@ def test_verify_tree_no_symlinks_refuses_mixed_tree_without_mutation(
     assert outside.read_bytes() == outside_before
 
 
+def test_verify_tree_no_symlinks_refuses_nested_descendant_without_mutation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    nested = root / "first" / "second"
+    nested.mkdir(parents=True)
+    (root / "before.bin").write_bytes(b"before\x00")
+    (nested / "before-link.bin").write_bytes(b"nested-before\x01")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside\xff")
+    linked = nested / "middle-link"
+    linked.symlink_to(outside)
+    (nested / "after-link.bin").write_bytes(b"nested-after\x02")
+    (root / "after.bin").write_bytes(b"after\x03")
+    before = _tree_snapshot(root)
+    outside_before = outside.read_bytes()
+
+    with pytest.raises(SafeFilesystemError) as info:
+        verify_tree_no_symlinks(root)
+
+    assert info.value.kind == "unsafe"
+    assert _tree_snapshot(root) == before
+    assert linked.is_symlink()
+    assert (nested / "before-link.bin").read_bytes() == b"nested-before\x01"
+    assert (nested / "after-link.bin").read_bytes() == b"nested-after\x02"
+    assert outside.read_bytes() == outside_before
+
+
 @pytest.mark.parametrize("shape", ["root", "intermediate"])
 def test_verify_tree_no_symlinks_refuses_symlink_path_components(
     tmp_path: Path, shape: str

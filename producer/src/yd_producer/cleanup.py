@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -28,7 +29,6 @@ from typing import Literal
 from yd_producer.controller import (
     DiscoveryUnreadableError,
     cycle_id,
-    done_cycles,
     parse_cycle_id,
 )
 from yd_producer.executor import JobRecord, JobSpec, JobState
@@ -67,6 +67,18 @@ _TEMP_FILE_FLAGS = (
     | os.O_EXCL
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_CLOEXEC", 0)
+)
+_DISCOVERY_DIRECTORY_FLAGS = (
+    os.O_RDONLY
+    | os.O_DIRECTORY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+_DISCOVERY_FILE_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NONBLOCK", 0)
 )
 _TERMINAL_FAILURE_STATES = frozenset({JobState.FAILED, JobState.TIMEOUT})
 _WRAP_ERRORS = (
@@ -329,20 +341,162 @@ def _require_log_identity(
         )
 
 
+class _CurrentDoneDiscoveryFailure(Exception):
+    pass
+
+
+def _open_discovery_component(
+    parent_fd: int, name: str, path: Path, *, directory: bool
+) -> int:
+    """从已绑定父 fd 打开一个当前-DONE 分量，拒绝 symlink 与错误类型。"""
+
+    label = "当前 DONE 目录分量" if directory else "当前 DONE"
+    flags = _DISCOVERY_DIRECTORY_FLAGS if directory else _DISCOVERY_FILE_FLAGS
+    required = "真目录" if directory else "普通文件"
+    try:
+        fd = os.open(name, flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        raise
+    except NotADirectoryError as error:
+        raise SafeFilesystemError(f"{label}必须是{required}：{path}") from error
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise SafeFilesystemError(f"{label}不得是 symlink：{path}") from error
+        raise SafeFilesystemError(
+            f"{label}无法打开：{path}（{error}）", kind="io"
+        ) from error
+    try:
+        predicate = stat.S_ISDIR if directory else stat.S_ISREG
+        if not predicate(os.fstat(fd).st_mode):
+            raise SafeFilesystemError(f"{label}必须是{required}：{path}")
+        return fd
+    except BaseException:
+        _close_fd(fd)
+        raise
+
+
+def _discover_current_done_cycles(
+    root: Path, source: str, *, minimum_cycle: datetime | None = None
+) -> set[datetime]:
+    """fd-bound no-follow 发现 current DONE；重绑可跳过不影响锚点的旧目标。"""
+
+    output_path = root / "output"
+    root_fd: int | None = None
+    output_fd: int | None = None
+    try:
+        try:
+            root_fd = open_directory_no_follow(root)
+        except FileNotFoundError:
+            return set()
+        except (SafeFilesystemError, OSError) as error:
+            raise _CurrentDoneDiscoveryFailure(root, error) from error
+        try:
+            output_fd = _open_discovery_component(
+                root_fd, "output", output_path, directory=True
+            )
+        except FileNotFoundError:
+            return set()
+        except (SafeFilesystemError, OSError) as error:
+            raise _CurrentDoneDiscoveryFailure(output_path, error) from error
+        try:
+            candidates = sorted(
+                (
+                    (cycle, name)
+                    for name in os.listdir(output_fd)
+                    if (cycle := parse_cycle_id(name)) is not None
+                ),
+                reverse=True,
+            )
+        except OSError as error:
+            raise _CurrentDoneDiscoveryFailure(output_path, error) from error
+
+        completed: set[datetime] = set()
+        for cycle, name in candidates:
+            if minimum_cycle is not None and cycle < minimum_cycle:
+                continue
+            cycle_path = output_path / name
+            cycle_fd: int | None = None
+            source_fd: int | None = None
+            done_fd: int | None = None
+            try:
+                try:
+                    cycle_fd = _open_discovery_component(
+                        output_fd, name, cycle_path, directory=True
+                    )
+                except FileNotFoundError:
+                    continue
+                except (SafeFilesystemError, OSError) as error:
+                    raise _CurrentDoneDiscoveryFailure(cycle_path, error) from error
+                source_path = cycle_path / source
+                try:
+                    source_fd = _open_discovery_component(
+                        cycle_fd, source, source_path, directory=True
+                    )
+                except FileNotFoundError:
+                    continue
+                except (SafeFilesystemError, OSError) as error:
+                    raise _CurrentDoneDiscoveryFailure(source_path, error) from error
+                done_path = source_path / _DONE_NAME
+                try:
+                    done_fd = _open_discovery_component(
+                        source_fd, _DONE_NAME, done_path, directory=False
+                    )
+                except FileNotFoundError:
+                    continue
+                except (SafeFilesystemError, OSError) as error:
+                    raise _CurrentDoneDiscoveryFailure(done_path, error) from error
+                completed.add(cycle)
+            finally:
+                _close_fd(done_fd)
+                _close_fd(source_fd)
+                _close_fd(cycle_fd)
+        return completed
+    finally:
+        _close_fd(output_fd)
+        _close_fd(root_fd)
+
+
+def _current_done_cycles_or_error(
+    root: Path,
+    source: str,
+    *,
+    phase: Literal["validate", "retention-plan"],
+    minimum_cycle: datetime | None = None,
+) -> set[datetime]:
+    """把 cleanup-owned authority discovery 收敛到调用入口的公开错误域。"""
+
+    try:
+        return _discover_current_done_cycles(root, source, minimum_cycle=minimum_cycle)
+    except _CurrentDoneDiscoveryFailure as error:
+        component_path, cause = error.args
+        path = component_path if phase == "retention-plan" else None
+        raise CleanupError(
+            f"{source}: 当前 DONE 锚点无法确定（{cause}）",
+            phase=phase,
+            path=path,
+        ) from cause
+    except (
+        DiscoveryUnreadableError,
+        SafeFilesystemError,
+        OSError,
+        ValueError,
+    ) as error:
+        path = root / "output" if phase == "retention-plan" else None
+        raise CleanupError(
+            f"{source}: 当前 DONE 锚点无法确定（{error}）",
+            phase=phase,
+            path=path,
+        ) from error
+
+
 def _require_current_retention_anchor(
     root: Path, source: str, latest: datetime
 ) -> None:
-    """拒绝晚于当前该源普通文件 DONE 集合的公开 plan 锚点。"""
+    """拒绝晚于 cleanup-owned 当前普通文件 DONE authority 的公开 plan 锚点。"""
 
-    output_root = root / "output"
-    try:
-        current_done = done_cycles(output_root, source)
-    except (DiscoveryUnreadableError, OSError, ValueError) as error:
-        raise CleanupError(
-            f"{source}: 当前 DONE 锚点无法确定（{error}）",
-            phase="validate",
-            path=None,
-        ) from error
+    current_done = _current_done_cycles_or_error(
+        root, source, phase="validate", minimum_cycle=latest
+    )
     if not current_done:
         raise CleanupError(
             f"{source}: 当前没有可用的普通文件 DONE 锚点",
@@ -350,14 +504,6 @@ def _require_current_retention_anchor(
             path=None,
         )
     current_latest = max(current_done)
-    try:
-        _precheck_anchor(output_root, source, current_latest, root)
-    except CleanupError as error:
-        raise CleanupError(
-            f"{source}: 当前 DONE 锚点不安全（{error}）",
-            phase="validate",
-            path=None,
-        ) from error
     if latest > current_latest:
         raise CleanupError(
             f"latest_done {cycle_id(latest)} 晚于当前 DONE {cycle_id(current_latest)}",
@@ -702,55 +848,6 @@ def _precheck_log_file(path: Path, root: Path, *, phase: CleanupPhase) -> None:
     _require_realpath_contained(path, root, phase=phase)
 
 
-def _precheck_anchor(
-    output_root: Path, source: str, latest: datetime, root: Path
-) -> None:
-    source_dir = output_root / cycle_id(latest) / source
-    done_path = source_dir / _DONE_NAME
-    info = _lstat_determined(source_dir, phase="retention-plan")
-    if info is None:
-        raise CleanupError(
-            f"最新 DONE 的 source 目录不存在：{source_dir}",
-            phase="retention-plan",
-            path=source_dir,
-        )
-    if stat.S_ISLNK(info.st_mode):
-        raise CleanupError(
-            f"拒绝用 symlink 锚定保留窗口：{source_dir}"
-            f"（目标 {_symlink_target_text(source_dir)}）",
-            phase="retention-plan",
-            path=source_dir,
-        )
-    if not stat.S_ISDIR(info.st_mode):
-        raise CleanupError(
-            f"最新 DONE 的 source 路径必须是真目录：{source_dir}",
-            phase="retention-plan",
-            path=source_dir,
-        )
-    _require_realpath_contained(source_dir, root, phase="retention-plan")
-    done_info = _lstat_determined(done_path, phase="retention-plan")
-    if done_info is None:
-        raise CleanupError(
-            f"最新 DONE 不存在：{done_path}",
-            phase="retention-plan",
-            path=done_path,
-        )
-    if stat.S_ISLNK(done_info.st_mode):
-        raise CleanupError(
-            f"拒绝用 symlink DONE 锚定保留窗口：{done_path}"
-            f"（目标 {_symlink_target_text(done_path)}）",
-            phase="retention-plan",
-            path=done_path,
-        )
-    if not stat.S_ISREG(done_info.st_mode):
-        raise CleanupError(
-            f"最新 DONE 必须是普通文件：{done_path}（st_mode={done_info.st_mode:#o}）",
-            phase="retention-plan",
-            path=done_path,
-        )
-    _require_realpath_contained(done_path, root, phase="retention-plan")
-
-
 def _list_names(directory: Path, *, phase: CleanupPhase) -> list[str]:
     try:
         return [entry.name for entry in directory.iterdir()]
@@ -766,14 +863,7 @@ def _list_names(directory: Path, *, phase: CleanupPhase) -> list[str]:
 
 def _plan_retention(root: Path, source: str) -> RetentionPlan:
     output_root = root / "output"
-    try:
-        completed = done_cycles(output_root, source)
-    except DiscoveryUnreadableError as error:
-        raise CleanupError(
-            f"{source}: 保留窗口无法锚定——{error.detail}",
-            phase="retention-plan",
-            path=output_root,
-        ) from error
+    completed = _current_done_cycles_or_error(root, source, phase="retention-plan")
     if not completed:
         return RetentionPlan(
             yd_root=root,
@@ -785,7 +875,6 @@ def _plan_retention(root: Path, source: str) -> RetentionPlan:
         )
 
     latest = max(completed)
-    _precheck_anchor(output_root, source, latest, root)
     cutoff = latest - _RETENTION_WINDOW
 
     output_dirs: list[Path] = []
