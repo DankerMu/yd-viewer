@@ -725,3 +725,271 @@ def test_ifs_grid_read_receives_exact_uppercase_catalog_uri(
     )
     assert observed_uris
     assert set(observed_uris) == {"canonical/IFS/grid/ifs_0p25/grid.json"}
+
+
+# Phase 6.2 depth retry ---------------------------------------------------------
+
+
+_F003_IDENTITIES: dict[str, tuple[str, str]] = {
+    "prcp_rate_or_amount": (
+        "gfs_2026050700_prcp_rate_or_amount_f003",
+        (
+            "canonical/gfs/2026050700/prcp_rate_or_amount/"
+            "gfs_2026050700_prcp_rate_or_amount_f003.nc"
+        ),
+    ),
+    "air_temperature_2m": (
+        "gfs_2026050700_air_temperature_2m_f003",
+        (
+            "canonical/gfs/2026050700/air_temperature_2m/"
+            "gfs_2026050700_air_temperature_2m_f003.nc"
+        ),
+    ),
+    "relative_humidity_2m": (
+        "gfs_2026050700_relative_humidity_2m_f003",
+        (
+            "canonical/gfs/2026050700/relative_humidity_2m/"
+            "gfs_2026050700_relative_humidity_2m_f003.nc"
+        ),
+    ),
+    "wind_u_10m": (
+        "gfs_2026050700_wind_u_10m_f003",
+        "canonical/gfs/2026050700/wind_u_10m/gfs_2026050700_wind_u_10m_f003.nc",
+    ),
+    "wind_v_10m": (
+        "gfs_2026050700_wind_v_10m_f003",
+        "canonical/gfs/2026050700/wind_v_10m/gfs_2026050700_wind_v_10m_f003.nc",
+    ),
+    "pressure_surface": (
+        "gfs_2026050700_pressure_surface_f003",
+        (
+            "canonical/gfs/2026050700/pressure_surface/"
+            "gfs_2026050700_pressure_surface_f003.nc"
+        ),
+    ),
+    "shortwave_down": (
+        "gfs_2026050700_shortwave_down_f003",
+        (
+            "canonical/gfs/2026050700/shortwave_down/"
+            "gfs_2026050700_shortwave_down_f003.nc"
+        ),
+    ),
+}
+
+
+class _ProtocolSourceLessMultiSourceRepository:
+    """Repository boundary fake that returns a source-less parsed pin contract."""
+
+    def __init__(self, backing: FileForcingRepository, contract: Any) -> None:
+        self._backing = backing
+        self._contract = contract
+        self.mapping_write_attempted = False
+
+    def load_forcing_mapping_contract(
+        self,
+        *,
+        model_id: str,
+        basin_version_id: str,
+        source_id: str | None = None,
+    ) -> Any:
+        return self._contract
+
+    def upsert_interp_weights(self, weights: Any) -> None:
+        self.mapping_write_attempted = True
+        raise AssertionError("source-less multi-source contract reached mapping write")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._backing, name)
+
+
+def _rewrite_netcdf_identity_attrs(
+    store: LocalObjectStore,
+    *,
+    source_uri: str,
+    destination_uri: str,
+    temporary_path: Path,
+    cycle_time: str,
+    valid_time: str,
+    lead_time_hours: int,
+) -> str:
+    import xarray as xr
+
+    dataset = xr.open_dataset(store.resolve_path(source_uri)).load()
+    try:
+        dataset.attrs["cycle_time"] = cycle_time
+        dataset.attrs["valid_time"] = valid_time
+        dataset.attrs["lead_time_hours"] = lead_time_hours
+        dataset.to_netcdf(temporary_path, engine="netcdf4", format="NETCDF4")
+        content = temporary_path.read_bytes()
+    finally:
+        dataset.close()
+        temporary_path.unlink(missing_ok=True)
+    store.write_bytes_atomic(destination_uri, content)
+    return sha256_bytes(content)
+
+
+def _prepared_gfs_f003_catalog(
+    tmp_path: Path,
+) -> tuple[ForcingProducer, FileForcingRepository, LocalObjectStore]:
+    store = LocalObjectStore(tmp_path)
+    producer, repository = make_file_producer(
+        tmp_path,
+        seed=direct_grid_binding(),
+        store=store,
+    )
+    canonical_products_for_cycle(
+        store,
+        source_id="gfs",
+        cycle_text=CYCLE_00Z,
+        grid_id=GFS_GRID_ID,
+        grid_signature=DEFAULT_GRID_SIGNATURE,
+        forecast_hours=(3,),
+    )
+    return (
+        ForcingProducer(
+            config=replace(producer.config, min_lead_hours=3),
+            repository=repository,
+            object_store=store,
+        ),
+        repository,
+        store,
+    )
+
+
+def _forge_catalog_time_lead_incoherence(
+    tmp_path: Path, store: LocalObjectStore
+) -> None:
+    payload = _catalog(store)
+    for row in payload["products"]:
+        expected_product_id, expected_object_uri = _F003_IDENTITIES[row["variable"]]
+        assert row["canonical_product_id"] == expected_product_id
+        assert row["object_uri"] == expected_object_uri
+        row["valid_time"] = "2026-05-07T00:00:00Z"
+        assert row["lead_time_hours"] == 3
+        row["checksum"] = _rewrite_netcdf_identity_attrs(
+            store,
+            source_uri=expected_object_uri,
+            destination_uri=expected_object_uri,
+            temporary_path=tmp_path / f"forged-time-lead-{row['variable']}.nc",
+            cycle_time="2026-05-07T00:00:00+00:00",
+            valid_time="2026-05-07T00:00:00+00:00",
+            lead_time_hours=3,
+        )
+    _write_catalog(store, payload)
+
+
+def _forge_catalog_product_id_incoherence(
+    tmp_path: Path, store: LocalObjectStore
+) -> None:
+    payload = _catalog(store)
+    for row in payload["products"]:
+        source_uri = row["object_uri"]
+        expected_product_id, expected_object_uri = _F003_IDENTITIES[row["variable"]]
+        assert row["canonical_product_id"].endswith("_f000")
+        assert row["lead_time_hours"] == 0
+        assert row["valid_time"] == "2026-05-07T00:00:00Z"
+        row["canonical_product_id"] = expected_product_id
+        row["object_uri"] = expected_object_uri
+        row["checksum"] = _rewrite_netcdf_identity_attrs(
+            store,
+            source_uri=source_uri,
+            destination_uri=expected_object_uri,
+            temporary_path=tmp_path / f"forged-product-id-{row['variable']}.nc",
+            cycle_time="2026-05-07T00:00:00+00:00",
+            valid_time="2026-05-07T00:00:00+00:00",
+            lead_time_hours=0,
+        )
+        assert row["canonical_product_id"] == expected_product_id
+        assert row["object_uri"] == expected_object_uri
+    _write_catalog(store, payload)
+
+
+def test_public_produce_rejects_source_less_multisource_contract_before_mapping_write(
+    tmp_path: Path,
+) -> None:
+    store = LocalObjectStore(tmp_path)
+    seed = direct_grid_binding(applicable_source_ids=("GFS", "IFS"))
+    base_producer, backing = make_file_producer(tmp_path, seed=seed, store=store)
+    canonical_products_for_cycle(
+        store,
+        source_id="gfs",
+        cycle_text=CYCLE_00Z,
+        grid_id=GFS_GRID_ID,
+        grid_signature=DEFAULT_GRID_SIGNATURE,
+    )
+    contract = parse_direct_grid_forcing_contract(seed)
+    repository = _ProtocolSourceLessMultiSourceRepository(backing, contract)
+    producer = ForcingProducer(
+        config=base_producer.config,
+        repository=repository,
+        object_store=store,
+    )
+
+    with pytest.raises(
+        ForcingProductionError,
+        match="Invalid forcing mapping contract: Direct-grid contract must apply exclusively",
+    ):
+        _produce_gfs(producer)
+
+    assert repository.mapping_write_attempted is False
+    _assert_no_gfs_ready(backing, store)
+
+
+def test_catalog_rejects_dual_forged_time_lead_before_netcdf_read_or_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    producer, repository, store = _prepared_gfs_f003_catalog(tmp_path)
+    _forge_catalog_time_lead_incoherence(tmp_path, store)
+
+    def netcdf_read_must_not_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("time/lead-incoherent catalog row reached NetCDF read")
+
+    monkeypatch.setattr(
+        "yd_producer.forcing.netcdf_open.open_canonical_netcdf",
+        netcdf_read_must_not_run,
+    )
+    with pytest.raises(
+        ForcingStoreError,
+        match="incoherent valid_time/cycle_time/lead_time_hours",
+    ):
+        repository.list_canonical_products(
+            source_id="gfs",
+            cycle_time=datetime(2026, 5, 7, 0, tzinfo=UTC),
+        )
+    with pytest.raises(
+        ForcingProductionError,
+        match="incoherent valid_time/cycle_time/lead_time_hours",
+    ):
+        _produce_gfs(producer)
+
+    _assert_no_gfs_ready(repository, store)
+
+
+def test_catalog_rejects_dual_forged_product_id_before_netcdf_read_or_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    producer, repository, store = _prepared_gfs(tmp_path)
+    _forge_catalog_product_id_incoherence(tmp_path, store)
+
+    def netcdf_read_must_not_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("product-id-incoherent catalog row reached NetCDF read")
+
+    monkeypatch.setattr(
+        "yd_producer.forcing.netcdf_open.open_canonical_netcdf",
+        netcdf_read_must_not_run,
+    )
+    with pytest.raises(
+        ForcingStoreError,
+        match="canonical_product_id does not match canonical product identity",
+    ):
+        repository.list_canonical_products(
+            source_id="gfs",
+            cycle_time=datetime(2026, 5, 7, 0, tzinfo=UTC),
+        )
+    with pytest.raises(
+        ForcingProductionError,
+        match="canonical_product_id does not match canonical product identity",
+    ):
+        _produce_gfs(producer)
+
+    _assert_no_gfs_ready(repository, store)

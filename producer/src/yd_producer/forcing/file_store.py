@@ -948,6 +948,24 @@ class FileForcingRepository:
             raise ForcingStoreError(
                 f"Canonical product catalog {catalog_key} product row {row_index} cycle_time does not match the requested cycle_time."
             )
+        elapsed = valid_time - row_cycle_time
+        hour = timedelta(hours=1)
+        if elapsed < timedelta(0) or elapsed % hour != timedelta(0):
+            raise ForcingStoreError(
+                f"Canonical product catalog {catalog_key} product row {row_index} has incoherent valid_time/cycle_time/lead_time_hours."
+            )
+        if elapsed // hour != lead_time:
+            raise ForcingStoreError(
+                f"Canonical product catalog {catalog_key} product row {row_index} has incoherent valid_time/cycle_time/lead_time_hours."
+            )
+        expected_product_id = (
+            f"{row_source_id}_{format_cycle_time(row_cycle_time)}_"
+            f"{row['variable']}_f{lead_time:03d}"
+        )
+        if row["canonical_product_id"] != expected_product_id:
+            raise ForcingStoreError(
+                f"Canonical product catalog {catalog_key} product row {row_index} canonical_product_id does not match canonical product identity."
+            )
         expected_key = (
             f"canonical/{row_source_id}/{format_cycle_time(row_cycle_time)}/"
             f"{row['variable']}/{row['canonical_product_id']}.nc"

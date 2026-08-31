@@ -711,6 +711,26 @@ class ForcingProducer:
         if contract is None:
             return None
 
+        try:
+            applicable_source_ids = contract.applicable_source_ids
+            if not isinstance(applicable_source_ids, Sequence) or isinstance(
+                applicable_source_ids, str | bytes
+            ):
+                raise TypeError(
+                    "applicable_source_ids must be a sequence of source identifiers"
+                )
+            normalized_source_ids = tuple(
+                normalize_source_id(source) for source in applicable_source_ids
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ForcingProductionError(
+                "Invalid forcing mapping contract: Direct-grid contract must apply exclusively to the current source."
+            ) from error
+        if normalized_source_ids != (source_id,):
+            raise ForcingProductionError(
+                "Invalid forcing mapping contract: Direct-grid contract must apply exclusively to the current source."
+            )
+
         mode = str(getattr(contract, "forcing_mapping_mode", "") or "").strip()
         if mode == IDW_MODE:
             return None
