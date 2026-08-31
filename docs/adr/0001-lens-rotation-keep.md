@@ -468,3 +468,33 @@ fd-bound `O_NOFOLLOW` authority discovery。Round 2 的三个 pinned reviewer �
 
 复议条件未触发：PR #113 的 Round 2/Phase 7 没有重报已关闭 finding；不存在「连续两个 rotated 命中均为
 P3」的可解释新样本。共享 OpenSpec change 仍未 archive，因 M2 后续任务未完成。
+
+---
+
+## 第 12 次复议（issue #14 / PR #115 合并后，2026-08-31）
+
+审计数字：22 行（21 merged、1 terminal），20 个多轮合并 PR，后续轮次命中变为
+**core=122 / rotated=96**。PR #115 对当前算法的增量是 core +4、rotated +0：Round 2 的三条 P1
+全部由 correctness 报出，Round 3 的真实 `CanonicalProduct` oracle 缺口由 spec-compliance 报出；两者都在
+Round 1 lens 集合内。
+
+若只看这四条，本样本当然不支持「轮换买到额外 finding」。但同一 PR 还提供了一个更强的反证，说明
+**122/96 仍不能被解释为 cut 信号**：Phase 6.2 独立抓到四条 P1 sibling finding——alternate-repository
+source-singleton bypass、dual-forged row identity、producer direct-alias sentinel 伪绿、dynamic file-store sentinel
+伪绿。它们是本 PR 最有价值的一组 owner-altitude 发现，全部由 invariant audit 的方法变化得到；问责行如实把
+它们记为 round 1.5，而 `rotation_attribution()` 对 `round < 2` 直接跳过，所以四条对 core/rotated 都贡献 0。
+换言之，算法把 later comprehensive 的四条全算给 core，却把同一修复链里更深的四条全部丢弃；这个
+样本的观测偏差方向仍然是确定的。
+
+方法层的结果也与第 10/11 次同向：真正闭环的是 dual-forgery construction、alternate repository、对
+sentinel 自身做变异，以及最终 32-family 正向/反向 obligation matrix；换 reviewer 名称不是充分解释。
+Round 4 的六路 Sonnet 与 final-head Gap Sweep 均 clean，没有重报已闭合 finding。
+
+因此本次**不按 122/96 自动 cut**，也不把默认 keep 解释成这组数字的胜利。决策保持：
+**继续保留 pinned core + free-slot rotation + 独立终审的默认安排，待人工确认；在 `catches` 增加取证方法、
+Phase 6.2/invariant-audit 归属并修正 round 1.5 丢失之前，lens-rotation DECIDABLE 继续只表示统计机制要求
+复议，不足以决定 keep/cut。**
+
+复议条件未触发：PR #115 后续轮没有 rotated finding，因而不存在「连续两个 rotated 命中均为 P3」的新样本；
+Round 4 与两次 Phase 7 都没有已闭合项重报。共享 OpenSpec change 仍未 archive，因为 8.2/8.3 及其他 M2
+任务未完成。
