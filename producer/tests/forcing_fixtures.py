@@ -8,9 +8,8 @@ acceptance tests assert against.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
-from yd_producer.forcing.producer import parse_cycle_time
 from yd_producer.store.object_store import LocalObjectStore, sha256_bytes
 
 #: Independent literal oracle: SHA-256 over the canonical JSON envelope
@@ -89,9 +88,16 @@ def canonical_products_for_cycle(
 
     from test_forcing_producer import _netcdf_bytes
 
-    cycle_time = parse_cycle_time(cycle_text)
+    cycle_time = {
+        CYCLE_00Z: datetime(2026, 5, 7, 0, tzinfo=UTC),
+        CYCLE_12Z: datetime(2026, 5, 7, 12, tzinfo=UTC),
+    }[cycle_text]
     if grid_definition_uri is None:
-        grid_definition_uri = f"canonical/{source_id}/grid/{grid_id}/grid.json"
+        grid_definition_uri = (
+            "canonical/IFS/grid/ifs_0p25/grid.json"
+            if source_id.lower() == "ifs"
+            else f"canonical/{source_id}/grid/{grid_id}/grid.json"
+        )
     compact_cycle = cycle_time.strftime("%Y%m%d%H")
     longitudes = tuple(-75.0 + i * 0.5 for i in range(cell_count))
     latitudes = tuple(40.0 + i * 0.2 for i in range(cell_count))
@@ -146,6 +152,13 @@ def canonical_products_for_cycle(
                 longitudes=longitudes,
                 latitudes=latitudes,
                 cell_ids=cell_ids,
+                attrs={
+                    "cycle_time": cycle_time.isoformat(),
+                    "valid_time": valid_time.isoformat(),
+                    "lead_time_hours": forecast_hour,
+                    "unit": _unit_for(variable),
+                    "grid_id": grid_id,
+                },
             )
             uri = store.write_bytes_atomic(key, content)
             product = {

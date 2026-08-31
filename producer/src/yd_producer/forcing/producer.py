@@ -398,6 +398,15 @@ class ForcingProducer:
                 raise TypeError("cycle_time must be a string or datetime.")
             resolved_source_id = normalize_source_id(requested_source_id)
             parsed_cycle_time = parse_cycle_time(cycle_time)
+            if (
+                parsed_cycle_time.hour not in {0, 12}
+                or parsed_cycle_time.minute != 0
+                or parsed_cycle_time.second != 0
+                or parsed_cycle_time.microsecond != 0
+            ):
+                raise ValueError(
+                    "cycle_time must be a whole-hour UTC 00Z or 12Z cycle."
+                )
             _safe_path_component(model_id)
             _safe_path_component(_object_source_segment(resolved_source_id))
         except (TypeError, ValueError) as error:
@@ -518,10 +527,12 @@ class ForcingProducer:
                 source_grid: grid_identity_hash(grid_points)
                 for source_grid, grid_points in grid_points_by_source_grid.items()
             }
+            output_config_identity = _output_config_identity(self.config)
             direct_grid_identity = _direct_grid_lineage_identity(
                 contract=forcing_mapping_contract,
                 station_signature=station_signature,
                 canonical_input_signature=canonical_input_signature,
+                output_config_identity=output_config_identity,
             )
             existing_currency_checked = True
             existing_is_current = self._existing_forcing_version_is_current(
@@ -1277,7 +1288,7 @@ class ForcingProducer:
                 product.object_uri,
                 expected_checksum=product.checksum,
             ) as dataset:
-                data_variable = _select_data_variable(dataset, product.variable)
+                data_variable = _validate_canonical_netcdf_identity(dataset, product)
                 data_array = dataset[data_variable]
                 expected_count = _data_array_size(data_array)
                 self._enforce_limit(
@@ -1336,7 +1347,7 @@ class ForcingProducer:
                 product.object_uri,
                 expected_checksum=product.checksum,
             ) as dataset:
-                data_variable = _select_data_variable(dataset, product.variable)
+                data_variable = _validate_canonical_netcdf_identity(dataset, product)
                 data_array = dataset[data_variable]
                 expected_count = _data_array_size(data_array)
                 self._enforce_limit(
@@ -2849,11 +2860,33 @@ def _station_signature_matches(existing: Any, current: Mapping[str, Any]) -> boo
     )
 
 
+def _output_config_identity(config: ForcingProducerConfig) -> dict[str, Any]:
+    """Fingerprint every configuration field that changes forcing output semantics."""
+
+    payload = {
+        "rn_shortwave_factor": config.rn_shortwave_factor,
+        "forcing_filename": config.forcing_filename,
+        "csv_filename": config.csv_filename,
+        "package_manifest_filename": config.package_manifest_filename,
+        "output_variables": list(config.output_variables),
+        "required_canonical_variables": list(config.required_canonical_variables),
+        "era5_latency_fallback_hours": config.era5_latency_fallback_hours,
+        "min_lead_hours": config.min_lead_hours,
+    }
+    payload_bytes = _json_bytes(payload)
+    return {
+        "schema_version": "nhms.forcing_output_config_identity.v1",
+        "payload": payload,
+        "checksum": sha256_bytes(payload_bytes),
+    }
+
+
 def _direct_grid_lineage_identity(
     *,
     contract: DirectGridForcingContract,
     station_signature: Mapping[str, Any],
     canonical_input_signature: Mapping[str, Any],
+    output_config_identity: Mapping[str, Any],
 ) -> dict[str, Any]:
     stations = [
         {
@@ -2894,6 +2927,7 @@ def _direct_grid_lineage_identity(
         "direct_grid_station_signature": station_identity["checksum"],
         "station_signature": station_signature,
         "canonical_input_signature": canonical_input_signature,
+        "output_config_identity": dict(output_config_identity),
     }
 
 
@@ -3789,12 +3823,84 @@ def _distance_degrees(lon_a: float, lat_a: float, lon_b: float, lat_b: float) ->
     return math.hypot((lon_a - lon_b) * longitude_scale, lat_a - lat_b)
 
 
+def _validate_canonical_netcdf_identity(dataset: Any, product: CanonicalProduct) -> str:
+    """Require the canonical writer's self-description before reading grid or values."""
+
+    data_variable = _select_data_variable(dataset, product.variable)
+    attrs = getattr(dataset, "attrs", None)
+    if not isinstance(attrs, Mapping):
+        raise ForcingProductionError(
+            f"Canonical product {product.canonical_product_id} has no NetCDF attributes."
+        )
+    required_attrs = (
+        "cycle_time",
+        "valid_time",
+        "lead_time_hours",
+        "unit",
+        "grid_id",
+    )
+    missing = [name for name in required_attrs if name not in attrs]
+    if missing:
+        raise ForcingProductionError(
+            f"Canonical product {product.canonical_product_id} is missing NetCDF attributes: "
+            + ", ".join(missing)
+            + "."
+        )
+    try:
+        actual_cycle_time = parse_cycle_time(attrs["cycle_time"])
+        actual_valid_time = parse_cycle_time(attrs["valid_time"])
+    except (TypeError, ValueError) as error:
+        raise ForcingProductionError(
+            f"Canonical product {product.canonical_product_id} has malformed NetCDF time attributes."
+        ) from error
+    raw_lead_time_hours = attrs["lead_time_hours"]
+    try:
+        lead_time_hours = int(raw_lead_time_hours)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ForcingProductionError(
+            f"Canonical product {product.canonical_product_id} has non-integral NetCDF lead_time_hours."
+        ) from error
+    if isinstance(raw_lead_time_hours, bool) or lead_time_hours != raw_lead_time_hours:
+        raise ForcingProductionError(
+            f"Canonical product {product.canonical_product_id} has non-integral NetCDF lead_time_hours."
+        )
+    expected_lead_time_hours = product.lead_time_hours
+    if type(expected_lead_time_hours) is not int:
+        raise ForcingProductionError(
+            f"Canonical product {product.canonical_product_id} has invalid catalog lead_time_hours."
+        )
+    actual_values = {
+        "cycle_time": actual_cycle_time,
+        "valid_time": actual_valid_time,
+        "lead_time_hours": lead_time_hours,
+        "unit": attrs["unit"],
+        "grid_id": attrs["grid_id"],
+    }
+    expected_values = {
+        "cycle_time": _ensure_utc(product.cycle_time),
+        "valid_time": _ensure_utc(product.valid_time),
+        "lead_time_hours": expected_lead_time_hours,
+        "unit": product.unit,
+        "grid_id": product.grid_id,
+    }
+    mismatches = [
+        name
+        for name, expected in expected_values.items()
+        if actual_values[name] != expected
+    ]
+    if mismatches:
+        raise ForcingProductionError(
+            f"Canonical product {product.canonical_product_id} NetCDF identity mismatch: "
+            + ", ".join(mismatches)
+            + "."
+        )
+    return data_variable
+
+
 def _select_data_variable(dataset: Any, expected_variable: str) -> str:
     if expected_variable in dataset.data_vars:
         return expected_variable
     data_variables = list(dataset.data_vars)
-    if len(data_variables) == 1:
-        return str(data_variables[0])
     raise ForcingProductionError(
         f"NetCDF product for {expected_variable} has no matching variable; found {data_variables}."
     )

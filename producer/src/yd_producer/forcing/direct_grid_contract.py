@@ -296,9 +296,9 @@ def _applicable_source_ids(
         )
     if source_id is not None:
         current_source = normalize_source_id(source_id)
-        if current_source not in normalized:
+        if tuple(normalized) != (current_source,):
             raise DirectGridContractError(
-                "Direct-grid contract does not apply to the current source.",
+                "Direct-grid contract must apply exclusively to the current source.",
                 field="applicable_source_ids",
                 source_id=current_source,
                 details={"applicable_source_ids": tuple(normalized)},

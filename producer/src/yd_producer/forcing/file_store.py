@@ -302,6 +302,9 @@ class FileForcingRepository:
         authoritative_contract = self.load_forcing_mapping_contract(
             model_id=model_id,
             basin_version_id=basin_version_id,
+            source_id=contract.applicable_source_ids[0]
+            if len(contract.applicable_source_ids) == 1
+            else None,
         )
         if authoritative_contract != contract:
             raise DirectGridContractError(
@@ -944,6 +947,20 @@ class FileForcingRepository:
         if row_cycle_time != requested_cycle_time:
             raise ForcingStoreError(
                 f"Canonical product catalog {catalog_key} product row {row_index} cycle_time does not match the requested cycle_time."
+            )
+        expected_key = (
+            f"canonical/{row_source_id}/{format_cycle_time(row_cycle_time)}/"
+            f"{row['variable']}/{row['canonical_product_id']}.nc"
+        )
+        try:
+            actual_key = self.object_store.normalize_key(row["object_uri"])
+        except (TypeError, ValueError) as error:
+            raise ForcingStoreError(
+                f"Canonical product catalog {catalog_key} product row {row_index} has invalid object_uri."
+            ) from error
+        if actual_key != expected_key:
+            raise ForcingStoreError(
+                f"Canonical product catalog {catalog_key} product row {row_index} object_uri does not match canonical object identity."
             )
         return CanonicalProduct(
             canonical_product_id=row["canonical_product_id"],

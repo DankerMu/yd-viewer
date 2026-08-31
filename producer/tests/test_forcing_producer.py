@@ -838,7 +838,7 @@ def _direct_grid_manifest() -> dict[str, Any]:
         "model_input_package_id": "model-input-demo-v1",
         "sp_att_path": "input/qhh.sp.att",
         "sp_att_checksum": "sha256:sp-att",
-        "applicable_source_ids": ["GFS", "IFS"],
+        "applicable_source_ids": ["GFS"],
         "grid_id": "ifs_gfs_025deg",
         "grid_signature": "sha256:grid-signature",
         "station_bindings": [
@@ -1655,6 +1655,15 @@ def _write_canonical_products(
                 include_geographic_coords=include_geographic_coords,
                 longitudes=longitudes,
                 latitudes=latitudes,
+                attrs={
+                    "cycle_time": cycle_time.isoformat(),
+                    "valid_time": valid_time.isoformat(),
+                    "lead_time_hours": lead_time_by_hour.get(
+                        forecast_hour, forecast_hour
+                    ),
+                    "unit": unit,
+                    "grid_id": "grid_a",
+                },
             )
             object_uri = store.write_bytes_atomic(key, content)
             products.append(
@@ -1684,6 +1693,7 @@ def _netcdf_bytes(
     longitudes: tuple[float, float, float] = (-75.0, -74.5, -74.0),
     latitudes: tuple[float, float, float] = (40.0, 40.2, 40.4),
     cell_ids: tuple[str, ...] = ("0", "1", "2"),
+    attrs: Mapping[str, Any] | None = None,
 ) -> bytes:
     import xarray as xr
 
@@ -1700,6 +1710,7 @@ def _netcdf_bytes(
     dataset = xr.Dataset(
         data_vars={variable: ("point", list(values))},
         coords=coords,
+        attrs=dict(attrs or {}),
     )
     try:
         with tempfile.NamedTemporaryFile(suffix=".nc") as temp_file:

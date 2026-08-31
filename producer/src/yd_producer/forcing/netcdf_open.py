@@ -20,6 +20,7 @@ from yd_producer.store.safe_fs import open_file_no_follow
 
 _LINUX_FD_ROOT = Path("/proc/self/fd")
 _DARWIN_FD_ROOT = Path("/dev/fd")
+MAX_CANONICAL_NETCDF_BYTES = 536_870_912
 
 
 def descriptor_alias_path(fd: int) -> Path:
@@ -46,10 +47,25 @@ def _normalized_sha256(expected_checksum: str) -> str:
     return expected_checksum.strip().removeprefix("sha256:").lower()
 
 
-def _checksum_descriptor(file_fd: int) -> str:
+def _validate_max_bytes(max_bytes: int) -> None:
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("max_bytes must be a non-negative integer.")
+
+
+def _checksum_descriptor(file_fd: int, *, max_bytes: int) -> str:
+    """Hash one descriptor without reading more than ``max_bytes`` and rewind it."""
+
+    _validate_max_bytes(max_bytes)
     digest = hashlib.sha256()
+    observed_bytes = 0
     try:
         while chunk := os.read(file_fd, 1024 * 1024):
+            observed_bytes += len(chunk)
+            if observed_bytes > max_bytes:
+                raise ValueError(
+                    "Canonical NetCDF exceeds byte limit: "
+                    f"observed more than {max_bytes} bytes."
+                )
             digest.update(chunk)
     finally:
         os.lseek(file_fd, 0, os.SEEK_SET)
@@ -62,15 +78,23 @@ def open_canonical_netcdf(
     key_or_uri: str,
     *,
     expected_checksum: str | None = None,
+    max_bytes: int = MAX_CANONICAL_NETCDF_BYTES,
 ) -> Iterator[Any]:
-    """Open a canonical NetCDF product through a no-follow descriptor alias."""
+    """Open a canonical NetCDF product through a bounded no-follow descriptor alias."""
 
+    _validate_max_bytes(max_bytes)
     path = object_store.resolve_path(key_or_uri)
     file_fd = open_file_no_follow(path, containment_root=object_store.root)
     dataset = None
     try:
+        size_bytes = os.fstat(file_fd).st_size
+        if size_bytes > max_bytes:
+            raise ValueError(
+                "Canonical NetCDF exceeds byte limit: "
+                f"size {size_bytes} exceeds {max_bytes} bytes."
+            )
         if expected_checksum is not None:
-            actual_checksum = _checksum_descriptor(file_fd)
+            actual_checksum = _checksum_descriptor(file_fd, max_bytes=max_bytes)
             if actual_checksum != _normalized_sha256(expected_checksum):
                 raise ValueError(
                     "Canonical checksum mismatch: "
