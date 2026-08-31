@@ -441,3 +441,30 @@ PR #92 五轮全部 not-clean，触 5 轮天花板。round 5 我**刻意**轮入
 作用的是 brief 里那条强制实测要求；同时那条「零 oracle」的发现根本不进 `catches`（它不是评审
 发现，是 orchestrator 自查），于是**真正奏效的方法在统计里不可见，而搭便车的视角在统计里加分**。
 十次复议之后，这个指标不是中立的噪声，它有确定方向的偏差。
+
+---
+
+## 第 11 次复议（issue #25 / PR #113 合并后，2026-08-31）
+
+审计数字：21 行（20 merged、1 terminal），19 个多轮合并 PR，后续轮次命中仍为
+**core=118 / rotated=96**。PR #113 的净捕获全部发生在 Round 1 或 Phase 6.2，因此没有改变这两个
+数字；恰好是一个说明当前归因模型不完备的反例，而不是支持按 118/96 作 keep/cut 的证据。
+
+PR #113 的 Round 1 发现 future retention anchor 可扩大删除窗，初次修复将其收成一个标量上界检查。
+强制的 Phase 6.2 不变量盘点随后抓到同一条 current-DONE identity 传输链的 sibling 形态：
+`controller.done_cycles` 会跟随中间 cycle symlink，伪造未来 authority。该 P1 不是新的 reviewer lens
+在 Round 2 抓到的，而是 **method-change audit** 发现的；其闭环是从「比较一个数」改为 cleanup-owned
+fd-bound `O_NOFOLLOW` authority discovery。Round 2 的三个 pinned reviewer 与 Phase 7 都 clean。
+
+这条结果与第 10 次的结论同向、但暴露了另一个缺口：
+
+- 它不属于 later comprehensive round，`rotation_attribution()` 根本不计它；
+- 它的价值来自强制盘点 authority 传输链和用四分量×三入口矩阵实测，而不是换入某个 reviewer 名称；
+- 如果只看 core/rotated，最重要的 P1 closure 会被统计成「没有发生」。
+
+因此本次**不根据 118/96 作 cut**，也不把它解释为 keep 的数值支持。保持既有默认：
+**保留 pinned core + 独立终审的安排，待人工确认；但在 `catches` 增加取证方法和 Phase 6.2/invariant-audit
+归属之前，lens-rotation 的 DECIDABLE 继续只应视为需要记录的指标缺陷，而不是可用的策略选择信号。**
+
+复议条件未触发：PR #113 的 Round 2/Phase 7 没有重报已关闭 finding；不存在「连续两个 rotated 命中均为
+P3」的可解释新样本。共享 OpenSpec change 仍未 archive，因 M2 后续任务未完成。
