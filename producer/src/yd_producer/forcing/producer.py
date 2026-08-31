@@ -27,9 +27,9 @@ from yd_producer.forcing.bounded_json import BoundedJSONError, load_bounded_json
 from yd_producer.forcing.canonical_json import _json_bytes, _json_default
 from yd_producer.forcing.direct_grid_contract import (
     DIRECT_GRID_MODE,
-    IDW_MODE,
     DirectGridContractError,
     DirectGridForcingContract,
+    validate_direct_grid_forcing_contract,
 )
 from yd_producer.forcing.grid_identity import grid_identity_hash
 from yd_producer.forcing.netcdf_open import open_canonical_netcdf
@@ -388,6 +388,7 @@ class ForcingProducer:
                 "A forcing repository is required for production."
             )
 
+        # Request preflight: no repository calls.
         try:
             requested_source_id = (
                 self.config.source_id if source_id is None else source_id
@@ -409,21 +410,23 @@ class ForcingProducer:
                 )
             _safe_path_component(model_id)
             _safe_path_component(_object_source_segment(resolved_source_id))
+            if basin_version_id not in (None, ""):
+                _safe_path_component(basin_version_id)
+            if max_lead_hours is not None and (
+                type(max_lead_hours) is not int or max_lead_hours < 0
+            ):
+                raise ValueError(
+                    "max_lead_hours must be None or a non-negative integer."
+                )
         except (TypeError, ValueError) as error:
             raise ForcingProductionError(
                 f"Invalid forcing production request: {error}"
             ) from error
 
-        existing: Mapping[str, Any] | None = None
-        existing_currency_checked = False
+        # Repository-return preflight: no existing-state mutation.
         try:
-            existing = self.repository.get_forcing_version(
-                source_id=resolved_source_id,
-                cycle_time=parsed_cycle_time,
-                model_id=model_id,
-            )
-
             model_identity = self._resolve_model_identity(model_id=model_id)
+            resolved_basin_version_id = _repository_basin_version_id(model_identity)
             self._validate_scheduler_identity(
                 model_identity=model_identity,
                 basin_id=basin_id,
@@ -431,15 +434,33 @@ class ForcingProducer:
                 river_network_version_id=river_network_version_id,
             )
             resolved_basin_id = str(model_identity.get("basin_id") or basin_id or "")
-            resolved_basin_version_id = str(model_identity["basin_version_id"])
             resolved_river_network_version_id = str(
                 model_identity.get("river_network_version_id") or ""
             )
-            _safe_path_component(resolved_basin_version_id)
             forcing_mapping_contract = self._resolve_forcing_mapping_contract(
                 model_id=model_id,
                 basin_version_id=resolved_basin_version_id,
                 source_id=resolved_source_id,
+            )
+            if forcing_mapping_contract is None:
+                raise ForcingProductionError(
+                    "Direct-grid forcing mapping contract is required; IDW fallback is not available."
+                )
+        except ForcingProductionError:
+            raise
+        except Exception as error:
+            raise ForcingProductionError(
+                f"Invalid forcing model identity or mapping contract: {error}"
+            ) from error
+
+        # Authority reads remain after existing lookup for stale-ready revocation.
+        existing: Mapping[str, Any] | None = None
+        existing_currency_checked = False
+        try:
+            existing = self.repository.get_forcing_version(
+                source_id=resolved_source_id,
+                cycle_time=parsed_cycle_time,
+                model_id=model_id,
             )
 
             required_variables = self._required_canonical_variables(resolved_source_id)
@@ -704,38 +725,12 @@ class ForcingProducer:
                 basin_version_id=basin_version_id,
                 source_id=source_id,
             )
+            if contract is not None:
+                validate_direct_grid_forcing_contract(contract, source_id=source_id)
         except DirectGridContractError as error:
             raise ForcingProductionError(
                 f"Invalid forcing mapping contract: {error}"
             ) from error
-        if contract is None:
-            return None
-
-        try:
-            applicable_source_ids = contract.applicable_source_ids
-            if not isinstance(applicable_source_ids, Sequence) or isinstance(
-                applicable_source_ids, str | bytes
-            ):
-                raise TypeError(
-                    "applicable_source_ids must be a sequence of source identifiers"
-                )
-            normalized_source_ids = tuple(
-                normalize_source_id(source) for source in applicable_source_ids
-            )
-        except (AttributeError, TypeError, ValueError) as error:
-            raise ForcingProductionError(
-                "Invalid forcing mapping contract: Direct-grid contract must apply exclusively to the current source."
-            ) from error
-        if normalized_source_ids != (source_id,):
-            raise ForcingProductionError(
-                "Invalid forcing mapping contract: Direct-grid contract must apply exclusively to the current source."
-            )
-
-        mode = str(getattr(contract, "forcing_mapping_mode", "") or "").strip()
-        if mode == IDW_MODE:
-            return None
-        if mode != DIRECT_GRID_MODE:
-            raise ForcingProductionError(f"Unsupported forcing_mapping_mode {mode!r}.")
         return contract
 
     def _stop_at_direct_grid_package_boundary(
@@ -4042,11 +4037,22 @@ def _package_manifest_uri(package_uri: str, manifest_filename: str) -> str:
 _SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
+def _repository_basin_version_id(model_identity: Mapping[str, Any]) -> str:
+    value = model_identity.get("basin_version_id")
+    try:
+        return _safe_path_component(value)
+    except (TypeError, ValueError) as error:
+        raise ForcingProductionError(
+            "Model identity has an invalid basin_version_id path component."
+        ) from error
+
+
 def _safe_path_component(value: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("Invalid path component.")
     if (
-        value.startswith("-")
+        value == "."
+        or value.startswith("-")
         or "/" in value
         or "\\" in value
         or ".." in value

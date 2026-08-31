@@ -105,6 +105,355 @@ class DirectGridForcingContract:
     stations: tuple[DirectGridStationBinding, ...]
 
 
+def validate_direct_grid_forcing_contract(
+    contract: DirectGridForcingContract,
+    *,
+    source_id: str | None = None,
+) -> None:
+    """Validate direct-grid dataclass semantics at parser and repository boundaries."""
+
+    if not isinstance(contract, DirectGridForcingContract):
+        raise DirectGridContractError(
+            "Direct-grid forcing contract must be a DirectGridForcingContract.",
+            field="contract",
+            source_id=source_id,
+            details={"actual_type": type(contract).__name__},
+        )
+    if contract.forcing_mapping_mode != DIRECT_GRID_MODE:
+        raise DirectGridContractError(
+            f"Unsupported forcing_mapping_mode {contract.forcing_mapping_mode!r}.",
+            field="forcing_mapping_mode",
+            source_id=source_id,
+            details={"supported_modes": [DIRECT_GRID_MODE]},
+        )
+
+    for field_name in (
+        "binding_uri",
+        "binding_checksum",
+        "model_input_package_id",
+        "sp_att_path",
+        "sp_att_checksum",
+        "grid_id",
+        "grid_signature",
+    ):
+        _validate_contract_text(
+            getattr(contract, field_name),
+            field_name=field_name,
+            source_id=source_id,
+        )
+
+    normalized_source_ids = _validate_contract_source_ids(
+        contract.applicable_source_ids,
+        source_id=source_id,
+    )
+    if source_id is not None:
+        try:
+            current_source_id = normalize_source_id(source_id)
+        except (AttributeError, ValueError) as error:
+            raise DirectGridContractError(
+                "Direct-grid contract validation requires a supported source identifier.",
+                field="applicable_source_ids",
+                source_id=source_id,
+                details={"actual_type": type(source_id).__name__},
+            ) from error
+        if normalized_source_ids != (current_source_id,):
+            raise DirectGridContractError(
+                "Direct-grid contract must apply exclusively to the current source.",
+                field="applicable_source_ids",
+                source_id=current_source_id,
+                details={"applicable_source_ids": normalized_source_ids},
+            )
+
+    stations = contract.stations
+    if not isinstance(stations, Sequence) or isinstance(stations, str | bytes):
+        raise DirectGridContractError(
+            "Direct-grid contract requires a non-empty station binding sequence.",
+            field="stations",
+            source_id=source_id,
+            details={"actual_type": type(stations).__name__},
+        )
+    if not stations:
+        raise DirectGridContractError(
+            "Direct-grid contract requires at least one station binding.",
+            field="stations",
+            source_id=source_id,
+        )
+    if len(stations) > MAX_DIRECT_GRID_STATION_BINDINGS:
+        raise DirectGridContractError(
+            "Direct-grid contract exceeds the station binding count limit.",
+            field="stations",
+            source_id=source_id,
+            details={
+                "observed_count": len(stations),
+                "max_count": MAX_DIRECT_GRID_STATION_BINDINGS,
+            },
+        )
+
+    indexes: list[int] = []
+    filenames: set[str] = set()
+    station_ids: set[str] = set()
+    grid_cell_ids: set[str] = set()
+    for offset, station in enumerate(stations):
+        if not isinstance(station, DirectGridStationBinding):
+            raise DirectGridContractError(
+                "Direct-grid station binding must be a DirectGridStationBinding.",
+                field=f"stations[{offset}]",
+                source_id=source_id,
+                details={"actual_type": type(station).__name__},
+            )
+
+        station_id = _validate_contract_text(
+            station.station_id,
+            field_name="station_id",
+            source_id=source_id,
+        )
+        station_grid_id = _validate_contract_text(
+            station.grid_id,
+            field_name="grid_id",
+            source_id=source_id,
+            station_id=station_id,
+        )
+        grid_cell_id = _validate_contract_text(
+            station.grid_cell_id,
+            field_name="grid_cell_id",
+            source_id=source_id,
+            station_id=station_id,
+        )
+        if station_grid_id != contract.grid_id:
+            raise DirectGridContractError(
+                "Direct-grid station grid_id does not match contract grid_id.",
+                field="grid_id",
+                source_id=source_id,
+                station_id=station_id,
+                details={
+                    "expected_grid_id": contract.grid_id,
+                    "actual_grid_id": station_grid_id,
+                },
+            )
+        if type(station.shud_forcing_index) is not int:
+            raise DirectGridContractError(
+                "Direct-grid station shud_forcing_index must be an integer.",
+                field="shud_forcing_index",
+                source_id=source_id,
+                station_id=station_id,
+                details={"actual_type": type(station.shud_forcing_index).__name__},
+            )
+        if station.shud_forcing_index <= 0:
+            raise DirectGridContractError(
+                "Direct-grid station shud_forcing_index must be positive.",
+                field="shud_forcing_index",
+                source_id=source_id,
+                station_id=station_id,
+            )
+        indexes.append(station.shud_forcing_index)
+
+        filename = _validate_contract_text(
+            station.forcing_filename,
+            field_name="forcing_filename",
+            source_id=source_id,
+            station_id=station_id,
+        )
+        if not _safe_forcing_filename(filename):
+            raise DirectGridContractError(
+                "Direct-grid station forcing_filename is unsafe.",
+                field="forcing_filename",
+                source_id=source_id,
+                station_id=station_id,
+                details={"forcing_filename": filename},
+            )
+        filename_key = filename.casefold()
+        if filename_key in filenames:
+            raise DirectGridContractError(
+                "Direct-grid forcing_filename values must be unique.",
+                field="forcing_filename",
+                source_id=source_id,
+                station_id=station_id,
+                details={"forcing_filename": filename},
+            )
+        filenames.add(filename_key)
+
+        if station_id in station_ids:
+            raise DirectGridContractError(
+                "Direct-grid station_id values must be unique.",
+                field="station_id",
+                source_id=source_id,
+                station_id=station_id,
+            )
+        station_ids.add(station_id)
+        if grid_cell_id in grid_cell_ids:
+            raise DirectGridContractError(
+                "Direct-grid grid_cell_id values must be unique.",
+                field="grid_cell_id",
+                source_id=source_id,
+                station_id=station_id,
+                details={"duplicate_grid_cell_id": grid_cell_id},
+            )
+        grid_cell_ids.add(grid_cell_id)
+
+        longitude = _validate_contract_number(
+            station.longitude,
+            field_name="longitude",
+            source_id=source_id,
+            station_id=station_id,
+        )
+        if not -180.0 <= longitude < 180.0:
+            raise DirectGridContractError(
+                "Direct-grid station longitude must be canonical within [-180, 180).",
+                field="longitude",
+                source_id=source_id,
+                station_id=station_id,
+                details={"value": longitude, "expected_range": "[-180, 180)"},
+            )
+        latitude = _validate_contract_number(
+            station.latitude,
+            field_name="latitude",
+            source_id=source_id,
+            station_id=station_id,
+        )
+        if not -90.0 <= latitude <= 90.0:
+            raise DirectGridContractError(
+                "Direct-grid station latitude must be within WGS84 bounds.",
+                field="latitude",
+                source_id=source_id,
+                station_id=station_id,
+                details={"value": latitude, "expected_range": "[-90, 90]"},
+            )
+        for field_name in ("x", "y", "z"):
+            _validate_contract_number(
+                getattr(station, field_name),
+                field_name=field_name,
+                source_id=source_id,
+                station_id=station_id,
+            )
+        if not isinstance(station.properties, Mapping):
+            raise DirectGridContractError(
+                "Direct-grid station properties must be a mapping.",
+                field="properties",
+                source_id=source_id,
+                station_id=station_id,
+                details={"actual_type": type(station.properties).__name__},
+            )
+
+    expected_indexes = tuple(range(1, len(stations) + 1))
+    actual_indexes = tuple(sorted(indexes))
+    if actual_indexes != expected_indexes:
+        raise DirectGridContractError(
+            "Direct-grid shud_forcing_index values must be unique and contiguous from 1.",
+            field="shud_forcing_index",
+            source_id=source_id,
+            details={
+                "actual_indexes": actual_indexes,
+                "expected_indexes": expected_indexes,
+            },
+        )
+
+
+def _validate_contract_text(
+    value: Any,
+    *,
+    field_name: str,
+    source_id: str | None,
+    station_id: str | None = None,
+) -> str:
+    if not isinstance(value, str):
+        raise DirectGridContractError(
+            f"Direct-grid contract field {field_name!r} must be a string.",
+            field=field_name,
+            source_id=source_id,
+            station_id=station_id,
+            details={"actual_type": type(value).__name__},
+        )
+    if not value.strip():
+        raise DirectGridContractError(
+            f"Direct-grid contract field {field_name!r} must not be blank.",
+            field=field_name,
+            source_id=source_id,
+            station_id=station_id,
+        )
+    return value
+
+
+def _validate_contract_source_ids(
+    source_ids: Any,
+    *,
+    source_id: str | None,
+) -> tuple[str, ...]:
+    if not isinstance(source_ids, Sequence) or isinstance(source_ids, str | bytes):
+        raise DirectGridContractError(
+            "Direct-grid contract field 'applicable_source_ids' must be a non-empty sequence.",
+            field="applicable_source_ids",
+            source_id=source_id,
+            details={"actual_type": type(source_ids).__name__},
+        )
+    if not source_ids:
+        raise DirectGridContractError(
+            "Direct-grid contract field 'applicable_source_ids' must not be empty.",
+            field="applicable_source_ids",
+            source_id=source_id,
+        )
+    normalized: list[str] = []
+    for source_index, raw_source_id in enumerate(source_ids):
+        if not isinstance(raw_source_id, str):
+            raise DirectGridContractError(
+                "Direct-grid contract source identifiers must be strings.",
+                field="applicable_source_ids",
+                source_id=source_id,
+                details={
+                    "invalid_source_index": source_index,
+                    "actual_type": type(raw_source_id).__name__,
+                },
+            )
+        try:
+            normalized.append(normalize_source_id(raw_source_id))
+        except ValueError:
+            raise DirectGridContractError(
+                "Direct-grid contract includes an unsupported source identifier.",
+                field="applicable_source_ids",
+                source_id=source_id,
+                details={
+                    "invalid_source_index": source_index,
+                    "source_id_length": len(raw_source_id),
+                },
+            ) from None
+    return tuple(normalized)
+
+
+def _validate_contract_number(
+    value: Any,
+    *,
+    field_name: str,
+    source_id: str | None,
+    station_id: str,
+) -> float:
+    if type(value) not in {int, float}:
+        raise DirectGridContractError(
+            f"Direct-grid station field {field_name!r} must be a finite number.",
+            field=field_name,
+            source_id=source_id,
+            station_id=station_id,
+            details={"actual_type": type(value).__name__},
+        )
+    try:
+        parsed_value = float(value)
+    except OverflowError:
+        raise DirectGridContractError(
+            f"Direct-grid station field {field_name!r} must be finite.",
+            field=field_name,
+            source_id=source_id,
+            station_id=station_id,
+            details={"actual_type": type(value).__name__},
+        ) from None
+    if not math.isfinite(parsed_value):
+        raise DirectGridContractError(
+            f"Direct-grid station field {field_name!r} must be finite.",
+            field=field_name,
+            source_id=source_id,
+            station_id=station_id,
+            details={"actual_type": type(value).__name__, "value": repr(value)},
+        )
+    return parsed_value
+
+
 def load_forcing_mapping_contract_from_manifest(
     manifest: Mapping[str, Any] | None,
     *,
@@ -190,7 +539,7 @@ def parse_direct_grid_forcing_contract(
     applicable_source_ids = _applicable_source_ids(manifest, source_id=source_id)
     stations = _station_bindings(manifest, grid_id=grid_id, source_id=source_id)
 
-    return DirectGridForcingContract(
+    contract = DirectGridForcingContract(
         forcing_mapping_mode=mode,
         binding_uri=binding_uri,
         binding_checksum=binding_checksum,
@@ -202,6 +551,8 @@ def parse_direct_grid_forcing_contract(
         grid_signature=grid_signature,
         stations=stations,
     )
+    validate_direct_grid_forcing_contract(contract, source_id=source_id)
+    return contract
 
 
 def _direct_grid_section_payload(
@@ -348,17 +699,6 @@ def _station_bindings(
         station_grid_id = _required_text(
             raw_station, "grid_id", source_id=source_id, station_id=station_id
         )
-        if station_grid_id != grid_id:
-            raise DirectGridContractError(
-                "Direct-grid station grid_id does not match manifest grid_id.",
-                field="grid_id",
-                source_id=source_id,
-                station_id=station_id,
-                details={
-                    "expected_grid_id": grid_id,
-                    "actual_grid_id": station_grid_id,
-                },
-            )
         forcing_index = _required_positive_int(
             raw_station,
             "shud_forcing_index",
@@ -368,14 +708,6 @@ def _station_bindings(
         filename = _required_text(
             raw_station, "forcing_filename", source_id=source_id, station_id=station_id
         )
-        if not _safe_forcing_filename(filename):
-            raise DirectGridContractError(
-                "Direct-grid station forcing_filename is unsafe.",
-                field="forcing_filename",
-                source_id=source_id,
-                station_id=station_id,
-                details={"forcing_filename": filename},
-            )
         bindings.append(
             DirectGridStationBinding(
                 station_id=station_id,
@@ -407,7 +739,6 @@ def _station_bindings(
             )
         )
 
-    _validate_station_uniqueness_and_indexes(bindings, source_id=source_id)
     return tuple(sorted(bindings, key=lambda binding: binding.shud_forcing_index))
 
 
@@ -522,54 +853,3 @@ def _safe_forcing_filename(filename: str) -> bool:
     if filename in {".", ".."}:
         return False
     return bool(_SAFE_STATION_FORCING_FILENAME.fullmatch(filename))
-
-
-def _validate_station_uniqueness_and_indexes(
-    bindings: Sequence[DirectGridStationBinding],
-    *,
-    source_id: str | None,
-) -> None:
-    indexes = [binding.shud_forcing_index for binding in bindings]
-    expected_indexes = list(range(1, len(bindings) + 1))
-    if sorted(indexes) != expected_indexes:
-        raise DirectGridContractError(
-            "Direct-grid shud_forcing_index values must be unique and contiguous from 1.",
-            field="shud_forcing_index",
-            source_id=source_id,
-            details={
-                "actual_indexes": tuple(sorted(indexes)),
-                "expected_indexes": tuple(expected_indexes),
-            },
-        )
-
-    filenames: set[str] = set()
-    station_ids: set[str] = set()
-    grid_cell_ids: set[str] = set()
-    for binding in bindings:
-        filename_key = binding.forcing_filename.casefold()
-        if filename_key in filenames:
-            raise DirectGridContractError(
-                "Direct-grid forcing_filename values must be unique.",
-                field="forcing_filename",
-                source_id=source_id,
-                station_id=binding.station_id,
-                details={"forcing_filename": binding.forcing_filename},
-            )
-        filenames.add(filename_key)
-        if binding.station_id in station_ids:
-            raise DirectGridContractError(
-                "Direct-grid station_id values must be unique.",
-                field="station_id",
-                source_id=source_id,
-                station_id=binding.station_id,
-            )
-        station_ids.add(binding.station_id)
-        if binding.grid_cell_id in grid_cell_ids:
-            raise DirectGridContractError(
-                "Direct-grid grid_cell_id values must be unique.",
-                field="grid_cell_id",
-                source_id=source_id,
-                station_id=binding.station_id,
-                details={"duplicate_grid_cell_id": binding.grid_cell_id},
-            )
-        grid_cell_ids.add(binding.grid_cell_id)

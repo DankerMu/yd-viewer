@@ -1234,12 +1234,7 @@ def test_producer_rejects_root_direct_grid_manifest_before_station_loading(
         event[0] == "finalize_forcing_version" for event in repository.events
     )
     assert not (tmp_path / "forcing").exists()
-    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
-    assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
-    assert (
-        "Invalid forcing mapping contract"
-        in repository.cycle_updates[-1]["error_message"]
-    )
+    assert repository.cycle_updates == []
 
 
 @pytest.mark.parametrize(

@@ -161,14 +161,14 @@ class FileForcingRepository:
         model = self._model_entry(model_id)
         return {
             "basin_id": str(model["basin_id"]),
-            "basin_version_id": str(model["basin_version_id"]),
+            "basin_version_id": model["basin_version_id"],
             "river_network_version_id": str(
                 model.get("river_network_version_id") or ""
             ),
         }
 
-    def resolve_model_basin_version(self, *, model_id: str) -> str:
-        return str(self._model_entry(model_id)["basin_version_id"])
+    def resolve_model_basin_version(self, *, model_id: str) -> Any:
+        return self._model_entry(model_id)["basin_version_id"]
 
     def load_met_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
         cached = self._stations_by_basin_version.get(basin_version_id)
