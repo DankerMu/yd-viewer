@@ -498,3 +498,32 @@ Phase 6.2/invariant-audit 归属并修正 round 1.5 丢失之前，lens-rotation
 复议条件未触发：PR #115 后续轮没有 rotated finding，因而不存在「连续两个 rotated 命中均为 P3」的新样本；
 Round 4 与两次 Phase 7 都没有已闭合项重报。共享 OpenSpec change 仍未 archive，因为 8.2/8.3 及其他 M2
 任务未完成。
+
+---
+
+## 第 13 次复议（issue #15 / PR #118 合并后，2026-09-01）
+
+审计数字：23 行（22 merged、1 terminal），21 个多轮合并 PR，后续轮次命中仍为
+**core=122 / rotated=96**。PR #118 的三条净捕获全部发生在 Round 1；Round 2 六名 Sonnet reviewer 与
+Phase 7 fresh Gap Sweep 均 clean，所以本样本对 later-round attribution 的增量是 **core +0 / rotated +0**。
+
+这不是支持 cut 的零收益样本，也不是支持 keep 的数值样本：本 PR 的 Round 2 与 Round 1 使用同一组六个
+角色，没有发生 free-slot rotation；Phase 7 的独立视角零 finding。没有轮换发生的样本，不能拿来估计轮换的
+边际收益。它唯一能证明的是本次 pinned core 已足以在第一轮抓出三条真实缺陷，并在修复后给出 clean
+收敛证明。
+
+本 PR 同时再次暴露当前统计模型看不见的重要方法成本：Phase 6.2 对 geometry / full-token FSM / required-entry
+preflight 做了完整 sibling-surface audit，最终 clean；49 腿 final-source mutation 与独立 literal oracle 才是
+闭环可信度的主要来源。它们都不是 later-round `catches`，因此不进入 122/96。Round 2 还把一个既有 #14
+forcing-package `.10g` sibling 风险路由到 #119，但因它是 pre-existing non-blocking note，也不进入该指标。
+这与第 10–12 次复议的结论完全同向：当前数字只统计「哪个 lens 名下有 finding」，没有统计取证方法、
+Phase 6.2/invariant-audit、clean closure 与 out-of-scope risk routing。
+
+**决策不变：keep。** 继续保留 pinned core + 条件式 free-slot rotation + 独立终审的默认安排；但不把
+122/96 解释成 keep 的数据支持，更不据此自动 cut。在 `catches` 增加取证方法与 Phase 6.2 归属、并让
+`loop_log_audit.py` 能区分「无轮换发生」之前，lens-rotation DECIDABLE 仍只表示统计机制要求复议，
+不是可直接执行的策略信号。
+
+复议条件未触发：本 PR 后续轮零 catch，不存在连续两个 rotated P3 样本；Round 2 与 Phase 7 均逐项确认
+C1/C2/C3 closed、C4 unchanged/discarded，零已闭合 finding 重报。共享 `m2-producer-core` 仍有后继任务，
+本次继续不 archive。
