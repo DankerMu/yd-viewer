@@ -426,7 +426,8 @@ node-22（`frd_muziyao@210.77.77.22`）：
 4. `apps/frontend/src/api/base.ts`：`buildApiUrl` 对相对前缀 base（`/yd`）改走字符串拼接——`new URL(path, "/yd/")` 因 base 非绝对 URL 直接抛 TypeError，React 整树崩溃白屏（2026-09-01 上线后用户报障，headless Chrome 复现定位）；NWM 现行两条路径（空 base、绝对 URL base）行为不变（27 侧 fork commit `4c7b89a5`）；
 5. Slurm job-name `yd_<stage>`（22 侧 fork commit `9bff45df`）：14 个 `infra/sbatch/*.sbatch` 模板 + `services/orchestrator/reconcile.py`（`_expected_job_name_token`→`yd_`、`FALLBACK_JOB_NAME="yd_forecast,nhms_forecast"`、`_GENERIC_ARRAY_JOB_NAMES` 双前缀、`_strip_job_name_prefix` 容忍 legacy 行，规避切换窗 wedge）；
 6. yd 展示定制（27 侧 fork commit `edde7932`，2026-09-01 用户要求）：径流分档取消 1000–10000 档、`>1000` 直接红色 `#CB181D`（`overviewDataContracts.ts` 图例+`m11DischargeColor`、`m11MapBuilders.ts` MVT log 阶插值 stops 同步）；`OverviewPage.tsx` 单流域部署时初始相机 fit 到该流域 bbox（多流域行为不变）；
-7. 流域边界总开关（27 侧 fork commit `c44b7161`）：`m11MapBuilders.ts:58` `m11BasinBoundaryOverlayEnabled` false→true——上游产品口径不展示边界，yd 单流域部署需要；headless 截图验证边界多边形+描边+Yd 标签正常渲染。
+7. 流域边界总开关（27 侧 fork commit `c44b7161`）：`m11MapBuilders.ts:58` `m11BasinBoundaryOverlayEnabled` false→true——上游产品口径不展示边界，yd 单流域部署需要；headless 截图验证边界多边形+描边+Yd 标签正常渲染；
+8. 空边界提示防闪（27 侧 fork commit `b991b507`）：翻开边界开关后暴露上游瞬态——basins 先到、versions（含几何）后到的窗口里「当前没有可见流域边界」闪现；`m11MapRuntime.tsx` 给该提示加 1.5s 驻留判定（`useSettledCondition`），真实缺边界仍提示；配套测试改用 fake timers 并固化「瞬态不显示」断言。
 
 代码之外的实例数据变更（非 patch，登记备查）：`core.basin_version` 中 `basins_yd_vbasins.geom` 由注册导入的 7891 个 mesh 三角形（31,564 点，被前端几何预算拒绝 → 无边界/无 bbox）替换为 mesh union+simplify 的 238 点流域边界 MultiPolygon（SRID 4490 保留，`ogr2ogr ST_Union` 自 `/home/ghdc/yd/input/yd/gis/domain.shp`）；原 geom 备份 `/home/nwm/yd-backup-basins_yd_vbasins-geom-20260901.json`（0600）。该表仅注册导入路径写入，autopipe 不覆写。
 
