@@ -54,6 +54,8 @@ yd 内部冲突顺序：
 
 任何 yd producer 进程中出现 `DATABASE_URL` 或 libpq 连接意图都视为配置错误，先停，不尝试“连通看看”。
 
+本节约束的是 yd producer/viewer 主线。应急 yd-NWM 副本实例是另一套系统，其边界单独定义在 §14；副本实例拥有自己的 PG、scheduler 与 env，不落入本节“yd 不得设置 `DATABASE_URL`”等条款，但对 **NWM 本体**的全部禁止关系（不修改 NWM 原件、unit、env、registry，不占 `:8080`，不连 NWM PG）对副本实例同样成立。
+
 ## 3. 节点拓扑与登录
 
 | 节点 | 登录 | 当前角色 |
@@ -375,3 +377,56 @@ viewer 回滚只作用于 yd：
 - 未跑过对应 oracle 时不得使用“已验证”“可上线”“可迁移”；
 - 测试失败、步骤跳过、节点不可达必须如实写进最终报告；
 - 每次跨节点操作结束时留下 commit、命令、结果和路径可复核的 receipt。
+
+## 14. 应急 yd-NWM 副本实例
+
+主线（M2–M5 producer/viewer）不变。为尽快获得 yd 可看可算的服务，另起一套 **NWM 完整服务的独立副本实例**，只注册 yd 流域。本节记录 2026-09-01 两节点只读勘察结论与部署边界；实际部署每一步仍需当时明确授权，并按 §13 留 receipt。
+
+### 14.1 原则
+
+- 副本代码与 NWM 上游**逐字节一致**，仅允许两个已登记 patch（见 14.4）；其余隔离全部落在部署身份层（checkout、env、unit、端口、路径）。禁止 sed 批量改名 `nwm`/`nhms` 内部符号。
+- 副本不能影响 NWM 业务化：不修改 NWM 的 checkout、unit、env、registry、DB、object-store、raw；不占 `:8080`/`:55432`；Nginx 只新增 `/yd/` location，`nginx -t` 后 reload，禁 restart。
+- 所有破坏性服务（retention/compression/governance）的作用域由 env 圈定（已逐脚本核实无硬编码路径）；副本的 `DATABASE_URL`、object-store/pgdata 根、以及全部 `*_LOCK_PATH`/`*_LOG_ROOT`/`*_RECEIPT_PATH`/`*_REPO(_ROOT)` 必须换成 yd 专属值——锁默认在 `/tmp`，照抄会与 NWM timer 互斥/竞态。
+
+### 14.2 勘察结论（2026-09-01，只读）
+
+node-27（`nwm@210.77.77.27`）：
+
+- NWM 生产为裸金属 user systemd：display-api（uvicorn，`127.0.0.1:8080`）、download/autopipe/frontier-alert/raw-retention/resource-governance/timeseries-compression/timeseries-retention 各 timer 均 active；
+- PG 是 `nhms-db` 容器，`127.0.0.1:55432->5432`；**`8081` 空闲**；
+- NFS 根 `/home/ghdc/`（22 侧 `/ghdc/data/`）权限 777，可建 yd 副本专属同级根；`/home/ghdc/yd` 为主线 YD_ROOT（当前为空），副本数据面不得放入其中；
+- NFS 总量 1.7T、余 164G（90% 用）；NWM raw 14 天滚动仅 3.0G，副本独立下载 raw 体量可承受；
+- `Basins/` 共 33 个流域，**无 yd**；样例 `heihe/input/heihe/` 的成员集与本仓 `fixtures/input/yd/` 完全同构，但 heihe `gis/` 有 domain/river/seg 三套 shapefile，yd fixture **缺 `seg.*` 一套**（registry import 对缺 `gis/seg.shp` 是拒绝语义）。
+
+node-22（`frd_muziyao@210.77.77.22`）：
+
+- 生产 scheduler = user systemd `nhms-compute-scheduler.timer`（每 5 分钟）→ `plan-production --submit --continuous --max-passes 1`，EnvironmentFile 为 `compute.scheduler-dbfree.env`；compute-api、slurm-gateway 均 active；
+- NWM checkout `/scratch/frd_muziyao/NWM`（勘察时 HEAD `ea6bcf1c`，仅 untracked `.nhms-work/`）；
+- `/volume/nwm/Basins`（本地 175T 盘，余 84T）与 NFS `/ghdc/data/nwm/Basins` 是**两棵独立树**：scheduler 读 /volume，27 侧 ingest 读 NFS——副本的 Basins 也要两处各放一份；
+- Slurm 分区 CPU（24 节点）/GPU（1），walltime 上限 10 天；`/scratch` 余 18T。
+
+### 14.3 身份隔离矩阵
+
+| 层 | NWM 现值 | yd 副本 |
+|---|---|---|
+| checkout | 27 `/home/nwm/NWM`；22 `/scratch/frd_muziyao/NWM` | 独立 clone（如 `.../yd-NWM`）+ 独立 venv；具体路径部署时登记 |
+| systemd | `nhms-*` user units | 全套 `yd-*` 前缀，ExecStart/WorkingDirectory/EnvironmentFile 指 yd checkout 与 yd env |
+| display 端口 | `127.0.0.1:8080` | `127.0.0.1:8081`（`NHMS_DISPLAY_API_PORT` 本为变量） |
+| PG | `nhms-db` 容器 `:55432` | 第二容器（如 `yd-db`）：新端口、新 pgdata、库名 `yd` |
+| 数据面 | `/{home/ghdc,ghdc/data}/nwm/...` | NFS 同级新根（如 `.../yd-nwm/`）：object-store、published、Basins（NFS 份）；22 本地 `/volume` 下新根放 Basins（scheduler 份） |
+| Slurm | 现有 job 名 | job-name 加 yd 前缀；同集群同分区 |
+| 流域注册 | 33 basin | 副本 Basins 树只放 `yd/` 一个流域 |
+| Nginx | `location / → :8080` | 仅新增 `location /yd/ { proxy_pass http://127.0.0.1:8081/; }`（剥前缀语义，§9.3） |
+
+### 14.4 仅有的两个代码 patch（fork 内登记维护）
+
+1. `services/orchestrator/source_cycle_raw_manifest.py:38-39`：`NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT`（现 `/ghdc/data/nwm/object-store`）与 manifest 前缀是代码字面量且 preflight 强制相等，副本改为 yd 数据面根；
+2. `apps/frontend/src/App.tsx`：`BrowserRouter` 增加 `basename={import.meta.env.BASE_URL}`（NWM 自身构建 BASE_URL=`/`，行为不变）。
+
+前端构建：`--base=/yd/` + `VITE_API_BASE_URL=/yd`（API client 与 MVT 瓦片 URL 均取自该变量，已核实无其它根绝对调用）。
+
+### 14.5 部署前已知缺口
+
+- yd 基线 `gis/` 需补 `seg.shp/.dbf/.prj/.shx` 后才能过 registry import；
+- 副本 venv 构建方式照抄 NWM 现场同款（NWM #1831 冻结约束只作用于 NWM 自己的 checkout，不约束副本 checkout，但部署时先确认现场构建方法）；
+- NFS 余量 164G 需在副本 retention 生效前监控。
