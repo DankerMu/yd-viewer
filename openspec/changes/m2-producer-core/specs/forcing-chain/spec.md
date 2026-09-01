@@ -61,6 +61,10 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 - **THEN** parser 与 producer 共用同一个 semantic validator；producer 在 existing lookup、mapping/package write 与 readiness mutation 前稳定拒绝，且不得把 unsafe filename静默替换成 synthetic filename后继续
 - **THEN** source-less parser 仍可保留 pin-compatible multi-source shape，但任何进入指定 source 的生产调用都必须要求 exact current-source singleton
 
+#### Scenario: canonical longitude 经 parser 保持 float 身份
+- **WHEN** JSON direct-grid contract 的 finite longitude 已位于 canonical `[-180,180)`，包括超过十位有效数字的合法值
+- **THEN** shared parser 必须原 float 返回且不得再做模运算制造 ULP 漂移；只允许保留既有 `-0.0 -> 0.0`，legacy `[180,360]` 输入仍按减 360 归一
+
 #### Scenario: request preservation 不得掩盖 authoritative drift
 - **WHEN** 合法 tuple 已 ready 后，当前 catalog、binding/`.sp.att` 或 canonical NetCDF/grid authority 发生 identity/checksum/content drift
 - **THEN** producer 在 existing lookup 后证明旧 ready 已 stale 并撤销其 final evidence；不得为了满足 malformed-request preservation 而返回旧 `already_done`
