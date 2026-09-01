@@ -82,7 +82,7 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 - **THEN** stable output-config identity 不匹配，producer 重算或 fail closed，不得返回旧 `already_done`
 
 ### Requirement: work 内临时 registry
-快照 file backend 要求 NWM 结构的 registry/model manifest 时，组装层 MUST 依据调用方显式提供的本轮 WorkIdentity、direct-grid contract 与已验证 binding/`.sp.att` bytes，在 `<work>/object-store/models/<model_id>/` 先 staging 后一次 rename 提交临时 registry/model package；MUST NOT 从变体 basename、`yd.binding` 文本、环境变量、数据库或外部 registry 服务猜测身份/contract。生成的 registry/model manifest MUST 可由 `FileForcingRepository` 原样消费，且 contract 的 binding/`.sp.att` checksum、source/project/model/basin identity 与本轮 work 必须一致。项目 MUST NOT 维护跨轮动态 registry；整棵 work 的成功/失败清理仍由既有 publish/cleanup owner 负责，组装层不得另建跨 work 删除协议。
+快照 file backend 要求 NWM 结构的 registry/model manifest 时，组装层 MUST 依据调用方显式提供的本轮 WorkIdentity、direct-grid contract 与已验证 binding/`.sp.att` bytes，在本轮 work 内的隔离 shadow object-store staging 中以最终相对 key 构造并由真实 `FileForcingRepository` 读回，再把 staged model 子树以同一 work/filesystem 的一次 no-follow rename 提交到 `<work>/object-store/models/<model_id>/`；MUST NOT 从变体 basename、`yd.binding` 文本、环境变量、数据库或外部 registry 服务猜测身份/contract。生成的 registry/model manifest MUST 可由 `FileForcingRepository` 原样消费，且 contract 的 binding/`.sp.att` checksum、source/project/model/basin identity 与本轮 work 必须一致。项目 MUST NOT 维护跨轮动态 registry；整棵 work 的成功/失败清理仍由既有 publish/cleanup owner 负责，组装层不得另建跨 work 删除协议。
 
 #### Scenario: 临时 registry 生命周期
 - **WHEN** 对显式 WorkIdentity、source-specific contract 与 checksum-correct assets 生成临时 file backend
@@ -97,9 +97,9 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 - **THEN** `forcing_domain_handoff.json` 与 `forcing_domain_package.json` 均落在本轮 object-store，handoff 的 `payloads.station_timeseries.time_lattice` 保留逐时段 `native_resolution`；本项目不恢复 NWM 2777 行 parser 来循环证明这些 JSON
 
 ### Requirement: SHUD 输入组装与固定参数
-组装器 MUST 在 work 内由模型变体、checksum 绑定的 forcing package 与本轮 warm-start 状态组装完整 SHUD 运行目录。运行目录终名固定为 `<work>/model` 并经同父目录 staging 一次 rename 提交；运行目录的初始条件 MUST 为 `states/<source>/<T>.cfg.ic` 的原始 bytes，状态必须是 no-follow 普通文件、可按原生分段格式解析且绝对时间头对应 T；该状态 MUST 覆盖模型变体自带率定末态，MUST NOT 被重戳、修正或回退到变体初态。forcing package 只能从 checksum 验证过的 package manifest 的 SHUD role 成员组装：index 在运行目录改名为 `<project_name>.tsd.forc`，station CSV basename 原样保留；debug/payload/handoff/domain-package 产物不得进入模型输入目录。
+组装器 MUST 在 work 内由模型变体、checksum 绑定的 forcing package 与本轮 warm-start 状态组装完整 SHUD 运行目录。运行目录终名固定为 `<work>/model` 并经同父目录 staging 一次 rename 提交；运行目录的初始条件 MUST 为 `states/<source>/<T>.cfg.ic` 的原始 bytes，状态必须是 no-follow 普通文件、可按原生分段格式解析且绝对时间头对应 T；该状态 MUST 覆盖模型变体自带率定末态，MUST NOT 被重戳、修正或回退到变体初态。variant 发现 MUST 严格局限于显式根并以 descriptor-bound streaming 复制普通文件，不得跟随 symlink/读取特殊文件，也不得在无模型包合同依据时另设 entry/depth 业务上限。forcing package 只能从 checksum 验证过的 package manifest 的 SHUD role 成员组装：index 在运行目录改名为 `<project_name>.tsd.forc`，station CSV basename 原样保留；debug/payload/handoff/domain-package 产物不得进入模型输入目录。
 
-组装 MUST 在 `<project_name>.para` 上固定覆盖 `START=0`、`END=7`、`DT_QR_DOWN=60`、`Update_IC_STEP=720`、`BINARY_OUTPUT=1`、`ASCII_OUTPUT=0`。参数 writer 只认 `{{KEY}}`、`${KEY}`、`KEY = value` 三种已登记形态：每键零命中则追加，恰一命中则替换，多命中则拒绝；六项之外的 bytes 保持不变。00Z 与 12Z MUST 使用同一套参数 bytes。
+组装 MUST 在 `<project_name>.para` 上固定覆盖 `START=0`、`END=7`、`DT_QR_DOWN=60`、`Update_IC_STEP=720`、`BINARY_OUTPUT=1`、`ASCII_OUTPUT=0`。参数 writer 只认 `{{KEY}}`、`${KEY}`、`KEY = value` 三种已登记形态：每键零命中则追加，恰一命中则替换，多命中则拒绝；同一行可各含一个不同 key 的 placeholder，后处理的 key 不得恢复前一 key 的旧 placeholder；六项之外的 bytes 保持不变。00Z 与 12Z MUST 使用同一套参数 bytes。
 
 #### Scenario: 参数三形态覆盖与 cycle 无关
 - **WHEN** 对含 placeholder、shell-style placeholder、assignment 与缺失键的合成 `.para` 分别以 00Z/12Z 执行组装
