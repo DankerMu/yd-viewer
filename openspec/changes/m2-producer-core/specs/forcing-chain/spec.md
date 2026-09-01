@@ -86,7 +86,7 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 
 #### Scenario: 临时 registry 生命周期
 - **WHEN** 对显式 WorkIdentity、source-specific contract 与 checksum-correct assets 生成临时 file backend
-- **THEN** registry、manifest、binding、`.sp.att` 与 station index 只落在本轮 `<work>/object-store/models/<model_id>/`，`FileForcingRepository` 能读回同一 model/source/contract；既有 work 删除后无任何 registry 残留或 work 外副本
+- **THEN** registry、manifest、binding、`.sp.att` 与 station index 只落在本轮 `<work>/object-store/models/<model_id>/`，`FileForcingRepository` 能读回同一 model/source/contract；station index geometry使用float shortest-roundtrip文本，负z只在该既有file-backend兼容视图中归一为`0.0`且不得反向改写direct-grid contract/forcing station；既有 work 删除后无任何 registry 残留或 work 外副本
 
 #### Scenario: 临时 registry 原子提交与身份拒绝
 - **WHEN** final model root/staging 已存在，或 binding/`.sp.att` checksum、contract URI、source/cycle/model/basin/project identity 任一不一致
