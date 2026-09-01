@@ -823,8 +823,12 @@ def _required_longitude(
                 "expected_range": "[-180, 360] before normalization",
             },
         )
-    normalized = ((longitude + 180.0) % 360.0) - 180.0
-    return 0.0 if normalized == -0.0 else normalized
+    # Already-canonical [-180, 180) values round-trip float-identically; an
+    # unconditional modulo would drift full-precision values by 1 ULP. Only
+    # legacy [180, 360] input is normalized by subtracting 360.
+    if -180.0 <= longitude < 180.0:
+        return 0.0 if longitude == -0.0 else longitude
+    return 0.0 if longitude == 360.0 else longitude - 360.0
 
 
 def _required_latitude(

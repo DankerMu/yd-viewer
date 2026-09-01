@@ -34,7 +34,7 @@ BINDING_SHA = "54667e8692f419b59ccbc48b7767ff6f9008b5932b50c7ccd8827f5cd130d420"
 SP_ATT_SHA = "378d3048687c872f30d3a5a29399ed25ac5ccd060c389704fb173d5010a53d3a"
 INDEX_LITERAL = (
     b"ID\tLon\tLat\tX\tY\tZ\tFilename\n"
-    b"1\t1\t2\t3\t4\t5\tX1.csv\n2\t6\t7\t8\t9\t10\tX2.csv\n"
+    b"1\t1.0\t2.0\t3.0\t4.0\t5.0\tX1.csv\n2\t6.0\t7.0\t8.0\t9.0\t10.0\tX2.csv\n"
 )
 INDEX = (
     b"2 20260507\nshud\nID\tLon\tLat\tX\tY\tZ\tFilename\n"

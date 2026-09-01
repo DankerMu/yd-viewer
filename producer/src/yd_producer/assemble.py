@@ -634,7 +634,7 @@ def _repository(
         or actual.properties_json.get("shud_forcing_index") != item.shud_forcing_index
         or actual.properties_json.get("forcing_filename") != item.forcing_filename
         or (actual.longitude, actual.latitude, actual.elevation_m)
-        != (item.longitude, item.latitude, item.z)
+        != (item.longitude, item.latitude, max(float(item.z), 0.0))
         for actual, item in zip(stations, wanted, strict=True)
     ):
         raise ValueError("repository station-index read-back differs from contract.")
@@ -745,8 +745,9 @@ def _contract_payload(contract: DirectGridForcingContract) -> dict[str, Any]:
 def _station_index(contract: DirectGridForcingContract) -> bytes:
     rows = ["ID\tLon\tLat\tX\tY\tZ\tFilename\n"]
     for station in sorted(contract.stations, key=lambda item: item.shud_forcing_index):
-        values = (station.longitude, station.latitude, station.x, station.y, station.z)
-        geometry = "\t".join(f"{float(value):.10g}" for value in values)
+        z = max(float(station.z), 0.0)
+        values = (station.longitude, station.latitude, station.x, station.y, z)
+        geometry = "\t".join(repr(float(value)) for value in values)
         rows.append(
             f"{station.shud_forcing_index}\t{geometry}\t{station.forcing_filename}\n"
         )

@@ -582,6 +582,39 @@ def test_finite_state_parser_no_line_buffering_tracemalloc() -> None:
     assert peak < 4 * 1024 * 1024, f"peak={peak}"
 
 
+@pytest.mark.parametrize(
+    "row_name",
+    ["X1.csv;rm", "X1.csvZZZ"],
+)
+def test_index_parser_rejects_invalid_filename_suffix(row_name: str) -> None:
+    # The declared name X1.csv is a valid prefix of the full token; the
+    # parser must reject the whole row instead of accepting the prefix.
+    content = (
+        b"ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        b"1\t1\t2\t3\t4\t5\t" + row_name.encode() + b"\n"
+    )
+    for chunks in (
+        iter([content]),
+        iter(content[index : index + 3] for index in range(0, len(content), 3)),
+    ):
+        with pytest.raises(ValueError) as captured:
+            _assemble_fs.parse_shud_index_stream(chunks, digest(content), ["X1.csv"])
+        assert "invalid station row" in str(captured.value)
+
+
+@pytest.mark.parametrize("row_name", ["X1.csv;rm", "X1.csvZZZ"])
+def test_assemble_rejects_invalid_filename_suffix_before_staging(
+    tmp_path: Path, row_name: str
+) -> None:
+    prepared_inputs = prepared(tmp_path)
+    value, work, registry, _variant, _states, _state, _forcing = prepared_inputs
+    bad_index = INDEX.replace(b"X1.csv", row_name.encode(), 1)
+    forcing = write_forcing_package(registry.object_store_root, value, index=bad_index)
+    error = _refuse(prepared_inputs, forcing)
+    assert error.phase == "validate"
+    assert not list(work.glob(".model.assemble-stage-*"))
+
+
 def test_index_utf8_split_across_chunks_fails_closed(
     tmp_path: Path, monkeypatch
 ) -> None:

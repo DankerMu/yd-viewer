@@ -246,7 +246,7 @@ class _IndexParser:
         if self._field_index == 0:
             self._id_valid = self._id_ok and self._id_count > 0
         elif self._field_index == 6:
-            self._row_name = "".join(self._name)
+            self._row_name = "".join(self._name) if self._name_ok else ""
         self._field_index += 1
 
     def _end_row(self) -> None:

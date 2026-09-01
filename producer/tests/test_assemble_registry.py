@@ -683,6 +683,104 @@ def test_file_repository_produces_handoff_with_native_time_lattice(
     }
 
 
+def test_station_index_preserves_full_precision_and_negative_z_compat(
+    tmp_path: Path,
+) -> None:
+    # Values need more than ten significant digits; the compatibility view
+    # must round-trip them through the real FileForcingRepository.
+    full = {
+        "longitude": 112.12345678901234,
+        "latitude": 23.123456789012345,
+        "x": 1234567.8901234567,
+        "y": 7654321.098765432,
+        "z": -12.345678901234,
+    }
+    value = identity()
+    base = contract(value)
+    precise = replace(
+        base.stations[0],
+        **full,
+    )
+    negative = replace(base.stations[1], z=-0.5)
+    precise_contract = replace(base, stations=(precise, negative))
+    work_dir(tmp_path, value)
+    registry = stage_work_registry(
+        work_root=tmp_path,
+        identity=value,
+        contract=precise_contract,
+        binding_content=BINDING,
+        sp_att_content=SP_ATT,
+        max_asset_bytes=4096,
+    )
+    # Independent literal oracle: exact committed station-index bytes, written
+    # out by hand (not recomputed via repr/the production serializer). The
+    # latitude field is the shortest-roundtrip text for the input double
+    # (23.123456789012345 parses to the float whose repr is ...344).
+    expected_index = (
+        b"ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        b"1\t112.12345678901234\t23.123456789012344\t1234567.8901234567"
+        b"\t7654321.098765432\t0.0\tX1.csv\n"
+        b"2\t6.0\t7.0\t8.0\t9.0\t0.0\tX2.csv\n"
+    )
+    index_path = registry.object_store_root / "models/demo_model/package/demo.tsd.forc"
+    assert index_path.read_bytes() == expected_index
+    # Repository read-back: elevation is the clamped compatibility value.
+    repository = FileForcingRepository(
+        LocalObjectStore(registry.object_store_root), registry.registry_manifest
+    )
+    stations = repository.load_met_stations(basin_version_id="basin_v1")
+    assert [(item.longitude, item.latitude, item.elevation_m) for item in stations] == [
+        (112.12345678901234, 23.123456789012345, 0.0),
+        (6.0, 7.0, 0.0),
+    ]
+    # The original contract payload and the direct-grid producer consumer
+    # retain the original geometry, including lon/lat and negative z.
+    payload = json.loads(
+        (registry.object_store_root / registry.registry_manifest).read_bytes()
+    )
+    rows = payload["models"][0]["resource_profile"]["direct_grid_forcing"][
+        "station_bindings"
+    ]
+    assert [
+        (row["longitude"], row["latitude"], row["x"], row["y"], row["z"])
+        for row in rows
+    ] == [
+        (
+            112.12345678901234,
+            23.123456789012345,
+            1234567.8901234567,
+            7654321.098765432,
+            -12.345678901234,
+        ),
+        (6.0, 7.0, 8.0, 9.0, -0.5),
+    ]
+    from yd_producer.forcing.producer import _met_stations_from_direct_grid_contract
+
+    direct_grid = _met_stations_from_direct_grid_contract(
+        precise_contract, basin_version_id="basin_v1"
+    )
+    assert [item.elevation_m for item in direct_grid] == [-12.345678901234, -0.5]
+    assert [
+        (
+            item.longitude,
+            item.latitude,
+            item.properties_json["x"],
+            item.properties_json["y"],
+            item.properties_json["z"],
+        )
+        for item in direct_grid
+    ] == [
+        (
+            112.12345678901234,
+            23.123456789012345,
+            1234567.8901234567,
+            7654321.098765432,
+            -12.345678901234,
+        ),
+        (6.0, 7.0, 8.0, 9.0, -0.5),
+    ]
+
+
 def test_assembled_run_is_contained_by_real_whole_work_cleanup(tmp_path: Path) -> None:
     value, work, registry, variant, states, state, forcing = prepared(tmp_path)
     result = run_assemble((value, work, registry, variant, states, state, forcing))

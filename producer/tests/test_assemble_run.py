@@ -241,6 +241,46 @@ def test_input_roots_inside_work_are_rejected_before_staging(tmp_path: Path) -> 
     )
 
 
+@pytest.mark.parametrize("entry", ["demo.cfg.ic", "demo.para"])
+@pytest.mark.parametrize("shape", ["missing", "directory", "symlink"])
+def test_required_variant_entry_must_be_a_regular_no_follow_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str, shape: str
+) -> None:
+    value, work, registry, variant, states, state, forcing = _inputs(tmp_path)
+    target = variant / entry
+    target.unlink()
+    if shape == "directory":
+        target.mkdir()
+    elif shape == "symlink":
+        other = "demo.para" if entry == "demo.cfg.ic" else "demo.cfg.ic"
+        target.symlink_to(variant / other)
+    # Discriminate the exact preflight: _tree must call regular() on the
+    # retyped required entry before any staging write. A bypass/tolerance of
+    # that check (the missing/directory/symlink para arms are otherwise caught
+    # only incidentally by the later parameter read) turns this red.
+    checked: list[str] = []
+    original = __import__("yd_producer._assemble_fs", fromlist=["regular"]).regular
+
+    def spying_regular(path, root):
+        if path.parent == variant:
+            checked.append(path.name)
+        return original(path, root)
+
+    monkeypatch.setattr("yd_producer._assemble_fs.regular", spying_regular)
+    # Snapshot all three sources after constructing the broken input but
+    # before assemble; every arm must leave the complete tree byte-identical.
+    before = sources(variant, states, registry.object_store_root)
+    _refuse(
+        (value, work, registry, variant, states, state, forcing),
+        phase="validate",
+        snapshot=False,
+    )
+    assert sources(variant, states, registry.object_store_root) == before
+    assert entry in checked
+    assert not (work / "model").exists()
+    assert not list(work.glob(".model.assemble-stage-*"))
+
+
 def test_variant_nested_symlink_fifo_and_unsafe_component_fail(tmp_path: Path) -> None:
     value, work, registry, variant, states, state, forcing = _inputs(tmp_path)
     os.mkfifo(variant / "bad.fifo")

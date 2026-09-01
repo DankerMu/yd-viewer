@@ -273,6 +273,56 @@ def test_contract_oversized_bindings_rejected() -> None:
         parse_direct_grid_forcing_contract(manifest, source_id="GFS")
 
 
+@pytest.mark.parametrize(
+    "longitude",
+    [
+        # Full-precision canonical values must round-trip float-identically:
+        # unconditional modulo would drift 112.12345678901234 by 1 ULP.
+        112.12345678901234,
+        -179.99999999999997,
+        -112.12345678901234,
+        0.0,
+        179.99999999999997,
+    ],
+)
+def test_contract_parser_preserves_canonical_longitude_float_identity(
+    longitude: float,
+) -> None:
+    manifest = _base_manifest()
+    manifest["station_bindings"][0]["longitude"] = longitude
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+    assert contract.stations[0].longitude == longitude
+    assert repr(contract.stations[0].longitude) == repr(longitude)
+
+
+def test_contract_parser_normalizes_negative_zero_longitude_to_positive() -> None:
+    manifest = _base_manifest()
+    manifest["station_bindings"][0]["longitude"] = -0.0
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+    assert contract.stations[0].longitude == 0.0
+    assert repr(contract.stations[0].longitude) == "0.0"
+
+
+@pytest.mark.parametrize(
+    "longitude, expected",
+    [
+        # Legacy [180, 360] input keeps subtract-360 normalization.
+        (180.0, -180.0),
+        (200.5, -159.5),
+        (292.12345678901234, -67.87654321098768),
+        (360.0, 0.0),
+    ],
+)
+def test_contract_parser_normalizes_legacy_longitude_by_subtracting_360(
+    longitude: float, expected: float
+) -> None:
+    manifest = _base_manifest()
+    manifest["station_bindings"][0]["longitude"] = longitude
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+    assert contract.stations[0].longitude == expected
+    assert repr(contract.stations[0].longitude) == repr(expected)
+
+
 def test_contract_rejects_duplicate_grid_cell_id_with_stable_discriminator() -> None:
     manifest = _base_manifest()
     duplicate = dict(manifest["station_bindings"][0])
