@@ -396,7 +396,7 @@ node-27（`nwm@210.77.77.27`）：
 - PG 是 `nhms-db` 容器，`127.0.0.1:55432->5432`；**`8081` 空闲**；
 - NFS 根 `/home/ghdc/`（22 侧 `/ghdc/data/`）权限 777，可建 yd 副本专属同级根；`/home/ghdc/yd` 为主线 YD_ROOT（当前为空），副本数据面不得放入其中；
 - NFS 总量 1.7T、余 164G（90% 用）；NWM raw 14 天滚动仅 3.0G，副本独立下载 raw 体量可承受；
-- `Basins/` 共 33 个流域，**无 yd**；样例 `heihe/input/heihe/` 的成员集与本仓 `fixtures/input/yd/` 完全同构，但 heihe `gis/` 有 domain/river/seg 三套 shapefile，yd fixture **缺 `seg.*` 一套**（registry import 对缺 `gis/seg.shp` 是拒绝语义）。
+- `Basins/` 共 33 个流域，**无 yd**；yd 原始数据的权威源是 NFS `/home/ghdc/yd`（22 侧 `/ghdc/data/yd`）：`input/yd/` 全套 SHUD 成员 + `CALIB/lz.calib`，`gis/` 含 domain/river/seg 三套完整 shapefile，布局符合 Basins 约定（registry import 所需的 `gis/river.shp`、`gis/seg.shp` 均在）——副本注册 yd 的成本即拷贝该目录到副本的两棵 Basins 树。本仓 `fixtures/input/yd/` 只是它的本地子集（缺 `seg.*`），不作为注册来源。
 
 node-22（`frd_muziyao@210.77.77.22`）：
 
@@ -427,6 +427,6 @@ node-22（`frd_muziyao@210.77.77.22`）：
 
 ### 14.5 部署前已知缺口
 
-- yd 基线 `gis/` 需补 `seg.shp/.dbf/.prj/.shx` 后才能过 registry import；
+- 注册来源用 NFS `/home/ghdc/yd`（完整，含 `seg.*`），不用本地 fixture 子集；`/home/ghdc/yd` 同时是主线 YD_ROOT 的现场根，副本只读拷出，不在其中新建任何目录；
 - 副本 venv 构建方式照抄 NWM 现场同款（NWM #1831 冻结约束只作用于 NWM 自己的 checkout，不约束副本 checkout，但部署时先确认现场构建方法）；
 - NFS 余量 164G 需在副本 retention 生效前监控。
