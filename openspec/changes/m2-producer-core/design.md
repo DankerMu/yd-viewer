@@ -49,6 +49,8 @@
 
 一次 work 即一次 Slurm attempt；重排队/进程重启必须由 controller 删除并重组整棵 work，禁止从旧 `run_dir` 恢复 `_captured`。磁盘规范文件名从不构成 authority：只信同一 tracker 实例的 `CapturedCheckpoint` 与其 checksum。新 tracker 遇到既有 `state_checkpoints/<project>.f012.cfg.ic.update` 不覆盖、不删除；补跑同样把它判为未验证 residue 并失败，保留证据。专用输出固定为 `<work>/state_checkpoint_recovery/f012`，整棵 recovery root 必须在本次调用前不存在；任何旧条目/目录/symlink 都拒绝而不半清理。
 
+canonical 的删除规则进一步收敛为零：tracker 在捕获或补跑安装后，即使自己刚完成 O_EXCL 创建，也不再按 pathname 清理校验/回读失败的条目。O_EXCL 返回只能证明创建瞬间的所有权；另一个写者可在返回后、回读前 unlink/替换同名 entry，而现有 `safe_fs` 没有 compare-and-unlink 原语可证明当前 pathname 仍指向本调用创建的 inode。失败条目因此作为未验证 residue 保留、不得记入 `_captured`，并阻断该 work 内重试；#26 在整轮失败路径统一删除整棵 work。这样避免 tracker 自建一套不完整的补偿删除协议。
+
 补跑仍使用 `RunDirectory` 的同一初态、forcing index 与 forcing CSV。调用前后对这些显式静态输入做 descriptor-bound checksum 对账；runner 只得到原 `RunDirectory` 与专用 output dir。参数文件在同步调用窗口内经唯一 writer 临时改成 `END=0.5`、`Update_IC_STEP=720`，并在 `finally` 原字节恢复；恢复失败、静态输入漂移、runner 异常/非零退出、无候选、候选 header/body 不合法或安装后 checksum 漂移均抛 `TrackerError`，不得把候选写入 `_captured`。候选只认 output dir 顶层精确 `<project>.cfg.ic.update`，不递归发现、不接受主跑末态或旧 residue。
 
 `render_shud_parameters` 扩为 `render_shud_parameters(content, *, end: Literal["7", "0.5"] = "7")`；默认调用 byte-for-byte 保持 #15 的六项主跑参数，补跑只允许显式 `end="0.5"`，其它值拒绝。yd publisher 已以显式 `scratch_checkpoint` 为输入，全仓无 `state_checkpoints.json` 消费者；因此不移植 pin 的 `write_manifest`/recovery outcome/provenance/final-IC JSON、两处 Slurm 环境读取或 `state_cli.py` rekey 面，避免制造第二套完成/发现协议。控制器提交计数与无 `DONE` 集成断言仍归 #26。

@@ -2516,8 +2516,8 @@ def ensure_twelve_hour_checkpoint(
 
 1. 唯一 authority 是同一 tracker 实例的 `CapturedCheckpoint`。若 `captured[12]` 已存在，先要求五字段与 canonical target/relative 720/source name 一致，再在同一 no-follow fd 有界读回：SHA-256 必须等于记录、header 命中 relative 720、`state.parse` 成功。全通过时原对象返回、runner 0 调用；任一漂移抛 `TrackerError`，不补跑、不覆盖/删除证据。
 2. 若实例内无记录，canonical target `state_checkpoints/<project>.f012.cfg.ic.update` 必须不存在。任意既有普通文件、目录、symlink 都是未验证 residue：runner 0 调用、原树 byte/type 不变、抛 `TrackerError`。
-3. #16 的 `_capture` 从 `atomic_write_bytes_no_follow` 改用 `write_bytes_no_follow_exclusive`（或等价 O_EXCL no-follow），并为 `FileExistsError` 单列不删除分支：新 tracker 观察 720 时若规范文件已在盘，只如实保持 missing，绝不能 overwrite 后 `_discard` 旧文件。创建后自身写/校验失败仍只清理本次新建的副本。
-4. recovery 安装同样 O_EXCL；commit 窗口里外来 entry 抢先出现时不覆盖、不删除。只在本调用确实新建 canonical 后，安装/回读失败才 best-effort 删除自己的半成品；清不掉则留下未验证 residue且不记 `_captured`。
+3. #16 的 `_capture` 从 `atomic_write_bytes_no_follow` 改用 `write_bytes_no_follow_exclusive`（或等价 O_EXCL no-follow），并为 `FileExistsError` 单列不删除分支：新 tracker 观察 720 时若规范文件已在盘，只如实保持 missing，绝不能 overwrite 后 `_discard` 旧文件。源 bytes 必须在 O_EXCL 前通过 header/body gate；写后回读必须逐字等于这份已验证 bytes。任何创建后校验/回读失败都保留 canonical 为未验证 residue、保持 missing，不按 pathname 删除。
+4. recovery 安装同样 O_EXCL；commit 窗口里外来 entry 抢先出现时不覆盖、不删除。安装后回读必须逐字等于首次已验证的 candidate bytes；回读失败或不同均保留 canonical residue、不得记 `_captured`，不按 pathname 删除。理由是 O_EXCL 只证明创建瞬间的所有权，无法排除竞争者随后 unlink/替换同名 entry；现有 `safe_fs` 无 compare-and-unlink，整棵失败 work 由 #26 统一回收。
 
 **C. 同初态、同 forcing 与临时参数**：
 
@@ -2570,7 +2570,7 @@ def ensure_twelve_hour_checkpoint(
 - Storage/cache/query: `_captured` 是唯一 attempt-local authority；磁盘无 manifest/cache 查询。
 - Public routes/entrypoints: `ensure_twelve_hour_checkpoint`、`RecoveryRunner`、`render_shud_parameters(end=...)`；CLI/controller 不在本 issue。
 - Frontend/downstream consumers: #24 publisher 的显式 `scratch_checkpoint`；#26 job-local orchestration；viewer 无消费。
-- Failure paths/rollback/stale state: parameter finally restore；输入 drift/runner/candidate/install 失败不记 authority；旧 residue 不覆盖/不删；整个 work 由 #26 后继回收。
+- Failure paths/rollback/stale state: parameter finally restore；输入 drift/runner/candidate/install 失败不记 authority；旧 residue 与 O_EXCL 后校验/回读失败的 canonical 都不覆盖、不按 pathname 删除；整个 work 由 #26 后继回收。
 - Evidence/audit/readiness: focused tests、prechange red、mutation matrix、snapshot guards、full producer/Ruff/OpenSpec；M4 真实 SHUD receipt 明示未覆盖。
 - Regression rows:
   - valid watcher capture -> point-of-use recheck 后 runner 0 调用、返回原记录。
@@ -2583,7 +2583,7 @@ def ensure_twelve_hour_checkpoint(
 - Shared helper roots: `store.safe_fs` 只消费，不修改；`assemble.render_shud_parameters` 是唯一 shared writer owner。
 - Public entrypoints: tracker package 两个新增导出；既有导出/签名不删。
 - Read surfaces: parameter/state/index/CSV/candidate/canonical，全部 exact path、no-follow、bounded/streamed。
-- Write/delete/overwrite surfaces: recovery dirs、临时 parameter overwrite/restore、canonical O_EXCL；只删本调用自己创建的失败 canonical，绝不清旧 residue。
+- Write/delete/overwrite surfaces: recovery dirs、临时 parameter overwrite/restore、canonical O_EXCL；tracker 对 canonical 零删除，旧 residue 与 O_EXCL 后失败 residue 均留给 #26 整 work 回收。
 - Staging/publish/rollback surfaces: fresh recovery output + parameter finally；无 NFS publish/DONE。
 - Producer/consumer evidence boundaries: runner rc + exact candidate bytes -> CapturedCheckpoint checksum -> #24 explicit path。
 - Stale-state/idempotency boundaries: existing valid captured record可安全复用；无记录的同名文件/旧 root 一律拒绝；失败后同 work 不重试。
@@ -2605,7 +2605,7 @@ def ensure_twelve_hour_checkpoint(
 12. candidate 在首次 bounded read 后被另一份 regular file替换 -> 安装/记录仍严格对应首次已验证 bytes，不能把第二份未经验证 bytes复制进 canonical；canonical readback与记录checksum一致。
 13. target hours `(720,)`/`(6,)`/`(6,12)` -> runner 0、recovery root不存在、参数/输入不变。
 14. forged `RunDirectory` matrix：path mismatch/relative、project mismatch、state/parameter/index 外指、CSV duplicate/casefold duplicate/超 cap、任一 static symlink/nonregular -> pre-write `TrackerError`。
-15. no-clobber 写自身失败/回读失败 -> 只 best-effort 删本次 canonical；清理失败时 residue存在但 `captured` 为空。
+15. no-clobber 写后回读失败、或 O_EXCL 返回后同名 entry 被另一份合法/损坏文件替换 -> canonical residue 原样保留、tracker 零 pathname 删除、`captured` 为空；捕获侧保持 missing，补跑侧整轮 `TrackerError`。
 16. public structure：`RecoveryRunner` runtime protocol/`ensure` keyword-only signature、tracker package导出；`assemble.py`/两个测试文件各≤1000行，`.large-file-guard.json` diff为空。
 17. snapshot：`test_checkpoint_recovery.py` 前 5 行有精确 pin/source 注释；清单 cap 6/6b 两目标均已落地，Markdown 数据行恰 28、唯一 NWM 原路径恰 27；provenance 解析器关于「27 条原路径」的说明保持正确；正反 provenance 与 DB-free scan green；`checkpoint_tracker.py` 不出现环境/外部 DB 调用。
 18. pre-change red：在 docs-only fixture commit 上 overlay 最终 source-neutral tests；新 public imports/signature/no-clobber/recovery行为必须 behavioral red，不接受只有 collection error而零行为断言的单一证据。

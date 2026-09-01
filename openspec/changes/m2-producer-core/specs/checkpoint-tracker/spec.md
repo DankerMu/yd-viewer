@@ -34,11 +34,15 @@ tracker MUST 在 SHUD 运行期间轮询 `<project>.cfg.ic.update` 的 header �
 - **THEN** tracker 不新增捕获 authority，本 source/cycle 判失败，无状态推进、无 `DONE`
 
 ### Requirement: attempt-local authority 与残留隔离
-每棵 scratch work MUST 只服务一个 Slurm attempt；捕获 authority MUST 是同一 tracker 实例的记录及其 checksum，MUST NOT 由规范文件名存在、目录扫描或上一次 attempt 的 recovery 产物推导。新 tracker/recovery 见到同名 checkpoint 或既有 recovery root 时 MUST 保留残留并 fail closed，MUST NOT 覆盖、删除或采纳。产品补跑目标 MUST 恰为 12 小时；其它目标（含把 720 分钟误写为 720 小时）MUST 在任何 runner 调用和文件写入前拒绝。
+每棵 scratch work MUST 只服务一个 Slurm attempt；捕获 authority MUST 是同一 tracker 实例的记录及其 checksum，MUST NOT 由规范文件名存在、目录扫描或上一次 attempt 的 recovery 产物推导。新 tracker/recovery 见到同名 checkpoint 或既有 recovery root 时 MUST 保留残留并 fail closed，MUST NOT 覆盖、删除或采纳。tracker 在 O_EXCL 创建 canonical 后也 MUST NOT 按 pathname 删除校验/回读失败的条目：创建成功不能证明当前 pathname 未被竞争者替换，失败条目 MUST 作为未验证残留保留且不得记为 authority，最终随整棵失败 work 由 controller 回收。产品补跑目标 MUST 恰为 12 小时；其它目标（含把 720 分钟误写为 720 小时）MUST 在任何 runner 调用和文件写入前拒绝。
 
 #### Scenario: 旧规范文件不是 checkpoint authority
 - **WHEN** 新 tracker 的 `state_checkpoints/` 已有一个 header/body 均合法的规范文件，但实例内无对应捕获记录
 - **THEN** 实时观测不覆盖或删除该文件，补跑不采纳它，并以未验证残留失败
+
+#### Scenario: O_EXCL 后同名 entry 被替换
+- **WHEN** 捕获或补跑安装的 O_EXCL 写返回后、canonical 回读前，同名 entry 被替换为另一份合法或损坏的文件，或回读本身失败
+- **THEN** tracker 不采纳、不按 pathname 删除该 entry，保留未验证残留并报告未捕获或整轮失败
 
 #### Scenario: 不可达目标小时早拒绝
 - **WHEN** tracker 目标为 `[720]` 或任何不等于 `[12]` 的集合
