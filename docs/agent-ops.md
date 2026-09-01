@@ -414,7 +414,7 @@ node-22（`frd_muziyao@210.77.77.22`）：
 | display 端口 | `127.0.0.1:8080` | `127.0.0.1:8081`（`NHMS_DISPLAY_API_PORT` 本为变量） |
 | PG | `nhms-db` 容器 `:55432` | 第二容器（如 `yd-db`）：新端口、新 pgdata、库名 `yd` |
 | 数据面 | `/{home/ghdc,ghdc/data}/nwm/...` | NFS 同级新根（如 `.../yd-nwm/`）：object-store、published、Basins（NFS 份）；22 本地 `/volume` 下新根放 Basins（scheduler 份） |
-| Slurm | 现有 job 名 | ~~job-name 加 yd 前缀~~ **未交付**：sbatch 模板未 patch，副本作业仍以 `nhms_*` 名入队，与 NWM 作业靠 JobID/提交账户区分（提交账户同为 frd_muziyao）。误 scancel 风险已知，是否补一行模板 patch 待裁决；同集群同分区 |
+| Slurm | 现有 job 名 | job-name `yd_<stage>` 前缀（2026-09-01 用户裁决后交付，fork commit `9bff45df`：14 个 sbatch 模板 + reconcile 双前缀容忍——sacct 名字校验是次级防护，legacy `nhms_*` 行永久可接受以覆盖切换窗）；同集群同分区 |
 | 流域注册 | 33 basin | 副本 Basins 树只放 `yd/` 一个流域 |
 | Nginx | `location / → :8080` | 仅新增 `location /yd/ { proxy_pass http://127.0.0.1:8081/; }`（剥前缀语义，§9.3） |
 
@@ -422,7 +422,9 @@ node-22（`frd_muziyao@210.77.77.22`）：
 
 1. `services/orchestrator/source_cycle_raw_manifest.py:38-39`：`NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT`（现 `/ghdc/data/nwm/object-store`）与 manifest 前缀是代码字面量且 preflight 强制相等，副本改为 yd 数据面根（22 侧 fork commit `d65303cd`）；
 2. `apps/frontend/src/App.tsx`：`BrowserRouter` 增加 `basename={import.meta.env.BASE_URL.replace(/\/+$/, "")}`（NWM 自身构建 BASE_URL=`/`，行为不变；27 侧 fork commit `537fc4a4`）；
-3. `config/calibration_overrides.yaml` 置空为 `calibration_overrides: []`（上游含 hetianhe 条目，registry publisher 对 yd-only inventory fail-closed 拒发；配置文件而非代码，仍按 patch 登记；22 侧 fork commit `e75d2907`）——部署中发现，待用户追认，可否决回退。
+3. `config/calibration_overrides.yaml` 置空为 `calibration_overrides: []`（上游含 hetianhe 条目，registry publisher 对 yd-only inventory fail-closed 拒发；配置文件而非代码，仍按 patch 登记；22 侧 fork commit `e75d2907`）——部署中发现，待用户追认，可否决回退；
+4. `apps/frontend/src/api/base.ts`：`buildApiUrl` 对相对前缀 base（`/yd`）改走字符串拼接——`new URL(path, "/yd/")` 因 base 非绝对 URL 直接抛 TypeError，React 整树崩溃白屏（2026-09-01 上线后用户报障，headless Chrome 复现定位）；NWM 现行两条路径（空 base、绝对 URL base）行为不变（27 侧 fork commit `4c7b89a5`）；
+5. Slurm job-name `yd_<stage>`（22 侧 fork commit `9bff45df`）：14 个 `infra/sbatch/*.sbatch` 模板 + `services/orchestrator/reconcile.py`（`_expected_job_name_token`→`yd_`、`FALLBACK_JOB_NAME="yd_forecast,nhms_forecast"`、`_GENERIC_ARRAY_JOB_NAMES` 双前缀、`_strip_job_name_prefix` 容忍 legacy 行，规避切换窗 wedge）。
 
 前端构建：`--base=/yd/` + `VITE_API_BASE_URL=/yd`（API client 与 MVT 瓦片 URL 均取自该变量，已核实无其它根绝对调用）。
 
@@ -441,6 +443,7 @@ node-22（`frd_muziyao@210.77.77.22`）：
 - 数据面：NFS `/{home/ghdc,ghdc/data}/yd-nwm/`；22 本地 `/scratch/frd_muziyao/yd-nwm-prod/`（Basins scheduler 份在 `/scratch/frd_muziyao/yd-nwm/Basins`，未用 /volume）；
 - 公网：`https://nwm.ac.cn/yd/`、`https://test.nwm.ac.cn/yd/`（两 conf 各插一处 `location /yd/`，`nginx -t` 后 reload）；
 - registry：仅 `basins_yd_shud`，direct-grid 2 行 canonical（dg-gfs-8827efa1…/dg-ifs-f2e14f8c…），packaged-IC audit 4/4 qualified；
-- timers（enabled）：`yd-node27-download` 30 min、`yd-node27-autopipe` 10 min、`yd-compute-scheduler` 5 min。**retention/compression/governance/frontier-alert 类 timer 有意未装未启**——raw/object-store 无限增长，何时启用 yd 域 retention（env 已隔离锁与根）待裁决；
+- timers（enabled）：`yd-node27-download` 30 min、`yd-node27-autopipe` 10 min、`yd-compute-scheduler` 5 min；2026-09-01 用户裁决后加 `yd-node27-raw-retention`（每日 04:05 UTC，14 天窗，anchor=display watermark）与 `yd-node27-timeseries-retention`（每日 05:45 UTC，14 天窗，enforce，archive gate=disabled 按 ADR 0002 Rev 2026-08-11）——env/锁/日志根全 yd 前缀，首跑均 rc=0 零删除、作用域核实仅 yd 根。**compression/governance/frontier-alert 类 timer 仍有意未装未启**；
+- scheduler 回看窗保持 96h（用户裁决）：更老的已拷 raw 只作存档，不会被计算；
 - 首轮全链（cycle 2026082712 双源）≈10–11 min/cycle，state index 已闭合（entry_count 4）；
-- 已知偏差：Slurm job-name 仍 `nhms_*`（见 14.3）；`AUTOPIPE_MVT_PREWARM_ENABLED=0`（prewarm 会打 `:8080`，属只读越界，已关）。
+- 已知偏差：`AUTOPIPE_MVT_PREWARM_ENABLED=0`（prewarm 会打 `:8080`，属只读越界，已关）。Slurm job-name 偏差已于当日修复（patch 5）。
