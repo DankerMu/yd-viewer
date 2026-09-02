@@ -92,3 +92,39 @@ def test_each_parameter_value_is_the_independent_literal() -> None:
     assert "BINARY_OUTPUT = 1" in text
     assert "ASCII_OUTPUT = 0" in text
     assert result == PARAMETER_EXPECTED
+
+
+def test_end_override_rewrites_only_the_end_assignment() -> None:
+    """issue #17 证据 1：`end="0.5"` 只改 END，默认 bytes 与固定表都不被污染。
+
+    期望值由 #15 的独立字面量 `PARAMETER_EXPECTED` 做**单点**字面替换得到，不由
+    实现反推；「随后默认调用仍为 7」证明 override 走的是调用期映射而非全局状态。
+    """
+    recovery = b"END = 0.5\n"
+    assert render_shud_parameters(PARAMETER_TEMPLATE, end="0.5") == (
+        PARAMETER_EXPECTED.replace(b"END = 7\n", recovery)
+    )
+    assert render_shud_parameters(PARAMETER_TEMPLATE, end="7") == PARAMETER_EXPECTED
+    assert render_shud_parameters(PARAMETER_TEMPLATE) == PARAMETER_EXPECTED
+    # 其余五项、注释行与行尾规则逐字保持（byte-for-byte，只有 END 一行不同）。
+    assert (
+        sum(
+            a != b
+            for a, b in zip(
+                PARAMETER_EXPECTED.splitlines(),
+                (render_shud_parameters(PARAMETER_TEMPLATE, end="0.5").splitlines()),
+            )
+        )
+        == 1
+    )
+
+
+# fmt: off
+@pytest.mark.parametrize("end", ["0.5 ", "8", "0.500000", "07", "", 0.5, True, None,
+                                 [], {}, ["7"]])  # 后三支 unhashable：成员判据会先抛裸 TypeError
+def test_illegal_end_values_are_refused(end) -> None:
+    """两个 literal 之外没有接受域：数值型/带空白/等价写法/**unhashable 容器**一律 validate 期拒绝。"""
+# fmt: on
+    with pytest.raises(AssemblyError) as captured:
+        render_shud_parameters(PARAMETER_TEMPLATE, end=end)  # type: ignore[arg-type]
+    assert captured.value.phase == "validate"

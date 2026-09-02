@@ -376,7 +376,10 @@ def assemble(
     )
 
 
-def render_shud_parameters(content: bytes) -> bytes:
+def render_shud_parameters(content: bytes, *, end: Literal["7", "0.5"] = "7") -> bytes:
+    # 类型判据 MUST 先于成员判据：`not in {…}` 对 unhashable 实参（`[]`/`{}`/`["7"]`）抛裸 `TypeError`，把契约错误漏成第三种异常种类。
+    if not isinstance(end, str) or end not in {"7", "0.5"}:
+        raise AssemblyError("SHUD END must be '7' or '0.5'.", phase="validate")
     if not isinstance(content, bytes):
         raise AssemblyError("Parameter content must be bytes.", phase="validate")
     if len(content) > MAX_OBJECT_MANIFEST_BYTES:
@@ -400,7 +403,7 @@ def render_shud_parameters(content: bytes) -> bytes:
         ),
         "\n",
     )
-    for key, value in _PARAMETERS.items():
+    for key, value in (_PARAMETERS | {"END": end}).items():
         matches: list[tuple[int, str, re.Match[str]]] = []
         token = re.compile(rf"(?<![A-Za-z0-9_])\{{\{{{key}\}}\}}(?![A-Za-z0-9_])")
         shell = re.compile(rf"(?<![A-Za-z0-9_])\$\{{{key}\}}(?![A-Za-z0-9_])")
