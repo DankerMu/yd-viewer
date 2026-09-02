@@ -7,7 +7,7 @@ r"""`ensure_twelve_hour_checkpoint` 的行为测试（任务 9.2 / 清单 cap 6b
 
 结账表（cap 6b；口径同 `test_checkpoint_tracker.py` 的捕获表：每个复合守卫操作数、每个异常元组成员、每个 `safe_fs` 关键字实参，要么有「改坏即变红」的见证，要么有书面等价理由；`->` 后是用例名，括号 = 参数化支数）。
 - R1 入口与 preflight：`targets == (12,)` -> `runner_is_never_called_for_non_twelve_targets`(4)（`()` 已由 #16 构造期拒绝，等价）；三入参类型 / 可调用性 -> `wrong_arg_types_are_rejected_before_any_io`(5)。
-- R1 路径身份：`path` 绝对 / 预存在 no-follow 目录、`project_name` 与 `identity.project_name` 双相等、三个静态字段 exact 顶层路径、CSV 顶层直属 / ASCII 文法 / 非空 / casefold 唯一 / `MAX_DIRECT_GRID_STATION_BINDINGS` -> `forged_run_directory_matrix`(22)。
+- R1 路径身份：`path` 绝对 / 预存在 no-follow 目录、`project_name` 与 `identity.project_name` 双相等、三个静态字段 exact 顶层路径、CSV 顶层直属 / ASCII 文法 / 非空 / casefold 唯一 / `MAX_DIRECT_GRID_STATION_BINDINGS` -> `forged_run_directory_matrix`(22)；其中三条 CSV 判据各点名自己的消息片段（`_forged` 体内 `oracle`），casefold 支 MUST 落在 `casefold-unique` 而**不是**先被大小写敏感的 `.csv` 文法 gate 拦下（PR #121 Round 1 cand-r1-01：旧的 `X1.CSV`/`X1.csv` 那对在文法 gate 就死了，`.casefold()` 缺席无人见证；换成文法合法的 `C1.csv`/`c1.csv` 后 `csv-casefold-uniqueness-off` 与 `csv-casefold-key-dropped` 两条腿各有独立可杀性）。
 - R1 目录归属：`path.name == "model"`（`elsewhere` 支封「关掉判据」，`model-old` 支封「相等放宽成子串包含」）与 `path == tracker.run_dir`（两支都不接受「同步伪造 tracker + 全部字段的整棵合法树」）-> `run_directory_must_be_the_trackers_own_model_directory`(3)。
 - R1 输入形态：初态有界读 + `state.parse` -> `initial_state_must_be_parseable`；basename 文法**无**业务长度 cap -> `long_forcing_basename_is_accepted`。
 - R2 authority：`CapturedCheckpoint` 五字段逐项 + 「valid 记录原样返回、runner 0 调用」 -> `captured_record_is_the_only_authority`(6)；回读的 checksum / header / body **三条 gate 各自独立可杀**（header、body 支各自同步更新记录 checksum 让前置 gate 通过，故无「前 gate 掩盖后 gate」的假覆盖）-> `captured_point_of_use_gates_are_independent`(3)。（#17 phase 2 审计第 2 条：原先的 `checksum` 类型/空值判据与独立尺寸判据**已从生产代码删除**——前者被摘要比对完全覆盖、后者由 `state.parse` 的同一 `MAX_STATE_IC_BYTES` 权威判定覆盖，不留死 guard 配等价变异体。）
@@ -17,6 +17,7 @@ r"""`ensure_twelve_hour_checkpoint` 的行为测试（任务 9.2 / 清单 cap 6b
 - R3 forcing：forcing **无**业务体积上限（>8 MiB 合法 CSV 的完整成功路径 + descriptor-bound 流式摘要 + 调用前后内容对账）-> `large_forcing_csv_above_the_removed_cap_succeeds`。
 - R3 失败传导：restore 写失败 -> `restore_failure_blocks_adoption`；restore 写完但落盘不确定（盘上已是原 bytes）仍 MUST 整轮失败 -> `restore_durability_failure_blocks_adoption_even_when_bytes_match`（与下一条各有独立可杀性：这条走读回逐字相同的窗口，字节比对 gate 不会响）；restore 未逐字还原 MUST NOT 记 authority -> `restore_readback_must_match_the_original_bytes`；runner 抛错与 restore 抛错**同时**发生 -> `double_failure_keeps_both_causes_inspectable`（cause 链保留 runner + note 记账 restore，结构断言）；state / index / CSV 三类后校验 -> `input_drift_after_runner_blocks_adoption`(3)（三支各对应一条独立矩阵腿，删单条判据不放走其余两类）。
 - R3 等价理由：`atomic_write_bytes_no_follow` 两处站点（临时写 / finally 恢复）与三处 `containment_root=run_directory.path` = 同函数、同关键字、同字段，注入失败使两支同时变红，无独立可变异操作数。
+- R3 fd 收尾（偏离 8 的 close 面，四支）：forcing 流式摘要 close-only 失败（runner 前快照 / restore 后对账两支）与 read+close 双失败都只以 `TrackerError` 外泄，双失败时 primary 逐字留在 `__cause__`、close 只以确定性 note 记账；`cancel-then-close` 支读抛 `KeyboardInterrupt` -> **原对象逐字外泄**（不换成 `TrackerError`、不被 close 的 `OSError` 顶掉）且 close 失败以 note 挂在它身上。四支共同判「目标 fd 恰好关一次」（不重试、不二次关、注入自身不漏 fd）——`finally` 里抛 close 顶掉 primary / close 移出 `finally` 泄漏 fd，两轮复审各踩一次 -> `forcing_stream_close_preserves_error_contract`(4)。注入只点名 forcing index 的那一个 fd，其余 fd 逐字放行；`stream-close-only-error-not-converted` / `stream-double-failure-secondary-note-dropped` / `stream-cancel-cleanup-moved-out-of-finally` / `stream-cancel-secondary-note-dropped` 四条腿分别只被 pre/post close 支、双失败支、取消支的 fd 泄漏与取消支的次级证据杀掉。
 - R4 runner 结局：普通异常收敛（`__cause__` 保留）/ 非 strict int / 非零且留下 gate-valid candidate 均不采纳 -> `runner_outcome_never_installs`(9)。
 - R4 candidate：家族十形态（missing / 另名 / 嵌套 / 目录 / 外指符号链接 / 非 UTF-8 / 1440 / 非有限 / 截断 body / `max_bytes+1` oversize，含证据保留。`max_bytes` 是**冻结读界**（不是第二份尺寸判据：尺寸的唯一权威是 `state.parse` 自带的 `MAX_STATE_IC_BYTES`，`oversize` 支实际由「header 不可读」拦下——64 MiB 全 `x` 无数值 token），其逐字值 + containment 由 `candidate_single_read_drives_install` 的实参核对钉死，读界乘 4 因此是 KILLED 腿而非等价体）-> `candidate_family_is_rejected`(10)，其原位目录 / 符号链接两支由 `nonregular_shape_matrix`(2 支) 承担；单次有界读驱动安装 + 读界/containment 逐字核对 -> `candidate_single_read_drives_install`；output dir inode swap -> `output_dir_identity_swap_rejects_the_replacement_tree`；canonical 回读**只有一条权威判据**（盘上逐字等于已验证 payload；结构/尺寸判据在 `_read_candidate` 已跑完，逐字相等即蕴含合法，重复判定即死 guard）-> `post_install_readback_failure_preserves_residue_and_never_unlinks`(3)；candidate 的「header 读不到」「header 不比 720」「body 不可解析」三条判据各对应一条独立矩阵腿。
 - R5 结构与账面：结构匹配 fake 通过 `isinstance(_, RecoveryRunner)` + 逐字签名与 keyword-only -> `public_seam_shape_is_frozen`；包 `__all__` 再导出两个 seam + R1-R8 偏离清单 -> `tracker_package_reexports_the_recovery_seam_and_documents_deviations`；零 manifest / outcome + runner 恰一次 -> `success_writes_no_manifest_or_outcome_file`。
@@ -25,6 +26,7 @@ r"""`ensure_twelve_hour_checkpoint` 的行为测试（任务 9.2 / 清单 cap 6b
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import inspect
 import os
@@ -152,6 +154,79 @@ def _plant(path: pathlib.Path, shape: str, outside_root: pathlib.Path) -> None:
 _ADDED = {"state_checkpoints", f"state_checkpoints/{PROJECT}.f012.cfg.ic.update"}
 
 
+def _inject_forcing_fd(monkeypatch, victim, *, arm: int, close_error: OSError, read_error: BaseException | None = None) -> dict[str, int]:  # type: ignore[no-untyped-def] # fmt: skip
+    """接管 `victim` 第 `arm` 次 open 所得 fd 的 read/close，其余 fd（`safe_fs` 父目录 / 无关文件）逐字放行。
+
+    全局让每个 close 失败会连带炸掉不相干路径，那不是判据。`close` MUST 先真关再抛（注入不漏 fd）、接管即解除武装（fd 号会被复用）；`read_error` 允许任意 `BaseException`（取消支抛 `KeyboardInterrupt`）。
+    """
+    open_real, read_real, close_real = safe_fs.open_file_no_follow, os.read, os.close
+    rec = {"opens": 0, "fd": -1, "closes": 0, "really_closed": 0}
+
+    def opening(path, **kwargs):  # type: ignore[no-untyped-def]
+        fd, hit = open_real(path, **kwargs), str(path) == str(victim)
+        rec["opens"] += hit
+        rec["fd"] = fd if hit and rec["opens"] == arm else rec["fd"]
+        return fd
+
+    def reading(fd, size):  # type: ignore[no-untyped-def]
+        if read_error is not None and fd == rec["fd"]:
+            raise read_error
+        return read_real(fd, size)
+
+    def closing(fd):  # type: ignore[no-untyped-def]
+        if fd != rec["fd"]:
+            return close_real(fd)
+        rec["fd"], rec["closes"] = -1, rec["closes"] + 1
+        close_real(fd)
+        rec["really_closed"] += 1
+        raise close_error
+
+    monkeypatch.setattr(safe_fs, "open_file_no_follow", opening)
+    monkeypatch.setattr(os, "read", reading)
+    monkeypatch.setattr(os, "close", closing)
+    return rec
+
+
+@pytest.mark.parametrize(("arm", "primary"), [(2, None), (3, None), (2, OSError(errno.EIO, "stale read")), (2, KeyboardInterrupt("cancel"))], ids=["pre-runner-close", "post-restore-close", "read-then-close", "cancel-then-close"])  # fmt: skip
+def test_forcing_stream_close_preserves_error_contract(tmp_path: pathlib.Path, arm: int, primary: BaseException | None, monkeypatch: pytest.MonkeyPatch) -> None:  # fmt: skip
+    """偏离 8 的 fd 收尾面：forcing 摘要的 close 失败只能以 `TrackerError` 外泄，取消信号只能原样外泄。
+
+    四支（PR #121 Round 1 两轮复审）：`pre-runner-close` / `post-restore-close` = index 第 2 / 3 次
+    open 的 close-only 失败；`read-then-close` = 读先 `EIO`、close 再 `ESTALE`；`cancel-then-close` =
+    读抛 `KeyboardInterrupt`，原对象 MUST 逐字继续传播（既不换成 `TrackerError`，也不被 close 的
+    `OSError` 顶掉），close 只以 note 记账。共同判据取**结构**：目标 fd 恰好关一次（close 抛在
+    `finally` 里会顶掉 primary，close 移出 `finally` 会泄漏 fd）、`__cause__` 是哪个对象、`__notes__`。
+    """
+    rd, tracker = _setup(tmp_path)
+    close_error = OSError(errno.ESTALE, "stale file handle")
+    rec = _inject_forcing_fd(monkeypatch, rd.forcing_index_path, arm=arm, close_error=close_error, read_error=primary)  # fmt: skip
+    before_tree, runner = _digest_tree(rd.path), _Runner(candidate=_distinctive_body())
+    cancel = isinstance(primary, KeyboardInterrupt)
+    with pytest.raises(KeyboardInterrupt if cancel else TrackerError) as caught:
+        _ensure(tracker, rd, runner)
+    outer = caught.value
+    # 共同判据先判：目标 fd 恰好关一次（不重试、不二次关、不漏 fd）——收尾若移出 `finally`，
+    # 取消支就是 `closes == 0` 的 fd 泄漏，本行是它唯一的失败点。
+    assert rec["opens"] == arm and rec["closes"] == rec["really_closed"] == 1
+    notes, secondary = " | ".join(getattr(outer, "__notes__", [])), f"{type(close_error).__name__}: {close_error}"  # fmt: skip
+    if cancel:  # 取消不是领域失败：外泄对象 MUST 逐字是注入的那个
+        assert outer is primary and secondary in notes, notes
+    else:
+        # 一线证据挂在 `__cause__` 上，其外面仍包着 `TrackerError`（偏离 8）。
+        assert not isinstance(outer, OSError) and "forcing index" in str(outer)
+        assert isinstance(cause := outer.__cause__, OSError), cause
+        if primary is None:  # close-only：cause 逐字是 close 错误，没有次级证据可言
+            assert cause is close_error and notes == ""
+        else:  # 双失败：close MUST NOT 替换 primary，只能以确定性 note 记账
+            assert cause is primary and secondary in notes, notes
+    pre = arm == 2  # 第 2 次 index open 落在 runner 前的快照支
+    assert runner.calls == (0 if pre else 1) and dict(tracker.captured) == {}
+    assert not _canonical(tracker).exists() and _produced(rd).is_file() is not pre
+    assert rd.parameter_path.read_bytes() == PARAMETER_EXPECTED and _root_of(rd).is_dir()  # C.2/C.3；root 留作失败证据  # fmt: skip
+    if pre:
+        assert _digest_tree(rd.path) == before_tree  # 快照期失败对 run dir 零 mutation
+
+
 def _assert_only_canonical_added(before: dict, after: dict) -> None:
     """前后对账：只新增 canonical 与其目录，parameter 已恢复原 bytes，其余一字不动。"""
     assert set(after) - set(before) == _ADDED
@@ -180,15 +255,11 @@ def _ensure(tracker: CheckpointTracker, rd: RunDirectory, runner) -> CapturedChe
 class _Runner:
     """结构匹配的 fake runner（各用例的业务 oracle 由闭包 / 基类提供）。"""
 
-    def __init__(
-        self,
-        *,
-        rc: object = 0,
-        write_candidate: bool = True,
-        candidate: bytes | None = None,
-        raise_error: Exception | None = None,
-        on_call: Callable[..., None] | None = None,
-    ):
+    # fmt: off
+    def __init__(self, *, rc: object = 0, write_candidate: bool = True,
+                 candidate: bytes | None = None, raise_error: Exception | None = None,
+                 on_call: Callable[..., None] | None = None):
+    # fmt: on
         self.calls, self.rc, self.write_candidate = 0, rc, write_candidate
         self.candidate, self.raise_error, self.on_call = candidate, raise_error, on_call
 
@@ -205,23 +276,11 @@ class _Runner:
         return self.rc  # type: ignore[return-value]
 
 
-@pytest.mark.parametrize(
-    ("field", "wrong"),
-    [
-        ("tracker", object()),
-        ("run_directory", object()),
-        ("runner", 42),
-        ("runner", None),
-        ("runner", "runner"),
-    ],
-)
-def test_wrong_arg_types_are_rejected_before_any_io(
-    tmp_path: pathlib.Path, field: str, wrong
-) -> None:
+@pytest.mark.parametrize(("field", "wrong"), [("tracker", object()), ("run_directory", object()), ("runner", 42), ("runner", None), ("runner", "runner")])  # fmt: skip
+def test_wrong_arg_types_are_rejected_before_any_io(tmp_path, field: str, wrong) -> None:  # fmt: skip
     rd, tracker = _setup(tmp_path)
     runner = _Runner(write_candidate=False)
-    before = _digest_tree(rd.path.parent)
-    good = {"tracker": tracker, "run_directory": rd, "runner": runner}
+    before, good = _digest_tree(rd.path.parent), {"tracker": tracker, "run_directory": rd, "runner": runner}  # fmt: skip
     good[field] = wrong
     with pytest.raises(TrackerError):
         ensure_twelve_hour_checkpoint(**good)  # type: ignore[arg-type]
@@ -230,16 +289,12 @@ def test_wrong_arg_types_are_rejected_before_any_io(
 
 
 @pytest.mark.parametrize("hours", [(720,), (6,), (6, 12), (12, 24)])
-def test_runner_is_never_called_for_non_twelve_targets(
-    tmp_path: pathlib.Path, hours: tuple[int, ...]
-) -> None:
+def test_runner_is_never_called_for_non_twelve_targets(tmp_path, hours: tuple[int, ...]) -> None:  # fmt: skip
     """分钟/小时混淆与多目标在 runner 0 调用、0 文件写入时拒绝（A.1、9.2 早拒绝）。  `(6, 12)` / `(12, 24)` 两支钉的是「恰为 `(12,)`」而不是「含 12」：把判据放宽成成员 检测后这两支会走到创建 recovery root，故 `targets-exactness-widened` 腿可杀。"""
     rd, tracker = _setup(tmp_path)
-    wrong = _tracker(rd.path, hours)
+    wrong, runner = _tracker(rd.path, hours), _Runner(write_candidate=False)
     assert wrong.targets != tracker.targets == _HOURS
-    runner = _Runner(write_candidate=False)
-    before_param = rd.parameter_path.read_bytes()
-    before_tree = _digest_tree(rd.path.parent)
+    before_param, before_tree = rd.parameter_path.read_bytes(), _digest_tree(rd.path.parent)  # fmt: skip
     with pytest.raises(TrackerError):
         _ensure(wrong, rd, runner)
     assert runner.calls == 0 and not _root_of(rd).exists()
@@ -251,32 +306,20 @@ def _legal_tree(rd: RunDirectory, work: str, leaf: str) -> RunDirectory:
     """以 `rd` 的 identity 为样板另造一棵 `<work>/<leaf>` 合法静态输入树（identity 借自真 `assemble()` 产物，两支之间唯一变量是目录名与它属于哪个 tracker）。"""
     root = rd.path.parent.parent / work / leaf
     root.mkdir(parents=True)
-    made = replace(
-        rd,
-        path=root,
-        state_path=root / f"{PROJECT}.cfg.ic",
-        parameter_path=root / f"{PROJECT}.para",
-        forcing_index_path=root / f"{PROJECT}.tsd.forc",
-        forcing_csv_paths=(root / "X1.csv",),
-    )
-    for path, raw in (
-        (made.state_path, _payload("360.000000")),
-        (made.parameter_path, PARAMETER_EXPECTED),
-        (made.forcing_index_path, b"index\n"),
-        (made.forcing_csv_paths[0], b"csv\n"),
-    ):
+    # fmt: off
+    made = replace(rd, path=root, state_path=root / f"{PROJECT}.cfg.ic",
+        parameter_path=root / f"{PROJECT}.para", forcing_index_path=root / f"{PROJECT}.tsd.forc",
+        forcing_csv_paths=(root / "X1.csv",))
+    for path, raw in ((made.state_path, _payload("360.000000")), (made.parameter_path, PARAMETER_EXPECTED),
+        (made.forcing_index_path, b"index\n"), (made.forcing_csv_paths[0], b"csv\n")):
+    # fmt: on
         path.write_bytes(raw)
     return made
 
 
-@pytest.mark.parametrize(
-    ("leaf", "tracker_leaf"),
-    # `model-old` 支封「相等判据放宽成子串包含」：目录名含 `model` 却不等于 `model`。
-    [("elsewhere", "elsewhere"), ("model-old", "model-old"), ("model", "other-model")],
-)
-def test_run_directory_must_be_the_trackers_own_model_directory(
-    tmp_path: pathlib.Path, leaf: str, tracker_leaf: str
-) -> None:
+# `model-old` 支封「相等判据放宽成子串包含」：目录名含 `model` 却不等于 `model`。
+@pytest.mark.parametrize(("leaf", "tracker_leaf"), [("elsewhere", "elsewhere"), ("model-old", "model-old"), ("model", "other-model")])  # fmt: skip
+def test_run_directory_must_be_the_trackers_own_model_directory(tmp_path, leaf: str, tracker_leaf: str) -> None:  # fmt: skip
     """A.2 的两条身份 guard（三支见证）：目录名 MUST **等于** `model`，且 MUST 等于 `tracker.run_dir`。MUST NOT 用 `replace(rd, path=...)` 验它们——那会先被别的字段比对拦住，杀不到目标 guard。`elsewhere` 支：tracker 与四个字段一起指向 `<work>/elsewhere`，只有目录名不对；`model-old` 支同样整棵自洽、只有名字含 `model` 而不等于它；`other-model` 支：`RunDirectory.path` 是一棵合法的 `<work-A>/model`，tracker 指向**另一棵**同样合法的树，只有相等性不成立。三支都要求 runner 0 调用、root 0 创建、目录内容一字未动。"""
     base, _ = _setup(tmp_path)
     forged = _legal_tree(base, "work", leaf)
@@ -296,9 +339,7 @@ def test_run_directory_must_be_the_trackers_own_model_directory(
 def _forged(rd: RunDirectory) -> dict[str, dict[str, object]]:
     path, first, tail = rd.path, rd.forcing_csv_paths[0], rd.forcing_csv_paths[1:]
     rel = pathlib.Path("relative/model")
-    # fmt: off
-    over = tuple(path / f"S{i:04d}.csv" for i in range(MAX_DIRECT_GRID_STATION_BINDINGS + 1))
-    # fmt: on
+    over = tuple(path / f"S{i:04d}.csv" for i in range(MAX_DIRECT_GRID_STATION_BINDINGS + 1))  # fmt: skip
     # fmt: off
     # 22 支伪造表两支一行：表密度是 1000 行闸与「不削结账表」之间唯一的余量来源，展开成
     # 每支一行就会把本文件挤出闸门。这是排版选择，不是 lint 豁免（与下面 `# fmt: on` 配对）。
@@ -312,7 +353,7 @@ def _forged(rd: RunDirectory) -> dict[str, dict[str, object]]:
         "index-symlink": {"forcing_index_path": path / "sym.tsd.forc"}, "index-dir": {"forcing_index_path": path / "dir-index"},
         "csv-nested": {"forcing_csv_paths": (path / "sub" / "X1.csv", *tail)}, "csv-unsafe-basename": {"forcing_csv_paths": (path / "bad;name.csv", *tail)},
         "csv-empty": {"forcing_csv_paths": ()}, "csv-duplicate": {"forcing_csv_paths": (first, first)},
-        "csv-casefold-duplicate": {"forcing_csv_paths": (path / "X1.CSV", first)}, "csv-over-cap": {"forcing_csv_paths": over},
+        "csv-casefold-duplicate": {"forcing_csv_paths": (path / "C1.csv", path / "c1.csv")}, "csv-over-cap": {"forcing_csv_paths": over},  # 两支文法都合法，只有大小写不同
         "csv-symlink": {"forcing_csv_paths": (path / "csv-sym.csv",)}, "csv-dir": {"forcing_csv_paths": (path / "dir-csv",)},
     }
     # fmt: on
@@ -330,22 +371,25 @@ path-mismatch path-relative project-mismatch state-dir state-outexact state-syml
 def test_forged_run_directory_matrix(tmp_path: pathlib.Path, name: str) -> None:
     """A.2 的伪造面家族：任何一支都在 runner 0 调用、recovery root 0 创建时拒绝。"""
     rd, tracker = _setup(tmp_path)
-    for junk in ("bad;name.csv", "X1.CSV", *(f"S{i:04d}.csv" for i in range(5))):
+    # `C1.csv` / `c1.csv` 是 `casefold-duplicate` 支的碰撞对：两支文法都合法、都是顶层直属普通文件，
+    # 只有大小写不同（刻意避开真实输入 `X1.csv`，case-insensitive APFS 上同名异 case 会顺手覆掉它）。
+    for junk in ("bad;name.csv", "C1.csv", "c1.csv", *(f"S{i:04d}.csv" for i in range(5))):  # fmt: skip
         (rd.path / junk).write_bytes(b"1\n")
     for dirname in ("dir-state", "dir-parameter", "dir-index", "dir-csv"):
         (rd.path / dirname).mkdir()
-    for link, target in (
-        ("sym.cfg.ic", rd.state_path),
-        ("sym.para", rd.parameter_path),
-        ("sym.tsd.forc", rd.forcing_index_path),
-        ("csv-sym.csv", rd.forcing_csv_paths[0]),
-    ):
+    # fmt: off
+    for link, target in (("sym.cfg.ic", rd.state_path), ("sym.para", rd.parameter_path),
+        ("sym.tsd.forc", rd.forcing_index_path), ("csv-sym.csv", rd.forcing_csv_paths[0])):
+    # fmt: on
         (rd.path / link).symlink_to(target)
-    forged = _forged(rd)
+    forged, runner = _forged(rd), _Runner(write_candidate=False)
     assert set(forged) == set(_FORGED_NAMES), "伪造表与参数表必须逐支对齐"
-    runner = _Runner(write_candidate=False)
-    with pytest.raises(TrackerError):
+    # 三条 CSV 判据各自点名消息片段：casefold 支 MUST 由 `casefold-unique` 拦住、MUST NOT 先被
+    # 大小写敏感的 `.csv` 文法 gate 拦下，否则 `.casefold()` 缺席无人见证（cand-r1-01）。
+    oracle = {"csv-unsafe-basename": "is unsafe", "csv-duplicate": "casefold-unique", "csv-casefold-duplicate": "casefold-unique"}  # fmt: skip
+    with pytest.raises(TrackerError) as caught:
         _ensure(tracker, replace(rd, **forged[name]), runner)
+    assert oracle.get(name, "") in str(caught.value), caught.value
     assert runner.calls == 0 and not _root_of(rd).exists()
 
 
@@ -374,19 +418,8 @@ def test_long_forcing_basename_is_accepted(tmp_path: pathlib.Path) -> None:
     assert rd.parameter_path.read_bytes() == PARAMETER_EXPECTED
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        None,
-        lambda r: replace(r, lead_hours=24),
-        lambda r: replace(r, relative_minute=1440.0),
-        lambda r: replace(r, path=pathlib.Path("/elsewhere/x")),
-        lambda r: replace(r, source_name="other.cfg.ic.update"),
-        lambda r: replace(r, checksum="0" * 64),
-    ],
-    ids=["valid-record", "lead-hours", "relative-minute", "path", "source", "checksum"],
-)
-def test_captured_record_is_the_only_authority(tmp_path: pathlib.Path, mutate) -> None:
+@pytest.mark.parametrize("mutate", [None, lambda r: replace(r, lead_hours=24), lambda r: replace(r, relative_minute=1440.0), lambda r: replace(r, path=pathlib.Path("/elsewhere/x")), lambda r: replace(r, source_name="other.cfg.ic.update"), lambda r: replace(r, checksum="0" * 64)], ids=["valid-record", "lead-hours", "relative-minute", "path", "source", "checksum"])  # fmt: skip
+def test_captured_record_is_the_only_authority(tmp_path, mutate) -> None:  # fmt: skip
     """B.1：valid 记录原样返回、runner 0 调用；五字段任一漂移 fail closed 且不动证据。"""
     rd, tracker = _setup(tmp_path)
     payload = _write(tracker.source_path, _payload("720.000000"))
@@ -406,19 +439,10 @@ def test_captured_record_is_the_only_authority(tmp_path: pathlib.Path, mutate) -
     assert _canonical(tracker).read_bytes() == payload
 
 
-@pytest.mark.parametrize(
-    ("gate", "content"),
-    [
-        # 记录仍是旧摘要：只有 checksum gate 命中。
-        ("checksum", _other_valid_body),
-        # 记录摘要同步更新 -> checksum 通过，单独咬住 header / body gate。
-        ("header", _header_1440),
-        ("body", _truncated),
-    ],
-)
-def test_captured_point_of_use_gates_are_independent(
-    tmp_path: pathlib.Path, gate: str, content
-) -> None:
+# `checksum` 支：记录仍是旧摘要，只有 checksum gate 命中。另两支同步更新记录摘要让
+# checksum gate 先行通过（见体内 `if gate != "checksum"`），单独咬住 header / body gate。
+@pytest.mark.parametrize(("gate", "content"), [("checksum", _other_valid_body), ("header", _header_1440), ("body", _truncated)])  # fmt: skip
+def test_captured_point_of_use_gates_are_independent(tmp_path, gate: str, content) -> None:  # fmt: skip
     """B.1 回读的三条 gate 各有独立见证：不存在前置 gate 掩盖后置 gate 的假覆盖。"""
     rd, tracker = _setup(tmp_path)
     _write(tracker.source_path, _payload("720.000000"))
@@ -426,7 +450,7 @@ def test_captured_point_of_use_gates_are_independent(
     replacement = content()
     canonical = _canonical(tracker)
     canonical.write_bytes(replacement)
-    if gate != "checksum":  # 让 checksum gate 先行通过，把断言压到目标 gate 上
+    if gate != "checksum":  # 前置 gate 先行通过，把断言压到目标 gate 上
         digest = hashlib.sha256(replacement).hexdigest()
         tracker._captured[12] = replace(tracker.captured[12], checksum=digest)
     runner = _Runner(write_candidate=False)
@@ -438,9 +462,7 @@ def test_captured_point_of_use_gates_are_independent(
 
 @pytest.mark.parametrize("where", ["canonical", "root"])
 @pytest.mark.parametrize("shape", ["regular", "directory", "symlink"])
-def test_preexisting_residue_is_never_touched(
-    tmp_path: pathlib.Path, where: str, shape: str
-) -> None:
+def test_preexisting_residue_is_never_touched(tmp_path, where: str, shape: str) -> None:  # fmt: skip
     """B.2 / R5：canonical 与 recovery root 的三种既有形态都是未验证残留，原树不变。"""
     rd, tracker = _setup(tmp_path)
     victim = _canonical(tracker) if where == "canonical" else _root_of(rd)
@@ -459,9 +481,7 @@ def test_preexisting_residue_is_never_touched(
 
 @pytest.mark.parametrize("shape", ["directory", "symlink"])
 @pytest.mark.parametrize("target", ["state", "parameter", "index", "csv", "candidate"])
-def test_nonregular_shape_matrix(
-    tmp_path: pathlib.Path, target: str, shape: str
-) -> None:
+def test_nonregular_shape_matrix(tmp_path, target: str, shape: str) -> None:  # fmt: skip
     """证据 6：在**精确路径原位**换形状，而不是 `replace(rd, state_path=...)`。  后者只杀 exact-path 字段比对，永远走不到 `_require_regular` / candidate 的 nonregular 分支——那半条 guard 无见证即假覆盖。静态输入的形态校验按冻结次序发生在 recovery root 创建**之前**（root MUST 不存在）；candidate 只在 runner 之后存在（root MUST 在）。 FIFO / socket 不在 `assemble()` 的产出形态域内，本用例不声明覆盖它们。"""
     rd, tracker = _setup(tmp_path)
     # fmt: off
@@ -491,9 +511,7 @@ def test_nonregular_shape_matrix(
 
 
 @pytest.mark.parametrize("preexisting", [False, True])
-def test_capture_no_clobber_and_valid_copy(
-    tmp_path: pathlib.Path, preexisting: bool
-) -> None:
+def test_capture_no_clobber_and_valid_copy(tmp_path, preexisting: bool) -> None:  # fmt: skip
     """B.3：O_EXCL 替换后捕获主路径不回归，且预存的 canonical 绝不被动。"""
     tracker = _tracker(tmp_path)
     payload = _write(tracker.source_path, _payload("720.000000"))
@@ -537,17 +555,14 @@ def test_capture_never_unlinks_a_canonical_entry(tmp_path: pathlib.Path, site: s
     assert _digest_tree(tmp_path) == foreign  # 外来 bytes / 形态原样
 
 
-def test_install_open_failure_behind_symlinked_dir_never_unlinks(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_install_open_failure_behind_symlinked_dir_never_unlinks(tmp_path, monkeypatch) -> None:  # fmt: skip
     """安装 open 抛 `SafeFilesystemError`（非 `FileExistsError`）且外来 entry 在场时一次都不许删：竞争者在 runner 期间把 `state_checkpoints` 换成指向「已含规范名文件」的外来目录的符号链接，`safe_fs` 在符号链接组件上直接拒绝，于是「本调用什么都没建过」与「canonical 解析到外来 entry」同时成立；探测式清理（把 `_FS_FAILURES` 也接上 best-effort unlink）会在这条 entry 上留下删除尝试，即使 `safe_fs` 同样拒绝跟随、外来 bytes 无损。"""
     calls = _record_unlink(monkeypatch)
     rd, tracker = _setup(tmp_path)
     canonical = _canonical(tracker)
 
     def hijack(_run_directory, _output_dir):
-        elsewhere = _run_directory.path.parent / "elsewhere"
-        elsewhere.mkdir()
+        (elsewhere := _run_directory.path.parent / "elsewhere").mkdir()
         (elsewhere / canonical.name).write_bytes(b"foreign bytes\n")
         canonical.parent.mkdir(parents=True)  # 先让本调用真的建过这个目录，再换掉它
         canonical.parent.rmdir()
@@ -610,20 +625,16 @@ def test_post_install_readback_failure_preserves_residue_and_never_unlinks(tmp_p
         monkeypatch.setattr(safe_fs, "write_bytes_no_follow_exclusive", swapping_write)
     with pytest.raises(TrackerError) as captured:
         _ensure(tracker, rd, _Runner(candidate=_distinctive_body()))
-    assert {  # 后两支同由逐字比对拦住：换进来的合法份没有别的拦截者
-        "read": "readback failed",
-        "replacement-valid": "differs from installed",
-        "replacement-torn": "differs from installed",
-    }[lane] in str(captured.value), captured.value
+    # 后两支同由逐字比对拦住：换进来的合法份没有别的拦截者。
+    assert {"read": "readback failed", "replacement-valid": "differs from installed",
+            "replacement-torn": "differs from installed"}[lane] in str(captured.value)  # fmt: skip
     assert dict(tracker.captured) == {} and calls == []  # 无 authority、零删除尝试
     # residue 原样留在盘上：回读失败 lane 读的是本调用装进去的那份，另两条读的是替换份。
     expected = _distinctive_body() if lane == "read" else replacement
     assert canonical.is_file() and canonical.read_bytes() == expected
 
 
-def test_cross_attempt_torn_source_residue_is_not_adopted(
-    tmp_path: pathlib.Path,
-) -> None:
+def test_cross_attempt_torn_source_residue_is_not_adopted(tmp_path) -> None:  # fmt: skip
     """tracker A 捕获 valid；B 看到 torn 720 source：B 无 authority 也不删 A 的副本。"""
     rd, tracker_a = _setup(tmp_path)
     payload = _write(tracker_a.source_path, _payload("720.000000"))
@@ -646,14 +657,13 @@ def test_genuine_miss_success_installs_canonical_record(tmp_path: pathlib.Path) 
     before_csvs = tuple(p.read_bytes() for p in rd.forcing_csv_paths)
 
     def on_call(run_directory, output_dir):
-        observed.update(
-            run_directory=run_directory,
-            output_dir=output_dir,
+        # fmt: off
+        observed.update(run_directory=run_directory, output_dir=output_dir,
             parameter=run_directory.parameter_path.read_bytes(),
             state=run_directory.state_path.read_bytes(),
             index=run_directory.forcing_index_path.read_bytes(),
-            csv=run_directory.forcing_csv_paths[0].read_bytes(),
-        )
+            csv=run_directory.forcing_csv_paths[0].read_bytes())
+        # fmt: on
 
     distinctive = _distinctive_body()
     before_tree = _digest_tree(rd.path)
@@ -691,9 +701,7 @@ def test_parameter_is_the_only_expected_change(tmp_path: pathlib.Path) -> None:
     _assert_only_canonical_added(before, _digest_tree(rd.path))
 
 
-def test_large_forcing_csv_above_the_removed_cap_succeeds(
-    tmp_path: pathlib.Path,
-) -> None:
+def test_large_forcing_csv_above_the_removed_cap_succeeds(tmp_path) -> None:  # fmt: skip
     """forcing **没有**业务体积上限：>8 MiB 的合法 CSV 必须走完整成功路径。  数据按行分块拼接（每块约 1 MiB，共 9 块），不是一次性无意义的超大对象复制；摘要走 descriptor-bound 流式路径，峰值内存与文件大小无关。留着被删 cap 的对齐实现必红。"""
     rd, tracker = _setup(tmp_path)
     victim = rd.forcing_csv_paths[0]
@@ -714,9 +722,7 @@ def test_large_forcing_csv_above_the_removed_cap_succeeds(
     assert rd.parameter_path.read_bytes() == PARAMETER_EXPECTED
 
 
-def test_restore_failure_blocks_adoption(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_restore_failure_blocks_adoption(tmp_path, monkeypatch) -> None:  # fmt: skip
     """注入第二次参数 atomic write 失败（场景：恢复原 bytes 时 ENOSPC）。"""
     rd, tracker = _setup(tmp_path)
     real_write = safe_fs.atomic_write_bytes_no_follow
@@ -786,9 +792,7 @@ def test_double_failure_keeps_both_causes_inspectable(tmp_path: pathlib.Path, mo
     assert not _canonical(tracker).exists() and _produced(rd).read_bytes() == _distinctive_body()  # fmt: skip
 
 
-def test_restore_readback_must_match_the_original_bytes(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_restore_readback_must_match_the_original_bytes(tmp_path, monkeypatch) -> None:  # fmt: skip
     """C.3：restore 之后 MUST 逐字读回原 bytes；读回与快照不一致就不得记 authority。  注入「`finally` 写完之后的读侧看到别的字节」（第三方换掉了 parameter，或 restore 写的是 语义等价而非逐字的副本）。放宽这条比对，整条成功路径会照常走完并记下 `_captured[12]`。"""
     rd, tracker = _setup(tmp_path)
     original = rd.parameter_path.read_bytes()
@@ -812,9 +816,7 @@ def test_restore_readback_must_match_the_original_bytes(
 
 
 @pytest.mark.parametrize("victim", ["state", "index", "csv"])
-def test_input_drift_after_runner_blocks_adoption(
-    tmp_path: pathlib.Path, victim: str
-) -> None:
+def test_input_drift_after_runner_blocks_adoption(tmp_path, victim: str) -> None:  # fmt: skip
     rd, tracker = _setup(tmp_path)
     path, payload = {
         "state": (rd.state_path, _payload("700.000000")),
@@ -946,9 +948,7 @@ def test_candidate_single_read_drives_install(tmp_path: pathlib.Path) -> None:
     assert read_kwargs == {"max_bytes": state.MAX_STATE_IC_BYTES, "containment_root": rd.path.parent}  # fmt: skip
 
 
-def test_output_dir_identity_swap_rejects_the_replacement_tree(
-    tmp_path: pathlib.Path,
-) -> None:
+def test_output_dir_identity_swap_rejects_the_replacement_tree(tmp_path) -> None:  # fmt: skip
     rd, tracker = _setup(tmp_path)
 
     def on_call(run_directory, output_dir):

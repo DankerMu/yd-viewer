@@ -95,6 +95,7 @@ import hashlib
 import math
 import os
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -821,24 +822,74 @@ def _read_parameter(run_directory: RunDirectory) -> bytes:
     return data
 
 
+def _close_note(label: str, error: OSError) -> str:
+    """次级 close 证据的**唯一**文本权威（只含类型与消息，与 D.2 restore 记账同形）。"""
+    return f"{label} descriptor close also failed: {type(error).__name__}: {error}"
+
+
+def _close_stream_fd(fd: int | None) -> OSError | None:
+    """关掉摘要 fd（可能为 `None`），**返回**失败而不是抛出；不重试。
+
+    返回错误对象是这条 lane 的全部要点，两个方向各踩过一次（PR #121 Round 1）：
+    `finally` 里**抛出** close 失败会替换正在传播的 primary（一线证据被换掉、还外泄裸
+    `OSError`）；把 close 完全**移出** `finally` 则会让 `KeyboardInterrupt` / `SystemExit`
+    穿过读循环时泄漏 fd。放在 `finally` 内、只回传错误，两条同时不犯。fd 状态在 close 失败
+    后不可判定，MUST NOT 重试（第二次可能关掉复用同一号码的外来 fd）。
+    """
+    if fd is None:
+        return None
+    try:
+        os.close(fd)
+    except OSError as error:  # 只接 `OSError`：`close` 的失败形态仅此一类
+        return error
+    return None
+
+
+def _stream_failure(label: str, primary: Exception, secondary: OSError | None) -> TrackerError:  # fmt: skip
+    """forcing 摘要的 fd 失败 -> 唯一对外类型（偏离 8）；次级证据只记账，不替换 primary。
+
+    次级失败不许升级成 `__cause__`：外部可见的证据链 MUST 只有一条 primary。
+    """
+    error = TrackerError(f"{label} failed to stream: {primary}")
+    if secondary is None:
+        return error
+    error.add_note(_close_note(label, secondary))
+    return error
+
+
 def _stream_digest(path: Path, root: Path, label: str) -> str:
-    """descriptor-bound、no-follow 的流式 SHA-256，读到 EOF。
+    """descriptor-bound、no-follow 的流式 SHA-256，读到 EOF，任何 exit lane 都恰好关一次 fd。
 
     forcing **没有**业务体积上限（C.1「不得无界读取」指的是不得把整文件读进内存，而不是
     给合法输入编一个 cap）：摘要按 1 MiB 窗口滚动，峰值内存与文件大小无关。
+
+    三条 exit lane 的 close 处置（PR #121 Round 1 两轮复审）：正常返回与 `except` 接住的
+    open/read 失败走 `finally` 关 fd，close 的失败以 `close_error` 回传、在 `finally` 之后
+    收敛成 `TrackerError`（双失败时 primary 仍是 `__cause__`、close 只以 note 记账，close-only
+    时 close 错误就是 primary）；而 `KeyboardInterrupt` / `SystemExit` 这类**不被接住**的取消
+    信号同样经过 `finally`，故 fd 不会泄漏，且 `sys.exception()`（3.12+，`finally` 内可见
+    当前正在传播的异常）让 close 的失败以 note 挂在**原异常对象**上——原对象逐字继续传播，
+    MUST NOT 被换成 `TrackerError`（取消不是领域失败），也 MUST NOT 被 close 的 `OSError` 顶掉。
     """
-    fd = None
+    fd: int | None = None
+    stream_error: Exception | None = None
     try:
         fd = safe_fs.open_file_no_follow(path, containment_root=root)
         digest = hashlib.sha256()
         while chunk := os.read(fd, 1024 * 1024):
             digest.update(chunk)
-        return digest.hexdigest()
     except _FS_FAILURES as error:
-        raise TrackerError(f"{label} failed to stream: {error}") from error
+        stream_error = error
     finally:
-        if fd is not None:
-            os.close(fd)
+        close_error = _close_stream_fd(fd)
+        # 正常支与已被 `except` 接住的支在这里都是 `None`，只有取消支非 `None`。
+        if close_error is not None and (active := sys.exception()) is not None:
+            active.add_note(_close_note(label, close_error))
+    if stream_error is not None:
+        raise _stream_failure(label, stream_error, close_error) from stream_error
+    if close_error is not None:
+        raise _stream_failure(label, close_error, None) from close_error
+    return digest.hexdigest()
 
 
 def _verify_inputs_unchanged(
