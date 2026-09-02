@@ -2605,7 +2605,7 @@ def ensure_twelve_hour_checkpoint(
 12. candidate 在首次 bounded read 后被另一份 regular file替换 -> 安装/记录仍严格对应首次已验证 bytes，不能把第二份未经验证 bytes复制进 canonical；canonical readback与记录checksum一致。
 13. target hours `(720,)`/`(6,)`/`(6,12)` -> runner 0、recovery root不存在、参数/输入不变。
 14. forged `RunDirectory` matrix：path mismatch/relative、project mismatch、state/parameter/index 外指、CSV duplicate/casefold duplicate/超 cap、任一 static symlink/nonregular -> pre-write `TrackerError`。
-15. no-clobber 写后回读失败、或 O_EXCL 返回后同名 entry 被另一份合法/损坏文件替换 -> canonical residue 原样保留、tracker 零 pathname 删除、`captured` 为空；捕获侧保持 missing，补跑侧整轮 `TrackerError`。
+15. no-clobber 写后回读失败、或 O_EXCL 返回后 canonical bytes 被改成另一份不同内容的合法/损坏状态 -> canonical residue 原样保留、tracker 零 pathname 删除、`captured` 为空；捕获侧保持 missing，补跑侧整轮 `TrackerError`。byte-identical replacement 与原 candidate 在本 issue 的 bytes/checksum authority 下不可区分，也不要求新增 inode oracle。
 16. public structure：`RecoveryRunner` runtime protocol/`ensure` keyword-only signature、tracker package导出；`assemble.py`/两个测试文件各≤1000行，`.large-file-guard.json` diff为空。
 17. snapshot：`test_checkpoint_recovery.py` 前 5 行有精确 pin/source 注释；清单 cap 6/6b 两目标均已落地，Markdown 数据行恰 28、唯一 NWM 原路径恰 27；provenance 解析器关于「27 条原路径」的说明保持正确；正反 provenance 与 DB-free scan green；`checkpoint_tracker.py` 不出现环境/外部 DB 调用。
 18. pre-change red：在 docs-only fixture commit 上 overlay 最终 source-neutral tests；新 public imports/signature/no-clobber/recovery行为必须 behavioral red，不接受只有 collection error而零行为断言的单一证据。

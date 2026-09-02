@@ -40,8 +40,8 @@ tracker MUST 在 SHUD 运行期间轮询 `<project>.cfg.ic.update` 的 header �
 - **WHEN** 新 tracker 的 `state_checkpoints/` 已有一个 header/body 均合法的规范文件，但实例内无对应捕获记录
 - **THEN** 实时观测不覆盖或删除该文件，补跑不采纳它，并以未验证残留失败
 
-#### Scenario: O_EXCL 后同名 entry 被替换
-- **WHEN** 捕获或补跑安装的 O_EXCL 写返回后、canonical 回读前，同名 entry 被替换为另一份合法或损坏的文件，或回读本身失败
+#### Scenario: O_EXCL 后 canonical 回读不一致
+- **WHEN** 捕获或补跑安装的 O_EXCL 写返回后、canonical 回读前，同名 entry 的 bytes 被改成另一份不同内容的合法或损坏状态，或回读本身失败
 - **THEN** tracker 不采纳、不按 pathname 删除该 entry，保留未验证残留并报告未捕获或整轮失败
 
 #### Scenario: 不可达目标小时早拒绝
