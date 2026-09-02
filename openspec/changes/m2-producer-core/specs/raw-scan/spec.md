@@ -28,11 +28,11 @@
 - **THEN** 拒绝并报错，不进行文件检查
 
 ### Requirement: raw 只读与临时副本
-完整判定后，控制器 MUST 把清单内文件复制到本轮 `work/raw/`；复制前后 NWM 原件的内容与元数据 MUST 保持不变；副本 MUST NOT 写入 `YD_ROOT` 或跨轮保留。完整判定是复制的**必要而非充分**条件：复制侧另有自己的准入条件（源侧链接形态、bundle 布局、调用参数与判定结果的一致性、**以及调用参数彼此之间的关系**），其中任一条不成立时 MUST 拒绝复制并报错，即便判定结果为完整；拒绝时 MUST NOT 留下任何部分产物。
+完整判定后，`stage_raw` MUST 把清单内文件复制到调用方给定 staging root 的 `raw/` 子树；任务 14.1 的控制器 MUST 把该 root 取为 `<attempt-work>/object-store`，使副本位于 `<attempt-work>/object-store/raw/` 并与 canonical/forcing/临时 model registry 共用一棵 `LocalObjectStore`。复制前后 NWM 原件的内容与元数据 MUST 保持不变；副本 MUST NOT 写入 `YD_ROOT` 或跨轮保留。完整判定是复制的**必要而非充分**条件：复制侧另有自己的准入条件（源侧链接形态、bundle 布局、调用参数与判定结果的一致性、**以及调用参数彼此之间的关系**），其中任一条不成立时 MUST 拒绝复制并报错，即便判定结果为完整；拒绝时 MUST NOT 留下任何部分产物。
 
 #### Scenario: 复制不改动源
 - **WHEN** 将 fixture raw 根中的文件复制到 work
-- **THEN** 源文件内容与 mtime 不变，work/raw/ 出现同内容副本
+- **THEN** 源文件内容与 mtime 不变，给定 staging root 的 `raw/` 下出现同内容副本；14.1 集成时该路径逐字是 `<attempt-work>/object-store/raw/`
 
 #### Scenario: 副本不落 NFS
 - **WHEN** 复制完成
@@ -63,11 +63,11 @@
 - **THEN** 拒绝并报错，不跟随该链、不复制，work 根内不出现任何新增路径
 
 ### Requirement: 本轮临时 raw manifest
-扫描器 MUST 在 work 内生成 NWM-compatible `raw-manifest.json`，包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息；entry 路径 MUST 只引用 `work/raw/` 临时副本。entry MUST 逐变量扇出，同一 `(lead, bundle)` 的各变量 entry 共享同一路径键；manifest 声明的 `(lead, variable)` 集合 MUST 与判定结果的预期变量集**相等**。变量与 bundle 的归属关系无处可查时（一个 lead 对应多于一个 bundle 文件模式）MUST 拒绝生成 manifest，MUST NOT 任选一个 bundle 承担全部变量。
+扫描器 MUST 在调用方给定 staging root 内生成 NWM-compatible `raw-manifest.json`，包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息；entry 路径 MUST 只引用同一 root 的 `raw/` 临时副本。14.1 集成时 manifest 逐字位于 `<attempt-work>/object-store/raw-manifest.json`。entry MUST 逐变量扇出，同一 `(lead, bundle)` 的各变量 entry 共享同一路径键；manifest 声明的 `(lead, variable)` 集合 MUST 与判定结果的预期变量集**相等**。变量与 bundle 的归属关系无处可查时（一个 lead 对应多于一个 bundle 文件模式）MUST 拒绝生成 manifest，MUST NOT 任选一个 bundle 承担全部变量。
 
 #### Scenario: manifest 结构与路径
 - **WHEN** 对完整 cycle 生成 manifest
-- **THEN** JSON 含 source/cycle/forecast hours/变量/filter 字段，且所有 entry 路径位于 `work/raw/` 之下
+- **THEN** JSON 含 source/cycle/forecast hours/变量/filter 字段，且所有 entry 路径位于同一 staging root 的 `raw/` 之下；14.1 集成时 root 为 `<attempt-work>/object-store`
 
 #### Scenario: 逐变量扇出与预期集相等
 - **WHEN** 对单一 bundle 模式的完整 cycle 生成 manifest

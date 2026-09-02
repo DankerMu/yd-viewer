@@ -5,7 +5,7 @@
 ## ADDED Requirements
 
 ### Requirement: DB-free canonical 转换（NWM 快照）
-canonical converter MUST 以本轮临时 raw manifest 与 `work/raw/` 副本为输入，在 work 的 object-store 内生成 canonical NetCDF 与 catalog；MUST NOT 依赖 PostgreSQL、NWM registry 服务或 NWM checkout import。
+canonical converter MUST 以同一 `LocalObjectStore` 根内的本轮临时 raw manifest 与 `raw/` 副本为输入，并在该根内生成 canonical NetCDF 与 catalog；任务 14.1 的根逐字为 `<attempt-work>/object-store`。MUST NOT 依赖 PostgreSQL、NWM registry 服务或 NWM checkout import。
 
 #### Scenario: 合成 raw 到 canonical
 - **WHEN** 对合成 raw fixture 与对应 manifest 运行 converter
