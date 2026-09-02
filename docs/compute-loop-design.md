@@ -302,11 +302,16 @@ SHUD 会反复覆盖同一个 `<project>.cfg.ic.update`：当模型时间为 720
 
 1. 使用同一个 cycle T 初态与同一份 forcing；
 2. 把 `END` 缩短为 0.5 天，`Update_IC_STEP=720`；
-3. 确定性补跑一次 12 小时；
-4. 取末态作为 T+12 checkpoint；
-5. 补跑仍失败则整轮失败，不写状态和 `DONE`。
+3. 在同一个 Slurm 作业内确定性补跑一次 12 小时，不产生第二次提交；
+4. 只从本次补跑的全新专用输出目录读取精确 `<project>.cfg.ic.update`，经 relative-720 header、原生分段结构与 checksum 校验后才把末态采纳为 T+12 checkpoint；
+5. 参数文件在补跑调用结束后恢复为主跑的原始 bytes，同一初态与 forcing 在补跑前后 checksum 不变；
+6. 补跑仍失败则整轮失败，不写状态和 `DONE`。
 
-这保留 NWM 的可靠性，但不复制其外层 watcher 服务、恢复状态机或 registry。
+一次 scratch work 只服务一次 Slurm attempt：tracker 的已捕获 authority 是该 attempt 内的内存记录与其 checksum，不能靠 `state_checkpoints/` 下某个规范文件名存在来恢复。重排队、进程重启或下次 cron 重试必须删除并重新组装整棵 work；若新实例在旧 work 中看到同名 checkpoint 或 recovery 目录，只能把它当作未验证残留，保留证据并 fail closed，既不能采纳，也不能覆盖/删除。配置的产品目标必须恰为 `checkpoint_hours=[12]`；`[720]` 这类小时/分钟混淆在启动补跑前响亮失败。
+
+tracker 不按 pathname 删除任何 canonical checkpoint，包括本调用 O_EXCL 创建后校验或回读失败的条目。O_EXCL 只能证明创建瞬间的所有权，无法证明竞争者未在随后替换同名 entry；现有文件原语也没有 identity-conditional unlink。失败条目保留为未验证残留、不得成为 authority，并阻断同一 work 内重试；整棵 work 仍由控制器在整轮失败收尾时统一删除。
+
+这保留 NWM 的可靠性，但不复制其外层 watcher 服务、恢复状态机、checkpoint manifest 或 registry。publisher 继续由调用方显式交入已经验证的 checkpoint 路径，不扫描 recovery 目录。
 
 ## 10. 控制器、Slurm 与积压
 

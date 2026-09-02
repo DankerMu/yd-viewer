@@ -2150,7 +2150,7 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 ## 9. checkpoint-tracker：T+12 捕获与补跑
 
 - [x] 9.1 快照并适配 `cfg.ic.update` 轮询捕获（命中 720 分钟复制 + 分段格式校验；产物保持相对时间头），以模拟覆写序列测试正常/漏采/副本损坏三态
-- [ ] 9.2 快照并适配漏采补跑（同一 Slurm 作业内、同初态同 forcing、END=0.5、末态采纳；注入假 SHUD 调用测试；补跑失败传导整轮失败；控制器提交计数不变）
+- [x] 9.2 快照并适配漏采补跑（同一 Slurm 作业内、同初态同 forcing、END=0.5、末态采纳；注入假 SHUD 调用测试；补跑失败传导整轮失败；控制器提交计数不变）
 
 依赖：组 2（勘察清单定原路径）、组 4（分段校验）、组 8（运行目录形态）
 §13.1 归属：tracker
@@ -2171,7 +2171,7 @@ Minimal mergeable slice: 捕获轮询（9.1）——独立于补跑可合并保�
 - **搭车修改**：合并 master 时 `.large-file-guard.json` 增加两条 exclude（`producer/tests/test_cfg_ic.py` 1050 行、`producer/tests/test_state_tools_qc.py` 1129 行），二者是 master 上已有的超限文件（PR #61 走服务端合并，不经本地 PreToolUse 钩子），而钩子按暂存集判定，导致 master 向任何分支的合并都会被自己的守卫挡死。拆分超出本 issue 范围，已开 issue #82 跟踪（issue-scribe 核实时另钉出这是**第三次复发**：`3f7d46e`/`f130883` 已因同一原因豁免过 `test_config.py`/`test_geometry.py`/`test_rawscan.py`，豁免清单单调增长而守卫覆盖面单调缩小）；`maxLines` 不动，无任何断言/测试/CI 被削弱。
 
 
-**本 issue 只做 9.1（捕获轮询）**，9.2（漏采补跑）归 issue #17。清单 §1 的第 6/7 行（`runtime.py` → `tracker/checkpoint_tracker.py`、`tests/test_shud_runtime.py` → `tests/test_checkpoint_tracker.py`）同时覆盖捕获与补跑两半，本 issue 只搬捕获半；两行的 `落地状态` 仍必须在本 PR 翻成 `本 issue 落地`——溯源守卫的反向判别器 `test_files_carrying_a_provenance_header_are_marked_landed` 一旦见到带溯源头的目标文件就要求该行标 `本 issue 落地`，留 `待落地` 会直接变红。**翻转 MUST 与文件落地同一个 commit**：正向判别器 `test_landed_snapshot_files_carry_their_provenance_header` 的缺席分支反向同样成立（「落地状态也不得先于文件翻转」），故 fixture 先行的 docs commit 里两行 MUST 仍是 `待落地`，由实现 commit 一并翻转。两行 `备注` 同步补记「本 issue 落捕获半，补跑半归 #17 落进同一文件」，并在 design.md **D9** 记录该分次落地偏离（spec `快照可追溯` Requirement 自带的逃生口：「或 design 中存在显式偏离记录」）。
+**本 issue 只做 9.1（捕获轮询）**，9.2（漏采补跑）归 issue #17。清单 §1 的 runtime 实现行横跨两半；测试则经 #17 文件体量裁决拆成 cap 6 捕获目标与 cap 6b 补跑目标。#16 已把实现行与 cap 6 翻为 `本 issue 落地`；#17 的 docs-only fixture commit 保持 cap 6b `待落地`，实现 commit 必须与 `test_checkpoint_recovery.py` 同时翻转。分次/拆文件偏离记于 design.md D9。
 
 **改动面**：
 
@@ -2263,7 +2263,7 @@ producer/tests/test_checkpoint_tracker.py
 3. 无轮询循环、无 `sleep` 等待、无轮询间隔配置（连带消掉 pin 的 `0.01` 秒默认）；观测由调用方驱动。**docstring 里 MUST 写作「`sleep` 等待」而不是带点的全名**——G7 的源码机检断言的正是那个带点的全名在整个文件中不出现，写全名会让模块自述与自己的守卫互相打架。
 4. 只接受相对分钟 header，不接受 epoch 形式（fail closed）。
 5. 结构校验用本仓 `state.parse`，不引入 pin 的 `state_ic_structure_complete` 与 `expected_river_count`（归 #9 / 组 8）。
-6. 不写 `state_checkpoints.json`、不记 recovery outcome、不做 `final_ic` 认领（归 #17 与发布路径）；连带本模块零环境变量读取。
+6. 不写 `state_checkpoints.json`、不记 recovery outcome、不做 `final_ic` 认领；#17 经全仓消费者核对后继续剥离该 manifest，发布路径只收显式 checkpoint path。连带 tracker 模块零环境变量读取。
 7. IO 原语全部复用 `store.safe_fs`，不移植 pin 的 staged-IO 族。
 8. 异常类型收敛为单一 `TrackerError`。
 
@@ -2430,7 +2430,7 @@ producer/tests/test_checkpoint_tracker.py
 awk '/^## 1\./,/^## 2\./' openspec/changes/m2-producer-core/nwm-snapshot-inventory.md | grep -c '^| '
 ```
 
-减 2（表头行与分隔行）。issue #16 落地时该值为 **29 - 2 = 27**。行数不等即视为触发器 1 未执行。Phase 7 的终审 brief MUST 核这张表存在且行数相等。
+减 2（表头行与分隔行）。issue #16 落地时该值为 **29 - 2 = 27**；#17 新增 cap 6b 后为 **30 - 2 = 28**。行数不等即视为触发器 1 未执行。Phase 7 的终审 brief MUST 核这张表存在且行数相等。
 
 另两条常驻纪律：
 
@@ -2452,9 +2452,189 @@ awk '/^## 1\./,/^## 2\./' openspec/changes/m2-producer-core/nwm-snapshot-invento
 - **相对 `run_dir` 会让实例状态与磁盘状态 fail-open 地错位**（round 3 cand-r3is-01，CONFIRMED/DEFER）：构造期原样存 `Path(run_dir)` 不校验绝对性，而 `safe_fs._expand_path` 对非绝对路径**每次调用**都按当时的 `Path.cwd()` 重新锚定。已实测的失败序列：cwd=A 观测 header 360 → 进程 `chdir` 到 B → 再观测 B 下另一份文件的 720，结果 `missing_hours()` 返回 `()`（声称 A 这一轮的 T+12 已捕获，实际从未捕获），且 `CapturedCheckpoint.path` 是相对路径，换 cwd 即「有记录、无文件」。**与 cand-03 失败方向相反**（那条 fail closed、`missing_hours()` 诚实），故不是重复。归属与 cand-03 **同一条 tracked issue #77**，措辞 MUST 收紧为「`run_dir` MUST 规范：**既绝对、祖先亦无符号链接**」，并注明两者方向相反。本 PR **不加**构造期 `is_absolute()` 守卫：verifier 裁定它超出本 PR 声明的改动面——§B 的构造期拒绝清单是闭合枚举，轴 6 那张刚被 Phase 6.2 独立审计封账的「10 行 = 10 见证」结账表要加第 11 行，须先改 fixture 再动码，而那会重新打开刚关掉的审计。当前不可达于声明域：全仓 `CheckpointTracker` 除模块自身与测试（`tmp_path`，恒绝对）外零调用点，`config.py` 无 `run_dir` 字段，`src/` 内零 `chdir`。
 - **epoch 形式 header 的 M4 具体核验钩子**（cand-19，CONFIRMED/FIX_NOW）：偏离 4「只认相对分钟」的正当性**只**建立在时间线证据上——`docs/compute-loop-design.md` 在本 PR 之前就已声明 `cfg.ic.update` 的 header 是模型相对分钟，且 spec 的收窄早于实现提交 26 分钟。它**不**建立在 pin 的行为上：round 2 直读 pin 控制流确认，`capture_available`(:3717-3736) 把 `_header_minute_matches_checkpoint`(:3963-3974) 的**两支都无条件**用在同一个 `<project>.cfg.ic.update` 上，分支注释只是归因不是守卫；而 yd 自己的初态正是 epoch 定戳的（pin `_shift_cfg_ic_time`(:3653) 在求解前把绝对分钟写进 header），所以「SHUD 把初态的时间基带进 update 文件」是**默认生产拓扑**而非异常。**M4 首次真跑 MUST 核验第一份真实 `cfg.ic.update` 的 header 是相对分钟形式**；若为 epoch 形式则每轮永久漏采（fail closed 且响亮，但总量为零），偏离 4 MUST 重新裁决。此处不接受通用的「真实 SHUD 行为归 M4」一句——它不会被解析成这一项具体检查（同类先例：cand-14 已按此标准给了自己的具体钩子）。
 
-**欠 #17 fixture 的一项显式裁决（round 3 F4，CONFIRMED/P3；本 issue 不替 #17 决定，只把它记成必须先裁的项）**：本 issue 在三处写死「补跑半随 #17 落进**同一个文件**」（本 fixture、design.md D9、清单 §1 cap 6 行），测试模块头的结账表另写「#17 MUST 按同一格式续表」。而 `producer/tests/test_checkpoint_tracker.py` 落地即 **806 行**，`.large-file-guard.json` 的 `maxLines` 为 **1000**、`exclude` 不含该文件，余量 **194 行**。碰撞是被清单自己的闭包清单**强制**的、不是密度估算：cap 6 行把 19 个补跑用例的闭包写死为 8 个 helper 加 13 项模块级常量（pin 上仅 `_FAST_SOLVER_STUB`(L4678)–`_DISTINCTIVE_STAGED_IC`(L5136) 一段就跨约 458 行）并明写「无法手搓等价，必须整体搬运」，实测本文件对 `SOLVER_STUB`/`_write_basins_package`/`install_recovered`/`run_shud`/`recover` 的命中**全为 0**——闭包一行未落，单它就超余量一倍以上，19 个用例本体与续表尚未计入。钩子按暂存集判定，故 #17 的**每一次本地 `git commit`** 都会被 `exit 2` 拒绝。#17 的 fixture MUST 在动码前三选一并写明理由：**(a)** 把测试拆成 `test_checkpoint_tracker.py` + `test_checkpoint_recovery.py` 两个文件，同时修订本 issue 写下的三处「同一个文件」MUST 与清单 cap 6 行；**(b)** 给 `test_checkpoint_tracker.py` 加**第四条** exclude——注意这正是 issue #82 记录在案的「豁免清单单调增长而守卫覆盖面单调缩小」模式的第四次复发，选它必须在 #82 里同步登记；**(c)** 拆分被搬运的闭包（把 13 项常量与 8 个 helper 落进独立 fixture 模块），只在本文件留用例。**MUST NOT 默认走 (b)**。
+**#17 fixture 前置裁决（round 3 F4，CONFIRMED/P3；已于 2026-09-01 关闭）**：本 issue 原在三处写死「补跑半随 #17 落进同一个测试文件」，而 `test_checkpoint_tracker.py` 已 806 行、只余 194 行，pin 的补跑闭包本身就超过余量。#17 在动码前选择方案 **(a)**：捕获测试留在 `test_checkpoint_tracker.py`，补跑测试进入新登记的 `test_checkpoint_recovery.py`；同步修订 design D9、清单 cap 6/6b 与本段旧 MUST。未选择新增 large-file exclude（不复发 #82），也未选择把 13 项 stub 抽成独立测试 API。完整理由与适配后的证据矩阵见下方 Issue #17 fixture。
 
 **Non-goals（本 issue 明示不做）**：漏采补跑（#17）、轮询循环与作业脚本接线、`state_checkpoints.json` 落盘、绝对 T+12 定戳（#9 重戳 + #13.1 发布）、river 行数等结构检查（#9）、work manifest 契约（组 8）、真实 SHUD 行为（M4）。
+
+### Issue #17 fixture（任务 9.2）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：改动面包含公开 tracker API、checkpoint/recovery 文件创建与不覆盖、临时参数 overwrite/rollback、attempt-local state transition，并命中项目 `cfg.ic`、T+12、warm-start、Slurm mandatory expanded triggers）
+Repair intensity: high（错误采纳会污染下一轮状态链；失败必须在状态/DONE owner 之前响亮终止）
+Project profile: yd-viewer
+Minimal mergeable slice: 组 9 余量；9.1 已由 #16 合并，本 issue 只交付 9.2，不再切第二刀
+
+**改动面**：
+
+- 修改 `docs/compute-loop-design.md` §9.3、`design.md` D9/D12、`specs/checkpoint-tracker/spec.md` 与本 fixture；修改 `nwm-snapshot-inventory.md`，把 cap 6 收敛为捕获测试并新增 cap 6b 补跑测试行。
+- 修改 `producer/src/yd_producer/tracker/checkpoint_tracker.py` 与 `tracker/__init__.py`：补跑 public seam、point-of-use authority 校验，以及既有捕获路径的 no-clobber 适配。
+- 最小修改 `producer/src/yd_producer/assemble.py` 的既有参数 writer；该文件当前 997 行，最终仍 MUST ≤1000 行，不加 large-file exclude、不再拆一个只转调 helper。
+- 修改 `producer/tests/test_assemble_parameters.py`、`producer/tests/test_checkpoint_tracker.py`；新增带 pin 溯源头的 `producer/tests/test_checkpoint_recovery.py`。`snapshot_provenance_fixtures.py` / `test_snapshot_provenance.py` 中的「27 条」指 **27 个唯一 NWM 原路径**，新增 cap 6b 与 cap 6 共用 `tests/test_shud_runtime.py`，故这两处保持 27、不盲改成 28；清单 Markdown 数据行才是 28。
+- `.large-file-guard.json`、依赖、`producer/uv.lock`、`config.py`、`executor.py`、`slurm.py`、`controller.py`、`publish.py`、`state/**` 均不改。
+
+**测试文件体量裁决（关闭 #16 交接）**：选择方案 (a)。捕获测试与既有 35 行/42 单元结账表留在 `test_checkpoint_tracker.py`；经 yd recovery seam 适配的补跑测试与自己的结账表进入 `test_checkpoint_recovery.py`。实现提交 MUST 把旧测试模块头第 15 行「#17 落补跑半时 MUST 按同一格式续表」改为「本文件的捕获结账表冻结；#17 的补跑结账表只在 `test_checkpoint_recovery.py`，禁止向本 806 行文件增加补跑用例」；这次只改该账面句，不改既有捕获表的执行语义/计数。不选 (b) large-file exclude（避免 #82 的第四次复发），也不选 (c) 独立 fixture module（会让 13 项旧 script stub 变成无人消费的测试 API）。D9、cap 6 行及 #16 fixture 中的旧「同一个测试文件」MUST 由本裁决覆盖；生产实现仍在同一个 `checkpoint_tracker.py`。
+
+**Must preserve**：
+
+1. #16 的 `CheckpointTracker` 构造、观测、`CapturedCheckpoint` 五字段、`captured` 只读视图、`missing_hours`/observed trail 与相对分钟判据保持；现有捕获测试逐条全绿。
+2. `render_shud_parameters(content)` 默认输出 byte-for-byte 等于 #15：六项仍为 `0/7/60/720/1/0`，`assemble()` 调用不传 override，00Z/12Z bytes 不变；三种 token/assignment、duplicate、UTF-8、大小上限与行尾规则不变。
+3. publisher 继续消费调用方显式 `scratch_checkpoint`；不新增目录扫描、manifest 或第二套完成状态。正式状态重戳与 `DONE` 仍只归 #24/#26。
+4. 每棵 work 的 cooperative single-writer 仍由 #23 runlock + #26 lifecycle 保证；本模块不宣称抵御绕过共同锁的不合作写者。
+5. 零新增依赖、零环境读取、零 NWM runtime import、零数据库/外部 registry/scheduler 调用；snapshot provenance 与 DB-free 正反守卫继续全绿。
+
+**公开 seam（逐字冻结）**：
+
+```python
+@runtime_checkable
+class RecoveryRunner(Protocol):
+    def __call__(
+        self, *, run_directory: RunDirectory, output_dir: Path
+    ) -> int: ...
+
+
+def ensure_twelve_hour_checkpoint(
+    *,
+    tracker: CheckpointTracker,
+    run_directory: RunDirectory,
+    runner: RecoveryRunner,
+) -> CapturedCheckpoint: ...
+```
+
+- `RecoveryRunner` 与 `ensure_twelve_hour_checkpoint` 由 `yd_producer.tracker` 再导出；runner 同步调用、无默认值，返回值必须是 strict `int`（bool/None/字符串拒绝），`0` 唯一成功值。
+- 这是 pin `SHUDRuntime._recover_missing_state_checkpoints` 的独立函数适配切点：不抽 `SHUDRuntime.run_shud/execute`、命令构造、进程轮询或 submit/poll；runner 负责一次真实/假 SHUD 调用，#26 负责把它放在已提交 Slurm job 内。
+- `render_shud_parameters` 的唯一允许扩展为 `render_shud_parameters(content: bytes, *, end: Literal["7", "0.5"] = "7") -> bytes`。运行时也只接受两个 literal；补跑传 `"0.5"`，其它五项仍走原固定表，禁止通用 mapping override 或第二套 writer。
+
+**A. 入口 preflight 与单目标**：
+
+1. 三个入参均类型/可调用性校验；`tracker` 的 target hours 必须恰为 `(12,)`。`(720,)`、`(6,)`、`(6,12)` 等全部在 runner 0 调用、目录/参数 0 mutation 时抛 `TrackerError`；不在 recovery 里猜「720 也许是分钟」。
+2. `RunDirectory.path` 必须是绝对、预存在的 `.../<work>/model` no-follow 目录，并逐字等于 tracker 的 `run_dir`；`project_name` 必须与 identity/tracker 相等。`state_path`/`parameter_path`/`forcing_index_path` 必须分别等于该目录顶层 `<project>.cfg.ic`/`<project>.para`/`<project>.tsd.forc`；forcing CSV 至少 1、最多 `MAX_DIRECT_GRID_STATION_BINDINGS`、basename 安全且 casefold 唯一、每项都是 run dir 顶层直属普通文件。伪造/外指/相对/重复路径在任何写前拒绝。
+3. recovery root 固定为 `<work>/state_checkpoint_recovery`，本小时 output 固定 `.../f012`。root 在调用前必须完全不存在；普通文件、目录、symlink 或不可判定形态都作为上次 attempt 残留保留并拒绝，不先删一半再失败。
+4. 一棵 work 只服务一个 Slurm attempt；重排队/进程重启/下次 cron 必须由 #26 删除并重组整棵 work。本模块不从盘恢复 `_captured`，也不提供 reset/retry API。
+5. recovery root/f012 由本模块在 runner 前 no-follow 创建并记录 `(st_dev, st_ino)`；runner 返回后、读取 candidate 前必须重新 descriptor-bound 核对同一 identity。runner 把 output dir rename/swap 成另一目录即失败，不能从未授权的新树采纳 candidate。
+
+**B. checkpoint authority 与 no-clobber**：
+
+1. 唯一 authority 是同一 tracker 实例的 `CapturedCheckpoint`。若 `captured[12]` 已存在，先要求五字段与 canonical target/relative 720/source name 一致，再在同一 no-follow fd 有界读回：SHA-256 必须等于记录、header 命中 relative 720、`state.parse` 成功。全通过时原对象返回、runner 0 调用；任一漂移抛 `TrackerError`，不补跑、不覆盖/删除证据。
+2. 若实例内无记录，canonical target `state_checkpoints/<project>.f012.cfg.ic.update` 必须不存在。任意既有普通文件、目录、symlink 都是未验证 residue：runner 0 调用、原树 byte/type 不变、抛 `TrackerError`。
+3. #16 的 `_capture` 从 `atomic_write_bytes_no_follow` 改用 `write_bytes_no_follow_exclusive`（或等价 O_EXCL no-follow），并为 `FileExistsError` 单列不删除分支：新 tracker 观察 720 时若规范文件已在盘，只如实保持 missing，绝不能 overwrite 后 `_discard` 旧文件。源 bytes 必须在 O_EXCL 前通过 header/body gate；写后回读必须逐字等于这份已验证 bytes。任何创建后校验/回读失败都保留 canonical 为未验证 residue、保持 missing，不按 pathname 删除。
+4. recovery 安装同样 O_EXCL；commit 窗口里外来 entry 抢先出现时不覆盖、不删除。安装后回读必须逐字等于首次已验证的 candidate bytes；回读失败或不同均保留 canonical residue、不得记 `_captured`，不按 pathname 删除。理由是 O_EXCL 只证明创建瞬间的所有权，无法排除竞争者随后 unlink/替换同名 entry；现有 `safe_fs` 无 compare-and-unlink，整棵失败 work 由 #26 统一回收。
+
+**C. 同初态、同 forcing 与临时参数**：
+
+1. runner 前对初态与 forcing index/CSV 做 descriptor-bound streaming SHA-256 快照；初态另受 `MAX_STATE_IC_BYTES` 且 `state.parse` 成功，parameter 受 `MAX_OBJECT_MANIFEST_BYTES`。不得无界读取 forcing，也不得递归发现额外输入。
+2. 以唯一 writer 从 parameter 原 bytes 得到 recovery bytes；在调用 runner 前 no-follow atomic replace。fake runner 在调用时必须能读到 `END=0.5` 与 `Update_IC_STEP=720`，并看见同一个 `RunDirectory`/state/forcing；`START=0` 等其余四项与主跑相同。
+3. runner 调用位于 `try/finally`；无论正常、非零或抛错，finally 都以原 bytes no-follow atomic restore parameter。正常恢复后逐字读回原 parameter，并重新流式核对初态与 forcing checksum；任一漂移或 restore 失败都是整轮 `TrackerError`，candidate 不采纳。
+4. 输入 checksum 对账只覆盖 Requirement 点名的 initial state + forcing；其它 variant 静态文件因 runner 复用同一 `RunDirectory` 自然相同，但本 issue 不发明整树 manifest。parameter 是唯一允许在受控窗口变化的静态文件。
+
+**D. runner 与 candidate 采纳**：
+
+1. 真正缺失且所有 preflight 通过时 runner 恰调用 1 次，关键字实参逐字为原 `RunDirectory` 与 fresh `.../state_checkpoint_recovery/f012`；本模块不 sleep、不轮询、不提交 executor。
+2. runner 抛任意普通异常、返回非 strict-int 或非零，即抛 `TrackerError`；即使 output 已有 gate-valid candidate 也不得采纳。异常原因用 chaining/notes 保留，外部只见 `TrackerError`。
+3. rc=0 后只读 output dir 顶层精确 `<project>.cfg.ic.update`；不接受另名、嵌套或主 run dir 的文件。missing、目录、symlink、非 UTF-8、oversize、header 非有限/非 720、body 截断均失败，保留 recovery tree 作为证据。candidate 必须经一个 descriptor-bound bounded no-follow read 得到单一 bytes；header/body/checksum 都验证这份 bytes，安装也写这份 bytes，禁止 validate 后重开源路径复制（runner/外部可在两次 open 间替换 regular file）。
+4. candidate bytes 通过 `_header_minute_matches_checkpoint(..., relative_minute=720.0)` 与真实 `state.parse` 后才 O_EXCL 安装；从 canonical 路径再有界回读，字节、checksum、header/body 二次一致后写入 `_captured[12] = CapturedCheckpoint(...)` 并返回。记录 `relative_minute=720.0`、`path` 为 canonical target、`source_name` 为 candidate basename、checksum 为 canonical 回读 bytes。
+5. 成功/失败都不写 `state_checkpoints.json`、recovery outcome JSON、`DONE`、正式状态或 controller report；recovery tree 留在本 work，最终由既有 whole-work owner 删除。
+
+**E. 明示不移植的 pin 面**：
+
+- 不移植 `write_manifest`/`_manifest_provenance`/`_final_ic_entry`、两处 Slurm 环境身份读取、per-hour outcome 字符串、outer timeout budget、多目标循环、refusal log 与 NWM staged-IO 族。依据：yd publisher 只收显式 `scratch_checkpoint`，全仓无 `state_checkpoints.json` 运行时消费者；复制这些会制造第二套 discovery/completion authority。
+- 不承接 `packages/common/state_cli.py` rekey 面；唯一 owner 仍是 #24。
+- pin 19 个 `run_shud` 用例按 yd seam 的仍适用业务不变量重写，不逐字复制 13 个 Python script stub：原入口未在抽取集、yd 只承诺项目模式 END=0.5/720、issue 明确要求注入 fake。保留的 oracle 是 same-input、fresh-output、rc/异常、missing/wrong-header/truncated、stale residue、参数 restore、no second submission boundary；cfg-style、6/12 多目标、manifest diagnostics、per-hour timeout 属上列剥离面。
+
+**Risk packs considered（core）**：
+
+- Public API / CLI / script entry: selected - 新 public runner protocol/ensure seam 与参数 writer keyword；CLI 不接线。
+- Config / project setup: not selected - schema 不改；固定 `[12]` 在 consumer 边界 fail closed。
+- File IO / path safety / overwrite: selected - recovery root、parameter replace/restore、candidate install、canonical no-clobber、symlink/nonregular/containment。
+- Schema / columns / units / field names: selected - END 单位天、checkpoint_hours 单位小时、header 单位相对分钟，三者不得混。
+- Auth / permissions / secrets: not selected - work-local、无凭据，本 issue 不决定 mode。
+- Concurrency / shared state / ordering: selected - `_captured` 内存 authority、主跑后补跑、parameter finally、O_EXCL；共同 runlock 为外层前提。
+- Resource limits / large input / discovery: selected - parameter/state 有界、forcing streaming、CSV count cap、candidate 不递归发现。
+- Legacy compatibility / examples: not selected - 无 recovery 既有 consumer；#15 default API 必须 byte-compatible，归 Must-preserve。
+- Error handling / rollback / partial outputs: selected - runner/restore/input drift/install 每支均不得产生 authority；旧 residue 保留。
+- Release / packaging / dependency compatibility: selected - stdlib only、lock 零 drift、snapshot guard/1000-line gate。
+- Documentation / migration notes: not selected - 新 M2 能力，无用户迁移。
+
+**Domain packs**：
+
+- Geospatial / CRS: not selected - 无几何面。
+- Time series / forcing / temporal boundaries: selected - 12 h ↔ 0.5 day ↔ 720 minute 三单位同一身份，forcing 前后不变。
+- 状态链 / warm-start 定戳一致性: selected - 只采 relative T+12；绝对定戳仍归 publisher。
+- NWM 快照溯源与 DB-free 隔离: selected - 固定 pin 抽取/剥离、测试 cap 6b、零外部耦合。
+
+**Invariant Matrix**：
+
+- Governing invariant: 一轮只可交出一个由同 attempt、同初态、同 forcing 产生且在 canonical 路径二次验证的 relative-T+12 checkpoint；文件名存在永远不能自证 authority。
+- Source-of-truth identity/contract: `tracker._targets == (12,)`、同一 `RunDirectory` 的显式静态路径、`CapturedCheckpoint` 五字段/checksum、candidate relative header 720。
+- Producers: SHUD/fake runner 只产 fresh output candidate；tracker O_EXCL 安装 canonical；parameter writer 产临时 recovery bytes。
+- Validators/preflight: run-directory exact-path/no-follow；canonical/recovery-root absence；state parse；streamed forcing checksums；candidate header/body/checksum；captured point-of-use recheck。
+- Storage/cache/query: `_captured` 是唯一 attempt-local authority；磁盘无 manifest/cache 查询。
+- Public routes/entrypoints: `ensure_twelve_hour_checkpoint`、`RecoveryRunner`、`render_shud_parameters(end=...)`；CLI/controller 不在本 issue。
+- Frontend/downstream consumers: #24 publisher 的显式 `scratch_checkpoint`；#26 job-local orchestration；viewer 无消费。
+- Failure paths/rollback/stale state: parameter finally restore；输入 drift/runner/candidate/install 失败不记 authority；旧 residue 与 O_EXCL 后校验/回读失败的 canonical 都不覆盖、不按 pathname 删除；整个 work 由 #26 后继回收。
+- Evidence/audit/readiness: focused tests、prechange red、mutation matrix、snapshot guards、full producer/Ruff/OpenSpec；M4 真实 SHUD receipt 明示未覆盖。
+- Regression rows:
+  - valid watcher capture -> point-of-use recheck 后 runner 0 调用、返回原记录。
+  - genuine miss + fake rc=0 + valid candidate -> 调用时 0.5/720，同输入 checksum，restore 后安装并返回。
+  - record drift / old canonical / old recovery root / impossible target / bad runner/candidate/input drift -> stable `TrackerError`、0 新 authority、证据不被冒充。
+  - unchanged `assemble()` + parameter template -> byte-exact主跑参数与 #15 相同。
+
+**Boundary-surface checklist**：
+
+- Shared helper roots: `store.safe_fs` 只消费，不修改；`assemble.render_shud_parameters` 是唯一 shared writer owner。
+- Public entrypoints: tracker package 两个新增导出；既有导出/签名不删。
+- Read surfaces: parameter/state/index/CSV/candidate/canonical，全部 exact path、no-follow、bounded/streamed。
+- Write/delete/overwrite surfaces: recovery dirs、临时 parameter overwrite/restore、canonical O_EXCL；tracker 对 canonical 零删除，旧 residue 与 O_EXCL 后失败 residue 均留给 #26 整 work 回收。
+- Staging/publish/rollback surfaces: fresh recovery output + parameter finally；无 NFS publish/DONE。
+- Producer/consumer evidence boundaries: runner rc + exact candidate bytes -> CapturedCheckpoint checksum -> #24 explicit path。
+- Stale-state/idempotency boundaries: existing valid captured record可安全复用；无记录的同名文件/旧 root 一律拒绝；失败后同 work 不重试。
+- Unchanged downstream consumers: #15 assemble default、#16 capture、#24 publisher、#23 lock、#26 executor contract。
+
+**Required evidence（每条 input -> expected output）**：
+
+1. 参数 writer：同一模板默认调用 -> #15 exact bytes；`end="0.5"` -> 仅 END 从 7 变 0.5、其余五项/注释/EOL unchanged；随后默认调用仍为 7（无全局污染）；非法 end family -> `AssemblyError(phase="validate")`。
+2. 已捕获 valid record -> `ensure...` 返回同一对象，runner calls=0；checksum/header/body 任一 drift -> `TrackerError`、runner 0、磁盘不删。
+3. genuine miss success fake -> callback 观测 exact `RunDirectory`/output path、END=0.5/720、初态/forcing bytes；写 valid 720 candidate 返回 0 -> canonical record/bytes/checksum正确，parameter原 bytes、state/forcing tree snapshot不变，runner恰一次。
+4. fake candidate body承接 staged IC 的 distinctive body -> returned checkpoint body同值，证明不是只由 END 合成；forcing callback checksum等于调用前权威值。
+5. runner raises、returns `True`/`None`/`"0"`/nonzero；nonzero 还写 valid candidate -> 均 `TrackerError`、无 captured/canonical、parameter恢复，candidate留证。
+6. candidate family：missing、wrong basename only、nested exact name only、directory、symlink-to-outside、non-UTF8、wrong header 1440、nonfinite header、720+truncated body、oversize -> 各失败且不采纳；outside target bytes unchanged。
+7. runner 分别改 state、forcing index、某 CSV 后再写 valid candidate -> post-run checksum gate失败、无 canonical、parameter恢复；每个被改输入留作整轮失败证据，不由 tracker悄悄改回。
+8. parameter restore 写失败（注入第二次 parameter atomic write 失败）-> `TrackerError`、无 authority；候选不安装。#26 必须按整轮失败删除 work，归集成验收。
+9. canonical pre-existing regular/dir/symlink 与 recovery-root pre-existing regular/dir/symlink -> runner 0、参数/输入 0 mutation、全树类型/bytes不变。
+10. 跨 attempt handoff：tracker A 捕获 valid；tracker B 对同 run dir 看到 torn 720 source再 `capture_available()` -> A 的 canonical bytes仍在、B captured空；B 的 `ensure...` 对该未验证 residue失败且不删除。
+11. install race：runner 期间在 canonical path 放外来 regular bytes -> O_EXCL 分支失败、外来 bytes原样、无 `_captured`；runner 把 f012 output dir rename 后以新 inode 替换 -> identity gate失败、不读/采纳替换树。
+12. candidate 在首次 bounded read 后被另一份 regular file替换 -> 安装/记录仍严格对应首次已验证 bytes，不能把第二份未经验证 bytes复制进 canonical；canonical readback与记录checksum一致。
+13. target hours `(720,)`/`(6,)`/`(6,12)` -> runner 0、recovery root不存在、参数/输入不变。
+14. forged `RunDirectory` matrix：path mismatch/relative、project mismatch、state/parameter/index 外指、CSV duplicate/casefold duplicate/超 cap、任一 static symlink/nonregular -> pre-write `TrackerError`。
+15. no-clobber 写后回读失败、或 O_EXCL 返回后 canonical bytes 被改成另一份不同内容的合法/损坏状态 -> canonical residue 原样保留、tracker 零 pathname 删除、`captured` 为空；捕获侧保持 missing，补跑侧整轮 `TrackerError`。byte-identical replacement 与原 candidate 在本 issue 的 bytes/checksum authority 下不可区分，也不要求新增 inode oracle。
+16. public structure：`RecoveryRunner` runtime protocol/`ensure` keyword-only signature、tracker package导出；`assemble.py`/两个测试文件各≤1000行，`.large-file-guard.json` diff为空。
+17. snapshot：`test_checkpoint_recovery.py` 前 5 行有精确 pin/source 注释；清单 cap 6/6b 两目标均已落地，Markdown 数据行恰 28、唯一 NWM 原路径恰 27；provenance 解析器关于「27 条原路径」的说明保持正确；正反 provenance 与 DB-free scan green；`checkpoint_tracker.py` 不出现环境/外部 DB 调用。
+18. pre-change red：在 docs-only fixture commit 上 overlay 最终 source-neutral tests；新 public imports/signature/no-clobber/recovery行为必须 behavioral red，不接受只有 collection error而零行为断言的单一证据。
+19. final mutation matrix至少逐腿覆盖：END override、target exactness、captured checksum/header/body三 gate、canonical preexist、recovery-root preexist/identity、runner strict rc、finally restore、state/index/CSV三类 post-checksum、candidate exact path/single-read/header/body、O_EXCL race、canonical readback checksum。每腿先校准 provenance，0 survived/0 unrun；等价体必须书面结账，不伪报 killed。
+20. final commands：focused tracker/recovery/parameter tests、`cd producer && uv run pytest`、producer Ruff check/format-check、`uv sync --frozen`、viewer profile tests/Ruff、OpenSpec strict/all、stage anchor、large-file hook、`git diff --check` 全绿。
+
+**Known limits / handoff**：
+
+- `cfg.ic.update` 第一物理行与 epoch/relative 真实形态仍按 #16 交接归 M4 两个具名 receipt；本 issue 不改 header parser。
+- 相对 `run_dir` 与 symlink ancestor 的 #77 仍是既有 capture constructor contract；本 public recovery seam额外要求 absolute/no-follow，但不越界重开 #16 构造矩阵。
+- fresh-work-per-attempt、同一 Slurm job 与 executor submission count = 1 的端到端证明归 #26；本 issue只能证明 runner callback一次且不持有 `JobExecutor`。
+- 真实 SHUD argv/binary、日志、walltime/kill 行为归 #26/M4；本期 fake runner 不声称真机可运行。
+- parameter restore 失败时 work 可能仍带 0.5 参数；这是响亮整轮失败证据，必须由 #26 whole-work failure cleanup 回收，不在 tracker 自建第二套删除协议。
+
+**Non-goals**：
+
+- controller/CLI、JobExecutor submit/poll、第二次作业计数断言、失败日志、DAT、NFS 状态、重戳、发布、DONE、整 work 删除（#24/#26）。
+- 多 checkpoint hour、6h/24h、per-hour loop、timeout/cancel/retry/backoff；产品配置固定 `[12]`。
+- `state_checkpoints.json`、status/lineage/provenance manifest、SLURM env identity、外层 watcher service。
+- `state_cli.py` rekey、header first-line/epoch裁决、river权威计数、真实 SHUD 数值/进程 receipt。
+- 修改 shared `safe_fs`、`state`、config schema、executor/slurm 或新增依赖/large-file豁免。
+
+**Review focus**：
+
+- 是否任何路径把磁盘文件名/旧 recovery tree当 authority，或会在新 tracker 上覆盖/删旧 canonical。
+- same initial/forcing是否真在 runner前后 descriptor-bound 对账；parameter restore是否覆盖所有 exit lane。
+- runner非零但留下 valid candidate、wrong-header但结构合法、720-header但body截断三类是否各自能被拒绝。
+- default参数 bytes/#16 capture/#24 explicit-path consumer是否保持，是否偷渡 manifest/controller/timeout 面。
+- pin adaptation与cap 6b登记是否如实，不把 yd 新 fake伪称逐字移植，也不漏掉1000行/DB-free/provenance闸。
 
 ## 10. prepare-variants：变体与几何
 
