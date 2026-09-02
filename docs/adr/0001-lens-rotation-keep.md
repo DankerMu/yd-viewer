@@ -527,3 +527,35 @@ Phase 6.2/invariant-audit、clean closure 与 out-of-scope risk routing。
 复议条件未触发：本 PR 后续轮零 catch，不存在连续两个 rotated P3 样本；Round 2 与 Phase 7 均逐项确认
 C1/C2/C3 closed、C4 unchanged/discarded，零已闭合 finding 重报。共享 `m2-producer-core` 仍有后继任务，
 本次继续不 archive。
+
+---
+
+## 第 14 次复议（issue #17 / PR #121 合并后，2026-09-02）
+
+审计数字：24 行（23 merged、1 terminal），22 个多轮合并 PR，后续轮次命中仍为
+**core=122 / rotated=96**。PR #121 的两条净捕获全部发生在 Round 1：test-evidence 抓到
+casefold fixture 被 extension grammar 提前拦截的假覆盖，security-perf 抓到 forcing fd 的
+`finally: os.close` 会裸逃或替换 primary。Round 2 四名 Sonnet 1M reviewer 与 Phase 7 fresh
+Gap Sweep 都是零 finding，因此本样本对 later-round attribution 的增量仍是 **core +0 / rotated +0**。
+
+本 PR 的 Round 2 采用「一名 full-PR comprehensive + 三个 pinned high-risk lens」：
+file-I/O/error-contract、test-evidence、invariant-state。`comprehensive` 是新任务名，但没有产生
+catch；另外三个均是 Round 1 已覆盖风险面的延续。故这个零增量不能解释为「轮换无价值」：没有
+rotated catch 不等于 rotated lens 没有做收敛证明；同样也不能解释为 keep 的数值支持，因为没有
+任何后轮 finding 可归因。它能证明的只有两点：Round 1 的两个 P1 在修复后确实关闭，且这一轮
+没有把已关闭 finding 重报成新问题。
+
+本 PR 还给当前指标的盲区补了一条**零事件样本**：最昂贵的后轮工作是 Phase 6.2 对全部 tracker
+`safe_fs`/显式 close、authority、rollback 与 stale-state sibling surface 的完整盘点，以及 59 腿
+mutation matrix 和 cancellation addendum。审计结果是 clean，因而它们不会进入 `catches`；但正是
+这些负证据让 Round 2 与 Phase 7 的 clean 有可信基础。当前 core/rotated 计数既看不见
+method-change audit 抓到的 finding（第 11/12 次复议已记录），也看不见 method-change audit 给出的
+**无遗漏闭合证明**。只按 122/96 作 keep/cut 仍会把取证方法与 clean-closure 的价值全部丢掉。
+
+**决策不变：keep。** 继续保留 pinned core + 条件式 free-slot rotation + 独立终审的默认安排；
+本次不把 122/96 解释成 keep 的数据支持，也不据此 cut。在 `catches` 增加取证方法、Phase 6.2
+归属和 clean-closure 结果，并让审计区分「发生轮换但零 catch」与「根本没有轮换」之前，
+lens-rotation 的 DECIDABLE 仍只表示统计机制要求复议，不是可直接执行的策略信号。
+
+复议条件未触发：PR #121 的 Round 2 与 Phase 7 零已关闭 finding 重报；后轮零 catch，因此不存在
+连续两个 rotated P3 样本。共享 `m2-producer-core` 仍有后继任务，本次继续不 archive。
