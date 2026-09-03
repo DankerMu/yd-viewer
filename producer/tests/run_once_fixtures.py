@@ -99,6 +99,11 @@ IFS_LEADS = (0, 3)
 IFS_VARIABLES = ("2t",)
 IFS_BUNDLE = "ifs.t{cycle_hour:02d}z.f{lead:03d}.bundle.grib2"
 
+#: 多变量判别器（contract-1 修复）：GFS ≥2 变量 × ≥2 lead，暴露 rawcopy 的
+#: 「每 (lead, 变量) 一条 entry、每 lead 一份 bundle 副本」共享键扇出。
+MULTI_GFS_LEADS = (0, 3)
+MULTI_GFS_VARIABLES = ("tmp2m", "rh2m", "ugrd10m")
+
 #: raw 目录段（`rawscan.SOURCE_DIR_NAMES` 的独立转录）。
 DIR_SEGMENTS = {"ifs": "IFS", "gfs": "gfs"}
 
@@ -178,6 +183,22 @@ def make_config(*, source: str = "gfs") -> Config:
     )
 
 
+def make_multi_gfs_config() -> Config:
+    """`make_config` 的多变量 GFS 变体：≥2 变量 × ≥2 lead（fanout 判别器）。
+
+    只替换 `raw.gfs` 的 `variables`（`lead_hours` 与 `bundles` 不变），因此
+    `rawscan.judge` 的预期集与 `rawcopy.stage_raw` 的扇出与 `write_raw_cycle(
+    leads=MULTI_GFS_LEADS, variables=MULTI_GFS_VARIABLES)` 逐字一致。
+    """
+    from dataclasses import replace
+
+    base = make_config(source="gfs")
+    return replace(
+        base,
+        raw=replace(base.raw, gfs=replace(base.raw.gfs, variables=MULTI_GFS_VARIABLES)),
+    )
+
+
 def make_local(tmp_path: Path | str, *, config: Config) -> LocalConfig:
     root = Path(tmp_path).resolve()
     return LocalConfig(
@@ -251,15 +272,26 @@ def raw_root(local: LocalConfig) -> Path:
 
 
 def write_raw_cycle(
-    local: LocalConfig, *, source: str = "gfs", cycle: datetime = CYCLE
+    local: LocalConfig,
+    *,
+    source: str = "gfs",
+    cycle: datetime = CYCLE,
+    leads: tuple[int, ...] | None = None,
+    variables: tuple[str, ...] | None = None,
 ) -> Path:
-    """写 `raw/<SEG>/<cycle>/` 的 bundle 与源 manifest.json（rawcopy 可承接形态）。"""
+    """写 `raw/<SEG>/<cycle>/` 的 bundle 与源 manifest.json（rawcopy 可承接形态）。
+
+    `leads`/`variables` 缺省取该 source 的单变量合成规则；多变量判别器传
+    `MULTI_GFS_LEADS`/`MULTI_GFS_VARIABLES`。
+    """
     segment = DIR_SEGMENTS[source]
     base = raw_root(local) / segment / cycle_text(cycle)
     base.mkdir(parents=True, exist_ok=True)
     pattern = GFS_BUNDLE if source == "gfs" else IFS_BUNDLE
-    variables = GFS_VARIABLES if source == "gfs" else IFS_VARIABLES
-    leads = GFS_LEADS if source == "gfs" else IFS_LEADS
+    if leads is None:
+        leads = GFS_LEADS if source == "gfs" else IFS_LEADS
+    if variables is None:
+        variables = GFS_VARIABLES if source == "gfs" else IFS_VARIABLES
     for lead in leads:
         name = pattern.format(cycle_hour=cycle.hour, lead=lead)
         (base / name).write_bytes(b"GRIB\xff\x00lead-%03d" % lead)

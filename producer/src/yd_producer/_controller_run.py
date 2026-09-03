@@ -1,11 +1,10 @@
 """`controller.run_once` 的私有支撑：单源单轮骨架（issue #26，任务 14.1）。
 
-公开 seam 只有 `yd_producer.controller.run_once`（测试一律从那里导入）；本模块不导出
-任何公共符号，是 run_once 的**唯一**私有支撑（tasks.md 允许且只允许一个私有
-`yd_producer._controller_run`；第二份 `_controller_run_checks.py` 属未记录的 fixture
-偏离，已折叠回本模块与 `controller.py` 的私有校验面）。固定调用序与逐条 ownership
-1–11 的对应逐条写在 `run_once`/`_run_once` 与各校验函数 docstring；契约来源：
-design.md D13、tasks.md `### Issue #26 fixture`、docs/compute-loop §9–§11。"""
+公开 seam 只有 `yd_producer.controller.run_once`；本模块不导出任何公共符号，是
+run_once 的唯一私有支撑（tasks.md 允许且只允许一个私有 `_controller_run`；第二份
+`_controller_run_checks.py` 属未记录的 fixture 偏离，已折叠回本模块与 controller
+私有校验面）。调用序与 ownership 1–11 写在各函数 docstring；契约来源：design.md
+D13、tasks.md `### Issue #26 fixture`、docs/compute-loop §9–§11。"""
 
 from __future__ import annotations
 
@@ -98,8 +97,8 @@ def _require_exact_work_parent(
 
     `stage_raw` 的 `mkdir(parents=True)` 是裸创建；若 `work_root` 或 `work_root/source`
     是已存在 symlink/别名（T leaf 缺席时 `lexists(work_dir)` 为假、拦不住），副本会写进
-    目标树。本闸在 `stage_raw` 之前以 raw phase 拒绝；**缺失的普通父目录仍然合法**。
-    """
+    目标树。本闸在 `stage_raw` 之前以 raw phase 拒绝；**缺失的普通父目录仍然合法**。"""
+
     expected_parent = work_root / source
     if work_dir.parent != expected_parent:
         raise RunError(
@@ -140,6 +139,50 @@ def _reject_preexisting_work(work_dir: Path, source: str, cycle: datetime) -> No
             source=source,
             cycle=cycle,
         )
+
+
+def _phase_error(
+    message: str, phase: controller.RunPhase, source: str, cycle: datetime, job_id=None
+):
+    """抛一个 phase 类型化 RunError 的便捷入口（私有结构简化，字段逐字保留）。"""
+    raise RunError(message, phase=phase, source=source, cycle=cycle, job_id=job_id)
+
+
+def _verify_raw_fanout(
+    *,
+    staged: rawcopy_module.StagedRaw,
+    store: LocalObjectStore,
+    source: str,
+    cycle: datetime,
+) -> None:
+    """逐变量扇出的集合/成员关系校验（raw-scan spec「逐变量扇出」）。
+
+    `entries` 按 `(lead, variable)` 扇出（同一 bundle 副本被多变量 entry 共享），
+    `copied_files` 按 lead/bundle 复制、无顺序保证；只允许：每 entry 解析到恰好一个
+    copied 成员，每副本至少被一 entry 引用。位置/等基数 `zip` 是 contract-1 已确认
+    缺陷，禁止恢复。
+    """
+    raw_error = lambda message: _phase_error(message, "raw", source, cycle)
+    copied_set = set(staged.copied_files)
+    repeats = len(staged.copied_files) - len(copied_set)
+    if repeats:
+        raw_error(f"copied_files 含重复路径（{repeats} 项）；raw 副本必须逐 lead 唯一")
+    raw_root = Path(store.root) / "raw"
+    for copied in staged.copied_files:
+        if not Path(copied).is_absolute() or not Path(copied).is_relative_to(raw_root):
+            raw_error(f"copied 路径 {copied} 不在 object-store raw 子树 {raw_root} 内")
+    referenced: set[Path] = set()
+    for entry in staged.entries:
+        resolved = store.resolve_path(entry.local_key)
+        if resolved not in copied_set:
+            raw_error(
+                f"entry.local_key {entry.local_key!r} 解析到 {resolved}，"
+                f"不在本轮 copied 副本集合（{len(copied_set)} 项）内"
+            )
+        referenced.add(resolved)
+    orphaned = copied_set - referenced
+    if orphaned:
+        raw_error(f"copied 副本 {next(iter(orphaned))} 未被任何 entry 引用（orphan）")
 
 
 def _variant_reach_count(*, source: str, cycle: datetime, variant_dir: Path) -> int:
@@ -187,8 +230,7 @@ def _canonical_checkpoint_path(*, attempt: PreparedAttempt, work_dir: Path) -> P
     """canonical 未来终名：`<work>/model/state_checkpoints/<project>.f012.cfg.ic.update`。
 
     由 tracker 的 `checkpoint_dir / f"{project}.f{12:03d}.cfg.ic.update"` 唯一确定性推导；
-    controller 自己推导并点用重验，不靠扫描规范文件名寻找 authority。
-    """
+    controller 自己推导并点用重验，不靠扫描规范文件名寻找 authority。"""
     return (
         work_dir
         / RUN_DIRECTORY_NAME
@@ -227,16 +269,13 @@ def _require_terminal_artifacts_pre_collect(
 
     时序闸（evidence 15）：collect 只许交接、不许制造；本闸零 collect、零 publish/DONE
     之前拒绝，不可由 collect 后 stat 替代。"""
+    collect_error = lambda message: _phase_error(
+        message, "collect", source, cycle, job_id
+    )
     for label, path in items:
         candidate = Path(path)
         if not candidate.is_relative_to(work_dir):
-            raise RunError(
-                f"{label} 不在精确 work {work_dir} 内：{candidate}",
-                phase="collect",
-                source=source,
-                cycle=cycle,
-                job_id=job_id,
-            )
+            collect_error(f"{label} 不在精确 work {work_dir} 内：{candidate}")
         try:
             info = safe_fs.stat_no_follow(candidate, containment_root=work_root)
         except FileNotFoundError as exc:
@@ -257,13 +296,9 @@ def _require_terminal_artifacts_pre_collect(
                 job_id=job_id,
             ) from exc
         if not stat_module.S_ISREG(info.st_mode):
-            raise RunError(
+            collect_error(
                 f"{label} 在 collect 前不是普通文件：{candidate}"
-                f"（st_mode={info.st_mode:#o}）",
-                phase="collect",
-                source=source,
-                cycle=cycle,
-                job_id=job_id,
+                f"（st_mode={info.st_mode:#o}）"
             )
 
 
@@ -293,90 +328,45 @@ def _validate_prepared(
     variant_dir: Path,
 ) -> None:
     """prepared-attempt 矩阵（ownership 5）：identity/command/DAT 的一把闸。"""
+    prepared_error = lambda message: _phase_error(message, "prepare", source, cycle)
+
     identity = attempt.identity
     if identity.source_id != source:
-        raise RunError(
-            f"driver 返回的 identity.source_id={identity.source_id!r} 不等于 "
-            f"source={source!r}",
-            phase="prepare",
-            source=source,
-            cycle=cycle,
+        prepared_error(
+            f"identity.source_id={identity.source_id!r} 不等于 source={source!r}"
         )
     if identity.cycle_time != cycle:
-        raise RunError(
-            f"driver 返回的 identity.cycle_time={identity.cycle_time!r} 不等于 "
-            f"cycle={cycle!r}",
-            phase="prepare",
-            source=source,
-            cycle=cycle,
+        prepared_error(
+            f"identity.cycle_time={identity.cycle_time!r} 不等于 cycle={cycle!r}"
         )
     calibrated = prepare_module.calibrated_state_path(variant_dir)
     expected_state_name = f"{identity.project_name}{controller.STATE_SUFFIX}"
     if calibrated.name != expected_state_name:
-        raise RunError(
-            f"identity.project_name={identity.project_name!r} 与率定状态项目名不符："
-            f"率定状态 {calibrated.name!r}，期望 {expected_state_name!r}",
-            phase="prepare",
-            source=source,
-            cycle=cycle,
-        )
+        prepared_error("identity.project_name 与率定状态项目名不符")
     command = attempt.command
     if not isinstance(command, tuple) or not command:
-        raise RunError(
-            f"command 必须是非空 tuple[str, ...]，实得 {command!r}",
-            phase="prepare",
-            source=source,
-            cycle=cycle,
-        )
+        prepared_error(f"command 必须是非空 tuple[str, ...]，实得 {command!r}")
     for item in command:
         if not isinstance(item, str) or not item:
-            raise RunError(
-                f"command 的每项必须是非空 str，实得 {item!r}",
-                phase="prepare",
-                source=source,
-                cycle=cycle,
-            )
+            prepared_error(f"command 的每项必须是非空 str，实得 {item!r}")
         if "\x00" in item:
-            raise RunError(
-                f"command 含 NUL 字节：{item!r}",
-                phase="prepare",
-                source=source,
-                cycle=cycle,
-            )
+            prepared_error(f"command 含 NUL 字节：{item!r}")
     scratch_dat = attempt.scratch_dat
     if not isinstance(scratch_dat, Path) or not scratch_dat.is_absolute():
-        raise RunError(
-            f"scratch_dat 必须是绝对路径，实得 {scratch_dat!r}",
-            phase="prepare",
-            source=source,
-            cycle=cycle,
-        )
+        prepared_error(f"scratch_dat 必须是绝对路径，实得 {scratch_dat!r}")
     leaf = scratch_dat.name
     if leaf in {"", ".", ".."} or "/" in leaf or "\\" in leaf or "\x00" in leaf:
-        raise RunError(
-            f"scratch DAT 必须是一个安全未来 leaf：{scratch_dat}",
-            phase="prepare",
-            source=source,
-            cycle=cycle,
-        )
+        prepared_error(f"scratch DAT 必须是一个安全未来 leaf：{scratch_dat}")
     parent = scratch_dat.parent
     # 词法与解析后的父路径必须一致：`.`/`..` 段与 symlink 祖先都会让 `resolve()` 与
     # 词法路径分叉，届时 `stage_raw` 的裸 `mkdir(parents=True)` 沿别名写到 work 之外。
     if not parent.is_relative_to(work_dir) or Path(parent).resolve() != parent:
-        raise RunError(
+        prepared_error(
             f"scratch DAT {scratch_dat} 必须位于 exact work {work_dir} 内的无歧义"
-            f"未来父目录（母路径 {parent} 不得含 `..`/symlink/别名）",
-            phase="prepare",
-            source=source,
-            cycle=cycle,
+            f"未来父目录（母路径 {parent} 不得含 `..`/symlink/别名）"
         )
     if os.path.lexists(scratch_dat):
-        raise RunError(
-            f"scratch DAT 提交前必须不存在：{scratch_dat}",
-            phase="prepare",
-            source=source,
-            cycle=cycle,
-        )
+        prepared_error(f"scratch DAT 提交前必须不存在：{scratch_dat}")
 
 
 def _verify_canonical_is_regular(
@@ -415,103 +405,56 @@ def _validate_products(
     cycle: datetime,
 ) -> None:
     """products 矩阵（ownership 8）：job/DAT/log/RunDirectory/tracker 逐字段绑定。"""
+    collect_error = lambda message: _phase_error(
+        message, "collect", source, cycle, terminal.job_id
+    )
+
     if not isinstance(products, AttemptProducts):
-        raise RunError(
-            f"driver.collect 返回类型错误：{type(products).__name__}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
-        )
+        collect_error(f"driver.collect 返回类型错误：{type(products).__name__}")
     if products.job_id != terminal.job_id:
-        raise RunError(
-            f"products.job_id {products.job_id!r} != terminal job_id "
-            f"{terminal.job_id!r}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
+        collect_error(
+            f"products.job_id {products.job_id!r} != terminal job_id {terminal.job_id!r}"
         )
     if products.scratch_dat != attempt.scratch_dat:
-        raise RunError(
+        collect_error(
             f"products.scratch_dat {products.scratch_dat!r} 不等于 prepare 声明的 "
-            f"{attempt.scratch_dat!r}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
+            f"{attempt.scratch_dat!r}"
         )
     if products.merged_log != job_spec.log_path:
-        raise RunError(
+        collect_error(
             f"products.merged_log {products.merged_log!r} 不等于 JobSpec.log_path "
-            f"{job_spec.log_path!r}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
+            f"{job_spec.log_path!r}"
         )
     run_directory = products.run_directory
     if not isinstance(run_directory, RunDirectory):
-        raise RunError(
-            f"products.run_directory 类型错误：{type(run_directory).__name__}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
+        collect_error(
+            f"products.run_directory 类型错误：{type(run_directory).__name__}"
         )
     expected_run_dir = work_dir / RUN_DIRECTORY_NAME
     if run_directory.path != expected_run_dir:
-        raise RunError(
-            f"RunDirectory.path {run_directory.path!r} 必须等于 {expected_run_dir!r}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
+        collect_error(
+            f"RunDirectory.path {run_directory.path!r} 必须等于 {expected_run_dir!r}"
         )
     if run_directory.identity != attempt.identity:
-        raise RunError(
+        collect_error(
             f"RunDirectory.identity {run_directory.identity!r} 不等于 "
-            f"attempt.identity {attempt.identity!r}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
+            f"attempt.identity {attempt.identity!r}"
         )
     tracker = products.tracker
     if not isinstance(tracker, CheckpointTracker):
-        raise RunError(
-            f"products.tracker 类型错误：{type(tracker).__name__}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
-        )
+        collect_error(f"products.tracker 类型错误：{type(tracker).__name__}")
     if tracker.run_dir != run_directory.path:
-        raise RunError(
+        collect_error(
             f"tracker.run_dir {tracker.run_dir!r} 必须等于 RunDirectory.path "
-            f"{run_directory.path!r}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
+            f"{run_directory.path!r}"
         )
     if tracker.project_name != run_directory.project_name:
-        raise RunError(
+        collect_error(
             f"tracker.project_name {tracker.project_name!r} 必须等于 "
-            f"RunDirectory.project_name {run_directory.project_name!r}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
+            f"RunDirectory.project_name {run_directory.project_name!r}"
         )
     if tracker.targets != (12,):
-        raise RunError(
-            f"tracker.targets 必须恰为 (12,)，实得 {tracker.targets!r}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
-        )
+        collect_error(f"tracker.targets 必须恰为 (12,)，实得 {tracker.targets!r}")
     # canonical 终名必须与 tracker 自己的派生逐字一致（控制器推导 <> tracker 派生的
     # 绑定重验；规范文件名从不自证 authority，这里是契约绑定不是扫描）。
     tracker_canonical = (
@@ -519,12 +462,8 @@ def _validate_products(
         / f"{tracker.project_name}.f{CHECKPOINT_TARGET_HOUR:03d}.cfg.ic.update"
     )
     if canonical != tracker_canonical:
-        raise RunError(
-            f"canonical 终名 {canonical} 必须逐字等于 tracker 派生 {tracker_canonical}",
-            phase="collect",
-            source=source,
-            cycle=cycle,
-            job_id=terminal.job_id,
+        collect_error(
+            f"canonical 终名 {canonical} 必须逐字等于 tracker 派生 {tracker_canonical}"
         )
     # DAT/log/checkpoint 在终态后为 no-follow 普通文件（pre-collect 闸在先，此处是
     # collect 之后的复验，防 collect 在窗口内替换）。
@@ -598,10 +537,10 @@ def _run_once(
     poll_wait: Callable[[], None],
     ctx: _Context,
 ) -> RunReport:
-    # --- 1. preflight（私有校验面在 controller）---
+    # 1. preflight（私有校验面在 controller）
     controller._preflight(config=config, local=local, source=source)
 
-    # --- 2. 前沿前半段（DONE/状态 -> T + 状态三判；不含 raw 判定）---
+    # 2. 前沿前半段（DONE/状态 -> T；不含 raw 判定）
     ctx.phase = "frontier"
     try:
         gathered = controller._target_and_state(Path(local.yd_root), source)
@@ -624,8 +563,7 @@ def _run_once(
     target, origin, _state_path = gathered
     ctx.cycle = target
 
-    # 任意可解析但越域的小时：在 residue/raw/work/submit 之前收敛为本源 RAW_INCOMPLETE
-    # 停止报告，MUST NOT 让 ConfigError 击穿整个 tick（ownership 2）。
+    # 越域小时：residue/raw/work/submit 前收敛 RAW_INCOMPLETE（ownership 2）。
     if target.hour not in config.cycle.hours:
         return _stopped_report(
             source,
@@ -639,7 +577,7 @@ def _run_once(
             ),
         )
 
-    # --- 3. 合法 T：residue plan/execute，然后 rawscan.judge ---
+    # 3. 合法 T：residue plan/execute，然后 rawscan.judge
     ctx.phase = "residue"
     decision = controller.FrontierDecision(
         source=source,
@@ -725,18 +663,14 @@ def _run_once(
         ) from exc
 
     store_obj = LocalObjectStore(object_store_root)
-    for entry, copied in zip(staged.entries, staged.copied_files, strict=True):
-        resolved = store_obj.resolve_path(entry.local_key)
-        if resolved != copied:
-            raise RunError(
-                f"entry.local_key {entry.local_key!r} 解析到 {resolved}，"
-                f"与副本 {copied} 不一致",
-                phase="raw",
-                source=source,
-                cycle=target,
-            )
+    _verify_raw_fanout(
+        staged=staged,
+        store=store_obj,
+        source=source,
+        cycle=target,
+    )
 
-    # --- 5. 变体/率定状态读取 + driver.prepare + prepared 校验 ---
+    # 5. 变体/率定状态 + driver.prepare + prepared 校验
     ctx.phase = "prepare"
     try:
         variants = prepare_module.variant_targets(local, config)
@@ -799,7 +733,7 @@ def _run_once(
     _validate_prepared(attempt, source, target, work_dir, variant_dir)
     canonical = _canonical_checkpoint_path(attempt=attempt, work_dir=work_dir)
 
-    # --- 6. controller 唯一构造 JobSpec；submit 前三件终态产物必须不存在 ---
+    # 6. 唯一构造 JobSpec；submit 前三件终态产物必须不存在
     ctx.phase = "submit"
     job_spec = _make_job_spec(
         attempt=attempt,
@@ -831,7 +765,7 @@ def _run_once(
         submission, job_spec, "submit", source=source, cycle=target
     )
 
-    # --- 7. 首次 poll 立即执行；每条非终态 poll 后恰一次 poll_wait ---
+    # 7. 首次 poll 立即；每条非终态 poll 后恰一次 poll_wait
     ctx.phase = "poll"
     terminal: JobRecord | None = None
     previous = submission
@@ -861,7 +795,7 @@ def _run_once(
         previous = record
     assert terminal is not None
 
-    # --- 8. 终态三分：FAILED/TIMEOUT -> JOB_FAILED（零 collect/publish，work 保留）---
+    # 8. 终态三分：FAILED/TIMEOUT -> JOB_FAILED（零 collect/publish）
     if terminal.state is not JobState.SUCCEEDED:
         return RunReport(
             source=source,
@@ -877,7 +811,7 @@ def _run_once(
             done_path=None,
         )
 
-    # --- 8b. SUCCEEDED：先证明三件产物已存在，再 collect 恰一次 ---
+    # 8b. SUCCEEDED：先证明三件产物存在，再 collect 恰一次
     ctx.phase = "collect"
     _require_terminal_artifacts_pre_collect(
         (
@@ -913,7 +847,7 @@ def _run_once(
         cycle=target,
     )
 
-    # --- 9. checkpoint point-of-use 重验（runner 必须零调用）---
+    # 9. checkpoint point-of-use 重验（runner 零调用）
     try:
         captured = tracker_module.ensure_twelve_hour_checkpoint(
             tracker=products.tracker,
@@ -949,7 +883,7 @@ def _run_once(
         canonical, work_root, source, target, job_id=submission.job_id
     )
 
-    # --- 10. publish 三态 ---
+    # 10. publish 三态
     ctx.phase = "publish"
     publish_inputs = publish_module.PublishInputs(
         yd_root=local.yd_root,
@@ -986,7 +920,7 @@ def _run_once(
             job_id=submission.job_id,
         ) from exc
 
-    # --- 11. 正常成功：SUCCEEDED，work 已删除 ---
+    # 11. 正常成功：SUCCEEDED，work 已删除
     return RunReport(
         source=source,
         cycle=target,

@@ -190,6 +190,9 @@ def test_ifs_happy_capture_success(tmp_path: pathlib.Path) -> None:
     assert waits == ["wait", "wait"]
 
 
+# fanout 正例在 `test_controller_run_once_fanout.py`（按 1000 行闸门语义拆分）。
+
+
 def test_call_ledger_is_exact_and_waits_follow_nonterminal_polls(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
