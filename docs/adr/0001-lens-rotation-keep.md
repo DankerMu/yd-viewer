@@ -559,3 +559,34 @@ lens-rotation 的 DECIDABLE 仍只表示统计机制要求复议，不是可直�
 
 复议条件未触发：PR #121 的 Round 2 与 Phase 7 零已关闭 finding 重报；后轮零 catch，因此不存在
 连续两个 rotated P3 样本。共享 `m2-producer-core` 仍有后继任务，本次继续不 archive。
+
+---
+
+## 第 15 次复议（issue #26 / PR #124 合并后，2026-09-03）
+
+审计数字：25 行（24 merged、1 terminal），23 个多轮合并 PR，后续轮次命中仍为
+**core=122 / rotated=96**。PR #124 的两条净捕获全部发生在 Round 1：correctness 抓到
+`StagedRaw.entries` 按变量扇出、`copied_files` 按 bundle 复制却被 controller 用位置/等基数
+`zip(strict=True)` 配对；integration 抓到 checkpoint scratch 文档层级与 runtime 不一致。
+Round 2 四名 Sonnet 1M reviewer 与 Phase 7 fresh Gap Sweep 都是零候选，因此本样本对
+later-round attribution 的增量仍是 **core +0 / rotated +0**。
+
+本 PR 的 Round 2 是首轮六个 lens 的四个子集（correctness / integration / security-perf /
+test-evidence），没有 free-slot rotation；Phase 7 是独立 fresh context，但零 finding。故这个样本与
+第 13 次复议的结论相同：**没有轮换发生的后轮零 catch，不能估计轮换的边际收益**。它证明的是两条
+Round 1 finding 已关闭、完整 14.1 diff 在修复后 clean，不是 keep 或 cut 的数值证据。
+
+本 PR 再次暴露当前归因模型看不见的高价值工作。Phase 6.2 对所有 `StagedRaw` producer/consumer、
+raw manifest、`LocalObjectStore`、失败时序与 stale-work sibling surface 做全量不变量审计；编排层还对
+旧 positional zip、跳过 fanout 校验、成功后由测试自身重建 work 三种机制分别做变异。前两种闭合
+review finding，第三种闭合的是编排层 Phase 2 发现的 test-oracle 缺陷。它们是 clean closure 的主要
+依据，却都不增加 later-round `catches`。这与第 10–14 次复议一致：当前 122/96 只记 reviewer 名称下的
+finding，不记取证方法、Phase 6.2、oracle 自查或 clean-closure 证明。
+
+**决策不变：keep。** 继续保留 pinned core + 条件式 free-slot rotation + 独立终审的默认安排；
+不把 122/96 解释成 keep 的支持，也不据此 cut。在 `catches` 增加取证方法、Phase 6.2/orchestrator
+归属和 clean-closure 结果，并让审计区分「没有轮换」与「发生轮换但零 catch」之前，lens-rotation
+DECIDABLE 仍只表示统计机制要求复议，不是可直接执行的策略信号。
+
+复议条件未触发：PR #124 的 Round 2 与 Phase 7 都没有重报已关闭 finding；后轮零 catch，不存在连续
+两个 rotated P3 样本。共享 `m2-producer-core` 仍有 14.2/14.3 等后继任务，本次继续不 archive。
