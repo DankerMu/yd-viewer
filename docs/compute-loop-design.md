@@ -84,8 +84,8 @@
       forcing/
       models/                    # 本轮临时 file registry/model package
     model/
+      state_checkpoints/
     output/
-    state_checkpoints/
     job.log
 ```
 
