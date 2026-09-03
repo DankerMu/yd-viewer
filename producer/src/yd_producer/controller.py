@@ -65,26 +65,45 @@ import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
+from yd_producer.executor import JobRecord, JobSpec, JobState
 from yd_producer.state.cfg_ic import MAX_STATE_IC_BYTES
 from yd_producer.state.header_time import (
     cfg_ic_header_minute_time,
     cfg_ic_header_shape,
 )
 
+if TYPE_CHECKING:
+    from yd_producer.assemble import RunDirectory, WorkIdentity
+    from yd_producer.config import Config, LocalConfig
+    from yd_producer.executor import JobExecutor, JobRecord
+    from yd_producer.publish import PublishResult
+    from yd_producer.tracker import CheckpointTracker
+
 __all__ = [
     "CYCLE_ID_FORMAT",
     "CYCLE_STRIDE",
     "MAX_HEADER_LINE_BYTES",
     "STATE_SUFFIX",
+    "AttemptDriver",
+    "AttemptProducts",
+    "AttemptRequest",
     "DiscoveryUnreadableError",
     "FrontierDecision",
+    "JobRunReport",
+    "PreparedAttempt",
+    "RunError",
+    "RunOutcome",
+    "RunReport",
     "StopReason",
     "cycle_id",
     "decide_frontier",
     "done_cycles",
     "parse_cycle_id",
+    "run_once",
     "visible_state_cycles",
 ]
 
@@ -188,13 +207,16 @@ class DiscoveryUnreadableError(Exception):
         self.detail = detail
 
 
-def _decide(
-    *,
-    yd_root: Path,
-    source: str,
-    raw_complete: Callable[[datetime], bool],
-) -> FrontierDecision:
-    """`decide_frontier` 的判定体；探测层的「无法确定」以 `DiscoveryUnreadableError` 上抛。"""
+def _target_and_state(
+    yd_root: Path, source: str
+) -> tuple[datetime, str, Path] | FrontierDecision:
+    """`decide_frontier` 的前半段：DONE/状态集合得到 T 并三判状态，**不含 raw 判定**。
+
+    返回 `(target, origin, state_path)` 表示该源可跑（状态三判全过）；返回
+    `FrontierDecision`（`cycle=None`）表示停止。`decide_frontier` 以本函数 + 注入的
+    `raw_complete` 组合（对外行为逐字保持）；`run_once` 复用前半段，以便在接入
+    `rawscan.judge` 之前独立处理任意可解析小时（越域小时不触发 residue/raw/work）。
+    """
     yd_root = Path(yd_root)
     states_dir = yd_root / "states" / source
     completed = done_cycles(yd_root / "output", source)
@@ -226,6 +248,20 @@ def _decide(
             stop_reason=stop_reason,
             detail=f"{source}: 待跑 T={cycle_id(target)}（{origin}）；{note}",
         )
+    return (target, origin, state_path)
+
+
+def _decide(
+    *,
+    yd_root: Path,
+    source: str,
+    raw_complete: Callable[[datetime], bool],
+) -> FrontierDecision:
+    """`decide_frontier` 的判定体；探测层的「无法确定」以 `DiscoveryUnreadableError` 上抛。"""
+    gathered = _target_and_state(Path(yd_root), source)
+    if isinstance(gathered, FrontierDecision):
+        return gathered
+    target, origin, state_path = gathered
 
     if not raw_complete(target):
         return FrontierDecision(
@@ -486,3 +522,470 @@ def _decode_line(raw: bytes) -> str | None:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
         return None
+
+
+# --- 单源单轮 run_once（issue #26 / 任务 14.1）------------------------------------
+#
+# 公共类型与入口只从本模块导出（tasks.md「测试布局」：私有支撑在
+# `yd_producer._controller_run`，无 `__all__` 公共面）。实现与逐条 ownership 的
+# 对应注释都在该私有模块，类型定义留在本公开 seam（测试从
+# `yd_producer.controller` 导入）。
+
+RunPhase = Literal[
+    "preflight",
+    "frontier",
+    "residue",
+    "raw",
+    "prepare",
+    "submit",
+    "poll",
+    "collect",
+    "publish",
+]
+
+_RUN_PHASES: tuple[str, ...] = (
+    "preflight",
+    "frontier",
+    "residue",
+    "raw",
+    "prepare",
+    "submit",
+    "poll",
+    "collect",
+    "publish",
+)
+
+
+class RunError(RuntimeError):
+    """run_once 的阶段类型化失败（tasks.md「公开面」逐字冻结）。
+
+    `phase` 取自闭合词表；`source`/`cycle`/`job_id` 是涉事的身份（尚未确定时为
+    `None`）；预期的底层异常以 `__cause__` 保留，普通异常不裸逃，`BaseException`
+    不包。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: RunPhase,
+        source: str,
+        cycle: datetime | None = None,
+        job_id: str | None = None,
+    ) -> None:
+        if phase not in _RUN_PHASES:
+            raise ValueError(f"RunError.phase 取值非法：{phase!r}")
+        super().__init__(message)
+        self.phase = phase
+        self.source = source
+        self.cycle = cycle
+        self.job_id = job_id
+
+
+class RunOutcome(StrEnum):
+    """一次 run_once 的结局。恰四项（tasks.md「公开面」逐字）。"""
+
+    STOPPED = "STOPPED"
+    SUCCEEDED = "SUCCEEDED"
+    SUCCEEDED_CLEANUP_PENDING = "SUCCEEDED_CLEANUP_PENDING"
+    JOB_FAILED = "JOB_FAILED"
+
+
+@dataclass(frozen=True, kw_only=True)
+class AttemptRequest:
+    """driver.prepare 接收的一次 attempt 的全部显式输入（逐字冻结）。
+
+    全部字段无默认值；路径与身份由 controller 决定，driver 无权改派。
+    """
+
+    source: str
+    cycle: datetime
+    work_root: Path
+    work_dir: Path
+    object_store_root: Path
+    raw_manifest_path: Path
+    variant_dir: Path
+    state_path: Path
+    shud_binary: str
+    checkpoint_hours: tuple[int, ...]
+    forecast_days: int
+    output_interval_minutes: int
+    reach_count: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class PreparedAttempt:
+    """driver.prepare 的产物：只含显式 identity、worker 命令与 scratch DAT 终名。
+
+    JobSpec 的 name/work/log/resources 由 controller 独占构造，driver 无权选择。
+    """
+
+    identity: WorkIdentity
+    command: tuple[str, ...]
+    scratch_dat: Path
+
+
+@dataclass(frozen=True, kw_only=True)
+class AttemptProducts:
+    """driver.collect 在 SUCCEEDED 后交出的产物。
+
+    只返回**已经存在**的对象/路径，不创建文件（创建归 fake 的 terminal hook / M4
+    worker）。
+    """
+
+    job_id: str
+    run_directory: RunDirectory
+    tracker: CheckpointTracker
+    scratch_dat: Path
+    merged_log: Path
+
+
+@runtime_checkable
+class AttemptDriver(Protocol):
+    """注入式计算节点边界（tasks.md「公开面」逐字）。
+
+    `prepare` 只交身份/命令/DAT 打戳；`collect` 只交同一 job 已存在的产物。
+    """
+
+    def prepare(self, *, request: AttemptRequest) -> PreparedAttempt: ...
+
+    def collect(
+        self, *, attempt: PreparedAttempt, terminal_record: JobRecord
+    ) -> AttemptProducts: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class JobRunReport:
+    """一次提交的 job 身份四元组 + 起止时间（逐字来自同一 submit/terminal record）。
+
+    `partition` 必须是 nonblank `str`（值取自 submit record 的资源映射，MUST NOT 从
+    新常量/driver 取）。
+    """
+
+    job_id: str
+    partition: str
+    state: JobState
+    submitted_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+
+    def __post_init__(self) -> None:
+        # nonblank 判据只做 `strip()` 探针：空白串（含纯空白）拒绝，但值**原样保留**，
+        # 绝不把环绕空格剥离/归一（现场 partition 值是 whitespace-sensitive）。
+        if not isinstance(self.partition, str) or not self.partition.strip():
+            raise ValueError(
+                f"JobRunReport.partition 必须是 nonblank str，实得 {self.partition!r}"
+            )
+        if not isinstance(self.job_id, str) or not self.job_id.strip():
+            raise ValueError(
+                f"JobRunReport.job_id 必须是 nonblank str，实得 {self.job_id!r}"
+            )
+        if not isinstance(self.state, JobState):
+            # #26 报告族的约定：结构性/语义性拒绝一律 ValueError（JobRunReport 的字段
+            # 逐字冻结由 dataclass 参数把关，这里只做构造点校验）。
+            raise ValueError(  # noqa: TRY004
+                f"JobRunReport.state 必须是 JobState，实得 {type(self.state).__name__}"
+            )
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunReport:
+    """一次 run_once 的结论（tasks.md「公开面」逐字）。
+
+    STOPPED 恰有 stop_reason 且无 job；提交后的结果恰有 job；SUCCEEDED 恰有
+    published 且 `done_path == published.done_path`；cleanup-pending 的 published 为
+    None 但 done_path 逐字取异常的已落盘路径；其它 outcome 的 done_path 为 None。
+    """
+
+    source: str
+    cycle: datetime | None
+    outcome: RunOutcome
+    stop_reason: StopReason | None
+    detail: str
+    job: JobRunReport | None
+    published: PublishResult | None
+    done_path: Path | None
+
+    def __post_init__(self) -> None:
+        # outcome 不是 `RunOutcome` 的构造点拒绝：若漏掉这条，一个外来字符串（如
+        # `"JOB_FAILED"` 字面值）会一路落到下面的 JOB_FAILED 分支而静默通过。
+        # （#26 报告族约定：结构性/语义性拒绝一律 ValueError，与 JobRunReport 同。）
+        if not isinstance(self.outcome, RunOutcome):
+            raise ValueError(  # noqa: TRY004
+                f"RunReport.outcome 必须是 RunOutcome，实得 {self.outcome!r}"
+            )
+        if self.outcome is RunOutcome.STOPPED:
+            if self.stop_reason is None or self.job is not None:
+                raise ValueError("STOPPED 恰有 stop_reason 且无 job")
+            if self.published is not None or self.done_path is not None:
+                raise ValueError("STOPPED 不得携带 published / done_path")
+            return
+        if self.stop_reason is not None or self.job is None:
+            raise ValueError("提交后的结果恰有 job 且无 stop_reason")
+        if self.outcome is RunOutcome.SUCCEEDED:
+            if self.published is None:
+                raise ValueError("SUCCEEDED 必须携带 published")
+            if self.done_path != self.published.done_path:
+                raise ValueError("SUCCEEDED 的 done_path 必须等于 published.done_path")
+            return
+        if self.outcome is RunOutcome.SUCCEEDED_CLEANUP_PENDING:
+            if self.published is not None or self.done_path is None:
+                raise ValueError(
+                    "SUCCEEDED_CLEANUP_PENDING 的 published 为 None 且 done_path 取已落盘路径"
+                )
+            return
+        # JOB_FAILED
+        if self.published is not None or self.done_path is not None:
+            raise ValueError("JOB_FAILED 不得携带 published / done_path")
+
+
+# --- run_once 私有校验面（issue #26 support 折叠；不导出，仅供 _controller_run）-----
+
+
+def _preflight(*, config: Config, local: LocalConfig, source: str) -> None:
+    """run_once 的 preflight（ownership 1）：零发现/写/删/driver/executor。"""
+    if source not in ("ifs", "gfs"):
+        raise RunError(
+            f"source 取值非法：{source!r}，只接受 ifs、gfs",
+            phase="preflight",
+            source=source,
+        )
+    for label, value in (
+        ("yd_root", local.yd_root),
+        ("scratch_root", local.scratch_root),
+        ("nwm.raw_root", local.nwm.raw_root),
+        ("shud_binary", local.shud_binary),
+    ):
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            raise RunError(
+                f"配置项 `{label}` 必须是绝对路径文本，实得 {value!r}",
+                phase="preflight",
+                source=source,
+            )
+    if config.forecast_days != 7:
+        raise RunError(
+            f"forecast_days 必须为 7，实得 {config.forecast_days!r}",
+            phase="preflight",
+            source=source,
+        )
+    if config.output_interval_minutes != 60:
+        raise RunError(
+            f"output_interval_minutes 必须为 60，实得 {config.output_interval_minutes!r}",
+            phase="preflight",
+            source=source,
+        )
+    if config.checkpoint_hours != (12,):
+        raise RunError(
+            f"checkpoint_hours 必须恰为 (12,)，实得 {config.checkpoint_hours!r}",
+            phase="preflight",
+            source=source,
+        )
+    if (
+        not isinstance(config.reach_count, int)
+        or isinstance(config.reach_count, bool)
+        or config.reach_count <= 0
+    ):
+        raise RunError(
+            f"reach_count 必须为正整数，实得 {config.reach_count!r}",
+            phase="preflight",
+            source=source,
+        )
+    required = set(config.slurm.required_fields)
+    present = set(local.slurm)
+    # required/local 两侧 partition 闸都先于键集相等复查：放在键集检查之后，任何到达者
+    # 都已键集相等，缺 partition 必被另一侧兜住，OWNER 闸成为不可达死代码（变异测试实测）。
+    if "partition" not in required:
+        raise RunError(
+            "slurm.required_fields 必须声明 partition（缺第 0 项）",
+            phase="preflight",
+            source=source,
+        )
+    if "partition" not in local.slurm:
+        raise RunError(
+            "local.toml 的 [slurm] 缺少 partition：在发现、残留清理、work 创建和提交"
+            "之前报错退出，零作业提交、零文件系统变更",
+            phase="preflight",
+            source=source,
+        )
+    if required != present:
+        missing = sorted(required - present)
+        extra = sorted(present - required)
+        raise RunError(
+            "`[slurm]` 的键集必须与 config.toml 的 `slurm.required_fields` 完全一致"
+            f"（缺 {'、'.join(missing) if missing else '无'}，"
+            f"多 {'、'.join(extra) if extra else '无'}）",
+            phase="preflight",
+            source=source,
+        )
+    partition = local.slurm["partition"]
+    # nonblank 判据只看 strip() 探针；值原样保留（现场 partition 值 whitespace-sensitive）。
+    if not isinstance(partition, str) or not partition.strip():
+        raise RunError(
+            f"slurm.partition 必须是 nonblank string，实得 {partition!r}",
+            phase="preflight",
+            source=source,
+        )
+
+
+def _require_spec_record(
+    record: JobRecord, spec: JobSpec, phase: str, *, source: str, cycle: datetime
+) -> None:
+    """submit 返回值必须匹配 spec name/resources，且不得已是终态（ownership 6/7）。"""
+    # nonblank 判据只做 `strip()` 探针：空白/纯空白 job_id 拒绝，但值原样保留（不归一）。
+    if (
+        record.job_id is None
+        or not isinstance(record.job_id, str)
+        or not record.job_id.strip()
+    ):
+        raise RunError(
+            f"submit 返回空/纯空白 job_id：{record.job_id!r}",
+            phase=phase,
+            source=source,
+            cycle=cycle,
+        )
+    if record.name != spec.name:
+        raise RunError(
+            f"submit 返回的 name {record.name!r} 不等于 JobSpec.name {spec.name!r}",
+            phase=phase,
+            source=source,
+            cycle=cycle,
+            job_id=record.job_id,
+        )
+    if dict(record.resources) != dict(spec.resources):
+        raise RunError(
+            f"submit 返回的 resources 不等于 JobSpec.resources："
+            f"{dict(record.resources)!r} != {dict(spec.resources)!r}",
+            phase=phase,
+            source=source,
+            cycle=cycle,
+            job_id=record.job_id,
+        )
+    if record.state.is_terminal:
+        raise RunError(
+            f"submit 不得返回终态（初态只允许 PENDING/RUNNING），实得 {record.state.value}",
+            phase=phase,
+            source=source,
+            cycle=cycle,
+            job_id=record.job_id,
+        )
+    if record.state not in (JobState.PENDING, JobState.RUNNING):
+        raise RunError(
+            f"submit 返回未知初态 {record.state.value}",
+            phase=phase,
+            source=source,
+            cycle=cycle,
+            job_id=record.job_id,
+        )
+
+
+def _require_poll_record(
+    record: JobRecord,
+    submission: JobRecord,
+    spec: JobSpec,
+    previous: JobRecord,
+    *,
+    source: str,
+    cycle: datetime,
+) -> None:
+    """每条 poll record 的身份/时间戳/状态单调性相对提交记录重验（ownership 7）。"""
+    if record.job_id != submission.job_id:
+        raise RunError(
+            f"poll 返回的 job_id {record.job_id!r} 不等于提交返回的 {submission.job_id!r}",
+            phase="poll",
+            source=source,
+            cycle=cycle,
+            job_id=submission.job_id,
+        )
+    if record.name != spec.name:
+        raise RunError(
+            f"poll 返回的 name {record.name!r} 不等于 JobSpec.name {spec.name!r}",
+            phase="poll",
+            source=source,
+            cycle=cycle,
+            job_id=submission.job_id,
+        )
+    if dict(record.resources) != dict(spec.resources):
+        raise RunError(
+            "poll 返回的 resources 不等于提交时的 JobSpec.resources",
+            phase="poll",
+            source=source,
+            cycle=cycle,
+            job_id=submission.job_id,
+        )
+    if record.submitted_at != submission.submitted_at:
+        raise RunError(
+            f"poll 返回的 submitted_at {record.submitted_at!r} 改变/消失："
+            f"提交时是 {submission.submitted_at!r}",
+            phase="poll",
+            source=source,
+            cycle=cycle,
+            job_id=submission.job_id,
+        )
+    if previous.started_at is not None and record.started_at != previous.started_at:
+        raise RunError(
+            f"started_at 一旦出现不得改变/消失：{previous.started_at!r} -> "
+            f"{record.started_at!r}",
+            phase="poll",
+            source=source,
+            cycle=cycle,
+            job_id=submission.job_id,
+        )
+    allowed = {
+        JobState.PENDING: (JobState.PENDING, JobState.RUNNING),
+        JobState.RUNNING: (JobState.RUNNING,),
+    }[previous.state]
+    if record.state not in allowed and not record.state.is_terminal:
+        raise RunError(
+            f"非法状态跃迁：{previous.state.value} -> {record.state.value}（"
+            "只允许 PENDING->PENDING/RUNNING/终态、RUNNING->RUNNING/终态）",
+            phase="poll",
+            source=source,
+            cycle=cycle,
+            job_id=submission.job_id,
+        )
+
+
+def _require_no_recovery(run_directory, output_dir) -> int:  # pragma: no cover
+    """controller 绝不在登录侧补跑：recovery runner 被调用即整轮失败。"""
+    raise AssertionError("controller 的 checkpoint 重验 runner 必须零调用")
+
+
+def _job_report(submission: JobRecord, terminal: JobRecord) -> JobRunReport:
+    """job 报告逐字来自同一次 submit/terminal record；partition 原值出自提交记录。"""
+    return JobRunReport(
+        job_id=terminal.job_id,
+        partition=submission.resources["partition"],
+        state=terminal.state,
+        submitted_at=submission.submitted_at,
+        started_at=terminal.started_at,
+        ended_at=terminal.ended_at,
+    )
+
+
+def run_once(
+    *,
+    config: Config,
+    local: LocalConfig,
+    source: str,
+    executor: JobExecutor,
+    driver: AttemptDriver,
+    poll_wait: Callable[[], None],
+) -> RunReport:
+    """单源单轮骨架：发现 -> 残留 -> raw -> 组装 -> 提交 fake -> 发布 -> work 清理。
+
+    签名逐字冻结（tasks.md「公开面」）：全部 keyword-only、无默认值。实现与逐条
+    ownership 的对应注释在私有支撑模块 `yd_producer._controller_run`（本模块同文件
+    上方的 `_preflight`/`_require_spec_record`/`_require_poll_record`/_job_report 等
+    私有校验面由该模块消费）；本入口只做惰性转发——把 assemble/forcing/tracker 的
+    导入链从本模块冷面挪开（本模块同时是 `residue`/`publish` 的依赖）。
+    """
+    from yd_producer._controller_run import run_once as _impl
+
+    return _impl(
+        config=config,
+        local=local,
+        source=source,
+        executor=executor,
+        driver=driver,
+        poll_wait=poll_wait,
+    )
