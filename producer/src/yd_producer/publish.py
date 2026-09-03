@@ -261,6 +261,17 @@ class PublishInputs:
         for name in ("scratch_dat", "scratch_checkpoint", "merged_log", "work_dir"):
             object.__setattr__(self, name, _resolved_ancestors(getattr(self, name)))
         object.__setattr__(self, "work_root", Path(self.work_root).resolve())
+        # #94 exact-work 危险删除闸：`work_dir` 必须逐字等于
+        # `work_root / source / cycle_id(cycle)`（两边都已解析）。少/多一层或兄弟
+        # source/cycle 构成不同的删除面，在任何 IO 之前拒绝——守卫在危险边界
+        # `PublishInputs.__post_init__`，未来调用方不能绕过。
+        expected_work = self.work_root / self.source / cycle_id(self.cycle)
+        if self.work_dir != expected_work:
+            raise ValueError(
+                f"work_dir {self.work_dir} 必须逐字等于 "
+                f"work_root/source/cycle_id(cycle) = {expected_work}；"
+                "禁止把删除面移到别的 source/cycle 层级（#94 危险删除闸）"
+            )
 
     @property
     def next_cycle(self) -> datetime:

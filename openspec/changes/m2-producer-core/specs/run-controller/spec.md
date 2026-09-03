@@ -57,8 +57,20 @@ run MUST 经作业执行器抽象为每源提交至多一个作业；提交参�
 - **THEN** 运行报告含两源各自的 job ID、partition、终态与起止时间
 
 #### Scenario: 缺 Slurm 现场字段即停
-- **WHEN** `local.toml` 缺少 partition 字段
-- **THEN** 提交前报错退出，无作业提交
+- **WHEN** `local.toml` 缺少 partition 字段，或版本化的 `slurm.required_fields` 未声明 partition
+- **THEN** 在发现、残留清理、work 创建和提交之前报错退出，无作业提交、无文件系统变更
+
+#### Scenario: 单源单轮报告绑定提交记录
+- **WHEN** 单源单轮 fake 作业从提交推进到成功终态并完成发布
+- **THEN** 运行报告中的 job ID、partition、终态、submitted/started/ended 时间逐项来自同一次提交及其终态记录，且该 source/cycle 恰有一次 executor submission
+
+#### Scenario: 作业成功终态之后才接收产物
+- **WHEN** fake executor 尚未返回成功终态，或返回的产物不属于同一 source/cycle/work/job
+- **THEN** run 不接收 DAT、日志或 checkpoint，不发布、不写 `DONE`；提交前预埋的规范文件名不能冒充本次作业产物
+
+#### Scenario: 漏采补跑不增加提交
+- **WHEN** 同一 fake 作业的主跑跳过 T+12 捕获，并在作业内用相同初态与 forcing 完成确定性 12 小时补跑
+- **THEN** controller 收到同一 attempt-local checkpoint authority 并正常发布，且该 source/cycle 的 executor submission count 仍精确为 1
 
 #### Scenario: 每源至多一个作业
 - **WHEN** 一次 run 中某源有多轮 raw 可追赶

@@ -668,3 +668,67 @@ def test_single_source_serial_rounds_keep_one_job_in_flight():
 
     assert fake.max_inflight == 1
     assert [r.name for r in fake.submissions] == ["ifs-T", "ifs-T+12"]
+
+
+# --- issue #26 交接：accessor 的三个判别器（PR #39 评论，随 #26 一并落地） ---
+
+
+def test_max_inflight_survives_full_drain_and_new_submit():
+    """历史峰值：A/B 提交 -> 双双排空 -> 再提交 C -> max_inflight 仍为 2。
+
+    旧语义「末次提交计数」在这条下必红：C 提交后 `len(inflight()) == 1`。
+    """
+    outcome = FakeOutcome(
+        final_state=JobState.SUCCEEDED, polls_until_terminal=1, started=True
+    )
+    fake = FakeJobExecutor(
+        outcomes={"A": outcome, "B": outcome, "C": outcome}, clock=make_clock()
+    )
+    a = fake.submit(make_spec("A")).job_id
+    b = fake.submit(make_spec("B")).job_id
+    assert fake.max_inflight == 2
+    run_to_terminal(fake, a)
+    run_to_terminal(fake, b)
+    assert fake.inflight() == ()
+    assert fake.max_inflight == 2
+    c = fake.submit(make_spec("C")).job_id
+    assert fake.max_inflight == 2
+    run_to_terminal(fake, c)
+    assert fake.max_inflight == 2
+
+
+def test_inflight_returns_submission_order():
+    """两个并发作业下 `inflight()` 的元组顺序即提交序（A 先于 B）。
+
+    逆序实现在这条下必红（提交 A、提交 B 后 inflight 必须 (A, B)）。
+    """
+    outcome = FakeOutcome(
+        final_state=JobState.SUCCEEDED, polls_until_terminal=1, started=True
+    )
+    fake = FakeJobExecutor(outcomes={"A": outcome, "B": outcome}, clock=make_clock())
+    a = fake.submit(make_spec("A")).job_id
+    b = fake.submit(make_spec("B")).job_id
+    assert fake.inflight() == (a, b)
+    # A 排空后 B 仍在途：顺序保持。
+    run_to_terminal(fake, a)
+    assert fake.inflight() == (b,)
+
+
+def test_submissions_are_submission_time_snapshots():
+    """`submissions[i]` 是提交时快照：某作业到终态后 `submissions[0].state` 仍 PENDING。
+
+    实时当前记录实现在这条下必红（终态后 `submissions[0].state` 会变成 SUCCEEDED）。
+    """
+    outcome = FakeOutcome(
+        final_state=JobState.SUCCEEDED, polls_until_terminal=1, started=True
+    )
+    fake = FakeJobExecutor(outcomes={"A": outcome, "B": outcome}, clock=make_clock())
+    fake.submit(make_spec("A"))
+    b = fake.submit(make_spec("B")).job_id
+    assert fake.submissions[0].state is JobState.PENDING
+    run_to_terminal(fake, fake.submissions[0].job_id)
+    assert fake.submissions[0].state is JobState.PENDING
+    assert fake.submissions[1].state is JobState.PENDING
+    run_to_terminal(fake, b)
+    assert fake.submissions[0].state is JobState.PENDING
+    assert fake.submissions[1].state is JobState.PENDING

@@ -789,12 +789,16 @@ def test_work_tree_with_escaping_symlink_is_removed(tmp_path: Path) -> None:
 
 
 def test_work_containment_root_is_not_derived(tmp_path: Path) -> None:
-    """`work_root` 不由 `work_dir` 的父链反推：不含 `work_dir` 的根 -> 拒且零删除。"""
+    """`work_root` 不由 `work_dir` 的父链反推：不含 `work_dir` 的根 -> 拒且零删除。
+
+    #94 起该形态在 `PublishInputs` 构造期就被 exact-work 闸以 `ValueError` 拒绝
+    （`work_dir != work_root/source/cycle`），先于任何 IO；work 树原样保留。
+    """
     scene = build_scene(tmp_path)
     foreign_root = tmp_path.resolve() / "foreign"
     foreign_root.mkdir()
 
-    with pytest.raises(publish.PublishCleanupError):
+    with pytest.raises(ValueError, match="必须逐字等于"):
         publish.publish(scene.make_inputs(work_root=foreign_root))
 
     assert scene.work_dir.exists()

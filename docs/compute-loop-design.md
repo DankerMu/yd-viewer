@@ -77,14 +77,15 @@
 ```text
 /scratch/frd_muziyao/yd-loop/
   work/<source>/<cycle>/
-    raw/                         # 本轮从 NWM NFS 只读复制的临时副本
-    raw-manifest.json
-    object-store/
+    object-store/                # 本轮唯一 LocalObjectStore 根
+      raw/                       # 从 NWM NFS 只读复制的临时副本
+      raw-manifest.json
       canonical/
       forcing/
+      models/                    # 本轮临时 file registry/model package
     model/
+      state_checkpoints/
     output/
-    state-checkpoints/
     job.log
 ```
 
@@ -227,7 +228,7 @@ yd-producer run
 
 ### 7.2 临时 raw manifest
 
-完整后，控制器把 manifest 声明的本轮 raw 文件复制到 `work/raw/`，并在 work 内生成 NWM-compatible `raw-manifest.json`。manifest 包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息，entry 路径只引用 `work/raw/` 临时副本。控制器复制前后均不修改 NWM NFS 原件。
+完整后，控制器以 `<work>/object-store` 作为 `rawcopy.stage_raw` 的 staging root，把 manifest 声明的本轮 raw 文件复制到 `<work>/object-store/raw/`，并生成 `<work>/object-store/raw-manifest.json`。这样 manifest 的 `raw/...` object key、canonical/forcing 产物与本轮临时 model registry 共用 `<work>/object-store` 这一棵 `LocalObjectStore`；`stage_raw` 自身仍只承诺写到调用方给定 root 下的 `raw/`。manifest 包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息，entry 路径只引用该 root 下的临时副本。控制器复制前后均不修改 NWM NFS 原件。
 
 ### 7.3 DB-free 日常链
 

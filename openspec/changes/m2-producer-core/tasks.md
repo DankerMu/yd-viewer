@@ -467,7 +467,7 @@ Review focus:
 ## 3. raw-scan：完整性扫描与临时 manifest
 
 - [x] 3.1 实现 IFS/GFS 完整性规则判定（00/12 限定、0–168h、变量/bundle 模式、GFS f000 特例、逐文件检查）
-- [x] 3.2 实现 raw 只读复制到 `work/raw/`（源不可变断言）与临时 `raw-manifest.json` 生成（entry 只引用副本）
+- [x] 3.2 实现 raw 只读复制到调用方 staging root 的 `raw/`（源不可变断言）与同 root 临时 `raw-manifest.json` 生成（entry 只引用副本）；14.1 把该 root 固定为 `<attempt-work>/object-store`
 
 依赖：组 1（规则来自 config）、组 2（manifest 结构）
 §13.1 归属：raw 扫描
@@ -626,7 +626,7 @@ Trigger B: round 1 cand-06/07/08（哨兵桩具体名字、oracle 复用实现�
 
 Non-goals:
 
-- raw 只读复制到 `work/raw/` 与临时 `raw-manifest.json` 生成（任务 3.2，后继 issue）——本 issue 只产出判定结果，不产生 manifest 结构、不写任何文件
+- raw 只读复制到调用方 staging root 的 `raw/` 与同 root 临时 `raw-manifest.json` 生成（任务 3.2，后继 issue）——本 issue 只产出判定结果，不产生 manifest 结构、不写任何文件
 - 打开 GRIB 文件校验其内部变量/记录：M2 无真实数据，内容与数值正确性归 M4 receipt；本 issue 的"可读"只到能读出一个字节为止
 - `lead_hours` 覆盖 0–168h 且与 `forecast_days * 24` 一致的校验：tasks.md 组 1 Non-goals 已把该项路由到 **issue #32**，本 issue 不做（`lead_hours` 是否覆盖 0–168h 属 config 取值正确性，与"逐文件判定"正交）
 - 版本化 `producer/config.toml` 生产实例与其真实 `variables`/`bundles`/`lead_hours` 取值：归 **issue #29**；本 issue 全部用例使用内联 TOML 合成值，`{"apcp", "dswrf"}` 仅以模块常量出现、不预设 `variables` 必须包含它们
@@ -690,7 +690,7 @@ Must preserve:
 def stage_raw(
     verdict: ScanVerdict,      # rawscan.judge 的返回；MUST complete=True，否则拒绝
     raw_root: str | os.PathLike[str],  # 与 judge 同一入参（源根）
-    work_dir: str | os.PathLike[str],  # 本轮 work/<source>/<cycle>/ 根
+    work_dir: str | os.PathLike[str],  # staging root（参数名为兼容既有 API 保留）
     source: str,               # "ifs" | "gfs"
     cycle: datetime,           # 与 judge 同一入参（tz-aware UTC 整点）
     config: Config,
@@ -732,7 +732,7 @@ def stage_raw(
 `entry.local_key` 在 pin 上**不是文件系统路径而是 object-store key**（§3.1 记有 IFS 的 `local_key` 逐字使用该默认值，以及 `packages/common/object_store.py` 的 `normalize_object_key`(L44-75) 与 `resolve_path`(L273-285) 均不做大小写归一）。**「消费端把 `local_key` 交给 `resolve_path` 解析」这一步不作 pin 断言**——§3.1 无任何一行记载该调用路径，而本仓唯一可核的 pin 桥就是 §3.1（round 2 verifier CONFIRMED/FIX_NOW；此前两版分别引 `converter.py:1460` 与「§3.1 实有的事实」，前者不存在于 §3.1，后者换了引用却没换命题）。承重结论改由**本仓自身**给出，不依赖任何 pin 事实：`store/object_store.py` 的 `LocalObjectStore` 每一条访问面都走 `self.resolve_path(key)`（`:156`/`:186`/`:204`/`:215`/`:233`/`:246`/`:261`/`:306`，定义在 `:314`），其根取 `work_dir`。故本 issue 逐字沿用 pin 的 key 形态并让 object-store 根落在 work 内：
 
 - `local_key = f"raw/{存储身份}/{YYYYMMDDHH}/{bundle 文件名}"`（`gfs_adapter.py:615`）
-- object-store 根 = `work_dir`；于是 `resolve_path` 结果为 `<work_dir>/raw/<存储身份>/<YYYYMMDDHH>/<bundle>`，**位于 `work/raw/` 之下**，满足 spec 的「entry 路径 MUST 只引用 `work/raw/` 临时副本」
+- object-store 根 = `work_dir`（此参数语义是调用方 staging root，不保证等于 attempt work 根）；于是 `resolve_path` 结果为 `<work_dir>/raw/<存储身份>/<YYYYMMDDHH>/<bundle>`，位于同一 staging root 的 `raw/` 之下。14.1 传 `<attempt-work>/object-store`，故集成路径为 `<attempt-work>/object-store/raw/...`
 - 存储身份逐源非对称，复用 `rawscan.SOURCE_DIR_NAMES`（`ifs -> "IFS"`、`gfs -> "gfs"`），MUST NOT 另抄一份字面量
 - `remote_url` 沿用源 manifest 对应 entry 的值；源 manifest 不可用时整轮 fail closed，MUST NOT 以 `""` 占位（见 fail-closed 段）
 - `expected_checksum`、`expected_size_bytes`、`manifest_uri` 三者 MUST 落 `None`，逐条理由 MUST 写进实现注释：前两者在 pin 的**构建期**同样是 `None`（下载期才可能有值），yd 复制的是已落盘的字节、无独立 oracle，写进去等于制造一个无人校验的声明；`manifest_uri` 留空的理由**不依赖任何 pin 事实**（§3.1 未记载该字段，故本仓不就它作 pin 声明；原文的「pin 上是 object-store URI（`ifs_adapter.py:667` 一带）」无 §3.1 支撑，已删——同上 verifier 裁定）：yd 的 manifest 落在 `<work_dir>/raw-manifest.json`，不是 object-store 对象，写一个 `file://` 路径等于发明一个本仓不持有的身份
@@ -773,7 +773,7 @@ pin 在 raw cycle 目录内落盘 `manifest.json`（GFS `_persist_manifest_metad
 
 #### Invariant Matrix
 
-Governing invariant: **本轮 manifest 声明的每一条 (lead, variable) 都对应一个已落在 `work/raw/` 之下的真实副本，其语义键逐字承接自源 manifest；三者中任何一项不成立时，整个 staging 以异常终止且不留任何部分产物。**
+Governing invariant: **本轮 manifest 声明的每一条 (lead, variable) 都对应一个已落在同一调用方 staging root 的 `raw/` 之下的真实副本，其语义键逐字承接自源 manifest；三者中任何一项不成立时，整个 staging 以异常终止且不留任何部分产物。**
 
 Source-of-truth identity/contract: `(entry.forecast_hour, entry.variable, entry.local_key)` 三元组，及其 `idx_selector` 累积语义子 Mapping
 
@@ -787,7 +787,7 @@ Surfaces:
 - Evidence/audit/readiness: `StagedRaw` 返回值、`raw-manifest.json` 自身
 
 Regression rows:
-- `stage_raw` + 完整 verdict + 带完整 `idx_selectors` 的源 manifest -> 副本齐全、manifest 三元组集合与 `expected_variables` 相等、entry 路径全部解析到 `work/raw/` 之下
+- `stage_raw` + 完整 verdict + 带完整 `idx_selectors` 的源 manifest -> 副本齐全、manifest 三元组集合与 `expected_variables` 相等、entry 路径全部解析到同一 staging root 的 `raw/` 之下
 - `stage_raw` + `complete=False` 的 verdict -> `kind="incomplete-verdict"`，且 `work_dir` 下零新增路径
 - `stage_raw` + 源 manifest 缺 apcp 的 `accumulation_type` -> `kind="accumulation-metadata"`，且 `work_dir` 下零新增路径（不落半个 manifest）
 - `stage_raw` + 源 manifest 的 `accumulation_type` 取域外值（如 `"unknown"`）-> `kind="accumulation-metadata"`（不静默降级成 cumulative）
@@ -879,7 +879,7 @@ Regression rows:
 
 - 三元组完整性是否断言的是**集合相等**而非包含，两个方向是否各有杀手变异体
 - 零写入拒绝是否真的零写入（含目录），取证是否为递归快照比对
-- `local_key` 是否为 object-store key 形态而非绝对文件系统路径，`resolve_path` 后是否确实落在 `work/raw/` 之下
+- `local_key` 是否为 object-store key 形态而非绝对文件系统路径，`resolve_path` 后是否确实落在调用方 staging root 的 `raw/` 之下
 - `idx_selector` 是否从复数键**按变量**取，而非把整个 `idx_selectors` 塞进单数键
 - R4B2 的域检查是否覆盖别名（`accumulation_policy`/`stepRange`），且是否**没有**引入 `or "cumulative_since_cycle"` 之类的默认
 - 是否出现按 `source == "gfs"` 的硬分支（应由 `variable == "apcp"` 与配置驱动）
@@ -4021,7 +4021,7 @@ Review focus:
 
 ## 14. run-controller（三）：主循环集成
 
-- [ ] 14.1 单源单轮 `run_once` 骨架打通：发现 → 组装 → 提交 fake → 发布 → work 清理；job ID/partition/终态/起止时间进运行报告；`local.toml` 缺 Slurm 字段即停
+- [x] 14.1 单源单轮 `run_once` 骨架打通：发现 → 组装 → 提交 fake → 发布 → work 清理；job ID/partition/终态/起止时间进运行报告；`local.toml` 缺 Slurm 字段即停
 - [ ] 14.2 多轮追赶与缺口停等：raw 一次补齐 T/T+12h/T+24h 时序推进、每源在途提交计数 ≤1、缺轮停在缺口（§13.1：同源顺序/raw 缺口）
 - [ ] 14.3 双源并行、单源失败隔离与崩溃恢复端到端：IFS 失败 GFS 继续、失败日志与 work 清理、无 DONE 残留下次重跑（§13.1：双源并行/单源失败/无 DONE 崩溃恢复）
 
@@ -4030,4 +4030,180 @@ Review focus:
 Suggested fixture level: expanded - 多轮端到端目录树与可编排 fake executor
 Minimal mergeable slice: 单源单轮骨架（14.1）——一条端到端路径独立合并保绿，追赶与双源为后继
 
-**14.1 接线约束（由 issue #22 / PR #62 round 1 验证闸门传下，batch integration-contract cand-06 CONFIRMED）**：`controller.decide_frontier` 返回的待跑 T 可能带**任意可解析的 cycle 小时**（issue #22 fixture 裁决 5 刻意如此：对不可解析文件名 fail-closed 会让一次崩溃的发布永久砖化该源），而 `rawscan.judge` 只对 `config.cycle.hours` 全域——实测一个 stray 的 `states/<source>/2026081918.cfg.ic` 会让 18Z 目标进入 `judge`，在任何文件系统访问之前抛 `ConfigError` 并**穿透** `decide_frontier`，把「停一个源」放大成「整个 tick 崩」。14.1 MUST 二选一并配用例：(a) 接线前把目标限制到 `config.cycle.hours`，或 (b) 把注入的 `raw_complete` 包一层，把 `ConfigError` 收敛为该源的停止原因。
+**14.1 接线约束（由 issue #22 / PR #62 round 1 验证闸门传下，batch integration-contract cand-06 CONFIRMED）**：`controller.decide_frontier` 返回的待跑 T 可能带**任意可解析的 cycle 小时**（issue #22 fixture 裁决 5 刻意如此：对不可解析文件名 fail-closed 会让一次崩溃的发布永久砖化该源），而 `rawscan.judge` 只对 `config.cycle.hours` 全域——实测一个 stray 的 `states/<source>/2026081918.cfg.ic` 会让 18Z 目标进入 `judge`，在任何文件系统访问之前抛 `ConfigError` 并**穿透** `decide_frontier`，把「停一个源」放大成「整个 tick 崩」。14.1 选择方案 (a)：接线前限制目标小时；越域 T 收敛为本源 `RAW_INCOMPLETE` 停止报告，且在 residue/raw/work/driver/submit 之前停止。`decide_frontier` 的公开签名与异常契约不改。
+
+### Issue #26 fixture（任务 14.1：单源单轮 `run_once`）
+
+Fixture level: expanded
+Upstream suggested level: expanded（agree：共享 controller 公共入口、Slurm 生命周期、NFS residue/publish、状态链/T+12/DONE 与删除面均为 mandatory expanded）
+Repair intensity: high（单次错绑即可把另一个 source/cycle 的状态或 work 发布/删除；`DONE` 之后清理失败还具有“已完成但未清净”的独立语义，适用 Invariant Matrix 与 boundary-surface checklist）
+Project profile: yd-viewer
+Minimal mergeable slice: 任务 14.1 单源单轮；不吸收 14.2 多轮追赶或 14.3 双源/失败恢复
+
+**Docs-first 偏离与上游缺口（本 fixture 的裁决优先于旧 sketch）**：
+
+1. design 旧草图 `run_once(cfg, executor)` 输入不足：`Config` 没有 #15 `WorkIdentity` 的 model/basin/project 五项，`JobExecutor` 又只返回调度状态、不产 DAT/log/checkpoint。14.1 新增显式 `AttemptDriver`，不从 variant basename/`yd.binding` 猜 identity，也不让文件名自证 checkpoint authority。
+2. forcing 与 SHUD 重任务按 `docs/agent-ops.md` §8.3 必须在 Slurm 计算节点内执行。故 `driver.prepare` 只声明 identity/worker argv/预期 DAT 路径；`RunDirectory`、同一 job-local tracker authority、DAT 与 log 只可在 executor 首次到达 `SUCCEEDED` 的 attempt 内生成，并由 `driver.collect` 交接。不得在 submit 前先跑 forcing/SHUD 或预埋终态产物。
+3. M2 尚无计算节点 worker CLI，也无跨 Slurm 进程携带 tracker 内存 authority 的原子 receipt。生产 `cli.py run` 本 issue保持 staged-unimplemented/fail-closed；M2 以注入 driver + 包住真实 `FakeJobExecutor` 的 terminal hook 验证本地骨架。真实 worker argv/receipt/CLI 绑定与 node-22 行为归 M4；不得用目录扫描或无 checksum manifest 伪装成生产接线。
+4. `rawcopy.stage_raw` 把其 `work_dir` 参数当 `LocalObjectStore` 根，而 #15 把真正 object-store 根固定为 `<attempt-work>/object-store`。14.1 因此传后者：raw/manifest/canonical/forcing/models 共根。已同步修订 compute-loop §3.3/§7.2 与 raw-scan spec 的整体布局；`stage_raw` standalone API/测试仍写“给定 staging root 下的 `raw/`”，不改其行为。
+5. #23 记录的顺序偏离在本 issue关闭：controller 先得到不含 raw 的合法 T，合法 00/12 T 先执行 residue plan/execute，再判 raw；raw 未齐时 residue 已清。任意越域小时在 residue 之前停止，避免 `ConfigError` 放大与非法前沿删除。
+6. #94 在本 PR 同批闭合，守卫落危险边界 `PublishInputs.__post_init__`：resolved `work_dir` 必须逐字等于 resolved `work_root/source/T`，不是只做 containment。#108 的 post-`DONE` 历史孤儿 sweeper不吸收；本轮若 `PublishCleanupError`，报告已完成/待清理，不触发失败回收。
+7. #47 的退出码载体尚未裁决，故 FAILED/TIMEOUT 日志/work 回收不在 14.1；由 #28 串 `finalize_failed_job`。14.1 只需对非成功终态返回 `JOB_FAILED` job report，零 collect/零 publish，保留 work 供后继失败 owner处理，不虚构 exit code。
+
+**公开面（逐字冻结）**：
+
+- `RunError(RuntimeError)`：结构化字段 `phase: Literal["preflight", "frontier", "residue", "raw", "prepare", "submit", "poll", "collect", "publish"]`、`source: str`、`cycle: datetime | None`、`job_id: str | None`；预期的底层异常以 `__cause__` 保留，普通异常不裸逃，`BaseException` 不包。
+- `RunOutcome(StrEnum)` 恰四项：`STOPPED`、`SUCCEEDED`、`SUCCEEDED_CLEANUP_PENDING`、`JOB_FAILED`。
+- frozen + kw-only `AttemptRequest(source, cycle, work_root, work_dir, object_store_root, raw_manifest_path, variant_dir, state_path, shud_binary, checkpoint_hours, forecast_days, output_interval_minutes, reach_count)`。
+- frozen + kw-only `PreparedAttempt(identity: WorkIdentity, command: tuple[str, ...], scratch_dat: Path)`。
+- frozen + kw-only `AttemptProducts(job_id: str, run_directory: RunDirectory, tracker: CheckpointTracker, scratch_dat: Path, merged_log: Path)`。
+- runtime-checkable `AttemptDriver`：
+  ```python
+  def prepare(self, *, request: AttemptRequest) -> PreparedAttempt: ...
+  def collect(
+      self, *, attempt: PreparedAttempt, terminal_record: JobRecord
+  ) -> AttemptProducts: ...
+  ```
+- frozen + kw-only `JobRunReport(job_id, partition, state, submitted_at, started_at, ended_at)`；`partition` 为 nonblank `str`，其它字段逐字来自同一 submit/terminal record。
+- frozen + kw-only `RunReport(source, cycle, outcome, stop_reason, detail, job, published, done_path)`；`published: PublishResult | None`、`done_path: Path | None`。STOPPED 恰有 stop reason/无 job，提交后的结果恰有 job；SUCCEEDED 恰有 published 且 `done_path == published.done_path`；cleanup-pending 的 `published` 为 None 但 `done_path` 逐字取异常的已落盘路径（不把异常对象塞进 report）；其它 outcome 的 done_path 为 None。
+- `run_once(*, config: Config, local: LocalConfig, source: str, executor: JobExecutor, driver: AttemptDriver, poll_wait: Callable[[], None]) -> RunReport`；全部 keyword-only、无默认值。
+
+**固定调用序与 ownership**：
+
+1. `preflight` 在任何发现/写/删/driver/executor 之前：`source in {gfs,ifs}`；`yd_root`/`scratch_root`/`nwm.raw_root`/`shud_binary` 为绝对路径文本；`forecast_days == 7`、`output_interval_minutes == 60`、`checkpoint_hours == (12,)`、`reach_count > 0`；`set(local.slurm) == set(config.slurm.required_fields)`；`partition` 同时在 required_fields 与 local mapping，且为 nonblank string。失败 `RunError(phase="preflight")`，树与调用计数全零。
+2. controller 把现有前沿判定内部拆为“DONE/状态得到 T”与“raw callback”两段；`decide_frontier` 的现有公开签名、六项 `StopReason`、detail 与既有测试逐字保持。无 T 的正常停止直接返回 STOPPED。T 的 hour 不在 `config.cycle.hours` 时返回 STOPPED/`RAW_INCOMPLETE`，携带 T，零 residue/raw/work。
+3. 合法 T：以 runnable `FrontierDecision` 调 `plan_residue` 并执行；任一判定/删除错误收敛为 `RunError(phase="residue")`，不建 work、不提交。然后 `rawscan.judge`；不完整返回 STOPPED/`RAW_INCOMPLETE`，detail区分 missing/unreadable计数，零 job。只有 complete verdict 进入 staging。
+4. `work_root = Path(local.scratch_root).resolve()/"work"`，`work_dir = work_root/source/cycle_id(T)`，`object_store_root = work_dir/"object-store"`。终名 work 预存任何形态均 `RunError(phase="raw")`，不续跑/不覆盖/不采纳；以 `object_store_root` 调 `stage_raw`，返回 manifest 必须逐字是 `object_store_root/raw-manifest.json`，每个 copy/entry key均在同一 store。
+5. 变体终名只经 `prepare.variant_targets(local, config)[source]`；率定状态只经 `prepare.calibrated_state_path`。用 bounded no-follow bytes + `state.parse` 得独立 `variant_reach_count`，river段必须存在；不得信 driver自报、不得从 DAT 列反推。driver.prepare 接收 exact request；returned identity source/cycle 必须相等，project_name必须与率定状态项目名一致；command必须非空 tuple[str,...] 且每项非空/NUL-free；scratch DAT 必须是 work 内安全未来 leaf，提交前 DAT 与 `<work>/job.log` 均不存在。
+6. controller 唯一构造 `JobSpec(name=f"yd-{source}-{cycle_id(T)}", work_dir=work_dir, command=attempt.command, log_path=work_dir/"job.log", resources=dict(local.slurm))`。driver无权选 name/work/log/resources。submit返回值必须匹配 spec name/resources，PENDING/RUNNING初态均可但不得已终态；submit异常收敛为 `RunError(phase="submit")`。
+7. submit record 只作身份/初态基线，不计作一次 `poll`。首次 `executor.poll(job_id)` 立即执行；若该次或后续 `poll` 返回非终态，才调用且恰调用一次 `poll_wait()`，随后发起下一次 `poll`。因此 terminal 首次 poll 时 wait=0，否则 wait 调用数恰等于非终态 poll 结果数；不得在 submit 与首次 poll 之间等待。controller 不内置 sleep、间隔、次数上限、watchdog、取消或 timeout。每条 poll record 必须保持 job_id/name/resources/submitted_at，started_at 一旦出现不得改变/消失，状态只允许 PENDING→PENDING/RUNNING/terminal、RUNNING→RUNNING/terminal；违反即 `RunError(phase="poll")`。M2 fake必须确定性终止；真实等待/取消归M4。
+8. terminal FAILED/TIMEOUT：不调用 collect/publish，返回 JOB_FAILED + 完整 JobRunReport；work按偏离7保留。terminal SUCCEEDED：collect恰一次；products job_id/DAT/log必须逐字匹配 terminal/prepared/JobSpec，RunDirectory identity/path与 tracker run_dir/project/targets必须绑定同一 work/identity。DAT/log/canonical checkpoint都必须在 submit前不存在、终态后才成为 no-follow普通文件。
+9. controller 以 `ensure_twelve_hour_checkpoint` 对同一 tracker/RunDirectory做 point-of-use authority校验，传一个“若被调用即抛错”的 recovery runner；因此 job-local捕获/补跑必须已经闭合，controller绝不在登录侧补跑。结果必须逐字是 `tracker.captured[12]` 的同一对象/path/checksum。
+10. `PublishInputs` 取 exact yd_root/source/T、prepared DAT、captured path、JobSpec log、exact work/work_root、`expected_rows=config.forecast_days*24`、`reach_count=config.reach_count`、独立 variant count。普通返回 -> SUCCEEDED且work不存在；`PublishCleanupError` -> SUCCEEDED_CLEANUP_PENDING、DONE在盘、不得触发失败回收；`PublishError`/其它普通异常 -> `RunError(phase="publish")`，不伪报 job失败。
+11. `run_once` 本身不取得/释放 flock；它是一轮可组合动作，14.2 必须在同一锁内循环多轮。调用方用既有 `run_with_lock` 覆盖整个 tick。14.1端到端测试必须在同一 wrapper内运行，并在job/publish窗口尝试第二次同锁进入，证明其被跳过且零发现。
+
+**M2 fake 端到端 oracle（不是生产 receipt）**：
+
+- 使用真实 `FakeJobExecutor`，允许测试写一个窄 wrapper：只在底层 `poll` 首次从非终态跃迁为 `SUCCEEDED` 时调用一次 terminal hook；其它 submit/poll/records/submissions/inflight/max_inflight 完全委派，不修改 `executor.py` 协议或 fake 行为。
+- terminal hook 必须消费本轮 raw manifest/object-store，并行使真实 `stage_work_registry -> FileForcingRepository -> ForcingProducer -> assemble`；canonical 数值对象可用 #13 已验证形状的合成 catalog/NetCDF fixture写入同一 store，必须在报告中明确“不重验 raw→canonical 数值，只验同根接线”，不得伪称 node-22真数据。
+- hook 随后用合成 SHUD runner写合法 v2 DAT/log，驱动同一 `CheckpointTracker`：一条主跑捕获720；另一条主跑跳过720后调用 #17 recovery seam在同一hook内补跑。两条都在 fake SUCCEEDED 前完成；driver.collect只返回已经存在的对象/路径，不创建文件。
+
+**Must preserve / unchanged siblings**：
+
+- `decide_frontier`、`FakeJobExecutor`、`SlurmJobExecutor`、`JobRecord/JobSpec`、#15/#17/#24 public signatures不改；不向executor加artifact callback/exit code。
+- rawcopy standalone root语义与既有测试不改；只改整体docs与14.1实参。
+- `publish`七步序、DONE后二分不改；只新增#94 exact-work形状守卫与独立测试。
+- CLI staged-unimplemented语义不改；无远端/NWM DB/scheduler/node-22操作，无真实M4声明。
+- `controller.py` 最终≤1000行；允许一个不导出公共符号的私有 `yd_producer._controller_run` support module承载run_once验证/轮询组合，公共类型与入口仍只从`yd_producer.controller`导出。不得新建第二条公共controller seam或增加large-file exclude。
+
+**Invariant Matrix**：
+
+- Governing invariant: 一个 `run_once` 只可把同一 `(source,T,work,job_id,identity)` 的一次成功Slurm attempt所产 DAT、job log与attempt-local checksum checkpoint提交成一个DONE；任何阶段不得换源/换轮/换work/换job、按文件名恢复authority或重复submit。
+- Source-of-truth identity/contract: preflight Config/Local slurm键集与partition；DONE/state决定T；`WorkIdentity`显式identity；controller派生JobSpec；submit/terminal JobRecord；同tracker `CapturedCheckpoint` checksum；PublishInputs三方reach计数。
+- Producers: rawcopy写同一object-store raw/manifest；terminal hook写canonical/forcing/run/DAT/log/checkpoint；publisher写DAT/state/DONE并删exact work。
+- Validators/preflight: controller config/path/slurm；frontier/state；residue；rawscan/rawcopy；variant state parser；prepared/terminal/products逐字段绑定；tracker point-of-use；publish contract/#94。
+- Storage/cache/query: 单attempt work；executor实例记录；tracker内存authority；NFS DONE/state/output。无DB、跨轮cache或磁盘checkpoint manifest。
+- Public routes/entrypoints: `run_once`与上述report/driver dataclasses/protocol；CLI不绑定。
+- Frontend/downstream consumers: viewer只见DONE正式产物；#27循环单轮，#28组合双源/失败owner；M4绑定真实worker receipt。
+- Failure paths/rollback/stale state: pre-submit拒绝零submit；job非成功零collect/publish；publish pre-DONE错误不伪报完成；post-DONE清理错误保持完成；preexisting work不续跑；失败work处理按#28/#108边界。
+- Evidence/audit/readiness: exact call ledger/tree snapshots/FakeJobExecutor submissions与timestamps、published bytes/DONE、mutation/red receipts、full CI。
+- Regression rows:
+  - valid GFS/IFS单轮 + capture或job-local recovery -> 每轮恰一submit、job报告逐字段相等、DONE最后、work消失。
+  - wrong partition/hour/work/job/identity/product/checkpoint/path -> first invalid phase稳定拒绝，零错误发布/兄弟树变更。
+  - FAILED/TIMEOUT -> JOB_FAILED且零collect/publish；PublishCleanupError -> completed-pending而非失败。
+  - existing decide_frontier/executor/tracker/publish callers -> signatures与测试逐项兼容。
+
+**Boundary-surface checklist**：
+
+- Shared helper roots: 消费controller discovery、residue、rawcopy、prepare/state、assemble/forcing/tracker/publish/runlock；只改controller与#94 publish guard，不改shared safe_fs。
+- Public entrypoints: run_once/report/AttemptDriver；existing public seams不删改。
+- Read surfaces: YD_ROOT DONE/state、NWM raw/source manifest、variant calibration state、terminal DAT/log/checkpoint；全部按owner的bounded/no-follow契约。
+- Write/delete/overwrite: object-store staging、residue精确NFS集合、publisher正式产物与exact work；preexisting work/终名不覆盖。
+- Staging/publish/rollback: one work/attempt；DONE前后错误语义分立；14.1不新增第二套rollback。
+- Producer/consumer evidence: PreparedAttempt→controller JobSpec→JobRecord→AttemptProducts job_id/path→CapturedCheckpoint→PublishInputs→RunReport。
+- Stale/idempotency: preexisting work拒绝；磁盘checkpoint无authority；DONE由frontier阻止重复T；同报告不触发第二提交。
+- Unchanged consumers: #27/#28后继、CLI、viewer、M4 Slurm实现。
+
+**Risk packs considered（core）**：
+
+- Public API / CLI / script entry: selected —— 新run_once/driver/report公共面；CLI明确不绑定。
+- Config / project setup: selected —— partition与运行所需产品值consumer preflight、零默认。
+- File IO / path safety / overwrite: selected —— NFS residue/publish、scratch staging/work删除、#94 exact形状。
+- Schema / columns / units / field names: selected —— report字段、job resources、12h/720min、DAT/state/publish输入。
+- Auth / permissions / secrets: not selected —— 无认证/凭据；正式mode仍由publisher既有契约。
+- Concurrency / shared state / ordering: selected —— flock外层、submit/poll单调、terminal后collect、DONE最后。
+- Resource limits / large input / discovery: selected —— raw/variant/state/manifest沿既有bounded/streaming面；poll不发明busy-loop默认。
+- Legacy compatibility / examples: selected —— existing frontier/executor/tracker/publisher与CLI staged行为必须保持。
+- Error handling / rollback / partial outputs: selected —— 每phase类型化错误、job失败/发布失败/post-DONE清理三分。
+- Release / packaging / dependency compatibility: selected —— 零依赖/lock变化、公共导出与1000行闸。
+- Documentation / migration notes: selected —— D13、raw整体布局与M4生产边界必须同步。
+
+**Domain packs**：
+
+- Geospatial / CRS / shapefile sidecars: not selected —— 不改几何，只读prepare变体。
+- Time series / forcing / temporal boundaries: selected —— 00/12、7d/60min、T+12/720min、raw→forcing时间身份。
+- 状态链 / warm-start 定戳一致性: selected —— exact T state、attempt-local relative checkpoint、publisher绝对T+12。
+- NWM快照溯源与DB-free隔离: selected —— 使用已落snapshot public seams与合成oracle，零外部服务/运行时NWM import。
+
+**Required evidence（input → expected，全部必须有独立判别器）**：
+
+1. happy capture：完整单源T树/raw/source manifest + real fake terminal hook -> call ledger严格 `preflight, frontier, residue-plan, residue-execute, raw-judge, raw-stage, variant-read, driver-prepare, submit, poll, [wait, poll]..., collect, checkpoint-recheck, publish`；首个poll前无wait，每个wait只跟在一条非终态poll结果后；DONE在盘、正式DAT/state正确、work不存在。
+2. job-local recovery：主跑tracker跳过720，terminal hook内调用#17补跑并成功 -> executor submissions恰1、job id同一、canonical checkpoint有效、DONE在盘；任何第二submit mutation变红。
+3. job报告：submit snapshot与terminal record的job_id/partition/state/submitted/started/ended逐字段等于report；partition不得从新常量/driver取。submitted记录必须保持PENDING快照，终态后`FakeJobExecutor.submissions[0].state is PENDING`。
+4. #10 accessor交接：两个并发独立fake作业下`inflight()`严格提交序；A/B排空后max_inflight仍为2，再提交/排空C仍为2；提交快照不随poll变化。新增到`test_executor.py`，不依赖run_once偶然覆盖。
+5. partition preflight：required_fields无partition、local无partition、partition空白/非str、手构local键集缺/多各一 -> `RunError(preflight)`，frontier/raw/driver/executor calls=0，两根快照不变。
+6. product preflight：forecast_days非7、interval非60、checkpoint_hours非(12,)、reach≤0、source越域、相对yd/scratch/raw/shud路径 -> 同上；不得延迟到job后才失败。
+7. frontier正常停止：NO_INITIAL_STATE/STATE_MISSING/STATE_UNREADABLE/HEADER mismatch/discovery unreadable -> STOPPED或对应typed error按既有contract，zero residue/work/submit；existing decide_frontier用例逐项不变。
+8. arbitrary hour：无DONE且唯一18Z state header合法 -> STOPPED RAW_INCOMPLETE，cycle=T，rawscan/plan_residue/driver/submit全零；`ConfigError`不逃逸。
+9. residue-before-raw：合法T有T+12残态与无DONE半成品，raw缺一件 -> residue先精确清掉两项、保留T/兄弟源，再返回STOPPED RAW_INCOMPLETE；杀死旧“raw stop导致不清residue”接线。
+10. raw layout：成功stage后所有entry经`LocalObjectStore(work/object-store)`解析为已存在`object-store/raw/...`，manifest在同根；terminal forcing/registry读同一store；若误传attempt-work根，集成用例因consumer找不到raw或exact布局断言变红。
+11. preexisting work：regular dir/file/symlink三态 -> phase raw拒绝，不删除/续跑/submit；兄弟cycle work与NWM raw/YD_ROOT快照不变。
+12. variant count：prepare target的率定state river行数与config分别同值/不等；同值成功，不等必须在submit前或publisher首写前`RunError/PublishError`且零DONE。driver自报/篡改任何count无入口；DAT nc单独错仍由publisher拒绝。
+13. prepared-attempt矩阵：wrong source/cycle/project、unsafe/blank command、DAT越work/预存/symlink parent -> prepare phase拒绝、submit0；valid identity/command/path通过。
+14. submit/poll identity：submit返回wrong name/resources/terminal、poll返回wrong id/name/resources/submitted_at、started_at消失/改变、PENDING回退等每腿 -> exact phase error、零collect/publish；正常PENDING重复/RUNNING重复/terminal通过。首个poll立即发生；wait调用次数精确等于 `executor.poll()` 返回非终态记录的次数，首个poll即terminal时wait=0。
+15. terminal timing：DAT/log/checkpoint在submit前均不存在；terminal hook创建后、collect前均存在；让driver.collect才创建任一项 -> evidence hook断言变红。collect恰一次且只在SUCCEEDED。
+16. products矩阵：wrong job_id/DAT/log/RunDirectory identity/path/tracker run_dir/project/targets、uncaptured或磁盘漂移checkpoint -> collect phase拒绝，零publish/DONE；磁盘规范名但新tracker无内存record不得通过。
+17. FAILED/TIMEOUT两腿 -> JOB_FAILED report含终态/times，collect/publish0、DONE不存在、work按本fixture边界保留；不要求exit code/失败日志。
+18. publish三态：普通成功 -> SUCCEEDED/published非空/work删；PublishError -> RunError(publish)且不写DONE；PublishCleanupError -> SUCCEEDED_CLEANUP_PENDING、DONE存在、不得调用失败finalizer/删除已完成证据。
+19. #94 exact work guard：`work_dir = work_root/source`、多一层、兄弟source、兄弟cycle各自构造PublishInputs -> 首个IO前拒绝，兄弟work与两根快照逐项不变；exact路径正例通过。独立新测试文件，不把已2066行`test_publish.py`继续膨胀。
+20. flock生命周期：外层`run_with_lock(action=run_once)`；terminal/wait/publish窗口内第二次同锁进入均`acquired=False`、inner action0调用；异常路径后锁可再取，lock文件保留。
+21. report/dataclass/protocol结构：字段名、frozen/kw-only、runtime protocol、run_once全部keyword-only无默认、enum闭合词表；public exports精确。
+22. batched pre-change red：docs-only fixture head overlay最终tests；新imports可用最小零行为shim后必须仍有behavioral failures，collection-only不计。
+23. mutation matrix至少覆盖：partition双owner、hour guard、residue/raw顺序、object-store root、exact work/job/log派生、每个poll identity/transition、terminal-before-collect、submission count=1、captured memory authority、variant count独立源、PublishCleanupError分类与#94四轴；0 survived/0 unrun，scratch/provenance纪律按project-profile。
+24. final矩阵：focused controller/executor/#94 + full producer；producer/viewer Ruff+format、frozen sync、OpenSpec strict/all、stage anchor、large-file hook、git diff check；两父merge-ref CPython3.12与CI全绿。
+
+**测试布局**：
+
+- `producer/src/yd_producer/_controller_run.py`（可选）：私有support，仅在controller.py不足1000行时承载实现细节；无`__all__`公共面，测试仍只从controller导入。
+- `producer/tests/run_once_fixtures.py`：独立目录字面、terminal-hook executor wrapper、driver、real registry/forcing/assemble/tracker/publish合成器；无`test_*`。
+- `producer/tests/test_controller_run_once.py`：成功、recovery、report、order/flock主链。
+- `producer/tests/test_controller_run_once_failures.py`：preflight/frontier/raw/identity/poll/products/publish错误矩阵。
+- `producer/tests/test_publish_work_identity.py`：#94 exact-work构造守卫。
+- `producer/tests/test_executor.py`：只补issue评论要求的3条accessor判别器；既有nodeids/断言不删改。
+- 每个新/修改的非exclude文件≤1000行；controller.py≤1000；不得新增large-file exclude。若两份controller测试任一接近上限，按上述语义边界继续拆文件，不删断言。
+
+**Known limits / routed deferrals**：
+
+- #47/#28：FAILED/TIMEOUT退出码、失败日志与work回收；14.1只报告，不伪造。
+- #108：post-DONE硬杀/历史孤儿work sweeper；当前PublishCleanupError报告明确完成待清理。
+- #106：14.3双源共享output层级竞态；单源14.1不可达。
+- #109：DAT分钟列内容闸；publisher既有已路由债，本issue不改。
+- #77：tracker run_dir符号链接祖先；controller使用resolved scratch根且products重验，但不改tracker构造合同。
+- M4：真实worker command/receipt、SHUD argv/header物理形态、Slurm wait/cancel、node-22/NFS/权限与数值oracle；CLI在此之前保持fail closed。
+
+**Non-goals**：
+
+- 多轮追赶/缺口循环（#27）；双源并发、失败隔离、失败日志、崩溃重跑（#28）。
+- 真实Slurm worker、CLI run绑定、cron安装、自动watchdog/cancel/timeout（M4）。
+- NWM数据库/scheduler/registry服务、运行时NWM import、IDW/ERA5 production。
+- 新checkpoint manifest/outcome、磁盘扫描恢复authority、第二次Slurm提交。
+- 修改canonical数学、forcing数值、SHUD真实执行或viewer。
+
+**Review focus**：
+
+- 是否任何终态产物在submit前生成，或collect在登录侧补做heavy work；fake hook是否真的发生在SUCCEEDED跃迁内。
+- source/T/work/job/identity/path/checksum是否逐段单owner绑定；driver是否偷走JobSpec resources/log/work权威。
+- residue是否在合法T的raw判定前执行、越域hour是否在删除前停止。
+- checkpoint是否只认同tracker内存record并point-of-use校验；recovery是否保持1 submission。
+- PublishCleanupError是否仍是已完成，#94是否在危险边界守住exact work；有没有越界吸收#28/#108。
+- mutation/red/merge-ref证据是否真实执行，合成canonical是否被如实限定为M2接线oracle而非node-22真数据。
