@@ -41,38 +41,179 @@ CYCLE_T = datetime(2026, 8, 26, 12, tzinfo=UTC)
 CYCLE_T12 = datetime(2026, 8, 27, 0, tzinfo=UTC)
 CYCLE_T24 = datetime(2026, 8, 27, 12, tzinfo=UTC)
 CYCLE_T36 = datetime(2026, 8, 28, 0, tzinfo=UTC)
-
-#: `_controller_run.catch_up_source` 允许的全部 Call owner。任意新增
-#: helper/finalizer/log/cleanup/fs 调用都会让集合不相等。
-_CATCH_UP_ALLOWED_CALLS = frozenset(
-    {
-        ("attr", "controller", "run_once"),
-        ("attr", "reports", "append"),
-        ("name", "tuple"),
-    }
+CYCLE_T48 = datetime(2026, 8, 28, 12, tzinfo=UTC)
+CYCLE_T60 = datetime(2026, 8, 29, 0, tzinfo=UTC)
+JOB_T36 = "yd-gfs-2026082800"
+JOB_T48 = "yd-gfs-2026082812"
+_RUN_ONCE_KW = (
+    "config",
+    "local",
+    "source",
+    "executor",
+    "driver",
+    "poll_wait",
+)
+_EXTRA_CONTROL = (
+    ast.Import,
+    ast.ImportFrom,
+    ast.With,
+    ast.AsyncWith,
+    ast.Try,
+    ast.For,
+    ast.AsyncFor,
+    ast.Match,
+    ast.Raise,
+    ast.Assert,
+    ast.Global,
+    ast.Nonlocal,
+    ast.Delete,
+    ast.Pass,
+    ast.Break,
+    ast.Continue,
 )
 
 
-def _call_descriptor(node: ast.Call) -> tuple[str, ...]:
-    func = node.func
-    if isinstance(func, ast.Name):
-        return ("name", func.id)
-    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-        return ("attr", func.value.id, func.attr)
-    return ("other", ast.dump(func, include_attributes=False))
+def _dump(node: ast.AST) -> str:
+    return ast.dump(node, include_attributes=False)
 
 
-def _assert_catch_up_source_call_whitelist() -> None:
+def _is_name(node: ast.AST, ident: str) -> bool:
+    return isinstance(node, ast.Name) and node.id == ident
+
+
+def _is_attr(node: ast.AST, owner: str, attr: str) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and _is_name(node.value, owner)
+        and node.attr == attr
+    )
+
+
+def _is_empty_list(node: ast.AST) -> bool:
+    return isinstance(node, ast.List) and node.elts == []
+
+
+def _is_list_run_report_ann(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Subscript)
+        and _is_name(node.value, "list")
+        and _is_name(node.slice, "RunReport")
+    )
+
+
+def _assert_no_implicit_constructs(node: ast.AST) -> None:
+    for child in ast.walk(node):
+        assert not isinstance(
+            child,
+            ast.Lambda
+            | ast.ListComp
+            | ast.SetComp
+            | ast.DictComp
+            | ast.GeneratorExp
+            | ast.Await
+            | ast.Yield
+            | ast.YieldFrom
+            | ast.NamedExpr
+            | ast.Starred
+            | ast.JoinedStr
+            | ast.FormattedValue,
+        ), _dump(child)
+        if isinstance(child, ast.Assign):
+            for target in child.targets:
+                assert not isinstance(target, ast.Attribute | ast.Subscript), _dump(
+                    child
+                )
+
+
+def _assert_run_once_call(node: ast.AST) -> None:
+    assert isinstance(node, ast.Call), _dump(node)
+    assert _is_attr(node.func, "controller", "run_once"), _dump(node)
+    assert node.args == []
+    assert tuple(kw.arg for kw in node.keywords) == _RUN_ONCE_KW
+    for keyword in node.keywords:
+        assert keyword.arg is not None
+        assert _is_name(keyword.value, keyword.arg), _dump(keyword)
+
+
+def _assert_append_call(node: ast.AST) -> None:
+    assert isinstance(node, ast.Expr), _dump(node)
+    call = node.value
+    assert isinstance(call, ast.Call), _dump(call)
+    assert _is_attr(call.func, "reports", "append"), _dump(call)
+    assert len(call.args) == 1 and _is_name(call.args[0], "report")
+    assert call.keywords == []
+
+
+def _assert_terminal_if(node: ast.AST) -> None:
+    assert isinstance(node, ast.If), _dump(node)
+    test = node.test
+    assert isinstance(test, ast.Compare), _dump(test)
+    assert _is_attr(test.left, "report", "outcome")
+    assert len(test.ops) == 1 and isinstance(test.ops[0], ast.IsNot)
+    assert len(test.comparators) == 1
+    assert _is_attr(test.comparators[0], "RunOutcome", "SUCCEEDED")
+    assert node.orelse == []
+    assert len(node.body) == 1
+    ret = node.body[0]
+    assert isinstance(ret, ast.Return), _dump(ret)
+    value = ret.value
+    assert isinstance(value, ast.Call), _dump(value)
+    assert _is_name(value.func, "tuple")
+    assert len(value.args) == 1 and _is_name(value.args[0], "reports")
+    assert value.keywords == []
+
+
+def _assert_catch_up_source_shape() -> None:
     source = inspect.getsource(_controller_run.catch_up_source)
     tree = ast.parse(source)
-    calls = {
-        _call_descriptor(node) for node in ast.walk(tree) if isinstance(node, ast.Call)
-    }
-    imports = [
-        node for node in ast.walk(tree) if isinstance(node, ast.Import | ast.ImportFrom)
+    assert len(tree.body) == 1
+    fn = tree.body[0]
+    assert isinstance(fn, ast.FunctionDef) and fn.name == "catch_up_source"
+    assert fn.decorator_list == []
+    assert fn.args.posonlyargs == [] and fn.args.args == []
+    assert fn.args.vararg is None and fn.args.kwarg is None
+    assert fn.args.defaults == []
+    assert tuple(arg.arg for arg in fn.args.kwonlyargs) == _RUN_ONCE_KW
+    assert all(default is None for default in fn.args.kw_defaults)
+    body = list(fn.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+    ):
+        body = body[1:]
+    assert len(body) == 2, [_dump(stmt) for stmt in body]
+    assign, loop = body
+    assert isinstance(assign, ast.AnnAssign), _dump(assign)
+    assert assign.simple == 1 and _is_name(assign.target, "reports")
+    assert _is_list_run_report_ann(assign.annotation)
+    assert assign.value is not None and _is_empty_list(assign.value)
+    assert isinstance(loop, ast.While), _dump(loop)
+    assert isinstance(loop.test, ast.Constant) and loop.test.value is True
+    assert loop.orelse == []
+    assert len(loop.body) == 3, [_dump(stmt) for stmt in loop.body]
+    bind, append, terminal = loop.body
+    assert isinstance(bind, ast.Assign), _dump(bind)
+    assert len(bind.targets) == 1 and _is_name(bind.targets[0], "report")
+    _assert_run_once_call(bind.value)
+    _assert_append_call(append)
+    _assert_terminal_if(terminal)
+    _assert_no_implicit_constructs(fn)
+    extra_while = [
+        n for n in ast.walk(fn) if isinstance(n, ast.While) and n is not loop
     ]
-    assert imports == []
-    assert calls == set(_CATCH_UP_ALLOWED_CALLS)
+    extra_if = [n for n in ast.walk(fn) if isinstance(n, ast.If) and n is not terminal]
+    extra_fn = [
+        n
+        for n in ast.walk(fn)
+        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+        and n is not fn
+    ]
+    extra_ctrl = [n for n in ast.walk(fn) if isinstance(n, _EXTRA_CONTROL)]
+    assert extra_while == []
+    assert extra_if == []
+    assert extra_fn == []
+    assert extra_ctrl == []
     assert "flock" not in source and "run_with_lock" not in source
 
 
@@ -116,19 +257,30 @@ def _tree_snapshot(root: pathlib.Path) -> dict[str, tuple[object, ...]]:
     return snapshot
 
 
+def _states(local) -> pathlib.Path:
+    return pathlib.Path(local.yd_root) / "states" / SOURCE
+
+
 def _wrap_run_once_snapshot_on_terminal(
     monkeypatch: pytest.MonkeyPatch,
     local,
     *,
     outcome: RunOutcome,
-) -> list[dict[str, tuple[object, ...]]]:
-    captured: list[dict[str, tuple[object, ...]]] = []
+) -> list[tuple[dict[str, tuple[object, ...]], dict[str, tuple[object, ...]]]]:
+    captured: list[
+        tuple[dict[str, tuple[object, ...]], dict[str, tuple[object, ...]]]
+    ] = []
     original = controller.run_once
 
     def wrapped(**kwargs):
         report = original(**kwargs)
         if report.cycle == CYCLE_T12 and report.outcome is outcome:
-            captured.append(_tree_snapshot(_work(local, CYCLE_T12)))
+            captured.append(
+                (
+                    _tree_snapshot(_work(local, CYCLE_T12)),
+                    _tree_snapshot(_states(local)),
+                )
+            )
         return report
 
     monkeypatch.setattr(controller, "run_once", wrapped)
@@ -255,6 +407,47 @@ def test_three_complete_cycles_stop_at_next_gap(tmp_path: pathlib.Path) -> None:
     assert not _done(local, CYCLE_T36).exists()
 
 
+def test_five_complete_cycles_stop_at_first_gap(tmp_path: pathlib.Path) -> None:
+    config, local, fake, driver, executor = _prepare(
+        tmp_path,
+        raw_cycles=(CYCLE_T, CYCLE_T12, CYCLE_T24, CYCLE_T36, CYCLE_T48),
+        outcomes={
+            JOB_T: success_outcome(),
+            JOB_T12: success_outcome(),
+            JOB_T24: success_outcome(),
+            JOB_T36: success_outcome(),
+            JOB_T48: success_outcome(),
+        },
+    )
+    reports, _lock = _catch_up(config, local, executor, driver)
+
+    assert [(r.cycle, r.outcome) for r in reports] == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.SUCCEEDED),
+        (CYCLE_T24, RunOutcome.SUCCEEDED),
+        (CYCLE_T36, RunOutcome.SUCCEEDED),
+        (CYCLE_T48, RunOutcome.SUCCEEDED),
+        (CYCLE_T60, RunOutcome.STOPPED),
+    ]
+    assert reports[-1].stop_reason is StopReason.RAW_INCOMPLETE
+    assert [record.name for record in fake.submissions] == [
+        JOB_T,
+        JOB_T12,
+        JOB_T24,
+        JOB_T36,
+        JOB_T48,
+    ]
+    assert executor.inflight_before_submit == [(), (), (), (), ()]
+    assert fake.max_inflight == 1
+    assert fake.inflight() == ()
+    assert _done(local, CYCLE_T).is_file()
+    assert _done(local, CYCLE_T12).is_file()
+    assert _done(local, CYCLE_T24).is_file()
+    assert _done(local, CYCLE_T36).is_file()
+    assert _done(local, CYCLE_T48).is_file()
+    assert not _done(local, CYCLE_T60).exists()
+
+
 def test_dynamic_raw_arrival_is_not_a_frozen_startup_horizon(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -375,9 +568,11 @@ def test_job_failed_on_second_round_stops_before_later_cycle(
     assert not _work(local, CYCLE_T).exists()
     assert not _log(local, CYCLE_T12).exists()
     assert snapshots != []
-    assert _tree_snapshot(work) == snapshots[0]
+    work_snap, state_snap = snapshots[0]
+    assert _tree_snapshot(work) == work_snap
+    assert _tree_snapshot(_states(local)) == state_snap
     assert finalizer_calls == []
-    _assert_catch_up_source_call_whitelist()
+    _assert_catch_up_source_shape()
 
 
 def test_cleanup_pending_on_second_round_stops_and_keeps_evidence(
@@ -417,9 +612,11 @@ def test_cleanup_pending_on_second_round_stops_and_keeps_evidence(
     assert not _done(local, CYCLE_T24).exists()
     assert not _log(local, CYCLE_T12).exists()
     assert snapshots != []
-    assert _tree_snapshot(work) == snapshots[0]
+    work_snap, state_snap = snapshots[0]
+    assert _tree_snapshot(work) == work_snap
+    assert _tree_snapshot(_states(local)) == state_snap
     assert finalizer_calls == []
-    _assert_catch_up_source_call_whitelist()
+    _assert_catch_up_source_shape()
 
 
 def test_second_round_run_error_identity_propagates(tmp_path: pathlib.Path) -> None:
@@ -645,4 +842,4 @@ def test_composition_reuses_public_run_once_seam(
         assert kwargs["driver"] is driver
         assert kwargs["poll_wait"] is poll_wait
 
-    _assert_catch_up_source_call_whitelist()
+    _assert_catch_up_source_shape()
