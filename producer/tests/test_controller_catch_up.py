@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 import pathlib
+import stat
 from datetime import UTC, datetime
 
 import pytest
@@ -39,6 +41,110 @@ CYCLE_T = datetime(2026, 8, 26, 12, tzinfo=UTC)
 CYCLE_T12 = datetime(2026, 8, 27, 0, tzinfo=UTC)
 CYCLE_T24 = datetime(2026, 8, 27, 12, tzinfo=UTC)
 CYCLE_T36 = datetime(2026, 8, 28, 0, tzinfo=UTC)
+
+#: `_controller_run.catch_up_source` 允许的全部 Call owner。任意新增
+#: helper/finalizer/log/cleanup/fs 调用都会让集合不相等。
+_CATCH_UP_ALLOWED_CALLS = frozenset(
+    {
+        ("attr", "controller", "run_once"),
+        ("attr", "reports", "append"),
+        ("name", "tuple"),
+    }
+)
+
+
+def _call_descriptor(node: ast.Call) -> tuple[str, ...]:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return ("name", func.id)
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        return ("attr", func.value.id, func.attr)
+    return ("other", ast.dump(func, include_attributes=False))
+
+
+def _assert_catch_up_source_call_whitelist() -> None:
+    source = inspect.getsource(_controller_run.catch_up_source)
+    tree = ast.parse(source)
+    calls = {
+        _call_descriptor(node) for node in ast.walk(tree) if isinstance(node, ast.Call)
+    }
+    imports = [
+        node for node in ast.walk(tree) if isinstance(node, ast.Import | ast.ImportFrom)
+    ]
+    assert imports == []
+    assert calls == set(_CATCH_UP_ALLOWED_CALLS)
+    assert "flock" not in source and "run_with_lock" not in source
+
+
+def _read_regular_nofollow(path: pathlib.Path) -> bytes:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _tree_snapshot(root: pathlib.Path) -> dict[str, tuple[object, ...]]:
+    """lstat 递归快照：不跟随 symlink，收录类型/mode 与普通文件字节。"""
+    snapshot: dict[str, tuple[object, ...]] = {}
+
+    def add(rel: str, path: pathlib.Path) -> None:
+        st = os.lstat(path)
+        kind = stat.S_IFMT(st.st_mode)
+        if stat.S_ISLNK(kind):
+            snapshot[rel] = ("symlink", st.st_mode, os.readlink(path))
+            return
+        if stat.S_ISDIR(kind):
+            snapshot[rel] = ("dir", st.st_mode)
+            for name in sorted(os.listdir(path)):
+                child = name if rel == "." else f"{rel}/{name}"
+                add(child, path / name)
+            return
+        if stat.S_ISREG(kind):
+            data = _read_regular_nofollow(path)
+            snapshot[rel] = ("reg", st.st_mode, len(data), data)
+            return
+        snapshot[rel] = ("other", kind, st.st_mode, st.st_size)
+
+    add(".", root)
+    return snapshot
+
+
+def _wrap_run_once_snapshot_on_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    local,
+    *,
+    outcome: RunOutcome,
+) -> list[dict[str, tuple[object, ...]]]:
+    captured: list[dict[str, tuple[object, ...]]] = []
+    original = controller.run_once
+
+    def wrapped(**kwargs):
+        report = original(**kwargs)
+        if report.cycle == CYCLE_T12 and report.outcome is outcome:
+            captured.append(_tree_snapshot(_work(local, CYCLE_T12)))
+        return report
+
+    monkeypatch.setattr(controller, "run_once", wrapped)
+    return captured
+
+
+def _install_outer_finalizer_sentinel(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    seen: list[str] = []
+    import yd_producer.cleanup as cleanup_module
+
+    def forbidden(*args, **kwargs):
+        seen.append("finalize_failed_job")
+        raise AssertionError("catch_up_source 外层不得调用 finalize_failed_job")
+
+    monkeypatch.setattr(cleanup_module, "finalize_failed_job", forbidden)
+    return seen
 
 
 def _done(local, cycle: datetime) -> pathlib.Path:
@@ -237,7 +343,7 @@ def test_initial_gap_does_not_skip_to_later_complete_raw(
 
 
 def test_job_failed_on_second_round_stops_before_later_cycle(
-    tmp_path: pathlib.Path,
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config, local, fake, driver, executor = _prepare(
         tmp_path,
@@ -250,6 +356,10 @@ def test_job_failed_on_second_round_stops_before_later_cycle(
             JOB_T24: success_outcome(),
         },
     )
+    snapshots = _wrap_run_once_snapshot_on_terminal(
+        monkeypatch, local, outcome=RunOutcome.JOB_FAILED
+    )
+    finalizer_calls = _install_outer_finalizer_sentinel(monkeypatch)
     reports, _lock = _catch_up(config, local, executor, driver)
 
     assert [(r.cycle, r.outcome) for r in reports] == [
@@ -260,13 +370,18 @@ def test_job_failed_on_second_round_stops_before_later_cycle(
     assert _done(local, CYCLE_T).is_file()
     assert not _done(local, CYCLE_T12).exists()
     assert not _done(local, CYCLE_T24).exists()
-    assert _work(local, CYCLE_T12).exists()
+    work = _work(local, CYCLE_T12)
+    assert work.exists()
     assert not _work(local, CYCLE_T).exists()
     assert not _log(local, CYCLE_T12).exists()
+    assert snapshots != []
+    assert _tree_snapshot(work) == snapshots[0]
+    assert finalizer_calls == []
+    _assert_catch_up_source_call_whitelist()
 
 
 def test_cleanup_pending_on_second_round_stops_and_keeps_evidence(
-    tmp_path: pathlib.Path,
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import yd_producer.publish as publish_module
 
@@ -282,11 +397,12 @@ def test_cleanup_pending_on_second_round_stops_and_keeps_evidence(
             raise OSError(1, "injected T+12 work removal failure")
         return original_remove(*args, **kwargs)
 
-    publish_module.remove_tree_allow_symlinks = failing_t12_work
-    try:
-        reports, _lock = _catch_up(config, local, executor, driver)
-    finally:
-        publish_module.remove_tree_allow_symlinks = original_remove
+    monkeypatch.setattr(publish_module, "remove_tree_allow_symlinks", failing_t12_work)
+    snapshots = _wrap_run_once_snapshot_on_terminal(
+        monkeypatch, local, outcome=RunOutcome.SUCCEEDED_CLEANUP_PENDING
+    )
+    finalizer_calls = _install_outer_finalizer_sentinel(monkeypatch)
+    reports, _lock = _catch_up(config, local, executor, driver)
 
     assert [(r.cycle, r.outcome) for r in reports] == [
         (CYCLE_T, RunOutcome.SUCCEEDED),
@@ -296,9 +412,14 @@ def test_cleanup_pending_on_second_round_stops_and_keeps_evidence(
     assert reports[-1].published is None
     assert reports[-1].done_path is not None and reports[-1].done_path.is_file()
     assert _done(local, CYCLE_T12).is_file()
-    assert _work(local, CYCLE_T12).exists()
+    work = _work(local, CYCLE_T12)
+    assert work.exists()
     assert not _done(local, CYCLE_T24).exists()
     assert not _log(local, CYCLE_T12).exists()
+    assert snapshots != []
+    assert _tree_snapshot(work) == snapshots[0]
+    assert finalizer_calls == []
+    _assert_catch_up_source_call_whitelist()
 
 
 def test_second_round_run_error_identity_propagates(tmp_path: pathlib.Path) -> None:
@@ -524,25 +645,4 @@ def test_composition_reuses_public_run_once_seam(
         assert kwargs["driver"] is driver
         assert kwargs["poll_wait"] is poll_wait
 
-    source = inspect.getsource(_controller_run.catch_up_source)
-    tree = ast.parse(source)
-    called: set[str] = set()
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name):
-                called.add(node.func.id)
-            elif isinstance(node.func, ast.Attribute):
-                called.add(node.func.attr)
-                if isinstance(node.func.value, ast.Name):
-                    called.add(node.func.value.id)
-        elif isinstance(node, ast.Import):
-            imported.update(alias.name.split(".", 1)[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module.split(".", 1)[0])
-            imported.update(alias.name for alias in node.names)
-    for forbidden in ("residue", "rawscan", "rawcopy", "publish", "plan_residue"):
-        assert forbidden not in called
-        assert forbidden not in imported
-    assert "run_once" in called
-    assert "flock" not in source and "run_with_lock" not in source
+    _assert_catch_up_source_call_whitelist()
