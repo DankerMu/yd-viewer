@@ -75,6 +75,14 @@ M2 的 `AttemptDriver` 是注入式计算节点边界，不是假成功入口：
 
 #94 的危险删除闸在本 issue 同批闭合：`PublishInputs` 构造期必须重验 resolved `work_dir == resolved work_root / source / cycle_id(cycle)`；少/多一层或兄弟 source/cycle 在任何 IO 前拒绝。把守卫放在危险边界而非只靠唯一 caller，使未来调用方不能绕过。
 
+**D14 issue #28 双源并行、失败收尾与崩溃恢复边界**：新增 `controller.run_sources(*, config, local, executors, drivers, poll_waits, failure_exit_codes) -> RunSourcesReport`，一次只组合 IFS/GFS 各一轮 `run_once`；14.2 的同源多轮循环仍归 #27，不在本 PR 偷做。四份 mapping 必须在启动线程前具有精确键集 `{ifs,gfs}`，`executors` 与 `drivers` 每源独立实例，避免把既有 `JobExecutor`/`AttemptDriver` 协议偷偷升级为线程安全契约。两个 worker 用 stdlib `ThreadPoolExecutor(max_workers=2)` 同时运行，先等待两源都结束，再按固定 source 顺序取结果/抛错；一个源的错误不得取消另一源。
+
+`_controller_run.run_once` 增加仅供组合层使用的私有失败收尾参数，公开 `controller.run_once` 六参数签名与 14.1 行为保持不变。组合层为每个 source 的 `FAILED/TIMEOUT` 注入 `failure_exit_codes[source](terminal_record) -> str`；controller 不从状态枚举猜退出码，拿同一 `JobSpec`/terminal `JobRecord` 调 `cleanup.finalize_failed_job`，成功后才返回 `JOB_FAILED`。失败码取得或收尾失败归新的 `RunError.phase="cleanup"`，但同批另一个 source 仍跑到终态。生产退出码适配与 CLI/真实 worker receipt 仍归 M4/#47，本地 fake 用 job-id 绑定的显式 provider。
+
+#59 的完整裁决选择 fail-closed：NFS `output/states` 残留与孤儿 Slurm 的写面不相交，仍先按 #23 规则清理；但精确 `work/<source>/<T>` 若预存，不自动删除、不复用、不恢复 authority，返回新的 `StopReason.UNVERIFIED_WORK_RESIDUE` 并保留证据。原因是 job-ID 存活查询按构造覆盖不到“`sbatch` 已提交但 ID 解析失败”窗口；M2 又没有可证明完整的跨进程 receipt。运维确认无在途作业并移走 work 后，下一 tick 才从 T 状态干净重跑。这是对旧 spec 无条件“删除残留后重跑”的显式收窄，不是假装已有能力。
+
+#106 在编排侧关闭：双源计算可并行，但同一 `run_sources` 共享一把进程内 publish lock，整次 `publish.publish` 串行。这样两源不会互见对方 `mkdir -> fchmod` 中间态，同时不改发布器“只放宽本次自建层级”的判据；无条件 `fchmod` 仍是被禁止的变异体。跨进程由既有同一 `runlock` 互斥，公开单源 `run_once` 不新增全局锁或隐式等待。
+
 **D10 issue #14 direct-grid forcing 的落点与 seam**：任务 8.1 只落 NWM pin `8ae9b8f2` 的 file-backend direct-grid producer；公开验收 seam 取快照原生的 `yd_producer.forcing.ForcingProducer.produce(...) -> ForcingProductionResult`，不在本 PR 另造 `forcing.build(work, manifest)` facade。上文 seam 4 的 `forcing.build` 是组 8 完整链的编排层草图，连同临时 registry 生命周期和 `assemble(...)` 归 issue #15；提前实现会穿越 #14 的 Minimal mergeable slice。
 
 本 issue 中「站点集合等于格点集合」按 direct-grid binding 的权威定义解释：输出站点与 binding 声明的 canonical `grid_cell_id` 集合一一对应，canonical 中未被 binding 引用的额外格点不成为站点，也不读取其值；这与 pin 的「Required grid cells are subset before value extraction」一致，不恢复旧 105 站 IDW。GFS/IFS 各用自己的 contract、grid id 和 cell id，禁止跨 source 复用 binding。source singleton 不是 file parser 的偶然性质：`ForcingProducer` 在每次 repository 返回 contract 后必须再次要求 normalized `applicable_source_ids == (requested_source,)`，因此注入式或未来 repository 也不能用 source-less parser/direct constructor 绕过生产边界。

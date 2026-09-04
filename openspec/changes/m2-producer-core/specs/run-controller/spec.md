@@ -23,12 +23,20 @@
 - **WHEN** `states/<source>/<T>.cfg.ic` 存在但其时间头不对应绝对 T
 - **THEN** 该源本次停止，不提交作业，另一源不受影响
 
-### Requirement: 未提交残留清理重跑
-无 `DONE(T)` 却存在比 T 更晚的状态文件或 T 的 source 目录半成品时，MUST 判为上次发布中断残留：保留 T 状态，删除残留后重跑 T。
+### Requirement: 未提交残留清理与可证安全重跑
+无 `DONE(T)` 却存在比 T 更晚的状态文件或 T 的 source 目录半成品时，MUST 判为上次发布中断的 NFS 残留并保留 T 状态。控制器 MAY 在删除这些 NFS 残留后重跑 T，但只有精确 `work/<source>/<T>` 不存在时才可自动重跑。若该 work 仍存在，控制器 MUST 停止本源、保留 work 并报告需人工确认，MUST NOT 假定同源无在途孤儿 Slurm 作业，也 MUST NOT 删除、复用或从该 work 恢复；运维确认无在途作业并移走 work 后，下一次 run 才可从 T 状态干净重跑。当前进程已取得同一 job 的明确 `FAILED`/`TIMEOUT` 终态不属于未知孤儿窗口：它 MUST 先完成失败日志提交与精确 work 删除，再返回失败结论。
 
-#### Scenario: 崩溃残留恢复
-- **WHEN** 模拟根中存在 T+12 状态与只含 DAT 无 `DONE` 的 T 目录
+#### Scenario: 无 scratch work 的崩溃残留恢复
+- **WHEN** 模拟根中存在 T+12 状态与只含 DAT 无 `DONE` 的 T 目录，且精确 `work/<source>/<T>` 不存在
 - **THEN** run 删除该 T+12 状态与半成品目录，以 T 状态重新组装本轮
+
+#### Scenario: 未验证 work 阻断自动重跑
+- **WHEN** 无 `DONE(T)` 且精确 `work/<source>/<T>` 仍存在，无论其中是否含 job 日志或产物
+- **THEN** run 返回 `STOPPED` 且原因是 `UNVERIFIED_WORK_RESIDUE`，保留该 work 并停止本源，不提交新作业；另一源不受影响
+
+#### Scenario: 人工排除孤儿后下一 tick 干净重跑
+- **WHEN** 上一 tick 因未验证 work 停止，运维已确认无在途作业并移走该 work，T 状态仍在
+- **THEN** 下一 tick 清理剩余 NFS 残留并从 T 状态重新组装，不采纳旧 work 中任何文件
 
 #### Scenario: 已 DONE 的产物不在残留集合内
 - **WHEN** 同一棵根里 `output/<T-12>/<source>/DONE` 存在、而 `output/<T>/<source>/` 是无 `DONE` 的半成品
@@ -89,7 +97,50 @@ run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过�
 
 #### Scenario: 双源并行单源失败不阻塞
 - **WHEN** fake executor 令 IFS 作业失败、GFS 作业成功
-- **THEN** GFS 正常发布并继续追赶，IFS 本次停止；IFS 失败留一份合并日志 `logs/ifs/<T>.log`，其 work 被删除
+- **THEN** 两源作业曾同时在途，GFS 正常发布且不等待 IFS 失败收尾，IFS 本次停止；IFS 失败留一份合并日志 `logs/ifs/<T>.log`，其 work 被删除；GFS 的后续逐轮追赶由同源循环继续
+
+#### Scenario: 双源 publish 串行保护共享层级
+- **WHEN** IFS/GFS 同一 cycle 的作业都成功并几乎同时进入 publish
+- **THEN** 两次 publish 不重叠，预置 `output/` 的 mode 不被改写，两源均正常落 `DONE`
+
+### Requirement: 双源单轮组合公共契约
+公开入口 MUST 精确为 `run_sources(*, config: Config, local: LocalConfig, executors: Mapping[str, JobExecutor], drivers: Mapping[str, AttemptDriver], poll_waits: Mapping[str, Callable[[], None]], failure_exit_codes: Mapping[str, Callable[[JobRecord], str]]) -> RunSourcesReport`，全部参数 keyword-only 且无默认值。它 MUST 以四份按 source 映射的输入组合 IFS/GFS 各一轮 `run_once`：`executors`、`drivers`、`poll_waits`、`failure_exit_codes` 的键集 MUST 各自恰为 `{ifs,gfs}`，映射 MUST 在启动 worker 前快照；两源 MUST 使用不同的 executor 与 driver 实例。映射或实例不合法时 MUST 在任何发现、文件系统变更或提交前拒绝。两个 source worker MUST 同时启动并全部结束后才汇总结论；一个源抛出 `RunError` 时 MUST NOT 取消或截断另一个源。
+
+两源都正常返回时，`run_sources` MUST 返回 frozen、keyword-only 的 `RunSourcesReport(ifs: RunReport, gfs: RunReport)`，且字段与报告内 source 一一对应。任一 worker 抛出 `RunError` 时，MUST 在两源都结束后抛 `RunSourcesError(RuntimeError)`；其 `reports: Mapping[str, RunReport]` 与 `errors: Mapping[str, RunError]` 是构造时取得的不可变快照，键集互斥、并集恰为 `{ifs,gfs}`，从而保留成功、停止或已完成失败收尾的兄弟报告。错误文本 MUST 按 `ifs`、`gfs` 固定顺序列出。
+
+`FAILED`/`TIMEOUT` 的自动失败收尾只属于 `run_sources` 路径：它 MUST 只调用本源 `failure_exit_codes[source]`，并把同一 terminal `JobRecord` 交给 provider；provider 的返回必须是 nonblank `str`，原值交给 `finalize_failed_job`。provider 或失败收尾的普通异常 MUST 变为同 source/cycle/job ID 的 `RunError(phase="cleanup")`，但不得取消兄弟 source。直接调用既有六参数 `run_once` 时 MUST 保持原行为：返回 `JOB_FAILED`，不取得退出码、不调用失败收尾并保留 work。
+
+#### Scenario: 双源输入在启动前完整校验
+- **WHEN** 四份 mapping 任一缺源、多源、值类型非法，或 IFS/GFS 共用同一 executor 或 driver 实例
+- **THEN** `run_sources` 在启动 worker 前拒绝，两个 source 的发现、work 与作业提交均为零
+
+#### Scenario: 双源作业并行且按源绑定
+- **WHEN** IFS/GFS 的 fake 作业在首次 poll 前互相等待对方已提交
+- **THEN** 两个作业曾同时在途，且各自只使用其 source 对应的 executor、driver 与 poll wait
+
+#### Scenario: 调用方改写不改变已启动 tick 的映射快照
+- **WHEN** 四份原始可变 mapping 已通过预检且两个 source worker 已启动，调用方随后把其中的 executor、driver、poll wait 与退出码 provider 全部替换为串源哨兵
+- **THEN** 当前 tick 仍只使用调用开始时快照的对象，两源 job、provider、报告与文件产物均不串线；哨兵零调用
+
+#### Scenario: 成功源不等待失败收尾
+- **WHEN** IFS 已返回失败终态但其失败日志/work 收尾被同步事件阻塞，而 GFS 已成功并请求发布
+- **THEN** GFS 的 publish 与 `DONE` 在解除 IFS 收尾阻塞前完成；解除后 IFS 才完成唯一日志提交与 work 删除
+
+#### Scenario: 首错不取消兄弟并聚合证据
+- **WHEN** IFS worker 抛出 `RunError`，GFS worker 随后正常完成并发布
+- **THEN** `run_sources` 等 GFS 完成后才抛 `RunSourcesError`，`errors["ifs"]` 保留原错误，`reports["gfs"]` 保留成功报告与已落盘 `DONE`
+
+#### Scenario: 失败退出码绑定同一 terminal record
+- **WHEN** IFS 返回 `FAILED` 且其 provider 对该 terminal job ID 返回非默认退出码，GFS 成功
+- **THEN** provider 只调用一次，IFS 唯一失败日志逐字含该 job ID 与退出码，IFS work 在日志提交后删除；GFS provider 不调用且 GFS 正常发布
+
+#### Scenario: 失败收尾异常按 source 聚合
+- **WHEN** 一个 source 的退出码 provider 抛错、返回空白，或失败日志/work 收尾失败
+- **THEN** 该 source 产生带同一 job ID 的 `RunError(phase="cleanup")`，另一 source 仍运行到结局且其报告被保留
+
+#### Scenario: 直接单源调用保持兼容
+- **WHEN** 既有调用方直接调用六参数 `run_once` 且 job 返回 `FAILED` 或 `TIMEOUT`
+- **THEN** 返回 `JOB_FAILED`，不调用退出码 provider或失败收尾，精确 work 保留
 
 ### Requirement: NFS 提交顺序与 DONE 语义
 发布 MUST 按固定顺序执行：
@@ -134,7 +185,7 @@ run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过�
 - **THEN** 该源 `states/` 下只存在最新待跑状态及其前一份
 
 ### Requirement: 失败处理
-作业失败时 MUST 不写 `DONE`、不推进状态链；MUST 把完整 stdout/stderr、命令、job ID、起止时间与退出码合成一份 `logs/<source>/<T>.log`；MUST 删除整个 scratch work；下次 run 从干净 work 对该 cycle 重试。MUST NOT 维护失败计数、退避或 `status.json`。
+作业在 `run_sources` 的当前控制器实例中明确返回 `FAILED`/`TIMEOUT` 时 MUST 不写 `DONE`、不推进状态链；双源组合器 MUST 按「双源单轮组合公共契约」从本源显式退出码 provider 取得同一 job 的非空退出码，MUST NOT 从 `JobState` 猜测；随后 MUST 把完整 stdout/stderr、命令、job ID、起止时间与退出码合成一份 `logs/<source>/<T>.log`，日志原子提交成功后才删除整个精确 scratch work。失败收尾完成后，下次 run 从干净 work 对该 cycle 重试。MUST NOT 维护失败计数、退避或 `status.json`。一个源的失败或失败收尾错误 MUST NOT 取消另一源已经启动的作业；双源控制器在两源都结束后才返回或抛出错误。直接六参数 `run_once` 的兼容行为不在此自动收尾要求内：它仍返回 `JOB_FAILED` 并保留 work。
 
 #### Scenario: 失败轮产物
 - **WHEN** fake executor 返回失败

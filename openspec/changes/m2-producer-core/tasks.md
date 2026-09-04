@@ -4052,7 +4052,7 @@ Minimal mergeable slice: 任务 14.1 单源单轮；不吸收 14.2 多轮追赶�
 
 **公开面（逐字冻结）**：
 
-- `RunError(RuntimeError)`：结构化字段 `phase: Literal["preflight", "frontier", "residue", "raw", "prepare", "submit", "poll", "collect", "publish"]`、`source: str`、`cycle: datetime | None`、`job_id: str | None`；预期的底层异常以 `__cause__` 保留，普通异常不裸逃，`BaseException` 不包。
+- `RunError(RuntimeError)`：14.1 基线的结构化字段 `phase: Literal["preflight", "frontier", "residue", "raw", "prepare", "submit", "poll", "collect", "publish"]`、`source: str`、`cycle: datetime | None`、`job_id: str | None`；预期的底层异常以 `__cause__` 保留，普通异常不裸逃，`BaseException` 不包。任务 14.3 / issue #28 后续只给该闭合 `phase` 词表增加 `"cleanup"`，其它字段与既有值不变。
 - `RunOutcome(StrEnum)` 恰四项：`STOPPED`、`SUCCEEDED`、`SUCCEEDED_CLEANUP_PENDING`、`JOB_FAILED`。
 - frozen + kw-only `AttemptRequest(source, cycle, work_root, work_dir, object_store_root, raw_manifest_path, variant_dir, state_path, shud_binary, checkpoint_hours, forecast_days, output_interval_minutes, reach_count)`。
 - frozen + kw-only `PreparedAttempt(identity: WorkIdentity, command: tuple[str, ...], scratch_dat: Path)`。
@@ -4071,7 +4071,7 @@ Minimal mergeable slice: 任务 14.1 单源单轮；不吸收 14.2 多轮追赶�
 **固定调用序与 ownership**：
 
 1. `preflight` 在任何发现/写/删/driver/executor 之前：`source in {gfs,ifs}`；`yd_root`/`scratch_root`/`nwm.raw_root`/`shud_binary` 为绝对路径文本；`forecast_days == 7`、`output_interval_minutes == 60`、`checkpoint_hours == (12,)`、`reach_count > 0`；`set(local.slurm) == set(config.slurm.required_fields)`；`partition` 同时在 required_fields 与 local mapping，且为 nonblank string。失败 `RunError(phase="preflight")`，树与调用计数全零。
-2. controller 把现有前沿判定内部拆为“DONE/状态得到 T”与“raw callback”两段；`decide_frontier` 的现有公开签名、六项 `StopReason`、detail 与既有测试逐字保持。无 T 的正常停止直接返回 STOPPED。T 的 hour 不在 `config.cycle.hours` 时返回 STOPPED/`RAW_INCOMPLETE`，携带 T，零 residue/raw/work。
+2. controller 把现有前沿判定内部拆为“DONE/状态得到 T”与“raw callback”两段；`decide_frontier` 的现有公开签名、14.1 基线六项 `StopReason` 的名称/值、detail 与既有测试逐字保持。任务 14.3 / issue #28 后续只增加第七项 `UNVERIFIED_WORK_RESIDUE`，既有六项不删、不改名、不改值。无 T 的正常停止直接返回 STOPPED。T 的 hour 不在 `config.cycle.hours` 时返回 STOPPED/`RAW_INCOMPLETE`，携带 T，零 residue/raw/work。
 3. 合法 T：以 runnable `FrontierDecision` 调 `plan_residue` 并执行；任一判定/删除错误收敛为 `RunError(phase="residue")`，不建 work、不提交。然后 `rawscan.judge`；不完整返回 STOPPED/`RAW_INCOMPLETE`，detail区分 missing/unreadable计数，零 job。只有 complete verdict 进入 staging。
 4. `work_root = Path(local.scratch_root).resolve()/"work"`，`work_dir = work_root/source/cycle_id(T)`，`object_store_root = work_dir/"object-store"`。终名 work 预存任何形态均 `RunError(phase="raw")`，不续跑/不覆盖/不采纳；以 `object_store_root` 调 `stage_raw`，返回 manifest 必须逐字是 `object_store_root/raw-manifest.json`，每个 copy/entry key均在同一 store。
 5. 变体终名只经 `prepare.variant_targets(local, config)[source]`；率定状态只经 `prepare.calibrated_state_path`。用 bounded no-follow bytes + `state.parse` 得独立 `variant_reach_count`，river段必须存在；不得信 driver自报、不得从 DAT 列反推。driver.prepare 接收 exact request；returned identity source/cycle 必须相等，project_name必须与率定状态项目名一致；command必须非空 tuple[str,...] 且每项非空/NUL-free；scratch DAT 必须是 work 内安全未来 leaf，提交前 DAT 与 `<work>/job.log` 均不存在。
@@ -4207,3 +4207,158 @@ Minimal mergeable slice: 任务 14.1 单源单轮；不吸收 14.2 多轮追赶�
 - checkpoint是否只认同tracker内存record并point-of-use校验；recovery是否保持1 submission。
 - PublishCleanupError是否仍是已完成，#94是否在危险边界守住exact work；有没有越界吸收#28/#108。
 - mutation/red/merge-ref证据是否真实执行，合成canonical是否被如实限定为M2接线oracle而非node-22真数据。
+
+### Issue #28 fixture（任务 14.3：双源并行、失败隔离与崩溃恢复）
+
+Fixture level: expanded
+Upstream suggested level: expanded（agree：共享 controller 入口、双线程调度、NFS publish、失败日志与 scratch 删除均为 mandatory expanded）
+Repair intensity: high（同时触及并发共享状态、Slurm 终态证据、NFS 发布顺序和危险删除；适用 Invariant Matrix 与 boundary-surface checklist）
+Project profile: yd-viewer
+Minimal mergeable slice: 任务 14.3；14.1 已由 #26 合并，14.2 仍归 #27，本 issue 不以“双源”为名偷做同源多轮循环
+
+**Risk triage**：
+
+- Issue type: feature
+- Blast radius: high
+- Why: 双源线程共享 NFS 层级；FAILED/TIMEOUT 接入日志后删除精确 work；跨进程残留存在孤儿 Slurm 歧义
+- Selected packs: Public API、File IO/path/overwrite、Concurrency/shared ordering、Error/rollback/partial outputs、Schema/evidence、Resource limits、Legacy compatibility、Time series、State chain、NWM DB-free
+- Evidence floor: focused 双源端到端 + producer 全套 + Ruff/frozen sync + OpenSpec strict/all + stage anchor + merge-ref
+
+**Docs-first 裁决与前序债关闭边界**：
+
+1. **#59 选择 fail-closed 候选 (b)，并修订无条件自动重跑语义**。进程死亡后 flock 会释放但 Slurm 作业可能仍写 `work/<source>/<T>`；`sbatch` 已成功而 job ID 解析失败时甚至没有 ID 可供存活查询。故 controller 只能在当前实例持有同一 terminal `JobRecord` 时自动失败收尾。跨 tick 看到精确 work 任何形态，MUST 返回 `UNVERIFIED_WORK_RESIDUE`、保留证据、零 raw/driver/submit；不得删、续用、扫描 checkpoint 或猜“无在途”。运维确认无在途并移走 work 后，下一 tick 才可重跑。NFS 侧 `output/states` 残留仍先按 #23 清理，因为它与 Slurm work 写面不相交。
+2. **#47 选择带外显式 provider，不改 `JobRecord` 七字段**。公开双源入口接收每源 `failure_exit_codes[source](terminal_record) -> str`；只在该源 `FAILED/TIMEOUT` 后调用一次，返回值必须是 nonblank `str` 并原样交 `FailureInputs.exit_code`。不得从 `JobState`、固定常量或另一源回执猜退出码。生产 Slurm/receipt 适配仍归 M4；本 issue 用 job-id 绑定 fake provider闭合 M2 seam。
+3. **#106 在组合层串行 publish**。双源作业与 poll 保持并行；同一个 `run_sources` 创建一把私有 lock，只把两次完整 `publish.publish` 调用串行。不得改 `publish._prepare_output_dir` 的“只放宽本调用自建层级”裁决；无条件 `fchmod` 是被禁止的变异体。跨进程并发继续由外层同一 `runlock` 排除。
+4. **#108 不吸收**。本 issue 只清当前实例明确失败的精确 work；已有 `DONE(T)` 的 post-DONE 历史孤儿 work 扫描仍由 #108 跟踪，不能把它混入无-DONE/失败路径后误删证据。
+
+**公开面（逐字冻结）**：
+
+- `StopReason` 新增且只新增 `UNVERIFIED_WORK_RESIDUE = "unverified_work_residue"`；`RunPhase` 新增且只新增 `"cleanup"`。
+- frozen + kw-only `RunSourcesReport(ifs: RunReport, gfs: RunReport)`；构造点要求两字段的 `source` 分别恰为 `ifs`/`gfs`。
+- `RunSourcesError(RuntimeError)`：只用于线程内 `RunError` 聚合；只读快照属性 `reports: Mapping[str, RunReport]` 与 `errors: Mapping[str, RunError]`，两者键集互斥且并集恰为 `{ifs,gfs}`。消息按 source 固定序列出 phase/detail；成功兄弟报告不得丢失。
+- `run_sources(*, config: Config, local: LocalConfig, executors: Mapping[str, JobExecutor], drivers: Mapping[str, AttemptDriver], poll_waits: Mapping[str, Callable[[], None]], failure_exit_codes: Mapping[str, Callable[[JobRecord], str]]) -> RunSourcesReport`；全部 keyword-only、无默认值。
+- 四个 mapping 在起线程前快照，键集都必须恰为 `{ifs,gfs}`；两源 executor 必须是两个不同实例，两源 driver 必须是两个不同实例；executor/driver 必须满足既有 runtime protocol，wait/exit-code 值必须 callable。违反抛 `ValueError`，零 discovery/work/submit。
+- `controller.__all__` 在 #26 精确列表上只增加 `RunSourcesError`、`RunSourcesReport`、`run_sources`；`run_once` 六参数签名、`RunReport` 八字段与 `JobRecord` 七字段不改。
+
+**固定并发、失败与恢复语义**：
+
+1. `run_sources` 只组合每源**一轮**：以 `ThreadPoolExecutor(max_workers=2, thread_name_prefix="yd-source")` 为 IFS/GFS 各提交一次私有 `_controller_run.run_once`。#27 将来可在更高层加入同源循环；本函数不重提同源第二作业。
+2. 两个 worker 共享的唯一可变对象是一次调用私建的 publish lock；executor/driver按源隔离，mapping快照只读。每源使用自己的 `poll_waits[source]` 与 `failure_exit_codes[source]`，不得串源。
+3. 组合层必须等待两个 future 都完成，随后按固定 `ifs,gfs` 顺序读取结论。两者均返回时构造 `RunSourcesReport`；一个或两个抛 `RunError` 时构造 `RunSourcesError`，其中保留已成功/停止/失败收尾完成的兄弟报告。不得在首错时 `cancel()`、提前返回或让 executor context 隐式掩盖兄弟结果。
+4. 私有 `_controller_run.run_once` 增加组合层选项，但公开 `controller.run_once` 仍按 #26 传“无失败 provider/无 publish lock”：FAILED/TIMEOUT 继续返回 `JOB_FAILED` 并保留 work，确保既有调用方不被悄悄赋予猜测式清理。`run_sources` 路径则在 terminal 记录验证后调用 provider；provider 抛错/返回非法或 `finalize_failed_job` 失败统一为 `RunError(phase="cleanup", source/cycle/job_id)` 并保留 `__cause__`。
+5. `run_sources` 的明确失败路径把 controller 唯一构造的同一 `JobSpec`、同一 terminal `JobRecord` 与 provider 原值交 `cleanup.FailureInputs`；必须先原子提交唯一日志后删 exact work。成功后才返回 `JOB_FAILED`，detail 指名日志与已删 work；零 collect/publish/DONE，状态链不动。
+6. 对合法 T，NFS residue plan/execute 后、rawscan 前，用 `lstat` 语义判精确 work：`ENOENT/ENOTDIR` 是 absent；普通目录/文件/symlink/断链 symlink都是未验证残留并 STOPPED；其它 `OSError` 是 `RunError(phase="residue")`，不得 fail-open。检测发生在 raw 缺口返回之前，避免旧 work 被 `RAW_INCOMPLETE` 掩盖。
+7. 无 work 时，已有 NFS T+12 状态与无 DONE 的 `output/<T>/<source>` 仍由 residue 精确清除，然后本轮从保留的 T 状态完整重组。work 从不恢复；旧 checkpoint/manifest/log无 authority。
+8. 共享 publish lock 包住完整 `publish.publish`，不包 raw/prepare/submit/poll/collect。一个源明确失败时不会取得 publish lock；另一个源可立即发布，不等待失败日志提交。两源都成功时 publish 不重叠，但 job 在途窗口必须重叠。
+9. `BaseException`（KeyboardInterrupt/SystemExit）继续不在 `run_once` 内包装；普通异常一律保留既有 RunError phase 语义。组合层不把任一源错误降格为另一个源失败，也不取消兄弟。
+
+**Must preserve / unchanged siblings**：
+
+- #26 `run_once`、AttemptDriver/RunReport/JobRunReport、executor/fake/slurm、cleanup/publish/residue/runlock 与 #15/#17 seams 的公开签名不改；只扩闭合 StopReason/RunPhase 与 controller exports。
+- CLI `run` 继续 staged-unimplemented；不新增生产 worker、跨进程 receipt、`squeue`/`sacct` 第二查询、cancel/watchdog、cron 或 node-22 操作。
+- publisher 七步序、DONE后二分、预置 mode/setgid不改；同源失败日志字节格式和“日志先于work删除”不改。
+- 每个新/修改非豁免文件≤1000行；`controller.py` 仍≤1000。允许一个新的私有 `yd_producer._controller_sources` 承载双源组合；公共 API 仍只从 `yd_producer.controller` 导出，不新增第二个公共模块。
+
+**Invariant Matrix**：
+
+- Governing invariant: 一个双源 tick 可让 IFS/GFS 的独立 job 同时在途，但每个 source 的 `(T,work,job,driver,exit-code,log,publish)` 证据链不得串源；未知跨进程 work 不删，已知失败只删同 job 的 exact work，NFS publish 同时至多一个。
+- Source-of-truth identity/contract: mapping key source；DONE/state定T；controller JobSpec；terminal JobRecord；provider按同source取exit code；FailureInputs exact work；publish input source/T/work。
+- Producers: 两个 run_once worker各自产 raw/work/job产物；失败收尾写本源日志；publisher写本源 DAT/state/DONE。
+- Validators/preflight: mapping精确键集/实例隔离；run_once既有全链；work `lstat`；provider nonblank；FailureInputs；publish lock。
+- Storage/cache/query: 每源独立 executor/driver/tracker/work；共享 YD_ROOT 与单次 publish lock；无跨进程 cache/receipt/registry。
+- Public routes/entrypoints: `run_sources`、`RunSourcesReport/Error`；既有 `run_once` 不变；CLI不绑定。
+- Frontend/downstream consumers: viewer仍只信 DONE；#27只消费/扩同源循环，不依赖线程内部；M4提供真实exit-code/worker receipt。
+- Failure paths/rollback/stale state: current terminal失败可自动收尾；unknown work停源；首错不取消兄弟；publish仍区分pre-DONE与post-DONE。
+- Evidence/audit/readiness: barrier fake证明2在途；per-source call/provider ledger；目录快照/失败日志 bytes；publish overlap计数/mode；red+mutation+full CI。
+- Regression rows:
+  - IFS FAILED + GFS SUCCEEDED -> max global inflight=2；GFS DONE；IFS唯一日志含其job/exit code且work消失；无IFS DONE/state推进。
+  - 一源未验证work或RunError + 兄弟成功 -> 本源零submit/残留保留；兄弟完整完成；聚合报告/错误保留两边证据。
+  - 两源同cycle SUCCEEDED -> publish overlap峰值=1、两DONE、预置`output/` mode逐位不变。
+  - 无work的NFS崩溃残留 -> 精确清理并从T状态重组；同一场景加work -> 停源不删不提交。
+  - 既有单源run_once/cleanup/publish/executor调用 -> signatures、结果与测试兼容。
+
+**Boundary-surface checklist**：
+
+- Shared helper roots: controller/_controller_run + 新私有组合模块；消费 cleanup/publish，不改 shared safe_fs。
+- Public entrypoints: run_sources新面；run_once/report/driver既有面保持。
+- Read surfaces: 两源frontier/raw/variant/job产品；未验证work只lstat、不读内容。
+- Write/delete/overwrite: 每源work与日志、NFS正式产物；失败删除exact work；unknown work零删除。
+- Staging/publish/rollback: job并行、publish串行；DONE前后语义不变。
+- Producer/consumer evidence: source mapping→JobSpec→terminal→provider→FailureInputs/log，或 products→publish→RunReport。
+- Stale/idempotency: unknown work人工闸；已清失败work下tick干净重跑；不采纳磁盘checkpoint。
+- Unchanged downstream consumers: #27、CLI、viewer、M4、单源tests。
+
+**Risk packs considered（core）**：
+
+- Public API / CLI / script entry: selected —— 新固定双源入口/报告/聚合错误；CLI明确不绑定。
+- Config / project setup: selected —— 复用全部config/local preflight，四份mapping另做组合前置校验。
+- File IO / path safety / overwrite: selected —— unknown work保留、known failure exact删除、双源NFS publish。
+- Schema / columns / units / field names: selected —— report/error属性、exit-code provider与失败日志schema；DAT/state schema沿既有owner。
+- Auth / permissions / secrets: not selected —— 无认证/凭据；权限风险由publish既有mode契约与#106回归覆盖。
+- Concurrency / shared state / ordering: selected —— 两线程、独立executor/driver、两job overlap、单publish、join-before-error。
+- Resource limits / large input / discovery: selected —— 固定2线程；work只lstat；日志仍streaming；不新增无界队列/扫描。
+- Legacy compatibility / examples: selected —— run_once六参数、JobRecord七字段、publisher/cleanup public seams保持。
+- Error handling / rollback / partial outputs: selected —— failure provider/log/work顺序、unknown residue、兄弟隔离、聚合错误。
+- Release / packaging / dependency compatibility: selected —— stdlib并发、零依赖/lock变化、文件cap与公开导出。
+- Documentation / migration notes: selected —— compute-loop、D14、run-controller delta与#59/#47/#106裁决同步。
+
+**Domain packs**：
+
+- Geospatial / CRS / shapefile sidecars: not selected —— 不改几何/CRS。
+- Time series / forcing / temporal boundaries: selected —— IFS/GFS同一或不同T独立，不得串cycle；forcing计算只走既有hook。
+- 状态链 / warm-start 定戳一致性: selected —— 失败源不推进；成功兄弟发布T+12；残留只保留T。
+- NWM快照溯源与DB-free隔离: selected —— 双源合成hook复用既有DB-free链，零外部NWM服务。
+
+**Required evidence（input → expected，全部必须有独立判别器）**：
+
+1. mapping preflight：四mapping各自缺/多/错key、executor/driver同实例、值不满足protocol/noncallable -> 起线程前`ValueError`；两根快照与调用计数零变。
+2. 双源barrier：两独立fake在首次poll前互等对方已submit -> 两条submission均到达、全局inflight峰值2；串行实现必须由有界barrier响亮失败，不能sleep猜时间。
+3. IFS FAILED/GFS SUCCEEDED：failure hook只写IFS原始job.log，GFS真实terminal hook跑完整DB-free链 -> GFS DONE/DAT/state存在、work删；IFS零collect/publish/DONE、state不动，唯一failure log精确等于手写header+原始bytes，IFS work删。
+4. 失败隔离时序：以记录型包装调用真实公开`cleanup.finalize_failed_job`，在IFS terminal后、真实日志/删除前用事件阻塞；GFS的真实`publish.publish`入口/出口与DONE必须在解除IFS阻塞前出现；再解除并验证IFS日志/work。串行“先收尾IFS再发布GFS”实现必须确定性卡在测试barrier并失败，不能sleep猜时间。
+5. 退出码owner：provider只被IFS terminal同一`JobRecord`调用一次，返回非默认字面`42:7`原样入日志；GFS provider零调用。把实现改成按state常量映射或串用GFS provider时测试变红。
+6. FAILED与TIMEOUT两腿各自收尾；provider抛异常、返回`None`/空/纯空白、cleanup日志提交失败、work删除失败 -> `RunSourcesError.errors[source].phase == "cleanup"`，`job_id`同terminal，兄弟仍完成；日志提交失败时work保留，work删除失败时日志保留。
+7. 两源都FAILED -> 两份本源日志/两个exact work删除、两个JOB_FAILED报告；job ID/exit code互不串线。
+8. unknown work四态（regular dir/file/symlink/断链symlink）+ raw完整/不完整两组 -> 都在raw判定前`STOPPED/UNVERIFIED_WORK_RESIDUE`，work逐项不变、raw/driver/submit零调用；兄弟可成功。
+9. work存在性`lstat`遇`EACCES/EIO` -> `RunError(residue)`而非absent；聚合错误保留成功兄弟报告。
+10. 无work的NFS crash恢复：T+12状态+无DONE半成品 -> residue先清两项，真实双源入口从T重新stage/submit/publish；旧T保留到DONE，终局新T+12/DONE在盘、work消失。加同源work的反例必须停而不删。
+11. 人工排除后重试：先因unknown work停；测试明确移走该work（模拟运维已确认），第二次同入口 -> 同T仅一次新submit并成功；第一次旧work内容从未被读/采纳。
+12. publish互斥：两个成功hook用记录型publish wrapper在入口/出口维护active计数并以事件构造同时到达 -> overlap峰值1、两源均DONE；拿掉shared lock变异必须峰值2/窗口失败。
+13. #106 mode/window：在公共 `run_sources -> publish.publish` 边界用同步事件让两源同时请求发布，并记录每次 publish 调用的进入/退出；预置`output/`为`0o2750` -> 两次调用区间不重叠、mode逐位不变、两源均落DONE。不得直接观测私有`_prepare_output_dir`；拿掉组合锁或恢复无条件fchmod的变异必须分别被overlap/mode判别器杀死。
+14. join-before-error：IFS在受控事件后抛`RunError`，GFS只有获准后完成 -> `run_sources`不得cancel/早抛；最终`RunSourcesError`含IFS error与GFS SUCCEEDED report/DONE。双错按ifs/gfs固定序呈现。
+15. 单源兼容：直接`run_once` FAILED/TIMEOUT仍JOB_FAILED且work保留、exit provider概念不可见；既有public signature/dataclass/export测试按记录的三项增量修订后全绿。
+16. 边界结构：RunSourcesReport frozen/kw-only/字段恰ifs,gfs；构造串源拒绝；RunSourcesError snapshots不可由原dict回改；run_sources参数全keyword-only无默认；StopReason/RunPhase只增加指定项。
+17. sibling source/cycle/path：每个失败日志、删除、DONE/state精确落自己的source/T；两源使用不同T也不得共享work/job/report；YD_ROOT外目标与NWM raw逐项不变。
+18. batched pre-change red：在 docs-only fixture head 上覆盖最终测试；若新public import阻断collection，临时最小零行为shim只用于red run且必须得到behavioral failures，随后删除；不得把collection-only当完整证据，不得遗留red-proof stash。
+19. mapping快照：用四份调用方持有的可变dict启动`run_sources`，两个worker以事件报告已进入后，测试线程把每个source的executor/driver/wait/provider都替成会记录并抛错的串源哨兵，再放行后续poll/terminal；当前tick必须只调用原快照对象，全部哨兵零调用，job/provider/report/文件仍逐源正确。不得只复制keys或只快照其中一份mapping。
+20. mutation matrix至少覆盖：sequential sources、shared executor/driver、首错cancel/早抛、mapping不快照/只快照keys、provider不调用/错源/按state猜、cleanup前返回、日志前删work、unknown work删/读/被raw stop掩盖、`lexists`吞IO、publish锁范围缺失/全局化、无条件fchmod、报告串源；0 survived/0 unrun，scratch/provenance纪律按project-profile。
+21. final矩阵：focused双源/controller/cleanup/publish + full producer；producer/viewer frozen sync + Ruff/format，OpenSpec strict/all、stage anchor、large-file hook、git diff check；最新origin/master合并结果的本地CPython3.12与CI全绿。
+
+**测试布局**：
+
+- `producer/src/yd_producer/_controller_sources.py`：私有固定双源线程组合与聚合；无`__all__`、不形成第二公共入口。
+- `_controller_run.py`：只加private failure-finalizer/publish-guard选项；公开wrapper不变，保持≤1000行。
+- `producer/tests/controller_sources_fixtures.py`：每源driver/executor/barrier/events、失败码与树构造；无`test_*`。
+- `producer/tests/test_controller_sources.py`：双源并行、单源失败、双失败、publish串行与结构主链。
+- `producer/tests/test_controller_sources_failures.py`：mapping/provider/cleanup/aggregate error矩阵。
+- `producer/tests/test_controller_crash_recovery.py`：unknown work四态、lstat错误、无work恢复与人工排除后重跑。
+- 复用既有run_once/cleanup/publish fixtures；不得复制其内部owner或把测试拆成对私有helper的白盒断言。
+
+**Known limits / routed deferrals**：
+
+- #27：同源多轮追赶/缺口循环；本入口每源一轮，成功兄弟的“继续追赶”由#27在更高层组合。
+- #108：post-DONE硬杀/cleanup-pending留下的历史scratch work sweeper；不属于无DONE未知work或当前已知失败。
+- M4：真实worker/receipt、Slurm退出码provider实现、跨进程活作业查询/人工操作receipt、CLI绑定、node-22/NFS真运行。
+
+**Non-goals**：
+
+- 修改`JobRecord` schema、Slurm executor、发布器权限算法、cleanup日志格式、residue NFS删除集合或shared safe_fs。
+- 自动删除未知work、自动cancel孤儿job、引入持久化job registry/status.json/retry count/backoff/watchdog。
+- 14.2多轮循环、真实CLI/cron、跨进程线程安全声明、NWM数据库/scheduler、viewer或数值oracle。
+
+**Review focus**：
+
+- 双源是否真的有同时在途窗口，同时所有source-scoped evidence从未串线；首错是否等兄弟结束。
+- FAILED/TIMEOUT是否用同terminal的显式exit provider并严格日志先删work后返回；单源run_once兼容是否保持。
+- unknown work是否在raw前fail closed且绝不读/删/续用；无work NFS残留是否仍自动恢复。
+- publish lock是否只在一次组合内共享且覆盖完整publish；是否错误恢复无条件fchmod或改写预置mode。
+- 是否越界吸收#27/#108/M4，或弱化既有tests/spec/oracle；red/mutation/merge-ref证据是否真实。
