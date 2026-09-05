@@ -66,6 +66,7 @@ def finalize_failed_attempt(
     terminal: JobRecord,
     work_root: Path,
     provider: Callable[[JobRecord], str],
+    claim: object,
 ) -> RunReport:
     """`run_sources` 路径：FAILED/TIMEOUT 用本源 provider + 真实 cleanup 收尾。"""
     from yd_producer import cleanup as cleanup_module
@@ -100,6 +101,7 @@ def finalize_failed_attempt(
                 job_spec=job_spec,
                 job_record=terminal,
                 exit_code=exit_code,
+                claim=claim,
             )
         )
     except Exception as orig:
@@ -182,12 +184,12 @@ class RunSourcesError(RuntimeError):
         if report_keys != _SOURCE_KEYS:
             raise ValueError(
                 "RunSourcesError.reports 必须精确含 {ifs,gfs}，"
-                f"实得 {sorted(report_keys)}"
+                f"实得 {_format_keys(report_keys)}"
             )
         if not error_keys or not error_keys <= _SOURCE_KEYS:
             raise ValueError(
                 "RunSourcesError.errors 必须是非空 source 子集，"
-                f"实得 {sorted(error_keys)}"
+                f"实得 {_format_keys(error_keys)}"
             )
         for source in _SOURCE_ORDER:
             _require_source_reports(
@@ -226,8 +228,17 @@ def _require_source_mapping(name: str, mapping: object) -> dict[str, object]:
         )
     keys = set(mapping)
     if keys != _SOURCE_KEYS:
-        raise ValueError(f"{name} 的键集必须恰为 {{ifs,gfs}}，实得 {sorted(keys)}")
+        raise ValueError(
+            f"{name} 的键集必须恰为 {{ifs,gfs}}，实得 {_format_keys(keys)}"
+        )
     return {source: mapping[source] for source in _SOURCE_ORDER}
+
+
+def _format_keys(keys) -> str:
+    """Stable diagnostic for mapping keys; never compares unlike types."""
+    rendered = [repr(key) for key in keys]
+    rendered.sort()
+    return "[" + ", ".join(rendered) + "]"
 
 
 def _require_protocol(

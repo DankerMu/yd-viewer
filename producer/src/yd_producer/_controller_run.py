@@ -21,6 +21,15 @@ from yd_producer import rawscan as rawscan_module
 from yd_producer import residue as residue_module
 from yd_producer import state as state_module
 from yd_producer import tracker as tracker_module
+from yd_producer._work_claim import (
+    ClaimLostError,
+    WorkClaim,
+    claim_exact_work,
+    lexists_claimed,
+    reject_preexisting_work,
+    require_plain_work_parent,
+    stat_claimed,
+)
 from yd_producer.assemble import RunDirectory
 from yd_producer.config import Config, LocalConfig
 from yd_producer.controller import (
@@ -86,57 +95,6 @@ def _discovery_unreadable_stop(
         stop_reason=controller.StopReason.DISCOVERY_UNREADABLE,
         detail=f"{source}: {error.detail}",
     )
-
-
-def _require_exact_work_parent(
-    *, work_root: Path, work_dir: Path, source: str, cycle: datetime
-) -> None:
-    """写前证明 work 父路径逐字等于 `work_root/source`（无 symlink/`..`/别名）。
-
-    `stage_raw` 的 `mkdir(parents=True)` 是裸创建；若 `work_root` 或 `work_root/source`
-    是已存在 symlink/别名（T leaf 缺席时 `lexists(work_dir)` 为假、拦不住），副本会写进
-    目标树。本闸在 `stage_raw` 之前以 raw phase 拒绝；**缺失的普通父目录仍然合法**。"""
-
-    expected_parent = work_root / source
-    if work_dir.parent != expected_parent:
-        raise RunError(
-            f"work 目录父路径必须逐字是 {expected_parent}，实得 {work_dir.parent}",
-            phase="raw",
-            source=source,
-            cycle=cycle,
-        )
-    if Path(work_dir.parent).resolve() != expected_parent:
-        raise RunError(
-            f"work 父路径 {work_dir.parent} 存在符号链接/别名/`..`（归一为 "
-            f"{Path(work_dir.parent).resolve()}）；staging 前拒绝，禁止把本轮写入指向别处",
-            phase="raw",
-            source=source,
-            cycle=cycle,
-        )
-    for component in (work_root, expected_parent):
-        if not os.path.lexists(component):
-            continue
-        info = os.lstat(component)
-        if stat_module.S_ISLNK(info.st_mode) or not stat_module.S_ISDIR(info.st_mode):
-            raise RunError(
-                f"work 路径分量 {component} 不是原样普通目录"
-                f"（st_mode={info.st_mode:#o}）；staging 前拒绝",
-                phase="raw",
-                source=source,
-                cycle=cycle,
-            )
-
-
-def _reject_preexisting_work(work_dir: Path, source: str, cycle: datetime) -> None:
-    """终名 work 预存任何形态都拒绝：不续跑、不覆盖、不采纳（ownership 4）。"""
-    if os.path.lexists(work_dir):
-        raise RunError(
-            f"终名 work 已存在（任何形态），拒绝运行：{work_dir}；"
-            "work 是一次性隔离单元，不续跑/不覆盖/不采纳",
-            phase="raw",
-            source=source,
-            cycle=cycle,
-        )
 
 
 def _phase_error(
@@ -239,13 +197,25 @@ def _canonical_checkpoint_path(*, attempt: PreparedAttempt, work_dir: Path) -> P
     )
 
 
+def _claimed_stat(path: Path, *, work_root: Path, claim: WorkClaim | None):
+    if claim is not None:
+        return stat_claimed(claim, path)
+    return safe_fs.stat_no_follow(path, containment_root=work_root)
+
+
 def _require_absent_before_submit(
-    items: tuple[tuple[str, Path], ...], *, source: str, cycle: datetime
+    items: tuple[tuple[str, Path], ...],
+    *,
+    source: str,
+    cycle: datetime,
+    claim: WorkClaim | None = None,
 ) -> None:
-    """提交前 DAT/job log/canonical 三者任何形态（含断链 symlink）都不存在：`lexists`
-    语义下普通文件/目录/symlink 一律算「存在」，任何预埋形态都不被采纳（evidence 15）。"""
+    """提交前 DAT/job log/canonical 三者任何形态都不存在。"""
     for label, path in items:
-        if os.path.lexists(path):
+        present = (
+            lexists_claimed(claim, path) if claim is not None else os.path.lexists(path)
+        )
+        if present:
             raise RunError(
                 f"{label} 提交前必须不存在（已存在任何形态）：{path}",
                 phase="submit",
@@ -262,11 +232,9 @@ def _require_terminal_artifacts_pre_collect(
     source: str,
     cycle: datetime,
     job_id: str,
+    claim: WorkClaim | None = None,
 ) -> None:
-    """SUCCEEDED 后、`driver.collect` 之前：三件产物必须已是 exact work 内普通文件。
-
-    时序闸（evidence 15）：collect 只许交接、不许制造；本闸零 collect、零 publish/DONE
-    之前拒绝，不可由 collect 后 stat 替代。"""
+    """SUCCEEDED 后、collect 前：三件产物必须是 exact work 内普通文件。"""
     collect_error = lambda message: _phase_error(
         message, "collect", source, cycle, job_id
     )
@@ -275,7 +243,7 @@ def _require_terminal_artifacts_pre_collect(
         if not candidate.is_relative_to(work_dir):
             collect_error(f"{label} 不在精确 work {work_dir} 内：{candidate}")
         try:
-            info = safe_fs.stat_no_follow(candidate, containment_root=work_root)
+            info = _claimed_stat(candidate, work_root=work_root, claim=claim)
         except FileNotFoundError as exc:
             raise RunError(
                 f"{label} 在 collect 前不存在：{candidate}（terminal hook 未在"
@@ -285,7 +253,7 @@ def _require_terminal_artifacts_pre_collect(
                 cycle=cycle,
                 job_id=job_id,
             ) from exc
-        except (OSError, safe_fs.SafeFilesystemError) as exc:
+        except (OSError, safe_fs.SafeFilesystemError, ClaimLostError) as exc:
             raise RunError(
                 f"{label} 在 collect 前不是 no-follow 普通文件：{candidate}（{exc}）",
                 phase="collect",
@@ -368,11 +336,17 @@ def _validate_prepared(
 
 
 def _verify_canonical_is_regular(
-    canonical: Path, work_root: Path, source: str, cycle: datetime, *, job_id: str
+    canonical: Path,
+    work_root: Path,
+    source: str,
+    cycle: datetime,
+    *,
+    job_id: str,
+    claim: WorkClaim | None = None,
 ) -> None:
     try:
-        info = safe_fs.stat_no_follow(canonical, containment_root=work_root)
-    except (OSError, safe_fs.SafeFilesystemError) as exc:
+        info = _claimed_stat(canonical, work_root=work_root, claim=claim)
+    except (OSError, safe_fs.SafeFilesystemError, ClaimLostError) as exc:
         raise RunError(
             f"checkpoint canonical 不是可读无 follow 普通文件：{canonical}（{exc}）",
             phase="collect",
@@ -401,6 +375,7 @@ def _validate_products(
     canonical: Path,
     source: str,
     cycle: datetime,
+    claim: WorkClaim | None = None,
 ) -> None:
     """products 矩阵（ownership 8）：job/DAT/log/RunDirectory/tracker 逐字段绑定。"""
     collect_error = lambda message: _phase_error(
@@ -453,8 +428,7 @@ def _validate_products(
         )
     if tracker.targets != (12,):
         collect_error(f"tracker.targets 必须恰为 (12,)，实得 {tracker.targets!r}")
-    # canonical 终名必须与 tracker 自己的派生逐字一致（控制器推导 <> tracker 派生的
-    # 绑定重验；规范文件名从不自证 authority，这里是契约绑定不是扫描）。
+    # canonical 终名必须与 tracker 派生逐字一致。
     tracker_canonical = (
         tracker.checkpoint_dir
         / f"{tracker.project_name}.f{CHECKPOINT_TARGET_HOUR:03d}.cfg.ic.update"
@@ -463,15 +437,14 @@ def _validate_products(
         collect_error(
             f"canonical 终名 {canonical} 必须逐字等于 tracker 派生 {tracker_canonical}"
         )
-    # DAT/log/checkpoint 在终态后为 no-follow 普通文件（pre-collect 闸在先，此处是
-    # collect 之后的复验，防 collect 在窗口内替换）。
+    # DAT/log 在终态后为 no-follow 普通文件。
     for label, path in (
         ("DAT", products.scratch_dat),
         ("merged log", products.merged_log),
     ):
         try:
-            info = safe_fs.stat_no_follow(path, containment_root=work_root)
-        except (OSError, safe_fs.SafeFilesystemError) as exc:
+            info = _claimed_stat(path, work_root=work_root, claim=claim)
+        except (OSError, safe_fs.SafeFilesystemError, ClaimLostError) as exc:
             raise RunError(
                 f"{label} 在终态后不是可读 no-follow 普通文件：{path}（{exc}）",
                 phase="collect",
@@ -639,15 +612,22 @@ def _run_once(
             ),
         )
 
-    # --- 4. work 派生：写前证明 exact 父路径、拒绝预存、stage_raw 落 object-store 根 ---
+    # --- 4. work 派生：可读 preexisting 闸之后才排他 claim，再 stage_raw ---
+    claim: WorkClaim | None = None
     try:
         work_root = Path(local.scratch_root).resolve() / "work"
         work_dir = work_root / source / controller.cycle_id(target)
         object_store_root = work_dir / "object-store"
-        _require_exact_work_parent(
+        require_plain_work_parent(
             work_root=work_root, work_dir=work_dir, source=source, cycle=target
         )
-        _reject_preexisting_work(work_dir, source, target)
+        reject_preexisting_work(work_dir, source, target)
+        claim = claim_exact_work(
+            work_root=work_root,
+            source=source,
+            cycle=target,
+            cycle_name=controller.cycle_id(target),
+        )
         staged = rawcopy_module.stage_raw(
             verdict=verdict,
             raw_root=local.nwm.raw_root,
@@ -655,6 +635,7 @@ def _run_once(
             source=source,
             cycle=target,
             config=config,
+            claim=claim,
         )
         expected_manifest = object_store_root / rawcopy_module.MANIFEST_FILENAME
         if staged.manifest_path != expected_manifest:
@@ -667,13 +648,26 @@ def _run_once(
             )
     except RunError:
         raise
-    except Exception as exc:
-        raise RunError(
-            f"raw staging 失败：{exc}",
+    except ClaimLostError as orig:
+        error = RunError(
+            f"raw staging 时精确 work identity 已漂移：{orig}",
             phase="raw",
             source=source,
             cycle=target,
-        ) from exc
+        )
+        for note in getattr(orig, "__notes__", ()):
+            error.add_note(note)
+        raise error from orig
+    except Exception as orig:
+        error = RunError(
+            f"raw staging 失败：{orig}",
+            phase="raw",
+            source=source,
+            cycle=target,
+        )
+        for note in getattr(orig, "__notes__", ()):
+            error.add_note(note)
+        raise error from orig
 
     store_obj = LocalObjectStore(object_store_root)
     _verify_raw_fanout(
@@ -763,6 +757,7 @@ def _run_once(
         ),
         source=source,
         cycle=target,
+        claim=claim,
     )
     try:
         submission = executor.submit(job_spec)
@@ -836,9 +831,9 @@ def _run_once(
             terminal=terminal,
             work_root=work_root,
             provider=failure_exit_code,
+            claim=claim,
         )
 
-    # 8b. SUCCEEDED：先证明三件产物存在，再 collect 恰一次
     ctx.phase = "collect"
     _require_terminal_artifacts_pre_collect(
         (
@@ -851,6 +846,7 @@ def _run_once(
         source=source,
         cycle=target,
         job_id=submission.job_id,
+        claim=claim,
     )
     try:
         products = driver.collect(attempt=attempt, terminal_record=terminal)
@@ -872,6 +868,7 @@ def _run_once(
         canonical=canonical,
         source=source,
         cycle=target,
+        claim=claim,
     )
 
     # 9. checkpoint point-of-use 重验（runner 零调用）
@@ -907,7 +904,7 @@ def _run_once(
             job_id=submission.job_id,
         )
     _verify_canonical_is_regular(
-        canonical, work_root, source, target, job_id=submission.job_id
+        canonical, work_root, source, target, job_id=submission.job_id, claim=claim
     )
 
     # 10. publish 三态
@@ -924,6 +921,7 @@ def _run_once(
         expected_rows=config.forecast_days * 24,
         reach_count=config.reach_count,
         variant_reach_count=variant_reach_count,
+        claim=claim,
     )
     try:
         if publish_lock is None:

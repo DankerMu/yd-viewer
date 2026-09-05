@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import threading
 from collections.abc import Callable
@@ -160,44 +161,59 @@ def require_source_tuple(
     return reports
 
 
-def failed_header(*, shud_binary: str, source: str, exit_code: str) -> bytes:
-    name = job_name(source)
+def log_header_bytes(
+    *,
+    shud_binary: str,
+    source: str,
+    cycle: str,
+    job_id: str,
+    exit_code: str,
+    state: str = "FAILED",
+    started: bool = True,
+) -> bytes:
+    name = f"yd-{source}-{cycle}"
+    ended_at = TIMEOUT_ENDED_AT if state == "TIMEOUT" else ENDED_AT
+    started_at = "null" if not started else f'"{STARTED_AT}"'
     payload = (
         '{"command":['
         f"{json.dumps(shud_binary)},"
-        '"--cycle","2026082612"],'
-        '"cycle":"2026082612",'
-        f'"ended_at":"{ENDED_AT}",'
+        f'"--cycle","{cycle}"],'
+        f'"cycle":"{cycle}",'
+        f'"ended_at":"{ended_at}",'
         f'"exit_code":{json.dumps(exit_code)},'
-        '"job_id":"fake-1",'
+        f'"job_id":{json.dumps(job_id)},'
         f'"job_name":"{name}",'
         '"schema":"yd-failure-log-v1",'
         f'"source":"{source}",'
-        f'"started_at":"{STARTED_AT}",'
-        '"state":"FAILED",'
+        f'"started_at":{started_at},'
+        f'"state":"{state}",'
         f'"submitted_at":"{SUBMITTED_AT}"}}'
     )
     return payload.encode("utf-8") + b"\n--- stdout/stderr ---\n"
+
+
+def failed_header(*, shud_binary: str, source: str, exit_code: str) -> bytes:
+    return log_header_bytes(
+        shud_binary=shud_binary,
+        source=source,
+        cycle=T_TEXT,
+        job_id="fake-1",
+        exit_code=exit_code,
+        state="FAILED",
+        started=True,
+    )
 
 
 def timeout_header(*, shud_binary: str, source: str, exit_code: str) -> bytes:
-    name = job_name(source)
-    payload = (
-        '{"command":['
-        f"{json.dumps(shud_binary)},"
-        '"--cycle","2026082612"],'
-        '"cycle":"2026082612",'
-        f'"ended_at":"{TIMEOUT_ENDED_AT}",'
-        f'"exit_code":{json.dumps(exit_code)},'
-        '"job_id":"fake-1",'
-        f'"job_name":"{name}",'
-        '"schema":"yd-failure-log-v1",'
-        f'"source":"{source}",'
-        '"started_at":null,'
-        '"state":"TIMEOUT",'
-        f'"submitted_at":"{SUBMITTED_AT}"}}'
+    return log_header_bytes(
+        shud_binary=shud_binary,
+        source=source,
+        cycle=T_TEXT,
+        job_id="fake-1",
+        exit_code=exit_code,
+        state="TIMEOUT",
+        started=False,
     )
-    return payload.encode("utf-8") + b"\n--- stdout/stderr ---\n"
 
 
 class RecordingProvider:
@@ -546,3 +562,35 @@ def plant_nfs_crash(local, source: str) -> None:
 
 def raise_run_error(source: str, *, phase: str = "prepare") -> RunError:
     return RunError(f"{source} injected", phase=phase, source=source, cycle=CYCLE)
+
+
+def inode_pair(path: Path) -> tuple[int, int]:
+    info = path.lstat()
+    return info.st_dev, info.st_ino
+
+
+def replace_named_directory(
+    path: Path, *, marker_name: str, marker_bytes: bytes
+) -> Path:
+    """Move `path` aside and put a new directory inode at the same pathname."""
+    aside = path.with_name(f"{path.name}.aside-{os.getpid()}")
+    path.rename(aside)
+    path.mkdir()
+    (path / marker_name).write_bytes(marker_bytes)
+    return aside
+
+
+def copy_replace_named_directory(path: Path) -> Path:
+    """Move `path` aside and copy its tree onto a new inode at the same pathname."""
+    aside = path.with_name(f"{path.name}.aside-{os.getpid()}")
+    path.rename(aside)
+    shutil.copytree(aside, path, symlinks=True)
+    return aside
+
+
+def rebind_work_parent(work_root: Path, external: Path) -> Path:
+    """Replace `scratch/work` with a symlink to `external` same-layout tree."""
+    aside = work_root.with_name(f"{work_root.name}.aside-{os.getpid()}")
+    work_root.rename(aside)
+    work_root.symlink_to(external)
+    return aside
