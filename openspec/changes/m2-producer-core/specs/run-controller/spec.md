@@ -120,6 +120,10 @@ run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过�
 
 `FAILED`/`TIMEOUT` 的自动失败收尾只属于 `run_sources` 路径：它 MUST 只调用本源 `failure_exit_codes[source]`，并把同一 terminal `JobRecord` 交给 provider；provider 的返回必须是 nonblank `str`，原值交给 `finalize_failed_job`。provider 或失败收尾的普通异常 MUST 变为同 source/cycle/job ID 的 `RunError(phase="cleanup")`，但不得取消兄弟 source；该源此前的成功报告仍保留。直接调用既有六参数 `run_once` 时 MUST 保持原行为：返回 `JOB_FAILED`，不取得退出码、不调用失败收尾并保留 work。
 
+对 raw 完整的合法 T，controller MUST 在任何 staging 写入前通过 no-follow 父目录排他创建精确 `work/<source>/<T>`，并冻结该目录的 `(st_dev, st_ino)` 作为本 attempt 的 ownership token。竞争者先创建任何形态时 MUST 零 staging、零提交、保留现有条目并以本源 `RunError(phase="raw")` 失败；普通的 check-then-create 不构成认领。共享 `work/` 与 `work/<source>/` 祖先 MUST 在 exact root 认领前由不参与 raw rollback 的 no-follow 创建负责；raw staging 的 rollback MUST NOT 删除兄弟 source 创建的共享祖先。
+
+controller 路径的 scratch 读取、失败收尾与成功发布 MUST 消费并重验同一个 token，不得从后来可能重绑的 pathname、父 symlink 或 `realpath` 重新推导 ownership。`DONE` 前 identity 漂移 MUST 保留当前条目、不写 `DONE` 并产生对应 raw/collect/publish `RunError`；失败日志已提交后、work 删除前漂移 MUST 保留日志与 replacement 并成为 `RunError(phase="cleanup")`；`DONE` 已写后漂移 MUST 保留 replacement 并返回 `SUCCEEDED_CLEANUP_PENDING`。删除操作 MUST 在打开 named root 后和最终移除 root 前校验 expected identity，不能只在函数入口比较一次。standalone `rawcopy.stage_raw`、`PublishInputs`/`publish` 与 `FailureInputs`/`finalize_failed_job` 的既有调用形态 MUST 保持兼容；新增 claim 输入只能是末尾有默认值的 additive 参数，controller 路径则必须传入非空 token。
+
 #### Scenario: 双源输入在启动前完整校验
 - **WHEN** 四份 mapping 任一缺源、多源、值类型非法，或 IFS/GFS 共用同一 executor 或 driver 实例
 - **THEN** `run_sources` 在启动 worker 前拒绝，两个 source 的发现、work 与作业提交均为零
@@ -159,6 +163,22 @@ run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过�
 #### Scenario: 直接单源调用保持兼容
 - **WHEN** 既有调用方直接调用六参数 `run_once` 且 job 返回 `FAILED` 或 `TIMEOUT`
 - **THEN** 返回 `JOB_FAILED`，不调用退出码 provider或失败收尾，精确 work 保留
+
+#### Scenario: final guard 后竞争者先占 exact work
+- **WHEN** controller 的最终不存在检查已通过，但在本轮取得原子 claim 前，另一个 writer 创建精确 work 与 foreign marker
+- **THEN** controller 认领失败并产生本源 `RunError(phase="raw")`，零 staging、零提交、零 `DONE`，foreign tree 字节与 identity 原样保留；兄弟 source 继续到自己的结局
+
+#### Scenario: 一源 raw rollback 不删除共享 scratch 祖先
+- **WHEN** 双源并行 staging，GFS 已创建共享 `work/` 祖先但尚未创建 source 子树，IFS 随后在 raw copy 中失败并 rollback
+- **THEN** IFS 只回滚自己已认领的 exact work 内条目，`work/` 与 GFS 路径不被 IFS 删除；GFS 仍发布并继续追赶
+
+#### Scenario: 失败收尾拒绝 replacement work
+- **WHEN** 本源失败日志已提交，但删除前原 exact work 被移走并在同 pathname 放入 replacement，或 `work` 父根被重绑到外部同布局树
+- **THEN** replacement/external tree 与外部日志逐字不变，已提交本源日志保留，controller 产生绑定同 source/cycle/job 的 `RunError(phase="cleanup")`，兄弟 source 不受影响
+
+#### Scenario: DONE 后 cleanup 拒绝 replacement work
+- **WHEN** `DONE` 已写成但 work 删除前 exact root identity 漂移
+- **THEN** 本轮返回 `SUCCEEDED_CLEANUP_PENDING`，`DONE` 与 replacement 均保留，MUST NOT 删除当前 pathname 指向的非本 attempt tree
 
 ### Requirement: NFS 提交顺序与 DONE 语义
 发布 MUST 按固定顺序执行：

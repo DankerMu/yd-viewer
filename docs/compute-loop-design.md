@@ -330,11 +330,12 @@ cron 每小时调用 `yd-producer run` 的非阻塞 `flock` 包装：
 4. 若无 `DONE(T)` 却存在比 T 更晚的状态或 T 目录半成品，它们是上次发布中断的 NFS 未提交残留：保留 T 状态，删除这些 NFS 残留；
 5. 若此时 `work/<source>/<T>` 仍存在，控制器不得删除或复用：它无法区分已死亡进程留下的目录与仍由孤儿 Slurm 作业写入的目录，也无法用 job ID 覆盖“已提交但 ID 未解析”的窗口；停止该源并保留证据，待运维确认无在途作业并移走该 work 后，下次 tick 才重跑 T；
 6. 扫描 T 的 raw；未完整则该源暂不提交；
-7. 为每源最多组装一个 work 并提交一个 Slurm 作业；
-8. IFS/GFS 作业可并行，控制器等待两者；同一 tick 的 NFS publish 串行，避免两源同时创建/放宽共享 `output/<T>/` 层级；
-9. 成功源发布后以前沿规则立即推进到下一个 cycle，直到追到最新完整 raw；
-10. 某源作业明确返回 `FAILED`/`TIMEOUT` 后，控制器以该 job 的显式退出码先提交唯一失败日志、再删除精确 work；本次停止该源，另一源继续追赶；
-11. 下次 cron 对已完成失败收尾的 cycle 从干净 work 重试一次。
+7. staging 前通过 no-follow 父目录排他认领 `work/<source>/<T>`，并把该目录的设备号/inode 身份作为本 attempt 的 ownership token；竞争者先创建任何形态时零 staging、零提交且保留对方条目；
+8. 为每源最多组装一个 work 并提交一个 Slurm 作业；raw staging、作业产物读取、失败收尾与成功发布都必须重验同一个 ownership token，不能从后来可能重绑的 pathname 重新推导所有权；
+9. IFS/GFS 作业可并行，控制器等待两者；同一 tick 的 NFS publish 串行，避免两源同时创建/放宽共享 `output/<T>/` 层级；共享 scratch 祖先不进任一 source 的 staging rollback 账本；
+10. 成功源发布后以前沿规则立即推进到下一个 cycle，直到追到最新完整 raw；
+11. 某源作业明确返回 `FAILED`/`TIMEOUT` 后，控制器以该 job 的显式退出码先提交唯一失败日志、再只删除 ownership token 仍匹配的精确 work；本次停止该源，另一源继续追赶；
+12. 下次 cron 对已完成失败收尾的 cycle 从干净 work 重试一次。
 
 raw 一次补齐多轮时按时序全补；中间永久缺轮时停在缺口，运维人员补齐原始资料后自动继续。不自动跳过 cycle。
 
@@ -366,13 +367,15 @@ Slurm 的 partition/account/资源/walltime 来自 `local.toml`。不为尚未�
 
 多个文件无法同时原子提交，因此用“旧状态保留 + DONE 最后写”恢复：若步骤 1–4 间宕机且无 `DONE`，下次删除该 source/cycle 的 NFS 半成品；精确 scratch work 不存在时仍用 T 状态整轮重跑。若同一 work 仍存在则先停源保留证据，运维确认没有在途孤儿 Slurm 作业并移走 work 后再重跑；不得把旧 work 文件当作恢复 authority。不得先写 `DONE` 再提交状态。
 
+scratch work 的删除还受本 attempt 的 ownership token 约束：删除前当前 `work/<source>/<T>` 必须仍是 staging 前排他认领的同一设备号/inode。`DONE` 前发现 identity 漂移时不得写 `DONE`，当前条目保留并响亮失败；`DONE` 后发现漂移时本轮仍按已完成上报，但标记 cleanup pending 并保留 replacement。pathname 相同、父根一起重绑或事后 `realpath` 重新匹配都不能替代原 identity。
+
 ### 11.3 失败
 
 - 不写 `DONE`；
 - 不推进状态链；
 - 从显式 job 退出码提供者取得同一 job 的退出码，不从终态枚举猜测；
 - 把完整 stdout/stderr、命令、开始/结束时间和退出码合成一份 `logs/<source>/<T>.log`；
-- 日志提交成功后删除整个精确 scratch work；
+- 日志提交成功后，只在 ownership token 仍匹配时删除整个精确 scratch work；若日志已提交但 work identity 已漂移，保留日志与当前 work，报告 cleanup error，不把 replacement 当成本 attempt 删除；
 - 下次 cron 干净重跑。进程崩溃留下、无法证明没有孤儿作业的 work 不走此自动删除路径，而是停源待人工确认。
 
 不维护失败次数、退避或 `status.json`。
@@ -384,7 +387,7 @@ Slurm 的 partition/account/资源/walltime 来自 `local.toml`。不为尚未�
 | `output/<T>/<source>/{yd.rivqdown.dat,DONE}` | 保留最新成功 cycle 往前 14 天 |
 | `states/<source>/*.cfg.ic` | 每源保留下一待跑状态及其前一份 |
 | `logs/<source>/<T>.log` | 仅失败轮；与 output 的 14 天窗口一起清理 |
-| scratch `work/<source>/<T>` | 每轮成功或失败收尾后删除 |
+| scratch `work/<source>/<T>` | ownership token 始终匹配时在成功或失败收尾后删除；identity 漂移则保留当前 entry 并响亮报告 |
 | NWM NFS raw 原件 | yd 永不清理 |
 | scratch raw 副本/canonical/forcing/raw-manifest | 本轮临时工件，随 work 删除 |
 
