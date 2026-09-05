@@ -692,6 +692,7 @@ def test_public_seam_shape_is_frozen() -> None:
         "RunSourcesError",
         "RunSourcesReport",
         "StopReason",
+        "catch_up_source",
         "cycle_id",
         "decide_frontier",
         "done_cycles",
