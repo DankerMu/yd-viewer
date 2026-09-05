@@ -124,6 +124,8 @@ run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过�
 
 controller 路径的 scratch 读取、失败收尾与成功发布 MUST 消费并重验同一个 token，不得从后来可能重绑的 pathname、父 symlink 或 `realpath` 重新推导 ownership。`DONE` 前 identity 漂移 MUST 保留当前条目、不写 `DONE` 并产生对应 raw/collect/publish `RunError`；失败日志已提交后、work 删除前漂移 MUST 保留日志与 replacement 并成为 `RunError(phase="cleanup")`；`DONE` 已写后漂移 MUST 保留 replacement 并返回 `SUCCEEDED_CLEANUP_PENDING`。删除操作 MUST 在打开 named root 后和最终移除 root 前校验 expected identity，不能只在函数入口比较一次。standalone `rawcopy.stage_raw`、`PublishInputs`/`publish` 与 `FailureInputs`/`finalize_failed_job` 的既有调用形态 MUST 保持兼容；新增 claim 输入只能是末尾有默认值的 additive 参数，controller 路径则必须传入非空 token。
 
+raw staging 失败时 MUST 保持 rawcopy 既有“不留半套”和本控制器“下次从干净 work 重试”语义：本轮后代已完整 rollback 且 exact root 仍匹配 token、确认为空时，controller MUST 仅以 identity-bound `rmdir` 删除该 exact root；MUST NOT 删除 source/shared ancestor。若 root 非空、漂移或无法确定，MUST 保留当前 entry，并在原 `RunError(phase="raw")` 中携带 cleanup 失败证据。ownership helper 打开的每个 directory/file fd MUST 在所有正常、`Exception` 与 `BaseException` 路径中恰当关闭；成功返回给 caller 的文件 fd 只由 caller 关闭。
+
 #### Scenario: 双源输入在启动前完整校验
 - **WHEN** 四份 mapping 任一缺源、多源、值类型非法，或 IFS/GFS 共用同一 executor 或 driver 实例
 - **THEN** `run_sources` 在启动 worker 前拒绝，两个 source 的发现、work 与作业提交均为零

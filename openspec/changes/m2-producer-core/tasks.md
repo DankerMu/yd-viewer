@@ -4495,6 +4495,8 @@ Minimal mergeable slice: 只交付任务 14.3；14.1 与 14.2 已合并，本 is
 26. Round 1 provider snapshot activation：caller 在 workers 启动后替换四 mappings，然后让一个 source 后续轮 FAILED；只原 provider 收到同 terminal record并供给日志退出码，replacement provider零调用。将 closure 从 `provider_snap` 改回 caller mapping 的 mutation必红。
 27. Round 1 heterogeneous keys：四份 run_sources mapping及 RunSourcesError reports/errors 分别加入 string+int/object 混合 key -> 都稳定 ValueError、零 discovery/work/submit；不得在错误文案中直接 `sorted(keys)`。
 28. Round 1 claim mutation closure：在 profile 规定的唯一 scratch 副本中，除 22–27 的 killers 外至少杀死“claim identity不传 FailureInputs”“claim identity不传 PublishInputs”“failure delete不比较 identity”“publish delete不比较 identity”“rawcopy重新递归创建 exact root”“rawcopy rollback重新登记shared祖先”六类，0 survived/0 unrun；旧 post-#27 terminal/publish/provider关键 killers复跑。
+29. Phase 2 clean raw retry：claim-aware `stage_raw` 在第 k 个副本失败并完整 rollback -> 原 raw RunError 保留，exact claimed root 最终不存在，source/shared祖先与兄弟work仍在；同一 `run_sources` 下一调用不得因本进程空根返回 UNVERIFIED_WORK_RESIDUE。若在 root 清理前塞入foreign entry或替换inode -> 不递归删除，entry保留，原error带cleanup失败证据。跳过exact-root释放、无条件递归删除、删除shared parent三类变异分别必红。
+30. Phase 2 fd lifecycle：对 `_work_claim` 的 root open、descendant walk、O_EXCL/read、mkdir/unlink/rmdir 注入每个有fd在手的 `OSError` 与 `KeyboardInterrupt` seam -> 本调用打开的fd全部恰一次close，原异常/ClaimLostError按合同传播；成功返回的file fd未被helper提前关且caller close后归零。删除任一finally/exception close、双close与吞BaseException变异必红。
 
 **测试布局**：
 
