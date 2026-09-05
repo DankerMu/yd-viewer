@@ -75,13 +75,21 @@ M2 的 `AttemptDriver` 是注入式计算节点边界，不是假成功入口：
 
 #94 的危险删除闸在本 issue 同批闭合：`PublishInputs` 构造期必须重验 resolved `work_dir == resolved work_root / source / cycle_id(cycle)`；少/多一层或兄弟 source/cycle 在任何 IO 前拒绝。把守卫放在危险边界而非只靠唯一 caller，使未来调用方不能绕过。
 
-**D14 issue #28 双源并行、失败收尾与崩溃恢复边界**：新增 `controller.run_sources(*, config, local, executors, drivers, poll_waits, failure_exit_codes) -> RunSourcesReport`，一次只组合 IFS/GFS 各一轮 `run_once`；14.2 的同源多轮循环仍归 #27，不在本 PR 偷做。四份 mapping 必须在启动线程前具有精确键集 `{ifs,gfs}`，`executors` 与 `drivers` 每源独立实例，避免把既有 `JobExecutor`/`AttemptDriver` 协议偷偷升级为线程安全契约。两个 worker 用 stdlib `ThreadPoolExecutor(max_workers=2)` 同时运行，先等待两源都结束，再按固定 source 顺序取结果/抛错；一个源的错误不得取消另一源。
+**D14 issue #27 单源多轮追赶**：新增 `controller.catch_up_source(*, config, local, source, executor, driver, poll_wait) -> tuple[RunReport, ...]`，只组合 14.1 的公开 `run_once`，不复制其前沿、raw、提交、轮询或发布逻辑。循环把每次 `run_once` 的报告按调用序加入不可变 tuple；只有 `RunOutcome.SUCCEEDED` 才进入下一轮，`STOPPED`、`JOB_FAILED`、`SUCCEEDED_CLEANUP_PENDING` 都把当前报告作为末项后立即返回，`RunError`/`BaseException` 不吞、不重试。
 
-`_controller_run.run_once` 增加仅供组合层使用的私有失败收尾参数，公开 `controller.run_once` 六参数签名与 14.1 行为保持不变。组合层为每个 source 的 `FAILED/TIMEOUT` 注入 `failure_exit_codes[source](terminal_record) -> str`；controller 不从状态枚举猜退出码，拿同一 `JobSpec`/terminal `JobRecord` 调 `cleanup.finalize_failed_job`，成功后才返回 `JOB_FAILED`。失败码取得或收尾失败归新的 `RunError.phase="cleanup"`，但同批另一个 source 仍跑到终态。生产退出码适配与 CLI/真实 worker receipt 仍归 M4/#47，本地 fake 用 job-id 绑定的显式 provider。
+每次成功后下一轮必须重新由 `run_once` 从已落盘 `DONE`/state 发现严格前沿；循环不得在内存里用 `T += 12h`，不得预扫并选择更晚的完整 raw。这样 T+12 缺失而 T+24 完整时仍停在 T+12；运维补齐后下一次调用自然先跑 T+12 再跑 T+24。追赶 horizon 不在调用开始冻结：若下一轮 raw 在前一轮运行期间补齐，同一次调用继续处理，直至首次观察到不完整 raw。因此外部持续以不低于计算速度补入连续 raw 时，本调用与其 flock 可以长期存活；这是 §10 的实时追赶语义，不在 M2 发明任意轮数 cap、快照边界或 watchdog，生产 receipt/精确人工取消归 M4。测试以“运行期间有限补入两轮、随后停止补入”的动态 fixture 判别该行为。
 
-#59 的完整裁决选择 fail-closed：NFS `output/states` 残留与孤儿 Slurm 的写面不相交，仍先按 #23 规则清理；但精确 `work/<source>/<T>` 若预存，不自动删除、不复用、不恢复 authority，返回新的 `StopReason.UNVERIFIED_WORK_RESIDUE` 并保留证据。原因是 job-ID 存活查询按构造覆盖不到“`sbatch` 已提交但 ID 解析失败”窗口；M2 又没有可证明完整的跨进程 receipt。运维确认无在途作业并移走 work 后，下一 tick 才从 T 状态干净重跑。这是对旧 spec 无条件“删除残留后重跑”的显式收窄，不是假装已有能力。
+`catch_up_source` 自身不取得细粒度锁；调用方必须用现有 `run_with_lock(lock_path=local.cron.lock_path, action=...)` 包住整个多轮调用，使同一 source 任意时刻最多一个在途作业。双源调度、失败日志/work 回收与崩溃恢复仍归 14.3；生产 CLI/真实 worker receipt 仍归 M4。
 
-#106 在编排侧关闭：双源计算可并行，但同一 `run_sources` 共享一把进程内 publish lock，整次 `publish.publish` 串行。这样两源不会互见对方 `mkdir -> fchmod` 中间态，同时不改发布器“只放宽本次自建层级”的判据；无条件 `fchmod` 仍是被禁止的变异体。跨进程由既有同一 `runlock` 互斥，公开单源 `run_once` 不新增全局锁或隐式等待。
+**D15 issue #28 双源独立追赶、失败收尾与崩溃恢复边界**：新增 `controller.run_sources(*, config, local, executors, drivers, poll_waits, failure_exit_codes) -> RunSourcesReport`。它在两个固定 worker 中分别按 D14 的“仅 `SUCCEEDED` 继续”规则独立追赶，但不能直接调用公开 `catch_up_source`：#28 必须向每轮私有 `_controller_run.run_once` 注入本源失败退出码 provider 与一次组合私建的共享 publish lock，而 D14 的公开签名和结构测试均保持不变。每个 worker 在上一轮同步结束后才开始下一轮，因此同源在途作业始终不超过一个；两源的第一轮可同时在途，后续追赶长度互不约束，一个源结束或抛错不取消另一个源。
+
+`RunSourcesReport` 的 `ifs`/`gfs` 字段都是按调用顺序冻结的 `tuple[RunReport, ...]`；正常返回时每源至少一项，且末项是首次非 `SUCCEEDED` 结局。worker 在若干成功轮后抛 `RunError` 时，`RunSourcesError.reports` 仍为精确含 `ifs/gfs` 的不可变 tuple 快照，`errors` 为非空 source 子集；同一 source 可同时有 partial reports 与 error，不能沿用单轮实现中 reports/errors 键集互斥的模型。组合器等待两个 worker 都结束后再按固定 `ifs,gfs` 顺序汇总；`BaseException` 不包装、不重试，但也不能通过取消兄弟 future 截断其在盘证据。
+
+四份 mapping 在启动线程前快照并要求精确键集 `{ifs,gfs}`；两源 executor 与 driver 各为不同实例，避免把现有协议暗中升级为线程安全共享对象。每轮重新从已提交 `DONE`/state 发现前沿，不缓存或自增 T，不冻结调用开始时的 raw horizon；`STOPPED`、`JOB_FAILED`、`SUCCEEDED_CLEANUP_PENDING` 都终止该源，另一个源继续逐轮追赶。
+
+`_controller_run.run_once` 只增加供组合层使用的私有失败收尾参数，公开 `run_once` 与 `catch_up_source` 均保持既有签名和行为。组合层在本源 `FAILED/TIMEOUT` 后调用 `failure_exit_codes[source](terminal_record) -> str`，不从状态枚举猜退出码；同一 `JobSpec`/terminal `JobRecord` 交给 `cleanup.finalize_failed_job`，唯一日志提交成功后才删 exact work。provider 或收尾失败成为同 source/cycle/job 的 `RunError(phase="cleanup")`，此前成功报告仍保留。直接六参数 `run_once` 继续只返回 `JOB_FAILED` 并保留 work。
+
+#59 采用 fail-closed：无 `DONE(T)` 且精确 `work/<source>/<T>` 预存时，不能证明不存在孤儿 Slurm 作业，故返回 `UNVERIFIED_WORK_RESIDUE`，不读、不删、不复用、不提交；运维确认无在途并移走 work 后，下次 tick 从 T 状态干净重跑。NFS `output/states` 未提交残留仍按 #23 清理。#106 在组合层关闭：同一 `run_sources` 只用一把私有锁串行完整 `publish.publish`，不串行 raw/prepare/submit/poll/collect/失败 cleanup，也不恢复发布器被禁止的无条件 `fchmod`。已有 `DONE` 的历史孤儿 scratch work 仍归 #108。
 
 **D10 issue #14 direct-grid forcing 的落点与 seam**：任务 8.1 只落 NWM pin `8ae9b8f2` 的 file-backend direct-grid producer；公开验收 seam 取快照原生的 `yd_producer.forcing.ForcingProducer.produce(...) -> ForcingProductionResult`，不在本 PR 另造 `forcing.build(work, manifest)` facade。上文 seam 4 的 `forcing.build` 是组 8 完整链的编排层草图，连同临时 registry 生命周期和 `assemble(...)` 归 issue #15；提前实现会穿越 #14 的 Minimal mergeable slice。
 
