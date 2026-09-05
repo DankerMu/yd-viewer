@@ -1224,14 +1224,27 @@ def stage_raw(
                     f"目标 {candidate} 已存在；work 是一次性隔离单元，不覆盖、不续跑",
                     "target-exists",
                 )
-    except (ConfigError, RawStagingError):
+    except (ConfigError, RawStagingError) as exc:
         # 词表内的失败原样外抛：kind、`__cause__` 与调用方的 `is` 身份都必须保留。
+        # Controller 已取得 token 时，即使准入尚未写入任何后代，也必须按同一
+        # identity-bound empty-root 协议释放 exact root；standalone `claim=None` 不变。
+        if claim is not None:
+            release_raw_claim_after_stage_failure(claim, exc)
         raise
     except Exception as exc:  # 收口器，见上方 floor 说明
-        raise RawStagingError(
+        error = RawStagingError(
             f"准入期出现未预期的异常 {_safe_repr(exc)}；本轮零写入",
             ADMISSION_FALLBACK_KIND,
-        ) from exc
+        )
+        if claim is not None:
+            release_raw_claim_after_stage_failure(claim, error)
+        raise error from exc
+    except BaseException as exc:
+        # Ctrl-C / SystemExit keep their exact identity and propagation, but a
+        # controller-owned empty root must not become next tick's unknown work.
+        if claim is not None:
+            release_raw_claim_after_stage_failure(claim, exc)
+        raise
 
     written = _Written(claim=claim)
     try:

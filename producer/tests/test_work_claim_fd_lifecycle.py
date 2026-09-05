@@ -10,6 +10,7 @@ from controller_sources_fixtures import CYCLE_T, T_TEXT
 
 from yd_producer import _work_claim as claim_mod
 from yd_producer._work_claim import (
+    ClaimLostError,
     WorkClaim,
     claim_exact_work,
     lexists_claimed,
@@ -23,6 +24,7 @@ from yd_producer._work_claim import (
     stat_claimed,
     unlink_claimed,
 )
+from yd_producer.controller import RunError
 
 
 class FdLedger:
@@ -397,6 +399,77 @@ def test_mkdir_relative_to_claim_closes_descendant_on_mkdir_failure(
     with pytest.raises(expected):
         mkdir_relative_to_claim(claim, claim.work_dir / "a" / "new" / "leaf")
     ledger.assert_clean()
+
+
+@pytest.mark.parametrize("operation", ["open", "fstat"])
+def test_claim_exact_work_keeps_pre_token_root_on_open_or_fstat_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    work_root = tmp_path / "work"
+    target = work_root / "ifs" / T_TEXT
+    original_open = claim_mod.os.open
+    original_fstat = claim_mod.os.fstat
+    opened_child = {"value": False}
+
+    def failing_open(path, *args, **kwargs):
+        if path == T_TEXT:
+            raise OSError("injected pre-token child open failure")
+        return original_open(path, *args, **kwargs)
+
+    def failing_fstat(fd: int):
+        if opened_child["value"]:
+            raise OSError("injected pre-token child fstat failure")
+        return original_fstat(fd)
+
+    def tracking_open(path, *args, **kwargs):
+        fd = original_open(path, *args, **kwargs)
+        if path == T_TEXT:
+            opened_child["value"] = True
+        return fd
+
+    if operation == "open":
+        monkeypatch.setattr(claim_mod.os, "open", failing_open)
+    else:
+        monkeypatch.setattr(claim_mod.os, "open", tracking_open)
+        monkeypatch.setattr(claim_mod.os, "fstat", failing_fstat)
+    with pytest.raises(RunError) as info:
+        claim_exact_work(
+            work_root=work_root,
+            source="ifs",
+            cycle=CYCLE_T,
+            cycle_name=T_TEXT,
+        )
+    assert info.value.phase == "raw"
+    assert info.value.source == "ifs"
+    assert info.value.cycle == CYCLE_T
+    assert isinstance(info.value.__cause__, OSError)
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    assert (work_root / "ifs").is_dir()
+    assert work_root.is_dir()
+
+
+def test_release_empty_claimed_root_rejects_replaced_empty_inode(
+    tmp_path: Path,
+) -> None:
+    claim = claim_exact_work(
+        work_root=tmp_path / "work",
+        source="ifs",
+        cycle=CYCLE_T,
+        cycle_name=T_TEXT,
+    )
+    original = claim.work_dir
+    replacement = original.with_name(f"{original.name}.replacement")
+    original.rename(replacement)
+    original.mkdir()
+    identity = (original.stat().st_dev, original.stat().st_ino)
+
+    with pytest.raises(ClaimLostError):
+        release_empty_claimed_root(claim)
+    assert original.is_dir()
+    assert (original.stat().st_dev, original.stat().st_ino) == identity
+    assert replacement.is_dir()
+    assert (tmp_path / "work" / "ifs").is_dir()
 
 
 def _empty_claimed_root(claim: WorkClaim, nested: Path, leaf: Path) -> None:
