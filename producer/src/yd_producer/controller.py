@@ -53,7 +53,7 @@ EINVAL`，`EACCES`/`EIO` 会穿透。方向性理由：`states/` 侧判空是 fa
 结果。唯一的例外是注入的 `raw_complete` 自己抛出的异常（见 `decide_frontier` 的
 docstring：那是调用方的输入域责任，归 #26）。
 
-本模块 stdlib-only：零 NWM 运行时 import、零数据库/scheduler 依赖。
+stdlib-only：零 NWM 运行时 import、零数据库/scheduler 依赖。
 """
 
 from __future__ import annotations
@@ -99,6 +99,7 @@ __all__ = [
     "RunOutcome",
     "RunReport",
     "StopReason",
+    "catch_up_source",
     "cycle_id",
     "decide_frontier",
     "done_cycles",
@@ -524,12 +525,7 @@ def _decode_line(raw: bytes) -> str | None:
         return None
 
 
-# --- 单源单轮 run_once（issue #26 / 任务 14.1）------------------------------------
-#
-# 公共类型与入口只从本模块导出（tasks.md「测试布局」：私有支撑在
-# `yd_producer._controller_run`，无 `__all__` 公共面）。实现与逐条 ownership 的
-# 对应注释都在该私有模块，类型定义留在本公开 seam（测试从
-# `yd_producer.controller` 导入）。
+# --- 单源单轮 / 多轮追赶（issue #26/#27）：类型在此，实现在 `_controller_run`。
 
 RunPhase = Literal[
     "preflight",
@@ -681,8 +677,6 @@ class JobRunReport:
                 f"JobRunReport.job_id 必须是 nonblank str，实得 {self.job_id!r}"
             )
         if not isinstance(self.state, JobState):
-            # #26 报告族的约定：结构性/语义性拒绝一律 ValueError（JobRunReport 的字段
-            # 逐字冻结由 dataclass 参数把关，这里只做构造点校验）。
             raise ValueError(  # noqa: TRY004
                 f"JobRunReport.state 必须是 JobState，实得 {type(self.state).__name__}"
             )
@@ -707,9 +701,6 @@ class RunReport:
     done_path: Path | None
 
     def __post_init__(self) -> None:
-        # outcome 不是 `RunOutcome` 的构造点拒绝：若漏掉这条，一个外来字符串（如
-        # `"JOB_FAILED"` 字面值）会一路落到下面的 JOB_FAILED 分支而静默通过。
-        # （#26 报告族约定：结构性/语义性拒绝一律 ValueError，与 JobRunReport 同。）
         if not isinstance(self.outcome, RunOutcome):
             raise ValueError(  # noqa: TRY004
                 f"RunReport.outcome 必须是 RunOutcome，实得 {self.outcome!r}"
@@ -739,7 +730,7 @@ class RunReport:
             raise ValueError("JOB_FAILED 不得携带 published / done_path")
 
 
-# --- run_once 私有校验面（issue #26 support 折叠；不导出，仅供 _controller_run）-----
+# --- run_once 私有校验面（不导出，仅供 `_controller_run`）-----
 
 
 def _preflight(*, config: Config, local: LocalConfig, source: str) -> None:
@@ -971,15 +962,30 @@ def run_once(
     driver: AttemptDriver,
     poll_wait: Callable[[], None],
 ) -> RunReport:
-    """单源单轮骨架：发现 -> 残留 -> raw -> 组装 -> 提交 fake -> 发布 -> work 清理。
-
-    签名逐字冻结（tasks.md「公开面」）：全部 keyword-only、无默认值。实现与逐条
-    ownership 的对应注释在私有支撑模块 `yd_producer._controller_run`（本模块同文件
-    上方的 `_preflight`/`_require_spec_record`/`_require_poll_record`/_job_report 等
-    私有校验面由该模块消费）；本入口只做惰性转发——把 assemble/forcing/tracker 的
-    导入链从本模块冷面挪开（本模块同时是 `residue`/`publish` 的依赖）。
-    """
+    """单源单轮骨架。签名逐字冻结；实现在 `_controller_run`，本入口惰性转发。"""
     from yd_producer._controller_run import run_once as _impl
+
+    return _impl(
+        config=config,
+        local=local,
+        source=source,
+        executor=executor,
+        driver=driver,
+        poll_wait=poll_wait,
+    )
+
+
+def catch_up_source(
+    *,
+    config: Config,
+    local: LocalConfig,
+    source: str,
+    executor: JobExecutor,
+    driver: AttemptDriver,
+    poll_wait: Callable[[], None],
+) -> tuple[RunReport, ...]:
+    """单源多轮追赶：每轮公开 `run_once`，仅 SUCCEEDED 继续。"""
+    from yd_producer._controller_run import catch_up_source as _impl
 
     return _impl(
         config=config,

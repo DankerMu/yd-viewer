@@ -1,10 +1,7 @@
-"""`controller.run_once` 的私有支撑：单源单轮骨架（issue #26，任务 14.1）。
+"""`controller.run_once` / `catch_up_source` 的私有支撑（issue #26/#27）。
 
-公开 seam 只有 `yd_producer.controller.run_once`；本模块不导出任何公共符号，是
-run_once 的唯一私有支撑（tasks.md 允许且只允许一个私有 `_controller_run`；第二份
-`_controller_run_checks.py` 属未记录的 fixture 偏离，已折叠回本模块与 controller
-私有校验面）。调用序与 ownership 1–11 写在各函数 docstring；契约来源：design.md
-D13、tasks.md `### Issue #26 fixture`、docs/compute-loop §9–§11。"""
+公开 seam 只有 `yd_producer.controller` 上的惰性转发；本模块不导出公共符号。
+`catch_up_source` 只组合公开 `controller.run_once`，不复制 14.1 状态机。"""
 
 from __future__ import annotations
 
@@ -931,3 +928,33 @@ def _run_once(
         published=result,
         done_path=result.done_path,
     )
+
+
+def catch_up_source(
+    *,
+    config: Config,
+    local: LocalConfig,
+    source: str,
+    executor: JobExecutor,
+    driver: AttemptDriver,
+    poll_wait: Callable[[], None],
+) -> tuple[RunReport, ...]:
+    """单源多轮追赶：每轮只调用公开 `controller.run_once`，仅 SUCCEEDED 继续。
+
+    不取锁、不预扫 raw、不自增 cycle、不复制 14.1 内部逻辑。STOPPED /
+    JOB_FAILED / SUCCEEDED_CLEANUP_PENDING 把当前报告作为末项后立即返回；
+    RunError 与 BaseException 原样外传。
+    """
+    reports: list[RunReport] = []
+    while True:
+        report = controller.run_once(
+            config=config,
+            local=local,
+            source=source,
+            executor=executor,
+            driver=driver,
+            poll_wait=poll_wait,
+        )
+        reports.append(report)
+        if report.outcome is not RunOutcome.SUCCEEDED:
+            return tuple(reports)

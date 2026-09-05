@@ -49,6 +49,14 @@
 - **WHEN** raw fixture 一次含 T、T+12h、T+24h 三轮完整数据
 - **THEN** 该源按 T → T+12h → T+24h 顺序逐轮跑完（fake executor 下三次发布）
 
+#### Scenario: 中间缺口不被更晚完整轮绕过
+- **WHEN** T 与 T+24h 的 raw 完整、T+12h 的 raw 不完整
+- **THEN** 该源跑完 T 后停在 T+12h，T+24h 零提交；补齐 T+12h 后的下一次 run 先跑 T+12h 再跑 T+24h
+
+#### Scenario: 追赶期间到达的连续轮继续处理
+- **WHEN** 调用开始时只有 T 的 raw 完整，但 T+12h、T+24h 分别在前一轮运行期间补齐，此后 T+36h 保持不完整
+- **THEN** 同一次持锁 run 按 T → T+12h → T+24h 处理，并在首次观察到 T+36h 不完整时停止；MUST NOT 在调用开始冻结 raw horizon 或设置任意轮数上限
+
 ### Requirement: 作业提交经执行器抽象且身份可追溯
 run MUST 经作业执行器抽象为每源提交至多一个作业；提交参数（partition、account、CPU、内存、walltime）MUST 全部取自 `local.toml`，代码 MUST NOT 内置任何默认值；每次提交的 job ID、partition、终态与起止时间 MUST 记入本次运行报告，失败源的日志 MUST 含同一 job ID。真实 `sbatch`/`sacct` 行为归 M4 oracle，本地以注入 fake 验证。
 

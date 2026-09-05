@@ -49,7 +49,13 @@ from yd_producer.config import (
     SlurmSchema,
     VariantsConfig,
 )
-from yd_producer.executor import FakeJobExecutor, JobRecord, JobState, StepClock
+from yd_producer.executor import (
+    FakeJobExecutor,
+    FakeOutcome,
+    JobRecord,
+    JobState,
+    StepClock,
+)
 from yd_producer.forcing import ForcingProducer, ForcingProducerConfig
 from yd_producer.forcing.file_store import FileForcingRepository
 from yd_producer.store.object_store import LocalObjectStore, sha256_bytes
@@ -61,6 +67,10 @@ from yd_producer.tracker import CheckpointTracker, ensure_twelve_hour_checkpoint
 CYCLE = datetime(2026, 8, 26, 12, tzinfo=UTC)
 #: T+12（checkpoint 的正式落点）。
 NEXT_CYCLE = datetime(2026, 8, 27, 0, tzinfo=UTC)
+#: T+12 / T+24 / T+36：多轮追赶的独立字面量（不从被测 cycle 算术回读）。
+T_PLUS_12 = datetime(2026, 8, 27, 0, tzinfo=UTC)
+T_PLUS_24 = datetime(2026, 8, 27, 12, tzinfo=UTC)
+T_PLUS_36 = datetime(2026, 8, 28, 0, tzinfo=UTC)
 #: 手算绝对分钟（20691 天 * 1440 = 29795040，2026-08-26 00Z；+720 => 29795760）。
 ABSOLUTE_MINUTE = 29795760
 #: tracker 捕获时 checkpoint 的**相对**分钟（T+12 = 720）。
@@ -253,18 +263,53 @@ def write_variant(local: LocalConfig, *, source: str = "gfs") -> Path:
     return root
 
 
-def write_state(local: LocalConfig, *, source: str = "gfs") -> Path:
-    """`states/<source>/<T>.cfg.ic`：绝对时间头对应 T。"""
-    path = Path(local.yd_root) / "states" / source / f"{cycle_text()}.cfg.ic"
+def write_state(
+    local: LocalConfig, *, source: str = "gfs", cycle: datetime = CYCLE
+) -> Path:
+    """`states/<source>/<cycle>.cfg.ic`：绝对时间头对应该 cycle。"""
+    path = Path(local.yd_root) / "states" / source / f"{cycle_text(cycle)}.cfg.ic"
     path.parent.mkdir(parents=True, exist_ok=True)
+    minute = round(cycle.timestamp() / 60)
     path.write_bytes(
         build_cfg_ic(
             mesh_count=2,
             river_count=REACH_COUNT,
-            minute=f"{ABSOLUTE_MINUTE}.000000",
+            minute=f"{minute}.000000",
         ).payload
     )
     return path
+
+
+def job_name_for(source: str, cycle: datetime) -> str:
+    """提交作业名的独立字面形态：`yd-<source>-<YYYYMMDDHH>`。"""
+    return f"yd-{source}-{cycle_text(cycle)}"
+
+
+def done_path_for(local: LocalConfig, source: str, cycle: datetime) -> Path:
+    return Path(local.yd_root) / "output" / cycle_text(cycle) / source / "DONE"
+
+
+def work_dir_for(local: LocalConfig, source: str, cycle: datetime) -> Path:
+    return Path(local.scratch_root).resolve() / "work" / source / cycle_text(cycle)
+
+
+def success_outcome(*, polls_until_terminal: int = 1) -> FakeOutcome:
+    return FakeOutcome(
+        final_state=JobState.SUCCEEDED,
+        polls_until_terminal=polls_until_terminal,
+        started=True,
+    )
+
+
+def success_outcomes(
+    *cycles: datetime, source: str = "gfs", polls_until_terminal: int = 1
+) -> dict[str, FakeOutcome]:
+    return {
+        job_name_for(source, cycle): success_outcome(
+            polls_until_terminal=polls_until_terminal
+        )
+        for cycle in cycles
+    }
 
 
 def raw_root(local: LocalConfig) -> Path:
@@ -636,11 +681,13 @@ class HookedExecutor:
     def __init__(self, executor: FakeJobExecutor, hook) -> None:
         self._executor = executor
         self._hook = hook
-        self._fired = False
+        self._fired_jobs: set[str] = set()
         self._previous: JobRecord | None = None
         self._job_name: str | None = None
+        self.inflight_before_submit: list[tuple[str, ...]] = []
 
     def submit(self, spec):
+        self.inflight_before_submit.append(self._executor.inflight())
         record = self._executor.submit(spec)
         self._previous = record
         self._job_name = spec.name
@@ -649,12 +696,12 @@ class HookedExecutor:
     def poll(self, job_id: str) -> JobRecord:
         record = self._executor.poll(job_id)
         if (
-            not self._fired
+            job_id not in self._fired_jobs
             and self._previous is not None
             and not self._previous.state.is_terminal
             and record.state is JobState.SUCCEEDED
         ):
-            self._fired = True
+            self._fired_jobs.add(job_id)
             self._hook(job_id=job_id)
         self._previous = record
         return record
@@ -669,6 +716,32 @@ class HookedExecutor:
 
     def inflight(self):
         return self._executor.inflight()
+
+
+def bind_terminal_hook(
+    driver: InProcessDriver,
+    state: HookState,
+    fake: FakeJobExecutor,
+    *,
+    on_terminal=None,
+) -> HookedExecutor:
+    """多轮可复用：每轮 prepare 刷新 request，每 job 的首次 SUCCEEDED 跑真链 hook。"""
+    request_slot: dict[str, object] = {}
+    original_prepare = driver.prepare
+
+    def capturing_prepare(*, request):
+        request_slot["request"] = request
+        return original_prepare(request=request)
+
+    driver.prepare = capturing_prepare  # type: ignore[method-assign]
+
+    def make_hook(*, job_id):
+        request = request_slot["request"]
+        make_terminal_hook(request, state)()
+        if on_terminal is not None:
+            on_terminal(request, job_id)
+
+    return HookedExecutor(fake, make_hook)
 
 
 # --- publish 三态注入 ---------------------------------------------------------

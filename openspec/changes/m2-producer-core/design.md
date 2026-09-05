@@ -75,6 +75,12 @@ M2 的 `AttemptDriver` 是注入式计算节点边界，不是假成功入口：
 
 #94 的危险删除闸在本 issue 同批闭合：`PublishInputs` 构造期必须重验 resolved `work_dir == resolved work_root / source / cycle_id(cycle)`；少/多一层或兄弟 source/cycle 在任何 IO 前拒绝。把守卫放在危险边界而非只靠唯一 caller，使未来调用方不能绕过。
 
+**D14 issue #27 单源多轮追赶**：新增 `controller.catch_up_source(*, config, local, source, executor, driver, poll_wait) -> tuple[RunReport, ...]`，只组合 14.1 的公开 `run_once`，不复制其前沿、raw、提交、轮询或发布逻辑。循环把每次 `run_once` 的报告按调用序加入不可变 tuple；只有 `RunOutcome.SUCCEEDED` 才进入下一轮，`STOPPED`、`JOB_FAILED`、`SUCCEEDED_CLEANUP_PENDING` 都把当前报告作为末项后立即返回，`RunError`/`BaseException` 不吞、不重试。
+
+每次成功后下一轮必须重新由 `run_once` 从已落盘 `DONE`/state 发现严格前沿；循环不得在内存里用 `T += 12h`，不得预扫并选择更晚的完整 raw。这样 T+12 缺失而 T+24 完整时仍停在 T+12；运维补齐后下一次调用自然先跑 T+12 再跑 T+24。追赶 horizon 不在调用开始冻结：若下一轮 raw 在前一轮运行期间补齐，同一次调用继续处理，直至首次观察到不完整 raw。因此外部持续以不低于计算速度补入连续 raw 时，本调用与其 flock 可以长期存活；这是 §10 的实时追赶语义，不在 M2 发明任意轮数 cap、快照边界或 watchdog，生产 receipt/精确人工取消归 M4。测试以“运行期间有限补入两轮、随后停止补入”的动态 fixture 判别该行为。
+
+`catch_up_source` 自身不取得细粒度锁；调用方必须用现有 `run_with_lock(lock_path=local.cron.lock_path, action=...)` 包住整个多轮调用，使同一 source 任意时刻最多一个在途作业。双源调度、失败日志/work 回收与崩溃恢复仍归 14.3；生产 CLI/真实 worker receipt 仍归 M4。
+
 **D10 issue #14 direct-grid forcing 的落点与 seam**：任务 8.1 只落 NWM pin `8ae9b8f2` 的 file-backend direct-grid producer；公开验收 seam 取快照原生的 `yd_producer.forcing.ForcingProducer.produce(...) -> ForcingProductionResult`，不在本 PR 另造 `forcing.build(work, manifest)` facade。上文 seam 4 的 `forcing.build` 是组 8 完整链的编排层草图，连同临时 registry 生命周期和 `assemble(...)` 归 issue #15；提前实现会穿越 #14 的 Minimal mergeable slice。
 
 本 issue 中「站点集合等于格点集合」按 direct-grid binding 的权威定义解释：输出站点与 binding 声明的 canonical `grid_cell_id` 集合一一对应，canonical 中未被 binding 引用的额外格点不成为站点，也不读取其值；这与 pin 的「Required grid cells are subset before value extraction」一致，不恢复旧 105 站 IDW。GFS/IFS 各用自己的 contract、grid id 和 cell id，禁止跨 source 复用 binding。source singleton 不是 file parser 的偶然性质：`ForcingProducer` 在每次 repository 返回 contract 后必须再次要求 normalized `applicable_source_ids == (requested_source,)`，因此注入式或未来 repository 也不能用 source-less parser/direct constructor 绕过生产边界。
