@@ -8,6 +8,9 @@ import threading
 
 import pytest
 from controller_sources_fixtures import (
+    CYCLE_T,
+    CYCLE_T12,
+    CYCLE_T24,
     GFS_EXIT,
     IFS_EXIT,
     IFS_RAW_LOG,
@@ -20,10 +23,14 @@ from controller_sources_fixtures import (
     Sentinel,
     TerminalHookGate,
     ThrowingProvider,
+    cycle_outcomes,
     done_path,
     failure_log_path,
     fake_for,
+    hooked_success_cycles,
     noop_wait,
+    plant_raw_cycles,
+    require_source_tuple,
     success_driver,
     success_hook,
     work_dir,
@@ -160,20 +167,22 @@ def test_mapping_snapshot_ignores_caller_mutation_after_entry(
     tmp_path: pathlib.Path,
 ) -> None:
     config, local = write_dual_tree(tmp_path)
+    plant_raw_cycles(local, "ifs", (CYCLE_T12,))
+    plant_raw_cycles(local, "gfs", (CYCLE_T12,))
     entered = DualBarrier()
     gate = TerminalHookGate()
     drivers = {}
     executors = {}
     for source in SOURCES:
-        driver, state, slot = success_driver()
-        drivers[source] = driver
-        executors[source] = BarrierExecutor(
-            fake_for(source, polls=1),
-            source=source,
+        driver, executor = hooked_success_cycles(
+            source,
+            (CYCLE_T, CYCLE_T12),
             barrier=entered,
-            hook=success_hook(slot, state, gate=gate),
+            gate=gate,
             wait_for_release=True,
         )
+        drivers[source] = driver
+        executors[source] = executor
     waits = {"ifs": noop_wait, "gfs": noop_wait}
     providers = {
         "ifs": RecordingProvider("ifs", IFS_EXIT),
@@ -219,8 +228,18 @@ def test_mapping_snapshot_ignores_caller_mutation_after_entry(
         failure_exit_codes=providers,
     )
     thread.join(timeout=5)
-    assert report.ifs.outcome is RunOutcome.SUCCEEDED
-    assert report.gfs.outcome is RunOutcome.SUCCEEDED
+    ifs = require_source_tuple(report.ifs, "ifs")
+    gfs = require_source_tuple(report.gfs, "gfs")
+    assert cycle_outcomes(ifs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.SUCCEEDED),
+        (CYCLE_T24, RunOutcome.STOPPED),
+    ]
+    assert cycle_outcomes(gfs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.SUCCEEDED),
+        (CYCLE_T24, RunOutcome.STOPPED),
+    ]
     for sentinel in sentinels.values():
         assert sentinel.calls == []
     assert original_exec["ifs"] is not executors["ifs"]
@@ -272,9 +291,15 @@ def test_provider_none_empty_whitespace_and_raise_become_cleanup_errors(
                 },
             )
         error = info.value
+        assert set(error.reports) == {"ifs", "gfs"}
+        assert error.reports["ifs"] == ()
         assert error.errors["ifs"].phase == "cleanup"
         assert error.errors["ifs"].job_id == "fake-1"
-        assert error.reports["gfs"].outcome is RunOutcome.SUCCEEDED
+        gfs = require_source_tuple(error.reports["gfs"], "gfs")
+        assert cycle_outcomes(gfs) == [
+            (CYCLE_T, RunOutcome.SUCCEEDED),
+            (CYCLE_T12, RunOutcome.STOPPED),
+        ]
         assert done_path(local, "gfs").is_file()
         ifs_work = work_dir(local, "ifs")
         if ifs_work.exists():
@@ -315,8 +340,14 @@ def test_timeout_path_uses_provider_and_cleanup(tmp_path: pathlib.Path) -> None:
         poll_waits={"ifs": noop_wait, "gfs": noop_wait},
         failure_exit_codes={"ifs": provider, "gfs": RecordingProvider("gfs", GFS_EXIT)},
     )
-    assert report.ifs.outcome is RunOutcome.JOB_FAILED
-    assert report.ifs.job.state is JobState.TIMEOUT
+    ifs = require_source_tuple(report.ifs, "ifs")
+    gfs = require_source_tuple(report.gfs, "gfs")
+    assert cycle_outcomes(ifs) == [(CYCLE_T, RunOutcome.JOB_FAILED)]
+    assert ifs[0].job.state is JobState.TIMEOUT
+    assert cycle_outcomes(gfs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.STOPPED),
+    ]
     assert len(provider.calls) == 1
     assert provider.calls[0].state is JobState.TIMEOUT
     assert failure_log_path(local, "ifs").is_file()
@@ -366,10 +397,16 @@ def test_log_commit_failure_keeps_work_and_work_delete_failure_keeps_log(
             },
         )
     error = info.value
+    assert set(error.reports) == {"ifs", "gfs"}
+    assert error.reports["ifs"] == ()
     assert error.errors["ifs"].phase == "cleanup"
     assert work_dir(local, "ifs").exists()
     assert not failure_log_path(local, "ifs").exists()
-    assert error.reports["gfs"].outcome is RunOutcome.SUCCEEDED
+    gfs = require_source_tuple(error.reports["gfs"], "gfs")
+    assert cycle_outcomes(gfs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.STOPPED),
+    ]
 
     def work_fail(inputs):
         if inputs.source == "ifs":
@@ -450,4 +487,6 @@ def test_dual_run_error_order_is_ifs_then_gfs(tmp_path: pathlib.Path) -> None:
     text = str(info.value)
     assert text.index("ifs:") < text.index("gfs:")
     assert set(info.value.errors) == {"ifs", "gfs"}
-    assert info.value.reports == {}
+    assert set(info.value.reports) == {"ifs", "gfs"}
+    assert info.value.reports["ifs"] == ()
+    assert info.value.reports["gfs"] == ()

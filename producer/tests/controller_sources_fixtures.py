@@ -17,9 +17,13 @@ from pathlib import Path
 from frontier_fixtures import YdRootBuilder
 from run_once_fixtures import (
     CYCLE,
+    T_PLUS_12,
+    T_PLUS_24,
+    T_PLUS_36,
     HookedExecutor,
     HookState,
     InProcessDriver,
+    job_name_for,
     make_terminal_hook,
     step_clock,
     write_raw_cycle,
@@ -28,14 +32,25 @@ from run_once_fixtures import (
 )
 from run_once_fixtures import write_config_local as _write_config_local
 
-from yd_producer.controller import RunError
+from yd_producer.controller import RunError, RunOutcome, RunReport
 from yd_producer.executor import FakeJobExecutor, FakeOutcome, JobRecord, JobState
 
 SOURCES = ("ifs", "gfs")
+CYCLE_T = CYCLE
+CYCLE_T12 = T_PLUS_12
+CYCLE_T24 = T_PLUS_24
+CYCLE_T36 = T_PLUS_36
 T_TEXT = "2026082612"
 T_PLUS_12_TEXT = "2026082700"
+T_PLUS_24_TEXT = "2026082712"
+T_PLUS_36_TEXT = "2026082800"
 IFS_JOB = "yd-ifs-2026082612"
+IFS_JOB_T12 = "yd-ifs-2026082700"
+IFS_JOB_T24 = "yd-ifs-2026082712"
 GFS_JOB = "yd-gfs-2026082612"
+GFS_JOB_T12 = "yd-gfs-2026082700"
+GFS_JOB_T24 = "yd-gfs-2026082712"
+GFS_JOB_T36 = "yd-gfs-2026082800"
 GFS_NEXT_JOB = "yd-gfs-2026082700"
 GFS_NEXT_MINUTE = "29796480.000000"
 IFS_EXIT = "42:7"
@@ -81,6 +96,68 @@ def failure_log_path(local, source: str, cycle: str = T_TEXT) -> Path:
 
 def job_name(source: str) -> str:
     return IFS_JOB if source == "ifs" else GFS_JOB
+
+
+def plant_raw_cycles(local, source: str, cycles: tuple) -> None:
+    for cycle in cycles:
+        write_raw_cycle(local, source=source, cycle=cycle)
+
+
+def outcomes_for(
+    source: str,
+    cycles: tuple,
+    *,
+    states: dict | None = None,
+    polls: int = 1,
+) -> dict[str, FakeOutcome]:
+    outcomes: dict[str, FakeOutcome] = {}
+    for cycle in cycles:
+        job_state = (
+            JobState.SUCCEEDED
+            if states is None
+            else states.get(cycle, JobState.SUCCEEDED)
+        )
+        outcomes[job_name_for(source, cycle)] = FakeOutcome(
+            final_state=job_state,
+            polls_until_terminal=polls,
+            started=job_state is not JobState.TIMEOUT,
+        )
+    return outcomes
+
+
+def fake_for_cycles(
+    source: str,
+    cycles: tuple,
+    *,
+    states: dict | None = None,
+    polls: int = 1,
+) -> FakeJobExecutor:
+    return FakeJobExecutor(
+        outcomes=outcomes_for(source, cycles, states=states, polls=polls),
+        clock=step_clock(),
+    )
+
+
+def cycle_outcomes(reports) -> list[tuple]:
+    return [(item.cycle, item.outcome) for item in reports]
+
+
+def require_source_tuple(
+    reports, source: str, *, terminal: bool = True
+) -> tuple[RunReport, ...]:
+    assert isinstance(reports, tuple), type(reports)
+    for item in reports:
+        assert isinstance(item, RunReport)
+        assert item.source == source
+    if terminal:
+        assert reports, f"{source} 正常 tuple 必须至少一项"
+        for item in reports[:-1]:
+            assert item.outcome is RunOutcome.SUCCEEDED
+        assert reports[-1].outcome is not RunOutcome.SUCCEEDED
+    else:
+        for item in reports:
+            assert item.outcome is RunOutcome.SUCCEEDED
+    return reports
 
 
 def failed_header(*, shud_binary: str, source: str, exit_code: str) -> bytes:
@@ -187,6 +264,12 @@ class DualBarrier:
     lock: threading.Lock = field(default_factory=threading.Lock)
     inflight: int = 0
     max_inflight: int = 0
+    per_source_inflight: dict[str, int] = field(
+        default_factory=lambda: {source: 0 for source in SOURCES}
+    )
+    per_source_max: dict[str, int] = field(
+        default_factory=lambda: {source: 0 for source in SOURCES}
+    )
     submissions: list[str] = field(default_factory=list)
     wait_timeout: float = 5.0
 
@@ -237,7 +320,8 @@ class BarrierExecutor:
         self._wait_for_peer = wait_for_peer
         self._first_poll = True
         self._previous: JobRecord | None = None
-        self._fired = False
+        self._fired_jobs: set[str] = set()
+        self.inflight_before_submit: list[tuple[str, ...]] = []
 
     def submit(self, spec):
         barrier = self._barrier
@@ -246,10 +330,16 @@ class BarrierExecutor:
             timeout=barrier.wait_timeout
         ):
             raise TimeoutError(f"{self._source} release 未到达")
+        self.inflight_before_submit.append(self._inner.inflight())
         record = self._inner.submit(spec)
         with barrier.lock:
             barrier.inflight += 1
             barrier.max_inflight = max(barrier.max_inflight, barrier.inflight)
+            barrier.per_source_inflight[self._source] += 1
+            barrier.per_source_max[self._source] = max(
+                barrier.per_source_max[self._source],
+                barrier.per_source_inflight[self._source],
+            )
             barrier.submissions.append(self._source)
         barrier.submitted[self._source].set()
         self._previous = record
@@ -265,23 +355,24 @@ class BarrierExecutor:
                         f"{self._source} 首次 poll 时 {source} 尚未 submit（串行实现）"
                     )
         record = self._inner.poll(job_id)
-        if (
-            self._hook is not None
-            and not self._fired
+        first_for_job = (
+            job_id not in self._fired_jobs
             and self._previous is not None
             and not self._previous.state.is_terminal
+        )
+        if (
+            self._hook is not None
+            and first_for_job
             and record.state is JobState.SUCCEEDED
         ):
-            self._fired = True
+            self._fired_jobs.add(job_id)
             self._hook(job_id=job_id)
         if (
             self._hook is not None
-            and not self._fired
-            and self._previous is not None
-            and not self._previous.state.is_terminal
+            and first_for_job
             and record.state in (JobState.FAILED, JobState.TIMEOUT)
         ):
-            self._fired = True
+            self._fired_jobs.add(job_id)
             self._hook(job_id=job_id, record=record)
         if (
             record.state.is_terminal
@@ -290,6 +381,7 @@ class BarrierExecutor:
         ):
             with barrier.lock:
                 barrier.inflight -= 1
+                barrier.per_source_inflight[self._source] -= 1
         self._previous = record
         return record
 
@@ -308,13 +400,16 @@ class BarrierExecutor:
 class FailureLogHook:
     """Write only the raw job.log on FAILED/TIMEOUT; never collect/publish products."""
 
-    def __init__(self, local, source: str, payload: bytes) -> None:
+    def __init__(
+        self, local, source: str, payload: bytes, *, cycle: str = T_TEXT
+    ) -> None:
         self.local = local
         self.source = source
         self.payload = payload
+        self.cycle = cycle
 
     def __call__(self, *, job_id, record=None):
-        path = work_dir(self.local, self.source) / "job.log"
+        path = work_dir(self.local, self.source, self.cycle) / "job.log"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(self.payload)
 
@@ -371,6 +466,38 @@ def hooked_success(source: str, *, gate: TerminalHookGate | None = None):
         fake_for(source, polls=1), success_hook(slot, state, gate=gate)
     )
     return driver, executor
+
+
+def hooked_success_cycles(
+    source: str,
+    cycles: tuple,
+    *,
+    barrier: DualBarrier | None = None,
+    gate: TerminalHookGate | None = None,
+    states: dict | None = None,
+    wait_for_peer: bool = True,
+    wait_for_release: bool = False,
+    on_terminal: Callable | None = None,
+):
+    driver, hook_state, slot = success_driver()
+    fake = fake_for_cycles(source, cycles, states=states)
+    original_hook = success_hook(slot, hook_state, gate=gate)
+
+    def hook(*, job_id, record=None):
+        original_hook(job_id=job_id, record=record)
+        if on_terminal is not None:
+            on_terminal(slot["request"], job_id)
+
+    if barrier is None:
+        return driver, HookedExecutor(fake, hook)
+    return driver, BarrierExecutor(
+        fake,
+        source=source,
+        barrier=barrier,
+        hook=hook,
+        wait_for_peer=wait_for_peer,
+        wait_for_release=wait_for_release,
+    )
 
 
 def noop_wait() -> None:

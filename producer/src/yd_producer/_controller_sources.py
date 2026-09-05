@@ -125,22 +125,46 @@ def finalize_failed_attempt(
     )
 
 
+def _require_source_reports(
+    source: str, reports: object, *, allow_empty: bool
+) -> tuple[RunReport, ...]:
+    if not isinstance(reports, tuple):
+        raise ValueError(  # noqa: TRY004
+            f"{source} 必须是 tuple[RunReport, ...]，实得 {type(reports).__name__}"
+        )
+    if not allow_empty and not reports:
+        raise ValueError(f"{source} 正常 tuple 必须至少一项")
+    for index, report in enumerate(reports):
+        if not isinstance(report, RunReport) or report.source != source:
+            raise ValueError(
+                f"{source}[{index}] 必须是 source={source!r} 的 RunReport，"
+                f"实得 {report!r}"
+            )
+        last = index == len(reports) - 1
+        if not allow_empty and not last and report.outcome is not RunOutcome.SUCCEEDED:
+            raise ValueError(
+                f"{source} 非末项必须是 SUCCEEDED，实得 {report.outcome!r}"
+            )
+        if not allow_empty and last and report.outcome is RunOutcome.SUCCEEDED:
+            raise ValueError(f"{source} 末项必须是首次非 SUCCEEDED")
+        if allow_empty and report.outcome is not RunOutcome.SUCCEEDED:
+            raise ValueError(
+                f"{source} 异常前 partial reports 必须全是 SUCCEEDED，"
+                f"实得 {report.outcome!r}"
+            )
+    return reports
+
+
 @dataclass(frozen=True, kw_only=True)
 class RunSourcesReport:
     """一次 `run_sources` 的双源结论。字段与报告内 source 一一对应。"""
 
-    ifs: RunReport
-    gfs: RunReport
+    ifs: tuple[RunReport, ...]
+    gfs: tuple[RunReport, ...]
 
     def __post_init__(self) -> None:
-        if self.ifs.source != "ifs":
-            raise ValueError(
-                f"RunSourcesReport.ifs.source 必须是 'ifs'，实得 {self.ifs.source!r}"
-            )
-        if self.gfs.source != "gfs":
-            raise ValueError(
-                f"RunSourcesReport.gfs.source 必须是 'gfs'，实得 {self.gfs.source!r}"
-            )
+        _require_source_reports("ifs", self.ifs, allow_empty=False)
+        _require_source_reports("gfs", self.gfs, allow_empty=False)
 
 
 class RunSourcesError(RuntimeError):
@@ -148,27 +172,29 @@ class RunSourcesError(RuntimeError):
 
     def __init__(
         self,
-        reports: Mapping[str, RunReport],
+        reports: Mapping[str, tuple[RunReport, ...]],
         errors: Mapping[str, RunError],
     ) -> None:
-        reports_snap = dict(reports)
+        reports_snap = {source: tuple(reports[source]) for source in reports}
         errors_snap = dict(errors)
         report_keys = set(reports_snap)
         error_keys = set(errors_snap)
-        if report_keys & error_keys:
-            raise ValueError("RunSourcesError.reports 与 errors 的键集必须互斥")
-        if report_keys | error_keys != _SOURCE_KEYS or not error_keys:
+        if report_keys != _SOURCE_KEYS:
             raise ValueError(
-                "RunSourcesError 的 reports/errors 键集必须互斥且并集恰为 {ifs,gfs}，"
-                f"且 errors 非空；实得 reports={sorted(report_keys)} "
-                f"errors={sorted(error_keys)}"
+                "RunSourcesError.reports 必须精确含 {ifs,gfs}，"
+                f"实得 {sorted(report_keys)}"
             )
-        for source, report in reports_snap.items():
-            if not isinstance(report, RunReport) or report.source != source:
-                raise ValueError(
-                    f"reports[{source!r}] 必须是 source={source!r} 的 RunReport，"
-                    f"实得 {report!r}"
-                )
+        if not error_keys or not error_keys <= _SOURCE_KEYS:
+            raise ValueError(
+                "RunSourcesError.errors 必须是非空 source 子集，"
+                f"实得 {sorted(error_keys)}"
+            )
+        for source in _SOURCE_ORDER:
+            _require_source_reports(
+                source,
+                reports_snap[source],
+                allow_empty=source in errors_snap,
+            )
         for source, error in errors_snap.items():
             if not isinstance(error, RunError) or error.source != source:
                 raise ValueError(
@@ -185,7 +211,7 @@ class RunSourcesError(RuntimeError):
         self._errors = MappingProxyType(errors_snap)
 
     @property
-    def reports(self) -> Mapping[str, RunReport]:
+    def reports(self) -> Mapping[str, tuple[RunReport, ...]]:
         return self._reports
 
     @property
@@ -252,6 +278,14 @@ def _snapshot_inputs(
     return exec_snap, driver_snap, wait_snap, provider_snap  # type: ignore[return-value]
 
 
+@dataclass(frozen=True, kw_only=True)
+class _SourceWorkerResult:
+    """单源 worker 结束时的有序报告；`error` 仅在该源抛 `RunError` 时非空。"""
+
+    reports: tuple[RunReport, ...]
+    error: RunError | None = None
+
+
 def run_sources(
     *,
     config: Config,
@@ -261,7 +295,7 @@ def run_sources(
     poll_waits: Mapping[str, Callable[[], None]],
     failure_exit_codes: Mapping[str, Callable[[JobRecord], str]],
 ) -> RunSourcesReport:
-    """组合 IFS/GFS 各一轮 `run_once`。全部 keyword-only、无默认值。"""
+    """双源独立追赶：每源逐轮私有 `run_once`，仅 SUCCEEDED 继续。全部 keyword-only、无默认值。"""
     from yd_producer._controller_run import run_once as run_one
 
     exec_snap, driver_snap, wait_snap, provider_snap = _snapshot_inputs(
@@ -272,7 +306,7 @@ def run_sources(
     )
     publish_lock = threading.Lock()
 
-    def _worker(source: str) -> RunReport:
+    def _worker(source: str) -> _SourceWorkerResult:
         class ExecutorView:
             def submit(self, spec):
                 return exec_snap[source].submit(spec)
@@ -295,39 +329,48 @@ def run_sources(
         def failure_exit_code(record: JobRecord) -> str:
             return provider_snap[source](record)
 
-        return run_one(
-            config=config,
-            local=local,
-            source=source,
-            executor=ExecutorView(),
-            driver=DriverView(),
-            poll_wait=poll_wait,
-            failure_exit_code=failure_exit_code,
-            publish_lock=publish_lock,
-        )
+        executor = ExecutorView()
+        driver = DriverView()
+        reports: list[RunReport] = []
+        while True:
+            try:
+                report = run_one(
+                    config=config,
+                    local=local,
+                    source=source,
+                    executor=executor,
+                    driver=driver,
+                    poll_wait=poll_wait,
+                    failure_exit_code=failure_exit_code,
+                    publish_lock=publish_lock,
+                )
+            except RunError as orig:
+                return _SourceWorkerResult(reports=tuple(reports), error=orig)
+            reports.append(report)
+            if report.outcome is not RunOutcome.SUCCEEDED:
+                return _SourceWorkerResult(reports=tuple(reports), error=None)
 
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="yd-source") as pool:
         futures = {source: pool.submit(_worker, source) for source in _SOURCE_ORDER}
         wait(tuple(futures.values()), return_when=ALL_COMPLETED)
-        collected: dict[str, RunReport | Exception] = {}
+        collected: dict[str, _SourceWorkerResult | Exception] = {}
         for source in _SOURCE_ORDER:
             try:
                 collected[source] = futures[source].result()
             except Exception as orig:  # noqa: BLE001
                 collected[source] = orig
 
-    reports: dict[str, RunReport] = {}
+    reports: dict[str, tuple[RunReport, ...]] = {source: () for source in _SOURCE_ORDER}
     errors: dict[str, RunError] = {}
     stray: Exception | None = None
     for source in _SOURCE_ORDER:
         item = collected[source]
-        if isinstance(item, RunError):
-            errors[source] = item
-        elif isinstance(item, Exception):
-            if stray is None:
-                stray = item
-        else:
-            reports[source] = item
+        if isinstance(item, _SourceWorkerResult):
+            reports[source] = item.reports
+            if item.error is not None:
+                errors[source] = item.error
+        elif isinstance(item, Exception) and stray is None:
+            stray = item
     if stray is not None:
         raise stray
     if errors:

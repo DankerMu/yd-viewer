@@ -11,6 +11,9 @@ import threading
 
 import pytest
 from controller_sources_fixtures import (
+    CYCLE_T,
+    CYCLE_T12,
+    CYCLE_T24,
     GFS_JOB,
     IFS_EXIT,
     IFS_JOB,
@@ -23,11 +26,15 @@ from controller_sources_fixtures import (
     FailureLogHook,
     RecordingProvider,
     TerminalHookGate,
+    cycle_outcomes,
     done_path,
     failed_header,
     failure_log_path,
     fake_for,
+    hooked_success_cycles,
     noop_wait,
+    plant_raw_cycles,
+    require_source_tuple,
     state_path,
     success_driver,
     success_hook,
@@ -37,7 +44,13 @@ from controller_sources_fixtures import (
 
 from yd_producer import controller as c
 from yd_producer import publish as publish_module
-from yd_producer.controller import RunOutcome, RunSourcesError, run_once, run_sources
+from yd_producer.controller import (
+    RunOutcome,
+    RunSourcesError,
+    StopReason,
+    run_once,
+    run_sources,
+)
 from yd_producer.executor import JobState
 
 
@@ -76,16 +89,28 @@ def test_dual_source_jobs_overlap_before_either_poll(tmp_path: pathlib.Path) -> 
         poll_waits=waits,
         failure_exit_codes=providers,
     )
-    assert report.ifs.source == "ifs" and report.gfs.source == "gfs"
-    assert report.ifs.outcome is RunOutcome.SUCCEEDED
-    assert report.gfs.outcome is RunOutcome.SUCCEEDED
+    ifs = require_source_tuple(report.ifs, "ifs")
+    gfs = require_source_tuple(report.gfs, "gfs")
+    assert cycle_outcomes(ifs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.STOPPED),
+    ]
+    assert cycle_outcomes(gfs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.STOPPED),
+    ]
+    assert ifs[-1].stop_reason is StopReason.RAW_INCOMPLETE
+    assert gfs[-1].stop_reason is StopReason.RAW_INCOMPLETE
     assert barrier.max_inflight == 2
+    assert barrier.per_source_max == {"ifs": 1, "gfs": 1}
     assert gate.max_active == 1
     assert set(barrier.submissions) == {"ifs", "gfs"}
     assert len(executors["ifs"].submissions) == 1
     assert len(executors["gfs"].submissions) == 1
     assert executors["ifs"].submissions[0].name == IFS_JOB
     assert executors["gfs"].submissions[0].name == GFS_JOB
+    assert all(item == () for item in executors["ifs"].inflight_before_submit)
+    assert all(item == () for item in executors["gfs"].inflight_before_submit)
     assert done_path(local, "ifs").is_file()
     assert done_path(local, "gfs").is_file()
     assert not work_dir(local, "ifs").exists()
@@ -137,11 +162,14 @@ def test_different_cycle_identity_does_not_cross_sources(
             "gfs": RecordingProvider("gfs", "9:1"),
         },
     )
-    assert report.ifs.cycle == datetime(2026, 8, 26, 12, tzinfo=UTC)
-    assert report.gfs.cycle == datetime(2026, 8, 27, 0, tzinfo=UTC)
-    assert report.ifs.source == "ifs" and report.gfs.source == "gfs"
-    assert report.ifs.outcome is RunOutcome.SUCCEEDED
-    assert report.gfs.outcome is RunOutcome.SUCCEEDED
+    ifs = require_source_tuple(report.ifs, "ifs")
+    gfs = require_source_tuple(report.gfs, "gfs")
+    assert ifs[0].cycle == datetime(2026, 8, 26, 12, tzinfo=UTC)
+    assert gfs[0].cycle == datetime(2026, 8, 27, 0, tzinfo=UTC)
+    assert cycle_outcomes(ifs)[0] == (CYCLE_T, RunOutcome.SUCCEEDED)
+    assert cycle_outcomes(gfs)[0] == (CYCLE_T12, RunOutcome.SUCCEEDED)
+    assert ifs[-1].outcome is RunOutcome.STOPPED
+    assert gfs[-1].outcome is RunOutcome.STOPPED
     assert executors["ifs"].submissions[0].name == IFS_JOB
     assert executors["gfs"].submissions[0].name == GFS_NEXT_JOB
     assert done_path(local, "ifs", "2026082612").is_file()
@@ -157,6 +185,7 @@ def test_different_cycle_identity_does_not_cross_sources(
     assert state_path(local, "gfs", "2026082712").is_file()
     assert not state_path(local, "gfs", "2026082612").exists()
     assert barrier.max_inflight == 2
+    assert barrier.per_source_max == {"ifs": 1, "gfs": 1}
     assert gate.max_active == 1
     assert snapshot_tree(pathlib.Path(local.nwm.raw_root)) == nwm_before
 
@@ -194,9 +223,15 @@ def test_ifs_failed_gfs_succeeded_isolates_logs_and_products(
         poll_waits={"ifs": noop_wait, "gfs": noop_wait},
         failure_exit_codes=providers,
     )
-    assert report.ifs.outcome is RunOutcome.JOB_FAILED
-    assert report.gfs.outcome is RunOutcome.SUCCEEDED
+    ifs = require_source_tuple(report.ifs, "ifs")
+    gfs = require_source_tuple(report.gfs, "gfs")
+    assert cycle_outcomes(ifs) == [(CYCLE_T, RunOutcome.JOB_FAILED)]
+    assert cycle_outcomes(gfs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.STOPPED),
+    ]
     assert barrier.max_inflight == 2
+    assert barrier.per_source_max == {"ifs": 1, "gfs": 1}
     assert not done_path(local, "ifs").exists()
     assert done_path(local, "gfs").is_file()
     assert state_path(local, "ifs", T_TEXT).is_file()
@@ -212,13 +247,13 @@ def test_ifs_failed_gfs_succeeded_isolates_logs_and_products(
     assert not failure_log_path(local, "gfs").exists()
     assert len(providers["ifs"].calls) == 1
     terminal = providers["ifs"].calls[0]
-    assert terminal.job_id == report.ifs.job.job_id
+    assert terminal.job_id == ifs[0].job.job_id
     assert terminal.name == IFS_JOB
     assert terminal.state is JobState.FAILED
     assert providers["gfs"].calls == []
     payload = json.loads(raw.split(b"\n", 1)[0])
     assert payload["exit_code"] == "42:7"
-    assert payload["job_id"] == report.ifs.job.job_id
+    assert payload["job_id"] == ifs[0].job.job_id
     assert payload["source"] == "ifs"
 
 
@@ -226,11 +261,12 @@ def test_failure_cleanup_does_not_block_sibling_publish(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config, local = write_dual_tree(tmp_path)
+    plant_raw_cycles(local, "gfs", (CYCLE_T12,))
     barrier = DualBarrier()
+    gate = TerminalHookGate()
     ifs_driver, _, _ = success_driver()
-    gfs_driver, gfs_state, gfs_slot = success_driver()
     block = threading.Event()
-    gfs_publish_done = threading.Event()
+    gfs_second_done = threading.Event()
     entered_cleanup = threading.Event()
     from yd_producer import cleanup as cleanup_module
 
@@ -249,11 +285,15 @@ def test_failure_cleanup_does_not_block_sibling_publish(
     publish_calls: list[str] = []
 
     def recording_publish(inputs):
-        publish_calls.append(f"enter:{inputs.source}")
+        publish_calls.append(
+            f"enter:{inputs.source}:{inputs.cycle.strftime('%Y%m%d%H')}"
+        )
         result = original_publish(inputs)
-        publish_calls.append(f"exit:{inputs.source}")
-        if inputs.source == "gfs":
-            gfs_publish_done.set()
+        publish_calls.append(
+            f"exit:{inputs.source}:{inputs.cycle.strftime('%Y%m%d%H')}"
+        )
+        if inputs.source == "gfs" and inputs.cycle == CYCLE_T12:
+            gfs_second_done.set()
         return result
 
     monkeypatch.setattr(publish_module, "publish", recording_publish)
@@ -261,12 +301,20 @@ def test_failure_cleanup_does_not_block_sibling_publish(
     def waiter():
         if not entered_cleanup.wait(timeout=5):
             raise TimeoutError("IFS 未进入 cleanup")
-        if not gfs_publish_done.wait(timeout=5):
-            raise TimeoutError("GFS publish 未在 IFS cleanup 放行前完成")
-        assert done_path(local, "gfs").is_file()
+        if not gfs_second_done.wait(timeout=5):
+            raise TimeoutError("GFS 第二轮 publish 未在 IFS cleanup 放行前完成")
+        assert done_path(local, "gfs", T_TEXT).is_file()
+        assert done_path(local, "gfs", T_PLUS_12_TEXT).is_file()
         assert not failure_log_path(local, "ifs").exists()
         block.set()
 
+    gfs_driver, gfs_exec = hooked_success_cycles(
+        "gfs",
+        (CYCLE_T, CYCLE_T12),
+        barrier=barrier,
+        gate=gate,
+        wait_for_peer=True,
+    )
     thread = threading.Thread(target=waiter, daemon=True)
     thread.start()
     report = run_sources(
@@ -279,12 +327,7 @@ def test_failure_cleanup_does_not_block_sibling_publish(
                 barrier=barrier,
                 hook=FailureLogHook(local, "ifs", IFS_RAW_LOG),
             ),
-            "gfs": BarrierExecutor(
-                fake_for("gfs", polls=1),
-                source="gfs",
-                barrier=barrier,
-                hook=success_hook(gfs_slot, gfs_state),
-            ),
+            "gfs": gfs_exec,
         },
         drivers={"ifs": ifs_driver, "gfs": gfs_driver},
         poll_waits={"ifs": noop_wait, "gfs": noop_wait},
@@ -295,13 +338,21 @@ def test_failure_cleanup_does_not_block_sibling_publish(
     )
     thread.join(timeout=5)
     assert not thread.is_alive()
-    assert report.gfs.outcome is RunOutcome.SUCCEEDED
-    assert report.ifs.outcome is RunOutcome.JOB_FAILED
-    assert done_path(local, "gfs").is_file()
+    ifs = require_source_tuple(report.ifs, "ifs")
+    gfs = require_source_tuple(report.gfs, "gfs")
+    assert cycle_outcomes(gfs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.SUCCEEDED),
+        (CYCLE_T24, RunOutcome.STOPPED),
+    ]
+    assert cycle_outcomes(ifs) == [(CYCLE_T, RunOutcome.JOB_FAILED)]
+    assert done_path(local, "gfs", T_TEXT).is_file()
+    assert done_path(local, "gfs", T_PLUS_12_TEXT).is_file()
     assert failure_log_path(local, "ifs").is_file()
     assert not work_dir(local, "ifs").exists()
-    assert "enter:gfs" in publish_calls
-    assert "exit:gfs" in publish_calls
+    assert "enter:gfs:2026082612" in publish_calls
+    assert "enter:gfs:2026082700" in publish_calls
+    assert "exit:gfs:2026082700" in publish_calls
 
 
 def test_both_sources_fail_keep_own_logs_and_delete_own_work(
@@ -337,15 +388,17 @@ def test_both_sources_fail_keep_own_logs_and_delete_own_work(
         poll_waits={"ifs": noop_wait, "gfs": noop_wait},
         failure_exit_codes=providers,
     )
-    assert report.ifs.outcome is RunOutcome.JOB_FAILED
-    assert report.gfs.outcome is RunOutcome.JOB_FAILED
+    ifs = require_source_tuple(report.ifs, "ifs")
+    gfs = require_source_tuple(report.gfs, "gfs")
+    assert cycle_outcomes(ifs) == [(CYCLE_T, RunOutcome.JOB_FAILED)]
+    assert cycle_outcomes(gfs) == [(CYCLE_T, RunOutcome.JOB_FAILED)]
     ifs_log = json.loads(failure_log_path(local, "ifs").read_bytes().split(b"\n", 1)[0])
     gfs_log = json.loads(failure_log_path(local, "gfs").read_bytes().split(b"\n", 1)[0])
     assert ifs_log["source"] == "ifs" and gfs_log["source"] == "gfs"
     assert ifs_log["exit_code"] == IFS_EXIT
     assert gfs_log["exit_code"] == "9:1"
-    assert ifs_log["job_id"] == report.ifs.job.job_id
-    assert gfs_log["job_id"] == report.gfs.job.job_id
+    assert ifs_log["job_id"] == ifs[0].job.job_id
+    assert gfs_log["job_id"] == gfs[0].job.job_id
     assert ifs_log["job_id"] == executors["ifs"].submissions[0].job_id
     assert gfs_log["job_id"] == executors["gfs"].submissions[0].job_id
     assert ifs_log["exit_code"] != gfs_log["exit_code"]
@@ -407,10 +460,19 @@ def test_publish_calls_never_overlap_and_keep_output_mode(
         poll_waits=waits,
         failure_exit_codes=providers,
     )
-    assert report.ifs.outcome is RunOutcome.SUCCEEDED
-    assert report.gfs.outcome is RunOutcome.SUCCEEDED
+    ifs = require_source_tuple(report.ifs, "ifs")
+    gfs = require_source_tuple(report.gfs, "gfs")
+    assert cycle_outcomes(ifs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.STOPPED),
+    ]
+    assert cycle_outcomes(gfs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.STOPPED),
+    ]
     assert max_active == 1
     assert barrier.max_inflight == 2
+    assert barrier.per_source_max == {"ifs": 1, "gfs": 1}
     assert gate.max_active == 1
     assert {item.split(":", 1)[1] for item in ledger if item.startswith("enter:")} == {
         "ifs",
@@ -429,29 +491,36 @@ def test_join_before_error_keeps_gfs_report_and_done(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config, local = write_dual_tree(tmp_path)
+    plant_raw_cycles(local, "gfs", (CYCLE_T12,))
     barrier = DualBarrier()
+    gate = TerminalHookGate()
     ifs_hold = threading.Event()
-    gfs_hold = threading.Event()
-    _ifs_driver, _, _ = success_driver()
-    gfs_driver, gfs_state, gfs_slot = success_driver()
+    gfs_second_done = threading.Event()
     original_publish = publish_module.publish
 
     def gfs_done_publish(inputs):
         result = original_publish(inputs)
-        if inputs.source == "gfs":
-            gfs_hold.set()
+        if inputs.source == "gfs" and inputs.cycle == CYCLE_T12:
+            gfs_second_done.set()
         return result
 
     class DelayedIfsDriver:
         def prepare(self, *, request):
             ifs_hold.set()
-            if not gfs_hold.wait(timeout=5):
-                raise TimeoutError("GFS 未获准完成")
+            if not gfs_second_done.wait(timeout=5):
+                raise TimeoutError("GFS 未获准完成后续两轮")
             raise c.RunError("ifs injected", phase="prepare", source="ifs")
 
         def collect(self, *, attempt, terminal_record):  # pragma: no cover
             raise AssertionError("ifs collect")
 
+    gfs_driver, gfs_exec = hooked_success_cycles(
+        "gfs",
+        (CYCLE_T, CYCLE_T12),
+        barrier=barrier,
+        gate=gate,
+        wait_for_peer=False,
+    )
     original_prepare = gfs_driver.prepare
 
     def gfs_prepare(*, request):
@@ -465,16 +534,7 @@ def test_join_before_error_keeps_gfs_report_and_done(
         run_sources(
             config=config,
             local=local,
-            executors={
-                "ifs": fake_for("ifs"),
-                "gfs": BarrierExecutor(
-                    fake_for("gfs", polls=1),
-                    source="gfs",
-                    barrier=barrier,
-                    hook=success_hook(gfs_slot, gfs_state),
-                    wait_for_peer=False,
-                ),
-            },
+            executors={"ifs": fake_for("ifs"), "gfs": gfs_exec},
             drivers={"ifs": DelayedIfsDriver(), "gfs": gfs_driver},
             poll_waits={"ifs": noop_wait, "gfs": noop_wait},
             failure_exit_codes={
@@ -484,10 +544,17 @@ def test_join_before_error_keeps_gfs_report_and_done(
         )
     error = info.value
     assert set(error.errors) == {"ifs"}
-    assert set(error.reports) == {"gfs"}
+    assert set(error.reports) == {"ifs", "gfs"}
+    assert error.reports["ifs"] == ()
     assert error.errors["ifs"].phase == "prepare"
-    assert error.reports["gfs"].outcome is RunOutcome.SUCCEEDED
-    assert done_path(local, "gfs").is_file()
+    gfs = require_source_tuple(error.reports["gfs"], "gfs")
+    assert cycle_outcomes(gfs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.SUCCEEDED),
+        (CYCLE_T24, RunOutcome.STOPPED),
+    ]
+    assert done_path(local, "gfs", T_TEXT).is_file()
+    assert done_path(local, "gfs", T_PLUS_12_TEXT).is_file()
     assert (
         str(error).index("ifs:") < str(error).index("gfs:")
         if "gfs:" in str(error)
@@ -571,7 +638,20 @@ def test_public_structure_is_frozen_keyword_only() -> None:
         "ifs",
         "gfs",
     )
-    from yd_producer.controller import RunReport
+    report_ann = c.RunSourcesReport.__annotations__
+    assert report_ann["ifs"] == "tuple[RunReport, ...]"
+    assert report_ann["gfs"] == "tuple[RunReport, ...]"
+    error_ann = c.RunSourcesError.__init__.__annotations__
+    assert "tuple[RunReport, ...]" in error_ann["reports"]
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    from yd_producer.controller import JobRunReport, RunReport
+    from yd_producer.executor import JobState
+    from yd_producer.publish import PublishResult
+
+    cycle = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    next_cycle = datetime(2026, 8, 27, 0, tzinfo=UTC)
 
     def _stopped(source: str) -> RunReport:
         return RunReport(
@@ -585,35 +665,100 @@ def test_public_structure_is_frozen_keyword_only() -> None:
             done_path=None,
         )
 
+    def _succeeded(source: str) -> RunReport:
+        done = Path(f"/tmp/{source}/DONE")
+        published = PublishResult(
+            source=source,
+            cycle=cycle,
+            next_cycle=next_cycle,
+            dat_path=Path(f"/tmp/{source}/yd.rivqdown.dat"),
+            state_path=Path(f"/tmp/{source}/state.cfg.ic"),
+            done_path=done,
+            removed_state_files=(),
+            removed_work_dir=Path(f"/tmp/{source}/work"),
+        )
+        job = JobRunReport(
+            job_id="fake-1",
+            partition="cpu",
+            state=JobState.SUCCEEDED,
+            submitted_at=cycle,
+            started_at=cycle,
+            ended_at=cycle,
+        )
+        return RunReport(
+            source=source,
+            cycle=cycle,
+            outcome=RunOutcome.SUCCEEDED,
+            stop_reason=None,
+            detail="ok",
+            job=job,
+            published=published,
+            done_path=done,
+        )
+
+    ok_report = c.RunSourcesReport(ifs=(_stopped("ifs"),), gfs=(_stopped("gfs"),))
+    assert isinstance(ok_report.ifs, tuple)
+    assert isinstance(ok_report.gfs, tuple)
     with pytest.raises(ValueError, match="ifs"):
-        c.RunSourcesReport(ifs=_stopped("gfs"), gfs=_stopped("gfs"))
+        c.RunSourcesReport(ifs=(_stopped("gfs"),), gfs=(_stopped("gfs"),))
     with pytest.raises(ValueError, match="gfs"):
-        c.RunSourcesReport(ifs=_stopped("ifs"), gfs=_stopped("ifs"))
+        c.RunSourcesReport(ifs=(_stopped("ifs"),), gfs=(_stopped("ifs"),))
+    with pytest.raises(ValueError, match="至少"):
+        c.RunSourcesReport(ifs=(), gfs=(_stopped("gfs"),))
     ifs_err = c.RunError("boom", phase="cleanup", source="ifs")
     gfs_err = c.RunError("nope", phase="cleanup", source="gfs")
-    with pytest.raises(ValueError, match="互斥"):
-        c.RunSourcesError({"ifs": _stopped("ifs")}, {"ifs": ifs_err})
-    with pytest.raises(ValueError, match="并集"):
-        c.RunSourcesError({}, {"ifs": ifs_err})
-    with pytest.raises(ValueError, match="并集"):
+    overlap = c.RunSourcesError(
+        {"ifs": (_succeeded("ifs"),), "gfs": (_stopped("gfs"),)},
+        {"ifs": ifs_err},
+    )
+    assert overlap.reports["ifs"][0].source == "ifs"
+    assert overlap.reports["ifs"][0].outcome is RunOutcome.SUCCEEDED
+    assert overlap.reports["gfs"][-1].outcome is RunOutcome.STOPPED
+    assert overlap.errors["ifs"] is ifs_err
+    empty_partial = c.RunSourcesError(
+        {"ifs": (), "gfs": (_stopped("gfs"),)},
+        {"ifs": ifs_err},
+    )
+    assert empty_partial.reports["ifs"] == ()
+    assert empty_partial.reports["gfs"][0].stop_reason is c.StopReason.NO_INITIAL_STATE
+    with pytest.raises(ValueError, match="ifs"):
+        c.RunSourcesError({"gfs": ()}, {"ifs": ifs_err})
+    with pytest.raises(ValueError, match="gfs"):
+        c.RunSourcesError({"ifs": ()}, {"ifs": ifs_err})
+    with pytest.raises(ValueError, match="gfs"):
         c.RunSourcesError(
-            {"ifs": _stopped("ifs"), "era5": _stopped("gfs")}, {"gfs": gfs_err}
+            {"ifs": (), "gfs": (), "era5": ()},
+            {"gfs": gfs_err},
         )
-    with pytest.raises(ValueError, match="errors 非空"):
-        c.RunSourcesError({"ifs": _stopped("ifs"), "gfs": _stopped("gfs")}, {})
-    with pytest.raises(ValueError, match="reports"):
-        c.RunSourcesError({"gfs": _stopped("ifs")}, {"ifs": ifs_err})
+    with pytest.raises(ValueError, match="非空 source 子集"):
+        c.RunSourcesError({"ifs": (), "gfs": ()}, {})
+    with pytest.raises(ValueError, match="ifs"):
+        c.RunSourcesError(
+            {"ifs": (_stopped("gfs"),), "gfs": (_stopped("gfs"),)}, {"ifs": ifs_err}
+        )
     with pytest.raises(ValueError, match="errors"):
-        c.RunSourcesError({"gfs": _stopped("gfs")}, {"ifs": gfs_err})
-    reports = {"gfs": _stopped("gfs")}
+        c.RunSourcesError(
+            {"ifs": (), "gfs": (_stopped("gfs"),)},
+            {"ifs": gfs_err},
+        )
+    with pytest.raises(ValueError, match="partial"):
+        c.RunSourcesError(
+            {"ifs": (_stopped("ifs"),), "gfs": (_stopped("gfs"),)},
+            {"ifs": ifs_err},
+        )
+    with pytest.raises(ValueError, match="至少"):
+        c.RunSourcesError({"ifs": (_succeeded("ifs"),), "gfs": ()}, {"ifs": ifs_err})
+    reports = {"ifs": (_succeeded("ifs"),), "gfs": (_stopped("gfs"),)}
     errors = {"ifs": ifs_err}
     wrapped = c.RunSourcesError(reports, errors)
-    reports["ifs"] = _stopped("ifs")
+    reports["gfs"] = (_succeeded("gfs"),)
     errors["gfs"] = gfs_err
-    assert set(wrapped.reports) == {"gfs"}
+    assert set(wrapped.reports) == {"ifs", "gfs"}
+    assert wrapped.reports["gfs"][0].outcome is RunOutcome.STOPPED
     assert set(wrapped.errors) == {"ifs"}
     assert "gfs" not in wrapped.errors
     assert wrapped.errors["ifs"].phase == "cleanup"
+    assert wrapped.reports["ifs"][0].outcome is RunOutcome.SUCCEEDED
     for phase in (
         "preflight",
         "frontier",

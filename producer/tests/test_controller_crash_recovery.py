@@ -9,6 +9,9 @@ import shutil
 
 import pytest
 from controller_sources_fixtures import (
+    CYCLE_T,
+    CYCLE_T12,
+    CYCLE_T24,
     GFS_EXIT,
     IFS_EXIT,
     OLD_WORK_MARKER,
@@ -16,12 +19,16 @@ from controller_sources_fixtures import (
     T_TEXT,
     RecordingProvider,
     TerminalHookGate,
+    cycle_outcomes,
     done_path,
     fake_for,
     hooked_success,
+    hooked_success_cycles,
     noop_wait,
     plant_nfs_crash,
+    plant_raw_cycles,
     plant_unknown_work,
+    require_source_tuple,
     state_path,
     success_driver,
     work_dir,
@@ -32,8 +39,23 @@ from controller_sources_fixtures import (
 from yd_producer.controller import RunOutcome, RunSourcesError, StopReason, run_sources
 
 
-def _success_gfs(*, gate: TerminalHookGate | None = None):
+def _success_gfs(*, gate: TerminalHookGate | None = None, extra=()):
+    if extra:
+        return hooked_success_cycles("gfs", (CYCLE_T, *extra), gate=gate)
     return hooked_success("gfs", gate=gate)
+
+
+def _gfs_two(local, *, gate: TerminalHookGate | None = None):
+    plant_raw_cycles(local, "gfs", (CYCLE_T12,))
+    return hooked_success_cycles("gfs", (CYCLE_T, CYCLE_T12), gate=gate)
+
+
+def _gfs_two_outcomes():
+    return [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.SUCCEEDED),
+        (CYCLE_T24, RunOutcome.STOPPED),
+    ]
 
 
 @pytest.mark.parametrize("shape", ["dir", "file", "symlink", "dangling"])
@@ -70,7 +92,7 @@ def test_unknown_work_stops_before_raw_and_leaves_work_untouched(
     monkeypatch.setattr(rawscan_module, "judge", counting_judge)
     monkeypatch.setattr(pathlib.Path, "read_bytes", counting_read)
     ifs_driver, _, _ = success_driver()
-    gfs_driver, gfs_exec = _success_gfs()
+    gfs_driver, gfs_exec = _gfs_two(local)
     report = run_sources(
         config=config,
         local=local,
@@ -85,15 +107,17 @@ def test_unknown_work_stops_before_raw_and_leaves_work_untouched(
             "gfs": RecordingProvider("gfs", GFS_EXIT),
         },
     )
-    assert report.ifs.outcome is RunOutcome.STOPPED
-    assert report.ifs.stop_reason is StopReason.UNVERIFIED_WORK_RESIDUE
-    assert report.gfs.outcome is RunOutcome.SUCCEEDED
+    ifs = require_source_tuple(report.ifs, "ifs")
+    gfs = require_source_tuple(report.gfs, "gfs")
+    assert cycle_outcomes(ifs) == [(CYCLE_T, RunOutcome.STOPPED)]
+    assert ifs[0].stop_reason is StopReason.UNVERIFIED_WORK_RESIDUE
+    assert cycle_outcomes(gfs) == _gfs_two_outcomes()
     assert "ifs" not in calls
     assert content_reads == []
     monkeypatch.setattr(pathlib.Path, "read_bytes", original_read)
     assert work_snapshot(planted) == before
     assert not done_path(local, "ifs").exists()
-    assert report.ifs.job is None
+    assert ifs[0].job is None
     if shape == "symlink":
         target = pathlib.Path(local.scratch_root).resolve() / "outside-work" / "old.bin"
         assert target.read_bytes() == OLD_WORK_MARKER
@@ -135,7 +159,7 @@ def test_post_check_work_marker_is_raw_error_and_preserves_foreign_tree(
 
     ifs_driver.prepare = counting_prepare  # type: ignore[method-assign]
     ifs_executor = fake_for("ifs")
-    gfs_driver, gfs_exec = _success_gfs()
+    gfs_driver, gfs_exec = _gfs_two(local)
     with pytest.raises(RunSourcesError) as info:
         run_sources(
             config=config,
@@ -152,6 +176,8 @@ def test_post_check_work_marker_is_raw_error_and_preserves_foreign_tree(
             },
         )
     error = info.value
+    assert set(error.reports) == {"ifs", "gfs"}
+    assert error.reports["ifs"] == ()
     assert error.errors["ifs"].phase == "raw"
     assert error.errors["ifs"].source == "ifs"
     assert marker.is_file()
@@ -159,8 +185,10 @@ def test_post_check_work_marker_is_raw_error_and_preserves_foreign_tree(
     assert list(marker.parent.iterdir()) == [marker]
     assert prepare_calls == []
     assert ifs_executor.submissions == ()
-    assert error.reports["gfs"].outcome is RunOutcome.SUCCEEDED
+    gfs = require_source_tuple(error.reports["gfs"], "gfs")
+    assert cycle_outcomes(gfs) == _gfs_two_outcomes()
     assert done_path(local, "gfs").is_file()
+    assert done_path(local, "gfs", T_PLUS_12_TEXT).is_file()
     assert not done_path(local, "ifs").exists()
 
 
@@ -171,7 +199,7 @@ def test_lstat_io_error_is_residue_run_error_not_absent(
     config, local = write_dual_tree(tmp_path)
     target = work_dir(local, "ifs")
     ifs_driver, _, _ = success_driver()
-    gfs_driver, gfs_exec = _success_gfs()
+    gfs_driver, gfs_exec = _gfs_two(local)
     original = os.lstat
 
     def flaky(path, *args, **kwargs):
@@ -196,8 +224,11 @@ def test_lstat_io_error_is_residue_run_error_not_absent(
             },
         )
     error = info.value
+    assert set(error.reports) == {"ifs", "gfs"}
+    assert error.reports["ifs"] == ()
     assert error.errors["ifs"].phase == "residue"
-    assert error.reports["gfs"].outcome is RunOutcome.SUCCEEDED
+    gfs = require_source_tuple(error.reports["gfs"], "gfs")
+    assert cycle_outcomes(gfs) == _gfs_two_outcomes()
     assert done_path(local, "gfs").is_file()
 
 
@@ -231,7 +262,12 @@ def test_nfs_crash_residue_rebuilds_without_work_and_stops_when_work_present(
             "gfs": RecordingProvider("gfs", GFS_EXIT),
         },
     )
-    assert report.ifs.outcome is RunOutcome.SUCCEEDED
+    ifs = require_source_tuple(report.ifs, "ifs")
+    gfs = require_source_tuple(report.gfs, "gfs")
+    assert cycle_outcomes(ifs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.STOPPED),
+    ]
     assert done_path(local, "ifs").is_file()
     rebuilt = state_path(local, "ifs", T_PLUS_12_TEXT)
     assert rebuilt.is_file()
@@ -243,21 +279,22 @@ def test_nfs_crash_residue_rebuilds_without_work_and_stops_when_work_present(
     assert published_dat.read_bytes() != residue_dat
     assert t_state.is_file()
     assert not work_dir(local, "ifs").exists()
-    assert report.gfs.outcome is RunOutcome.SUCCEEDED
+    assert cycle_outcomes(gfs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.STOPPED),
+    ]
     assert gate.max_active == 1
     assert len(ifs_exec.submissions) == 1
     assert len(gfs_exec.submissions) == 1
     assert (
-        report.ifs.job is not None
-        and report.ifs.job.job_id == ifs_exec.submissions[0].job_id
+        ifs[0].job is not None and ifs[0].job.job_id == ifs_exec.submissions[0].job_id
     )
     assert (
-        report.gfs.job is not None
-        and report.gfs.job.job_id == gfs_exec.submissions[0].job_id
+        gfs[0].job is not None and gfs[0].job.job_id == gfs_exec.submissions[0].job_id
     )
     assert ifs_exec.submissions[0].name != gfs_exec.submissions[0].name
-    assert report.ifs.source != report.gfs.source
-    assert report.ifs.cycle == report.gfs.cycle
+    assert ifs[0].source != gfs[0].source
+    assert ifs[0].cycle == gfs[0].cycle
     nwm_raw = pathlib.Path(local.nwm.raw_root)
     assert nwm_raw.exists()
 
@@ -283,7 +320,9 @@ def test_nfs_crash_residue_rebuilds_without_work_and_stops_when_work_present(
             "gfs": RecordingProvider("gfs", GFS_EXIT),
         },
     )
-    assert report.ifs.stop_reason is StopReason.UNVERIFIED_WORK_RESIDUE
+    ifs = require_source_tuple(report.ifs, "ifs")
+    assert cycle_outcomes(ifs) == [(CYCLE_T, RunOutcome.STOPPED)]
+    assert ifs[0].stop_reason is StopReason.UNVERIFIED_WORK_RESIDUE
     assert work_snapshot(planted) == before
     assert not done_path(local, "ifs").exists()
     # NFS residue is still cleaned first.
@@ -313,7 +352,9 @@ def test_operator_removal_allows_next_tick_to_submit_once(
             "gfs": RecordingProvider("gfs", GFS_EXIT),
         },
     )
-    assert first.ifs.stop_reason is StopReason.UNVERIFIED_WORK_RESIDUE
+    first_ifs = require_source_tuple(first.ifs, "ifs")
+    assert cycle_outcomes(first_ifs) == [(CYCLE_T, RunOutcome.STOPPED)]
+    assert first_ifs[0].stop_reason is StopReason.UNVERIFIED_WORK_RESIDUE
     assert marker.read_bytes() == OLD_WORK_MARKER
     shutil.rmtree(planted)
     ifs_driver2, ifs_exec = hooked_success("ifs")
@@ -332,7 +373,11 @@ def test_operator_removal_allows_next_tick_to_submit_once(
             "gfs": RecordingProvider("gfs", GFS_EXIT),
         },
     )
-    assert second.ifs.outcome is RunOutcome.SUCCEEDED
-    assert len(second.ifs.job.job_id) > 0
+    second_ifs = require_source_tuple(second.ifs, "ifs")
+    assert cycle_outcomes(second_ifs) == [
+        (CYCLE_T, RunOutcome.SUCCEEDED),
+        (CYCLE_T12, RunOutcome.STOPPED),
+    ]
+    assert len(second_ifs[0].job.job_id) > 0
     assert done_path(local, "ifs").is_file()
     assert not work_dir(local, "ifs").exists()
