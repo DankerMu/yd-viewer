@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 
 from yd_producer import controller
 from yd_producer import prepare as prepare_module
@@ -499,8 +500,10 @@ def run_once(
     executor: JobExecutor,
     driver: AttemptDriver,
     poll_wait: Callable[[], None],
+    failure_exit_code: Callable[[JobRecord], str] | None = None,
+    publish_lock: Lock | None = None,
 ) -> RunReport:
-    """单源单轮骨架；全部 keyword-only、无默认值（tasks.md「公开面」逐字冻结）。
+    """单源单轮骨架。公开 wrapper 仍只传六参数；后两项仅供 `run_sources`。
 
     普通异常一律 `RunError(phase/source/cycle/job_id)` 并保留 `__cause__`；`RunError`
     原样穿透；`BaseException`（KeyboardInterrupt/SystemExit）不包。"""
@@ -514,6 +517,8 @@ def run_once(
             driver=driver,
             poll_wait=poll_wait,
             ctx=ctx,
+            failure_exit_code=failure_exit_code,
+            publish_lock=publish_lock,
         )
     except RunError:
         raise
@@ -536,6 +541,8 @@ def _run_once(
     driver: AttemptDriver,
     poll_wait: Callable[[], None],
     ctx: _Context,
+    failure_exit_code: Callable[[JobRecord], str] | None,
+    publish_lock: Lock | None,
 ) -> RunReport:
     # 1. preflight（私有校验面在 controller）
     controller._preflight(config=config, local=local, source=source)
@@ -598,6 +605,15 @@ def _run_once(
             source=source,
             cycle=target,
         ) from exc
+
+    if failure_exit_code is not None:
+        work_root = Path(local.scratch_root).resolve() / "work"
+        work_dir = work_root / source / controller.cycle_id(target)
+        from yd_producer._controller_sources import classify_unverified_work
+
+        unverified = classify_unverified_work(work_dir, source=source, cycle=target)
+        if unverified is not None:
+            return unverified
 
     ctx.phase = "raw"
     try:
@@ -797,18 +813,32 @@ def _run_once(
 
     # 8. 终态三分：FAILED/TIMEOUT -> JOB_FAILED（零 collect/publish）
     if terminal.state is not JobState.SUCCEEDED:
-        return RunReport(
+        if failure_exit_code is None:
+            return RunReport(
+                source=source,
+                cycle=target,
+                outcome=RunOutcome.JOB_FAILED,
+                stop_reason=None,
+                detail=(
+                    f"{source}: 作业 {terminal.job_id} 终态 {terminal.state.value}，"
+                    "本轮失败；work 按 14.1 边界保留，失败收尾归 #28/#47"
+                ),
+                job=controller._job_report(submission, terminal),
+                published=None,
+                done_path=None,
+            )
+        ctx.phase = "cleanup"
+        from yd_producer._controller_sources import finalize_failed_attempt
+
+        return finalize_failed_attempt(
+            local=local,
             source=source,
             cycle=target,
-            outcome=RunOutcome.JOB_FAILED,
-            stop_reason=None,
-            detail=(
-                f"{source}: 作业 {terminal.job_id} 终态 {terminal.state.value}，"
-                "本轮失败；work 按 14.1 边界保留，失败收尾归 #28/#47"
-            ),
-            job=controller._job_report(submission, terminal),
-            published=None,
-            done_path=None,
+            job_spec=job_spec,
+            submission=submission,
+            terminal=terminal,
+            work_root=work_root,
+            provider=failure_exit_code,
         )
 
     # 8b. SUCCEEDED：先证明三件产物存在，再 collect 恰一次
@@ -899,7 +929,11 @@ def _run_once(
         variant_reach_count=variant_reach_count,
     )
     try:
-        result = publish_module.publish(publish_inputs)
+        if publish_lock is None:
+            result = publish_module.publish(publish_inputs)
+        else:
+            with publish_lock:
+                result = publish_module.publish(publish_inputs)
     except publish_module.PublishCleanupError as exc:
         return RunReport(
             source=source,
