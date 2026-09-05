@@ -26,6 +26,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from yd_producer._work_claim import (
+    ClaimLostError,
+    WorkClaim,
+    mkdir_relative_to_claim,
+    open_claimed_excl,
+    release_raw_claim_after_stage_failure,
+    rmdir_claimed,
+    unlink_claimed,
+)
 from yd_producer.config import Config, ConfigError, RawSourceConfig
 from yd_producer.raw.manifest import DownloadManifest, ManifestEntry, parse_cycle_time
 from yd_producer.rawscan import (
@@ -815,12 +824,12 @@ def _rollback_note(failures: tuple[str, ...]) -> str:
 class _Written:
     """本轮 work 侧写入的账本，供失败清理用（不留半套 raw）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, claim: WorkClaim | None = None) -> None:
         self.files: list[Path] = []
         self.dirs: list[Path] = []
+        self.claim = claim
 
-    @staticmethod
-    def _remove(remove: Any, path: Path, failures: list[str]) -> None:
+    def _remove(self, remove: Any, path: Path, failures: list[str]) -> None:
         try:
             remove(path)
         except FileNotFoundError:
@@ -857,37 +866,40 @@ class _Written:
         `BaseException` 不吞：清理途中的 Ctrl-C MUST 照常传播。
         """
         failures: list[str] = []
+        claim = self.claim
+        if claim is None:
+            unlink = os.unlink
+            rmdir = os.rmdir
+        else:
+
+            def unlink(path: Path) -> None:
+                unlink_claimed(claim, path)
+
+            def rmdir(path: Path) -> None:
+                rmdir_claimed(claim, path)
+
         for path in reversed(self.files):
-            self._remove(os.unlink, path, failures)
+            self._remove(unlink, path, failures)
         for path in sorted(
             set(self.dirs), key=lambda item: len(item.parts), reverse=True
         ):
-            self._remove(os.rmdir, path, failures)
+            self._remove(rmdir, path, failures)
         return tuple(failures)
 
 
-def _ensure_dir(directory: Path, written: _Written) -> None:
+def _ensure_dir(
+    directory: Path, written: _Written, *, claim: WorkClaim | None = None
+) -> None:
+    if claim is not None:
+        _ensure_dir_under_claim(directory, written, claim)
+        return
     missing: list[Path] = []
     probe = directory
     while not probe.exists():
         missing.append(probe)
         if probe.parent == probe:
-            # 文件系统根：`probe.parent == probe` 时再上溯就是死循环。该支要求根
-            # 本身 `exists()` 为假，实际不可达（`while` 先退出），但它一旦成立就会
-            # 把根登记进账本——`rollback` 的 `rmdir("/")` 只会以 EBUSY/EACCES 落进
-            # 失败清单，不会删掉任何东西。与下方账本语义同源，一并记在此处。
             break
         probe = probe.parent
-    # 账本**先于**效果登记：`mkdir(parents=True)` 是多步的，中途失败（ENOSPC/EDQUOT/
-    # 并发 rmdir）会留下已建的祖先段，而失败路径不回到这里，账本就永远收不到它们。
-    # 代价与其边界（round-2 verifier 证伪了原先的落地理由，这里换成正确的那条）：
-    # 账本记的是「走查时不存在的段」而不是「本轮创建的段」，两者在走查与 `mkdir`
-    # 之间的窗口里可能发散——窗口内被**别人**创建的同名目录会被 `rollback` 删掉。
-    # 原注释写的「反向多记是安全的：`rmdir` 只会吞掉 OSError」论证的是「不会抛」，
-    # 而风险是「会删不是本轮建的」，两个命题不同，故不成立。真正的边界是 fixture
-    # 把 `work_dir` 定义为一次性隔离单元：窗口内的外来写入者在模型之外。收紧成
-    # 「本轮创建的」需要 `mkdir` 逐级自建（放弃 `parents=True`），归组 12 的
-    # work-dir 生命周期一并处理。
     written.dirs.extend(missing)
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -897,7 +909,24 @@ def _ensure_dir(directory: Path, written: _Written) -> None:
         ) from exc
 
 
-def _copy_one(source_path: Path, target: Path, written: _Written) -> None:
+def _ensure_dir_under_claim(
+    directory: Path, written: _Written, claim: WorkClaim
+) -> None:
+    """Create descendants of the claimed exact root; never ledger shared ancestors."""
+    try:
+        missing = mkdir_relative_to_claim(claim, directory)
+    except ClaimLostError as orig:
+        raise RawStagingError(str(orig), "copy-failed") from orig
+    written.dirs.extend(missing)
+
+
+def _copy_one(
+    source_path: Path,
+    target: Path,
+    written: _Written,
+    *,
+    claim: WorkClaim | None = None,
+) -> None:
     """复制一个 bundle：前后各取一次 `lstat` 元组，中间以 O_EXCL 写目标。"""
     try:
         before = _identity(source_path)
@@ -906,16 +935,19 @@ def _copy_one(source_path: Path, target: Path, written: _Written) -> None:
             f"源文件 {source_path} 不可访问：{exc}", "copy-failed"
         ) from exc
     try:
-        dest_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError as exc:
+        if claim is not None:
+            dest_fd = open_claimed_excl(claim, target)
+        else:
+            dest_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError as orig:
         raise RawStagingError(
             f"目标副本 {target} 已存在；work 是一次性隔离单元，不覆盖",
             "target-exists",
-        ) from exc
-    except OSError as exc:
+        ) from orig
+    except (OSError, ClaimLostError) as orig:
         raise RawStagingError(
-            f"无法创建目标副本 {target}：{exc}", "copy-failed"
-        ) from exc
+            f"无法创建目标副本 {target}：{orig}", "copy-failed"
+        ) from orig
     written.files.append(target)
     try:
         with (
@@ -1017,18 +1049,22 @@ def _write_manifest(
     manifest_path: Path,
     payload: bytes,
     written: _Written,
+    claim: WorkClaim | None = None,
 ) -> None:
     try:
-        fd = os.open(manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError as exc:
+        if claim is not None:
+            fd = open_claimed_excl(claim, manifest_path)
+        else:
+            fd = os.open(manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError as orig:
         raise RawStagingError(
             f"目标 {manifest_path} 已存在；work 是一次性隔离单元，不覆盖",
             "target-exists",
-        ) from exc
-    except OSError as exc:
+        ) from orig
+    except (OSError, ClaimLostError) as orig:
         raise RawStagingError(
-            f"无法创建 {manifest_path}：{exc}", "copy-failed"
-        ) from exc
+            f"无法创建 {manifest_path}：{orig}", "copy-failed"
+        ) from orig
     written.files.append(manifest_path)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -1049,6 +1085,8 @@ def stage_raw(
     source: str,
     cycle: datetime,
     config: Config,
+    *,
+    claim: WorkClaim | None = None,
 ) -> StagedRaw:
     """把 `verdict.expected_files` 只读复制进 `work_dir`，并生成本轮 raw manifest。
 
@@ -1186,24 +1224,47 @@ def stage_raw(
                     f"目标 {candidate} 已存在；work 是一次性隔离单元，不覆盖、不续跑",
                     "target-exists",
                 )
-    except (ConfigError, RawStagingError):
+    except (ConfigError, RawStagingError) as exc:
         # 词表内的失败原样外抛：kind、`__cause__` 与调用方的 `is` 身份都必须保留。
+        # Controller 已取得 token 时，即使准入尚未写入任何后代，也必须按同一
+        # identity-bound empty-root 协议释放 exact root；standalone `claim=None` 不变。
+        if claim is not None:
+            release_raw_claim_after_stage_failure(claim, exc)
         raise
     except Exception as exc:  # 收口器，见上方 floor 说明
-        raise RawStagingError(
+        error = RawStagingError(
             f"准入期出现未预期的异常 {_safe_repr(exc)}；本轮零写入",
             ADMISSION_FALLBACK_KIND,
-        ) from exc
+        )
+        if claim is not None:
+            release_raw_claim_after_stage_failure(claim, error)
+        raise error from exc
+    except BaseException as exc:
+        # Ctrl-C / SystemExit keep their exact identity and propagation, but a
+        # controller-owned empty root must not become next tick's unknown work.
+        if claim is not None:
+            release_raw_claim_after_stage_failure(claim, exc)
+        raise
 
-    written = _Written()
+    written = _Written(claim=claim)
     try:
+        if claim is not None:
+            try:
+                work_path.relative_to(claim.work_dir)
+            except ValueError as orig:
+                raise RawStagingError(
+                    f"stage_raw 目标 {work_path} 必须位于本 attempt 认领的精确 work "
+                    f"{claim.work_dir} 内：{orig}",
+                    "copy-failed",
+                ) from orig
         for (_, source_path), target in zip(rebuilt, targets, strict=True):
-            _ensure_dir(target.parent, written)
-            _copy_one(source_path, target, written)
+            _ensure_dir(target.parent, written, claim=claim)
+            _copy_one(source_path, target, written, claim=claim)
         _write_manifest(
             manifest_path=manifest_path,
             payload=manifest_payload,
             written=written,
+            claim=claim,
         )
     except RawStagingError as exc:
         failures = written.rollback()
@@ -1211,6 +1272,8 @@ def stage_raw(
             # 用 `add_note` 而不是重建异常：kind、`__cause__` 与调用方的 `is` 身份
             # 都必须原样保留，要加的只是「清理没做干净」这条信号。
             exc.add_note(_rollback_note(failures))
+        if claim is not None:
+            release_raw_claim_after_stage_failure(claim, exc)
         raise
     except Exception as exc:
         # 清理触发器 MUST NOT 窄于它要维护的不变量：只接 `RawStagingError` 时，写入块
@@ -1221,10 +1284,13 @@ def stage_raw(
         # 「已清理」这句话只有在真清理干净时才准说：清理失败时它是假消息，而残留
         # 会让下一次重试被 `lexists` 预检以 `target-exists` 硬拒、楔死整个 cycle。
         cleanup = "已清理本轮 work 侧写入" if not failures else _rollback_note(failures)
-        raise RawStagingError(
+        error = RawStagingError(
             f"复制/落盘期出现未预期的异常 {_safe_repr(exc)}；{cleanup}",
             "copy-failed",
-        ) from exc
+        )
+        if claim is not None:
+            release_raw_claim_after_stage_failure(claim, error)
+        raise error from exc
     except BaseException as exc:
         # `KeyboardInterrupt`/`SystemExit` MUST NOT 被改写成 `RawStagingError`——那会
         # 让 Ctrl-C 看起来像一次 staging 失败。但清理照做：不留半套副本这条不变量与
@@ -1233,5 +1299,7 @@ def stage_raw(
         failures = written.rollback()
         if failures:
             exc.add_note(_rollback_note(failures))
+        if claim is not None:
+            release_raw_claim_after_stage_failure(claim, exc)
         raise
     return StagedRaw(manifest_path=manifest_path, copied_files=targets, entries=entries)

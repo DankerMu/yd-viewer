@@ -689,61 +689,26 @@ def remove_tree_allow_symlinks(
     *,
     containment_root: Path | None = None,
     missing_ok: bool = True,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> None:
     """Remove a QUARANTINE tree, unlinking symlink entries instead of refusing them.
 
-    Scope (#1330): this primitive exists for residue/quarantine trees whose
-    contents are untrusted BY CONSTRUCTION — whatever a killed attempt left
-    behind, including symlinks.  ``rmtree_no_follow``'s refuse-on-symlink policy
-    stays the correct one for trees where a symlink is evidence of tampering;
-    here a refusal would permanently lock the run at the hygiene hook.
-
-    Symlinks are never followed: the LINK itself is unlinked through a dir-fd,
-    directories are entered only via ``O_DIRECTORY|O_NOFOLLOW`` descriptors, and
-    every other entry shape (regular file, FIFO, socket, device) is unlinked
-    through the dir-fd without ever being opened.  An absent ``name`` is a no-op
-    when ``missing_ok``; a ``name`` that is itself a symlink is unlinked as a
-    link rather than traversed.
-
-    Error contract (#1330): traversal / unlink / rmdir ``OSError``s are wrapped
-    ``kind="io"``; walk-stage safety refusals keep ``kind="unsafe"``.
+    Optional ``expected_root_identity`` compares named/opened root identity and
+    rechecks immediately before the final ``rmdir``. Drift is
+    ``kind="identity_changed"``. Default ``None`` keeps historical callers.
     """
+    from yd_producer.store._tree_delete import (
+        remove_tree_allow_symlinks as _impl,
+    )
 
-    _reject_unsafe_entry_name(name)
-    target = _expand_path(parent) / name
-    try:
-        parent_fd = open_directory_no_follow(parent, containment_root=containment_root)
-    except FileNotFoundError:
-        if missing_ok:
-            return
-        raise
-    try:
-        try:
-            entry_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            if missing_ok:
-                return
-            raise
-        if not stat.S_ISDIR(entry_stat.st_mode):
-            # Symlink, regular file or device node at the root: unlink the entry
-            # itself.  ``S_ISDIR`` is false for a symlink under ``lstat`` even
-            # when it points at a directory, so this is the no-follow branch.
-            os.unlink(name, dir_fd=parent_fd)
-            return
-        child_fd = _open_child_dir(parent_fd, name, target)
-        try:
-            _remove_tree_contents_allow_symlinks_fd(child_fd, target)
-        finally:
-            os.close(child_fd)
-        os.rmdir(name, dir_fd=parent_fd)
-    except SafeFilesystemError:
-        raise
-    except OSError as error:
-        raise SafeFilesystemError(
-            f"Failed to remove tree {target}: {error}", kind="io"
-        ) from error
-    finally:
-        os.close(parent_fd)
+    _impl(
+        parent,
+        name,
+        expand_path=_expand_path,
+        containment_root=containment_root,
+        missing_ok=missing_ok,
+        expected_root_identity=expected_root_identity,
+    )
 
 
 def _remove_tree_contents_allow_symlinks_fd(dir_fd: int, path_label: Path) -> None:

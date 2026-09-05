@@ -92,6 +92,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from yd_producer._work_claim import (
+    ClaimLostError,
+    WorkClaim,
+    read_claimed_bytes,
+    stat_claimed,
+    validate_claim,
+)
 from yd_producer.controller import (
     CYCLE_STRIDE,
     STATE_SUFFIX,
@@ -250,6 +257,8 @@ class PublishInputs:
     reach_count: int
     #: 模型变体的 reach 数（真实来源归 #20 / 14.1 接线）。
     variant_reach_count: int
+    #: Optional frozen exact-work claim. Controller paths pass a non-None token.
+    claim: WorkClaim | None = None
 
     #: `Path(yd_root).resolve()`：NFS 侧全部路径与 `containment_root` 的唯一来源。
     root: Path = field(init=False)
@@ -272,6 +281,11 @@ class PublishInputs:
                 f"work_root/source/cycle_id(cycle) = {expected_work}；"
                 "禁止把删除面移到别的 source/cycle 层级（#94 危险删除闸）"
             )
+        if self.claim is not None:
+            try:
+                validate_claim(self.claim, path=self.work_dir)
+            except ClaimLostError as orig:
+                raise PublishError(f"发布前精确 work identity 已漂移：{orig}") from orig
 
     @property
     def next_cycle(self) -> datetime:
@@ -326,6 +340,26 @@ class PublishResult:
 # --- 契约检查 ---
 
 
+def _scratch_stat(inputs: PublishInputs, path: Path) -> os.stat_result:
+    return stat_claimed(inputs.claim, path) if inputs.claim else stat_no_follow(path)
+
+
+def _scratch_read_limited(
+    inputs: PublishInputs, path: Path, *, max_bytes: int
+) -> bytes:
+    if inputs.claim is not None:
+        return read_claimed_bytes(inputs.claim, path, max_bytes=max_bytes)
+    return read_bytes_limited_no_follow(path, max_bytes=max_bytes)
+
+
+def _scratch_read(inputs: PublishInputs, path: Path) -> bytes:
+    return (
+        read_claimed_bytes(inputs.claim, path)
+        if inputs.claim
+        else read_bytes_no_follow(path)
+    )
+
+
 def _stat_or_none(path: Path, *, containment_root: Path) -> os.stat_result | None:
     """存在性探测。不存在返回 `None`；symlink 形态的 `SafeFilesystemError` 由调用方收敛。"""
     try:
@@ -363,10 +397,10 @@ def _check_merged_log(inputs: PublishInputs) -> None:
     """合并日志 MUST 存在、是普通文件、非空——失败时要回收的就是它。"""
     log = inputs.merged_log
     try:
-        info = stat_no_follow(log)
+        info = _scratch_stat(inputs, log)
     except FileNotFoundError as error:
         raise PublishError(f"合并日志 {log} 不存在") from error
-    except (SafeFilesystemError, OSError) as error:
+    except (SafeFilesystemError, OSError, ClaimLostError) as error:
         raise PublishError(f"合并日志 {log} 不可用（{error}）") from error
     if not stat.S_ISREG(info.st_mode):
         raise PublishError(f"合并日志 {log} 不是普通文件（st_mode={info.st_mode:#o}）")
@@ -378,17 +412,17 @@ def _read_dat_head(inputs: PublishInputs) -> tuple[int, int]:
     """有界读 DAT 头部，返回 `(nc, st_size)`。数据区**不**进内存。"""
     dat = inputs.scratch_dat
     try:
-        info = stat_no_follow(dat)
+        info = _scratch_stat(inputs, dat)
     except FileNotFoundError as error:
         raise PublishError(f"DAT {dat} 不存在") from error
-    except (SafeFilesystemError, OSError) as error:
+    except (SafeFilesystemError, OSError, ClaimLostError) as error:
         raise PublishError(f"DAT {dat} 不可用（{error}）") from error
     if not stat.S_ISREG(info.st_mode):
         raise PublishError(f"DAT {dat} 不是普通文件（st_mode={info.st_mode:#o}）")
 
     try:
-        head = read_bytes_limited_no_follow(dat, max_bytes=DAT_FIXED_HEADER_BYTES)
-    except (SafeFilesystemError, OSError) as error:
+        head = _scratch_read_limited(inputs, dat, max_bytes=DAT_FIXED_HEADER_BYTES)
+    except (SafeFilesystemError, OSError, ClaimLostError) as error:
         # `SafeFilesystemError` 是 `RuntimeError`，两个都要列：`open_file_no_follow` 对
         # EACCES/EIO 与 `stat` 到 open 之间被删掉的 ENOENT 竞态都是裸抛 `OSError`。
         raise PublishError(f"DAT {dat} 读取失败（{error}）") from error
@@ -447,8 +481,8 @@ def _check_dat(inputs: PublishInputs) -> int:
     # 第二趟有界读：只到列编号表末尾为止，数据区 MUST NOT 进内存。
     table_end = DAT_FIXED_HEADER_BYTES + _FLOAT64_BYTES * nc
     try:
-        table = read_bytes_limited_no_follow(dat, max_bytes=table_end)
-    except (SafeFilesystemError, OSError) as error:
+        table = _scratch_read_limited(inputs, dat, max_bytes=table_end)
+    except (SafeFilesystemError, OSError, ClaimLostError) as error:
         raise PublishError(f"DAT {dat} 读取失败（{error}）") from error
     if len(table) < table_end:
         raise PublishError(
@@ -477,8 +511,8 @@ def _restamped_bytes(inputs: PublishInputs) -> bytes:
     """
     checkpoint = inputs.scratch_checkpoint
     try:
-        raw = read_bytes_limited_no_follow(checkpoint, max_bytes=MAX_STATE_IC_BYTES)
-    except (SafeFilesystemError, OSError) as error:
+        raw = _scratch_read_limited(inputs, checkpoint, max_bytes=MAX_STATE_IC_BYTES)
+    except (SafeFilesystemError, OSError, ClaimLostError) as error:
         raise PublishError(f"checkpoint {checkpoint} 读取失败（{error}）") from error
     try:
         doc = parse(raw)
@@ -553,6 +587,11 @@ def _check_and_restamp(inputs: PublishInputs) -> tuple[bytes, int]:
 
     次序固定：期望值正数闸（不读文件）-> 重戳（步骤 1）-> DAT/状态/日志/`DONE` 前置。
     """
+    if inputs.claim is not None:
+        try:
+            validate_claim(inputs.claim, path=inputs.work_dir)
+        except ClaimLostError as orig:
+            raise PublishError(f"发布读取前精确 work identity 已漂移：{orig}") from orig
     _check_positive_expectations(inputs)
     payload = _restamped_bytes(inputs)
     dat_size = _check_dat(inputs)
@@ -742,7 +781,7 @@ def _publish_dat(inputs: PublishInputs, expected_size: int) -> None:
     过的 DAT，而 `DONE` 会把它封成正式产物。零额外 IO。用 `PublishError` 而不是 `assert`：
     `assert` 在 `-O` 下整条消失。
     """
-    payload = read_bytes_no_follow(inputs.scratch_dat)
+    payload = _scratch_read(inputs, inputs.scratch_dat)
     if len(payload) != expected_size:
         raise PublishError(
             f"DAT {inputs.scratch_dat} 在契约检查之后被改动：整读得 {len(payload)} 字节，"
@@ -873,11 +912,21 @@ def _remove_work(inputs: PublishInputs) -> None:
     不是 `YD_ROOT`——`work` 不在 `YD_ROOT` 内，传 `YD_ROOT` 会被直接拒。
     """
     work_dir = inputs.work_dir
+    if inputs.claim is None:
+        remove_tree_allow_symlinks(
+            work_dir.parent,
+            work_dir.name,
+            containment_root=inputs.work_root,
+            missing_ok=True,
+        )
+        return
+    validate_claim(inputs.claim, path=work_dir)
     remove_tree_allow_symlinks(
         work_dir.parent,
         work_dir.name,
         containment_root=inputs.work_root,
-        missing_ok=True,
+        missing_ok=False,
+        expected_root_identity=inputs.claim.identity,
     )
 
 
@@ -931,7 +980,7 @@ def publish(inputs: PublishInputs) -> PublishResult:
         ) from error
     try:
         _remove_work(inputs)
-    except (SafeFilesystemError, OSError) as error:
+    except (ClaimLostError, SafeFilesystemError, OSError) as error:
         raise PublishCleanupError(
             f"{inputs.done_path} 已写成（本轮完成），但 work 清理失败：{error}",
             done_path=inputs.done_path,
