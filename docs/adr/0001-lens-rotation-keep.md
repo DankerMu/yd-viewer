@@ -590,3 +590,33 @@ DECIDABLE 仍只表示统计机制要求复议，不是可直接执行的策略�
 
 复议条件未触发：PR #124 的 Round 2 与 Phase 7 都没有重报已关闭 finding；后轮零 catch，不存在连续
 两个 rotated P3 样本。共享 `m2-producer-core` 仍有 14.2/14.3 等后继任务，本次继续不 archive。
+
+---
+
+## 第 16 次复议（issue #27 / PR #126 合并后，2026-09-04）
+
+审计数字：26 行（25 merged、1 terminal），24 个多轮合并 PR，后续轮次命中变为
+**core=125 / rotated=96**。PR #126 的 Round 1 两项净捕获和 Round 2 三项净捕获全部属于
+`test-evidence`；Round 2 的两个 reviewer（test-evidence / invariant-state）都在 Round 1 六人编制中，
+因此三条后轮 catch 全部记为 core。Round 3 在这两个 pinned lens 之外增加 correctness，但 correctness
+同样在 Round 1 编制中；且本轮零 finding，所以本 PR 对 rotated 的增量仍是 0。
+
+这组数字表面上使 core 领先从 26 扩到 29，但本 PR **不能据此支持 cut rotation**。Round 1 的
+`test-evidence` 已看过同一 12 行生产循环，抓到的是终态零收尾与变异来源账本两个粗粒度缺口；Round 2
+同一 lens 再抓到 context-manager 隐式执行、四轮 cap 和 set 去重三个细粒度缺口，差别不是 lens 名称，
+而是修复后审查把对象从「行为是否存在」升级为「oracle 是否能杀死完整反例族」。随后 depth retro 又把
+方法升级为完整有序函数 AST、work/state 双树快照、五轮行为和 14 项来源绑定变异；Phase 6.2 与 Round 3
+给出的 clean closure 同样不会进入 catches。换言之，本 PR 的 core +3 仍是第 10–15 次复议反复记录的
+同一混淆：**方法强度被记到了 reviewer 名下**。
+
+本 PR 也没有给 rotation 提供新的正向样本。Round 3 所谓自由视角 correctness 实际是 Round 1 已存在的
+lens，且没有捕获；没有真正的新 lens，就无法估计「轮入新视角」的边际收益。把 rotated=96 不增长读成
+轮换无用，等于把「未发生轮换」误作「轮换发生但没抓到」。与第 13、15 次复议完全同构。
+
+**决策不变：keep。** 继续保留 pinned core + 条件式 free-slot rotation + 独立终审；不把 125/96
+解释成 keep 的数据支持，也不据此 cut。在日志能区分 reviewer 名称、取证方法、Phase 6.2/编排层 catch、
+以及「未发生轮换」与「轮换发生但零 catch」之前，lens-rotation DECIDABLE 仍只触发人工复议，不自动改变
+策略。默认 keep 符合当前证据不足时优先正确性的规则。
+
+复议条件未触发：Round 3 与 Phase 7 没有重报五项已关闭 finding；Phase 6.2 的唯一二阶加固候选经独立
+verifier 判 REFUTED；没有连续 rotated P3 样本。共享 `m2-producer-core` 仍有 14.3，继续不 archive。
