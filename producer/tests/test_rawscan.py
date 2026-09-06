@@ -1,8 +1,10 @@
 """`yd_producer.rawscan.judge` 完整性判定测试（tasks.md 组 3 任务 3.1）。
 
-全部用例使用**内联合成配置值**：仓库刻意不提供版本化 `config.toml` 生产实例，真实
-`variables`/`bundles`/`lead_hours` 取值归 issue #29。下方的变量名与 bundle 模式只用
-于行使判定规则，不代表生产取值。
+本模块每个用例仍使用**内联合成配置值**。下方的本地变量名、bundle 模式与 lead 取值
+只用于行使本模块的判定规则，不代表生产取值。
+
+版本化生产实例由 `producer/tests/test_config.py` 独立验证；本模块 MUST NOT 从它派生
+oracle（包括配置值、bundle 模式或 lead 取值）。
 
 期望清单一律在用例内**字面构造**（lead 升序 × `bundles` 声明序），不调用被测模块的
 任何辅助函数——否则顺序断言会退化为拿实现自身当 oracle。

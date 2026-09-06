@@ -1,8 +1,8 @@
 """`yd_producer.config` 装载器测试。
 
-全部用例使用内联 TOML 写入 `tmp_path`：仓库刻意不提供版本化 `config.toml` 生产实例，
-也不提供 `local.toml.example`（`raw.*` 的真实取值出自后续 NWM 勘察）。下方 fixture
-中的 `raw` 变量名与 bundle 模式是**合成测试值**，只用于验证 schema，不代表生产取值。
+内联 TOML fixture 写入 `tmp_path`；其中 `raw` 变量名与 bundle 模式是**合成测试值**，
+只用于验证 schema，不代表生产取值。Issue #29 另以 `load_config()` 装载版本化
+`producer/config.toml`，并对照独立字面量账本验证生产规则。
 """
 
 import copy
@@ -22,6 +22,131 @@ from yd_producer.config import (
     LocalConfig,
     load_config,
     load_local,
+)
+from yd_producer.rawscan import (
+    GFS_F000_UNAVAILABLE_VARIABLES,
+    render_bundle_filename,
+)
+
+# --- 版本化生产 config.toml --------------------------------------------------
+
+# 从本测试文件定位仓库内的实际生产文件，不能依赖 pytest/cron 的当前工作目录。
+PRODUCTION_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.toml"
+
+# Issue #29 fixture 的独立字面量账本；不得从生产 TOML 反向生成，也不得用 range 推导。
+EXPECTED_PRODUCTION_GFS_LEAD_HOURS = (
+    0,
+    3,
+    6,
+    9,
+    12,
+    15,
+    18,
+    21,
+    24,
+    27,
+    30,
+    33,
+    36,
+    39,
+    42,
+    45,
+    48,
+    51,
+    54,
+    57,
+    60,
+    63,
+    66,
+    69,
+    72,
+    75,
+    78,
+    81,
+    84,
+    87,
+    90,
+    93,
+    96,
+    99,
+    102,
+    105,
+    108,
+    111,
+    114,
+    117,
+    120,
+    123,
+    126,
+    129,
+    132,
+    135,
+    138,
+    141,
+    144,
+    147,
+    150,
+    153,
+    156,
+    159,
+    162,
+    165,
+    168,
+)
+EXPECTED_PRODUCTION_IFS_LEAD_HOURS = (
+    0,
+    3,
+    6,
+    9,
+    12,
+    15,
+    18,
+    21,
+    24,
+    27,
+    30,
+    33,
+    36,
+    39,
+    42,
+    45,
+    48,
+    51,
+    54,
+    57,
+    60,
+    63,
+    66,
+    69,
+    72,
+    75,
+    78,
+    81,
+    84,
+    87,
+    90,
+    93,
+    96,
+    99,
+    102,
+    105,
+    108,
+    111,
+    114,
+    117,
+    120,
+    123,
+    126,
+    129,
+    132,
+    135,
+    138,
+    141,
+    144,
+    150,
+    156,
+    162,
+    168,
 )
 
 # --- 内联 TOML fixture -------------------------------------------------------
@@ -385,6 +510,106 @@ def _with(data: Mapping[str, Any], dotted_key: str, value: Any) -> dict[str, Any
 def _loaded_config(tmp_path: Path, data: Mapping[str, Any] | None = None) -> Config:
     return load_config(
         _write_toml(tmp_path / "config.toml", VALID_CONFIG if data is None else data)
+    )
+
+
+# --- 版本化生产实例 -----------------------------------------------------------
+
+
+def test_production_config_matches_issue_29_literal_ledger():
+    """仓库内生产规则逐字段等于 Issue #29 的独立字面量账本。"""
+    config = load_config(PRODUCTION_CONFIG_PATH)
+
+    assert config.forecast_days == 7
+    assert config.output_interval_minutes == 60
+    assert config.checkpoint_hours == (12,)
+    assert config.reach_count == 3988
+    assert config.nwm_mapping_builder_module == "workers.mapping_builder.cli"
+    assert config.nwm_canonical_grid_id.gfs == "gfs_0p25"
+    assert config.nwm_canonical_grid_id.ifs == "ifs_0p25"
+    assert config.cycle.hours == (0, 12)
+    assert config.variants.gfs == "input/models/yd_gfs"
+    assert config.variants.ifs == "input/models/yd_ifs"
+    assert config.raw.gfs.lead_hours == EXPECTED_PRODUCTION_GFS_LEAD_HOURS
+    assert config.raw.ifs.lead_hours == EXPECTED_PRODUCTION_IFS_LEAD_HOURS
+    assert config.raw.gfs.variables == (
+        "tmp2m",
+        "apcp",
+        "rh2m",
+        "u10m",
+        "v10m",
+        "pressfc",
+        "dswrf",
+    )
+    assert config.raw.ifs.variables == (
+        "2t",
+        "2d",
+        "10u",
+        "10v",
+        "tp",
+        "sp",
+        "ssr",
+        "str",
+    )
+    assert config.raw.gfs.bundles == (
+        "gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2",
+    )
+    assert config.raw.ifs.bundles == ("ifs.t{cycle_hour}z.f{lead}.bundle.grib2",)
+    assert config.raw.gfs.f000_special is True
+    assert config.raw.ifs.f000_special is False
+    assert config.slurm.required_fields == (
+        "partition",
+        "account",
+        "cpus",
+        "memory",
+        "walltime",
+    )
+
+
+def test_production_gfs_f000_unavailable_variables_are_configured():
+    config = load_config(PRODUCTION_CONFIG_PATH)
+
+    assert GFS_F000_UNAVAILABLE_VARIABLES <= set(config.raw.gfs.variables)
+
+
+def test_production_bundle_patterns_render_pin_terminal_names():
+    config = load_config(PRODUCTION_CONFIG_PATH)
+
+    assert (
+        render_bundle_filename(
+            config.raw.gfs.bundles[0],
+            cycle_hour=0,
+            lead=0,
+            config_path="raw.gfs.bundles",
+        )
+        == "gfs.t00z.pgrb2.0p25.f000.bundle.grib2"
+    )
+    assert (
+        render_bundle_filename(
+            config.raw.gfs.bundles[0],
+            cycle_hour=12,
+            lead=168,
+            config_path="raw.gfs.bundles",
+        )
+        == "gfs.t12z.pgrb2.0p25.f168.bundle.grib2"
+    )
+    assert (
+        render_bundle_filename(
+            config.raw.ifs.bundles[0],
+            cycle_hour=0,
+            lead=0,
+            config_path="raw.ifs.bundles",
+        )
+        == "ifs.t00z.f000.bundle.grib2"
+    )
+    assert (
+        render_bundle_filename(
+            config.raw.ifs.bundles[0],
+            cycle_hour=12,
+            lead=168,
+            config_path="raw.ifs.bundles",
+        )
+        == "ifs.t12z.f168.bundle.grib2"
     )
 
 

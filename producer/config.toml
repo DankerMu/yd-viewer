@@ -1,0 +1,42 @@
+# 业务时间轴：docs/compute-loop-design.md §5；0–7 天和 60 分钟同时由 docs/products-contract.md §5.2 交叉证明。
+forecast_days = 7
+output_interval_minutes = 60
+checkpoint_hours = [12]
+
+# 河网规模：docs/products-contract.md §5.1。
+reach_count = 3988
+
+# NWM@8ae9b8f2 快照事实：openspec/changes/m2-producer-core/nwm-snapshot-inventory.md §3.1；pin workers/mapping_builder/cli.py。
+nwm_mapping_builder_module = "workers.mapping_builder.cli"
+
+# NWM@8ae9b8f2 canonical grid 身份：inventory §3.1；pin canonical/gfs/grid/gfs_0p25/grid.json 与 canonical/IFS/grid/ifs_0p25/grid.json。
+[nwm_canonical_grid_id]
+gfs = "gfs_0p25"
+ifs = "ifs_0p25"
+
+# 起报时刻：docs/compute-loop-design.md §5、§7.1。
+[cycle]
+hours = [0, 12]
+
+# 相对 yd_root 的模型变体：docs/compute-loop-design.md §5、§6.1。
+[variants]
+gfs = "input/models/yd_gfs"
+ifs = "input/models/yd_ifs"
+
+# GFS raw 规则：docs/compute-loop-design.md §7.1；NWM@8ae9b8f2 inventory §3.1，pin workers/data_adapters/gfs_adapter.py。
+[raw.gfs]
+lead_hours = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90, 93, 96, 99, 102, 105, 108, 111, 114, 117, 120, 123, 126, 129, 132, 135, 138, 141, 144, 147, 150, 153, 156, 159, 162, 165, 168]
+variables = ["tmp2m", "apcp", "rh2m", "u10m", "v10m", "pressfc", "dswrf"]
+bundles = ["gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2"]
+f000_special = true
+
+# IFS raw 规则：docs/compute-loop-design.md §7.1；NWM@8ae9b8f2 inventory §3.1，pin workers/data_adapters/ifs_adapter.py。
+[raw.ifs]
+lead_hours = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90, 93, 96, 99, 102, 105, 108, 111, 114, 117, 120, 123, 126, 129, 132, 135, 138, 141, 144, 150, 156, 162, 168]
+variables = ["2t", "2d", "10u", "10v", "tp", "sp", "ssr", "str"]
+bundles = ["ifs.t{cycle_hour}z.f{lead}.bundle.grib2"]
+f000_special = false
+
+# Slurm 资源字段结构：docs/compute-loop-design.md §5；现场值仍只属于未跟踪 local.toml。
+[slurm]
+required_fields = ["partition", "account", "cpus", "memory", "walltime"]
