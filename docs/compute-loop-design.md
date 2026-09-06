@@ -328,7 +328,9 @@ SHUD 会反复覆盖同一个 `<project>.cfg.ic.update`：当模型时间为 720
 5. 参数文件在补跑调用结束后恢复为主跑的原始 bytes，同一初态与 forcing 在补跑前后 checksum 不变；
 6. 补跑仍失败则整轮失败，不写状态和 `DONE`。
 
-一次 scratch work 只服务一次 Slurm attempt：tracker 的已捕获 authority 是该 attempt 内的内存记录与其 checksum，不能靠 `state_checkpoints/` 下某个规范文件名存在来恢复。重排队、进程重启或下次 cron 重试必须删除并重新组装整棵 work；若新实例在旧 work 中看到同名 checkpoint 或 recovery 目录，只能把它当作未验证残留，保留证据并 fail closed，既不能采纳，也不能覆盖/删除。配置的产品目标必须恰为 `checkpoint_hours=[12]`；`[720]` 这类小时/分钟混淆在启动补跑前响亮失败。
+一次 scratch work 只服务一次 Slurm attempt：tracker 的已捕获 authority 是该 attempt 内的内存记录与其 checksum，不能靠 `state_checkpoints/` 下某个规范文件名存在来恢复。唯一授权的跨进程交接是**仍在运行的同一 controller attempt** 对自己提交的 Slurm worker receipt 做完 source/cycle/work/job/`WorkIdentity` 信封校验后，把 receipt 明示的 `CapturedCheckpoint` 五字段交给 tracker owner 的 `import_verified_checkpoint(*, tracker, record)`。该 seam 仍要求目标恰为 `(12,)`，并对精确 canonical 路径作有界 no-follow 回读，重验五字段、SHA-256、relative-720 header 与原生分段结构；全通过后才把传入的同一对象记为 `captured[12]`。随后 controller 仍调用 `ensure_twelve_hour_checkpoint` 对同一对象再做 point-of-use 重验，runner 为零调用。receipt record 是必要输入而不是充分证明；tracker 不拥有也不伪装验证其信封。
+
+这条交接不是 crash recovery。重排队、controller 进程重启、下次 cron 或另一个 attempt 没有原 controller 的在途 attempt/terminal-job identity，不得从旧 receipt、规范文件名或目录扫描调用该 seam 恢复 `_captured`；仍按 §10–11 的既有 work 残留/人工闸保留证据并 fail closed，运维排除在途后移走旧 work，下一次才重新组装。未显式导入 record 的 fresh tracker 在旧 work 中看到同名 checkpoint 或 recovery 目录，仍只能把它当作未验证残留，既不能采纳，也不能覆盖/删除。配置的产品目标必须恰为 `checkpoint_hours=[12]`；`[720]` 这类小时/分钟混淆在启动补跑前响亮失败。
 
 tracker 不按 pathname 删除任何 canonical checkpoint，包括本调用 O_EXCL 创建后校验或回读失败的条目。O_EXCL 只能证明创建瞬间的所有权，无法证明竞争者未在随后替换同名 entry；现有文件原语也没有 identity-conditional unlink。失败条目保留为未验证残留、不得成为 authority，并阻断同一 work 内重试；整棵 work 仍由控制器在整轮失败收尾时统一删除。
 
