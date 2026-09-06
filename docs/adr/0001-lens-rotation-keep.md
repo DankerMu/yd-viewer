@@ -752,3 +752,27 @@ high 桶现在有 10 个 merged PR、累计 `gate_net_catch=49`。本次零 catc
 
 复议条件未触发：不存在后续综合轮、rotated catch 或已关闭 finding 重报。共享 `m2-producer-core` 仍承载
 #32、#72、#48、#46 及其它后继任务，本次继续不 archive。
+
+---
+
+## 第 22 次复议（issue #135 fixture / PR #144 合并后，2026-09-06）
+
+审计数字：32 行（31 merged、1 terminal），26 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #144 是 `fixture:none` 的 docs-only 前置，`rounds=0`；Phase 0.5
+fixture reviewer 的 revise/pass 与 base 漂移后的 fresh review 都不属于代码综合轮。因此本样本不进入
+rotation attribution，也不改变 core/rotated 数字。
+
+`none` 桶现在有 3 个 merged PR、累计 `gate_net_catch=0`，尚未达到 8 个样本的 keep/cut 门槛；即使
+未来达到，也只用于裁定 docs-only 路径，不可外推到 #135 后继代码 PR 的 high-tier 席位。该代码 PR 仍按
+fixture 的 expanded/high 执行完整 review loop。
+
+本 PR 的有效信号是 pre-merge hard gate，而不是 lens rotation：旧 SHA 已全绿且 fixture review pass 后，
+`master` 合入 #31，改变同一 `tasks.md` 与 `LocalConfig.slurm` 权威契约。hard gate 正确阻断了旧 base；重新
+rebase、语义 reconciliation、fresh review 与新 CI 后才合并。它证明 SHA/base 完整性门禁有价值，但对后轮
+free-slot rotation 的正反证均为零。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；
+不把零轮次 docs-only 样本计作“轮换发生但零收益”。累计 rotated 捕获仍显著，证据不足时默认 keep。
+
+复议条件未触发：不存在综合轮、rotated catch、verifier candidate 或已关闭 finding 重报。共享
+`m2-producer-core` 仍服务 #135、#136、#137 与 #132，本次继续不 archive。
