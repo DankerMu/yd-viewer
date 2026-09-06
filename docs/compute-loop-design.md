@@ -152,6 +152,8 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 - `checkpoint_hours=[12]`；
 - Slurm 资源配置字段结构。
 
+装载器在读取上述规则时必须先校验三条值域：`cycle.hours ⊆ {0,12}`、`forecast_days > 0`、`checkpoint_hours ⊆ [0, 24 * forecast_days)`；失败以对应点分路径的 `ConfigError` 拒绝。其它取值域仍由各自业务边界负责，不在此扩张装载器职责。
+
 不入库的 `local.toml` 只保存现场值：
 
 - `yd_root`；

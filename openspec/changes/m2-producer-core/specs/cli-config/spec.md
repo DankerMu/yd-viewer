@@ -39,7 +39,9 @@
 - **THEN** 退出码分别为 `0`、`3`、`3`、`3`、`3`、`2`，stderr 不含 traceback；锁已被持有时以 `0` 跳过且零 controller 调用
 
 ### Requirement: config.toml 装载与校验
-装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构、NWM mapping-builder module 点分名 `nwm_mapping_builder_module` 与每 source 的 NWM canonical grid 标识 `nwm_canonical_grid_id.gfs`/`.ifs`（两者均为版本化快照事实，非现场值）；任何必需字段缺失或类型错误 MUST fail closed。装载器只校验存在性与类型，MUST NOT 做取值域校验（取值域约束归各自的下游 fail-closed 闸门）。
+装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构、NWM mapping-builder module 点分名 `nwm_mapping_builder_module` 与每 source 的 NWM canonical grid 标识 `nwm_canonical_grid_id.gfs`/`.ifs`（两者均为版本化快照事实，非现场值）；任何必需字段缺失或类型错误 MUST fail closed。
+
+装载器还 MUST 且只 MUST 在本裁决中认领三条取值域：`cycle.hours` 的每个值都属于 `{0,12}`、`forecast_days > 0`、`checkpoint_hours` 的每个值满足 `0 <= hour < 24 * forecast_days`。违反时抛 `ConfigError`，其结构化 `path` 分别为 `cycle.hours`、`forecast_days`、`checkpoint_hours`。其它取值域仍归既有下游 owner，不得借本 Requirement 擅自迁入装载器。
 
 #### Scenario: 完整配置装载成功
 - **WHEN** 载入包含全部必需字段的 `config.toml`
@@ -48,6 +50,10 @@
 #### Scenario: 缺失必需字段即报错
 - **WHEN** 载入缺少 `forecast_days` 的 `config.toml`
 - **THEN** 装载器报错并指明缺失字段名，不返回带默认值的配置
+
+#### Scenario: 三条取值域在装载边界 fail closed
+- **WHEN** `cycle.hours` 含非 00/12、`forecast_days <= 0`，或 `checkpoint_hours` 含小于 0 / 大于等于 `24 * forecast_days` 的值
+- **THEN** 装载器抛 `ConfigError`，`path` 精确指向对应字段，不返回配置对象；checkpoint 上界随 `forecast_days` 改变，不写死 168
 
 ### Requirement: local.toml 现场值不得猜测
 装载器 MUST 从 gitignored `local.toml` 读取现场值（`yd_root`、`scratch_root`、NWM raw 根、NWM checkout 根与解释器路径（仅 prepare）、SHUD 二进制、Slurm partition/account/CPU/内存/walltime、cron lock 与日志位置）；文件缺失或字段缺失 MUST 明确报错，代码中 MUST NOT 内置任何现场默认值。`LocalConfig.slurm` MUST 以只读 `Mapping[str, str | int]` 暴露，装载器复制校验后的值并用 `types.MappingProxyType` 冻结；调用方不得通过该字段增删改资源配置。键集的唯一权威仍是 `Config.slurm.required_fields`，不得改成固定 Slurm 字段 dataclass。
