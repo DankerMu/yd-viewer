@@ -649,3 +649,33 @@ method-change audit 的正向发现，也看不见 CI 诊断与 clean-closure �
 
 复议条件未触发：Round 2 与两次 Phase 7 均未重报已关闭 finding；没有任何后轮 rotated catch，
 因此不存在连续两个 rotated P3 样本。共享 `m2-producer-core` 仍服务后继 M2 任务，本次继续不 archive。
+
+---
+
+## 第 18 次复议（issue #52 / PR #133 合并后，2026-09-06）
+
+审计数字：28 行（27 merged、1 terminal），26 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #133 的 Round 1 有 1 条经独立 verifier 确认的 P1/FIX_NOW；
+Round 2 三席零候选，因此对 later-round catch 的数值增量为 **core +0 / rotated +0**。
+
+与第 17 次复议不同，本 PR 确实发生了一次真实轮换：Round 1 为 correctness、
+`test-evidence+spec-compliance`、integration；Round 2 保留前两席作为 pinned core，并在上一轮 major
+信号下轮入 Round 1 未出现的 invariant-state。该 rotating lens 完整追踪了 config → judge → verdict →
+rawcopy → manifest → init/controller 的身份与错误顺序，结论 clean，没有新增 finding。故本样本应如实记为
+“一次发生轮换但零 catch”，不能再归入“没有发生轮换”的缺数据桶。
+
+这一条零收益样本仍不足以支持 cut。累计 rotated 后轮捕获为 96，并非接近零；当前决策规则也没有把单次
+clean 轮当作反证——修复后复审本来就应大量 clean。更关键的是，本 PR 的唯一净捕获来自 Round 1
+spec-compliance 对**组合输入**的审查：绝对 `tmp_path` 下的零文件系统断言没有覆盖相对 `raw_root` 的
+`Path.cwd()` 前置原语。修复后轮换席验证了该缺口没有沿身份链转移，这属于 closure value，但现有
+`catches` 指标只计新 finding，无法给 clean closure 记正收益。用这一不对称指标的单个 0 去否定轮换，
+会把“没有第二个 bug”误当成“没有验证价值”。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审。
+本次把“真实轮换但零 catch”明确记为一个零收益样本，但不据此修改策略；只有后续形成连续、同条件、
+真实轮入新 lens 且持续零 catch 的样本，或累计归因显示 rotated 收益实质归零，才重新考虑 cut。
+证据不足时默认 keep，符合当前工作流优先正确性的规则。
+
+复议条件未触发：显式 Sonnet Round 2 与 Phase 7 均未重报已关闭的 C1；rotating invariant-state 没有
+产生 P2/P3 finding，更不存在连续两个 rotated P3 样本。共享 `m2-producer-core` 仍服务 #29 等后继
+M2 任务，本次继续不 archive。
