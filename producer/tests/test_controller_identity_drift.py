@@ -21,6 +21,7 @@ from controller_sources_fixtures import (
     DualBarrier,
     FailureLogHook,
     RecordingProvider,
+    TerminalHookGate,
     copy_replace_named_directory,
     cycle_outcomes,
     done_path,
@@ -271,8 +272,9 @@ def test_publish_scratch_read_before_done_rejects_replaced_root(
         return original(inputs)
 
     monkeypatch.setattr(publish_module, "publish", swapping_publish)
-    ifs_driver, ifs_exec = hooked_success_cycles("ifs", (CYCLE_T, CYCLE_T12))
-    gfs_driver, gfs_exec = hooked_success_cycles("gfs", (CYCLE_T, CYCLE_T12))
+    gate = TerminalHookGate()
+    ifs_driver, ifs_exec = hooked_success_cycles("ifs", (CYCLE_T, CYCLE_T12), gate=gate)
+    gfs_driver, gfs_exec = hooked_success_cycles("gfs", (CYCLE_T, CYCLE_T12), gate=gate)
     with pytest.raises(RunSourcesError) as info:
         run_sources(
             config=config,
@@ -297,6 +299,7 @@ def test_publish_scratch_read_before_done_rejects_replaced_root(
     assert cycle_outcomes(gfs) == _gfs_two_outcomes()
     assert done_path(local, "gfs").is_file()
     assert done_path(local, "gfs", T_PLUS_12_TEXT).is_file()
+    assert gate.max_active == 1
 
 
 def test_done_then_root_replacement_is_cleanup_pending(
@@ -318,8 +321,9 @@ def test_done_then_root_replacement_is_cleanup_pending(
         return original(inputs)
 
     monkeypatch.setattr(publish_module, "_remove_work", swapping_remove)
-    ifs_driver, ifs_exec = hooked_success_cycles("ifs", (CYCLE_T,))
-    gfs_driver, gfs_exec = hooked_success_cycles("gfs", (CYCLE_T, CYCLE_T12))
+    gate = TerminalHookGate()
+    ifs_driver, ifs_exec = hooked_success_cycles("ifs", (CYCLE_T,), gate=gate)
+    gfs_driver, gfs_exec = hooked_success_cycles("gfs", (CYCLE_T, CYCLE_T12), gate=gate)
     report = run_sources(
         config=config,
         local=local,
@@ -341,6 +345,7 @@ def test_done_then_root_replacement_is_cleanup_pending(
     assert (replacement / REPLACEMENT_NAME).read_bytes() == REPLACEMENT_MARKER
     assert inode_pair(replacement) == planted["inode"]
     assert cycle_outcomes(gfs) == _gfs_two_outcomes()
+    assert gate.max_active == 1
 
 
 def test_remove_tree_identity_mismatch_is_kind_identity_changed(
@@ -588,8 +593,9 @@ def test_publish_first_scratch_read_after_validate_does_not_ingest_replacement(
 
     monkeypatch.setattr(publish_module, "_restamped_bytes", swapping_restamp)
     monkeypatch.setattr(publish_module, "read_bytes_limited_no_follow", tracking_read)
-    ifs_driver, ifs_exec = hooked_success_cycles("ifs", (CYCLE_T,))
-    gfs_driver, gfs_exec = hooked_success_cycles("gfs", (CYCLE_T, CYCLE_T12))
+    gate = TerminalHookGate()
+    ifs_driver, ifs_exec = hooked_success_cycles("ifs", (CYCLE_T,), gate=gate)
+    gfs_driver, gfs_exec = hooked_success_cycles("gfs", (CYCLE_T, CYCLE_T12), gate=gate)
     with pytest.raises(RunSourcesError) as info:
         _run_dual(
             config,
@@ -613,6 +619,7 @@ def test_publish_first_scratch_read_after_validate_does_not_ingest_replacement(
     assert cycle_outcomes(gfs) == _gfs_two_outcomes()
     assert done_path(local, "gfs").is_file()
     assert done_path(local, "gfs", T_PLUS_12_TEXT).is_file()
+    assert gate.max_active == 1
 
 
 def test_rawcopy_target_open_after_mkdir_does_not_write_replaced_root(
@@ -768,8 +775,9 @@ def test_collect_stat_after_terminal_does_not_touch_replaced_root(
         run_mod, "_require_terminal_artifacts_pre_collect", swapping_require
     )
     monkeypatch.setattr(run_mod.safe_fs, "stat_no_follow", tracking_stat)
-    ifs_driver, ifs_exec = hooked_success_cycles("ifs", (CYCLE_T,))
-    gfs_driver, gfs_exec = hooked_success_cycles("gfs", (CYCLE_T, CYCLE_T12))
+    gate = TerminalHookGate()
+    ifs_driver, ifs_exec = hooked_success_cycles("ifs", (CYCLE_T,), gate=gate)
+    gfs_driver, gfs_exec = hooked_success_cycles("gfs", (CYCLE_T, CYCLE_T12), gate=gate)
     with pytest.raises(RunSourcesError) as info:
         _run_dual(
             config,
@@ -791,3 +799,4 @@ def test_collect_stat_after_terminal_does_not_touch_replaced_root(
     gfs = require_source_tuple(error.reports["gfs"], "gfs")
     assert cycle_outcomes(gfs) == _gfs_two_outcomes()
     assert not done_path(local, "ifs").exists()
+    assert gate.max_active == 1

@@ -43,12 +43,29 @@ from yd_producer.controller import RunOutcome, RunSourcesError, run_sources
 from yd_producer.executor import FakeJobExecutor, FakeOutcome, JobState
 
 
-def _gfs_catch_up(local, *, barrier: DualBarrier | None = None):
+class _RecordingTerminalHookGate(TerminalHookGate):
+    """Count full terminal-hook bodies routed through the caller's shared gate."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._calls_lock = threading.Lock()
+        self.calls = 0
+
+    def run(self, body) -> None:
+        with self._calls_lock:
+            self.calls += 1
+        super().run(body)
+
+
+def _gfs_catch_up(
+    local, *, gate: TerminalHookGate | None, barrier: DualBarrier | None = None
+):
     plant_raw_cycles(local, "gfs", (CYCLE_T12, CYCLE_T24))
     return hooked_success_cycles(
         "gfs",
         (CYCLE_T, CYCLE_T12, CYCLE_T24),
         barrier=barrier,
+        gate=gate,
         wait_for_peer=barrier is not None,
     )
 
@@ -91,13 +108,14 @@ def _later_fail_executor(
     source: str,
     *,
     state: JobState,
+    gate,
     barrier: DualBarrier | None = None,
 ):
     fake = _later_fail_fake(source, state=state)
     driver, hook_state, slot = success_driver()
     from controller_sources_fixtures import success_hook
 
-    success = success_hook(slot, hook_state)
+    success = success_hook(slot, hook_state, gate=gate)
     fail = FailureLogHook(
         local,
         source,
@@ -129,10 +147,11 @@ def test_later_round_job_failure_keeps_prior_success(
     config, local = write_dual_tree(tmp_path)
     plant_raw_cycles(local, "ifs", (CYCLE_T12,))
     barrier = DualBarrier()
+    gate = _RecordingTerminalHookGate()
     ifs_driver, ifs_exec = _later_fail_executor(
-        local, "ifs", state=final_state, barrier=barrier
+        local, "ifs", state=final_state, gate=gate, barrier=barrier
     )
-    gfs_driver, gfs_exec = _gfs_catch_up(local, barrier=barrier)
+    gfs_driver, gfs_exec = _gfs_catch_up(local, gate=gate, barrier=barrier)
     provider = RecordingProvider("ifs", "77:1")
     report = run_sources(
         config=config,
@@ -174,6 +193,8 @@ def test_later_round_job_failure_keeps_prior_success(
     assert done_path(local, "ifs").is_file()
     assert not done_path(local, "ifs", T_PLUS_12_TEXT).exists()
     assert cycle_outcomes(gfs) == _gfs_full_outcomes()
+    assert gate.calls == 4
+    assert gate.max_active == 1
 
 
 @pytest.mark.parametrize(
@@ -191,10 +212,11 @@ def test_later_round_invalid_provider_keeps_prior_success(
     config, local = write_dual_tree(tmp_path)
     plant_raw_cycles(local, "ifs", (CYCLE_T12,))
     barrier = DualBarrier()
+    gate = _RecordingTerminalHookGate()
     ifs_driver, ifs_exec = _later_fail_executor(
-        local, "ifs", state=JobState.FAILED, barrier=barrier
+        local, "ifs", state=JobState.FAILED, gate=gate, barrier=barrier
     )
-    gfs_driver, gfs_exec = _gfs_catch_up(local, barrier=barrier)
+    gfs_driver, gfs_exec = _gfs_catch_up(local, gate=gate, barrier=barrier)
     with pytest.raises(RunSourcesError) as info:
         run_sources(
             config=config,
@@ -218,6 +240,8 @@ def test_later_round_invalid_provider_keeps_prior_success(
     assert done_path(local, "ifs").is_file()
     gfs = require_source_tuple(error.reports["gfs"], "gfs")
     assert cycle_outcomes(gfs) == _gfs_full_outcomes()
+    assert gate.calls == 4
+    assert gate.max_active == 1
 
 
 def test_later_round_log_and_delete_failures_keep_later_job_identity(
@@ -236,10 +260,11 @@ def test_later_round_log_and_delete_failures_keep_later_job_identity(
 
     monkeypatch.setattr(cleanup_module, "finalize_failed_job", log_fail)
     barrier = DualBarrier()
+    gate = _RecordingTerminalHookGate()
     ifs_driver, ifs_exec = _later_fail_executor(
-        local, "ifs", state=JobState.FAILED, barrier=barrier
+        local, "ifs", state=JobState.FAILED, gate=gate, barrier=barrier
     )
-    gfs_driver, gfs_exec = _gfs_catch_up(local, barrier=barrier)
+    gfs_driver, gfs_exec = _gfs_catch_up(local, gate=gate, barrier=barrier)
     with pytest.raises(RunSourcesError) as info:
         run_sources(
             config=config,
@@ -261,6 +286,8 @@ def test_later_round_log_and_delete_failures_keep_later_job_identity(
     assert not failure_log_path(local, "ifs", T_PLUS_12_TEXT).exists()
     gfs = require_source_tuple(error.reports["gfs"], "gfs")
     assert cycle_outcomes(gfs) == _gfs_full_outcomes()
+    assert gate.calls == 4
+    assert gate.max_active == 1
 
 
 def test_later_round_work_delete_failure_keeps_later_log(
@@ -280,10 +307,11 @@ def test_later_round_work_delete_failure_keeps_later_log(
 
     monkeypatch.setattr(cleanup_module, "finalize_failed_job", work_fail)
     barrier = DualBarrier()
+    gate = _RecordingTerminalHookGate()
     ifs_driver, ifs_exec = _later_fail_executor(
-        local, "ifs", state=JobState.FAILED, barrier=barrier
+        local, "ifs", state=JobState.FAILED, gate=gate, barrier=barrier
     )
-    gfs_driver, gfs_exec = _gfs_catch_up(local, barrier=barrier)
+    gfs_driver, gfs_exec = _gfs_catch_up(local, gate=gate, barrier=barrier)
     with pytest.raises(RunSourcesError) as info:
         run_sources(
             config=config,
@@ -304,6 +332,8 @@ def test_later_round_work_delete_failure_keeps_later_log(
     assert failure_log_path(local, "ifs", T_PLUS_12_TEXT).is_file()
     gfs = require_source_tuple(error.reports["gfs"], "gfs")
     assert cycle_outcomes(gfs) == _gfs_full_outcomes()
+    assert gate.calls == 4
+    assert gate.max_active == 1
 
 
 def test_two_sources_fail_at_different_rounds_keep_independent_identity(
@@ -313,8 +343,9 @@ def test_two_sources_fail_at_different_rounds_keep_independent_identity(
     plant_raw_cycles(local, "ifs", (CYCLE_T12,))
     plant_raw_cycles(local, "gfs", (CYCLE_T12, CYCLE_T24))
     barrier = DualBarrier()
+    gate = _RecordingTerminalHookGate()
     ifs_driver, ifs_exec = _later_fail_executor(
-        local, "ifs", state=JobState.FAILED, barrier=barrier
+        local, "ifs", state=JobState.FAILED, gate=gate, barrier=barrier
     )
     gfs_fake = FakeJobExecutor(
         outcomes={
@@ -364,6 +395,13 @@ def test_two_sources_fail_at_different_rounds_keep_independent_identity(
     assert not done_path(local, "gfs").exists()
 
 
+def test_later_failure_helpers_require_the_shared_gate() -> None:
+    with pytest.raises(TypeError):
+        _later_fail_executor(None, "ifs", state=JobState.FAILED)
+    with pytest.raises(TypeError):
+        _gfs_catch_up(None)
+
+
 def test_mapping_snapshot_uses_original_provider_on_later_failure(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -371,9 +409,9 @@ def test_mapping_snapshot_uses_original_provider_on_later_failure(
     plant_raw_cycles(local, "ifs", (CYCLE_T12,))
     plant_raw_cycles(local, "gfs", (CYCLE_T12, CYCLE_T24))
     entered = DualBarrier()
-    gate = TerminalHookGate()
+    gate = _RecordingTerminalHookGate()
     ifs_driver, ifs_exec = _later_fail_executor(
-        local, "ifs", state=JobState.FAILED, barrier=entered
+        local, "ifs", state=JobState.FAILED, gate=gate, barrier=entered
     )
     gfs_driver, gfs_exec = hooked_success_cycles(
         "gfs",
@@ -441,5 +479,7 @@ def test_mapping_snapshot_uses_original_provider_on_later_failure(
     assert header["job_id"] == ifs[1].job.job_id
     assert header["exit_code"] == "55:9"
     assert body == IFS_RAW_LOG
+    assert gate.calls == 4
+    assert gate.max_active == 1
     for sentinel in sentinels.values():
         assert sentinel.calls == []
