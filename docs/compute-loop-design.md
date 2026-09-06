@@ -336,7 +336,7 @@ cron 每小时调用 `yd-producer run` 的非阻塞 `flock` 包装：
 8. 为每源最多组装一个 work 并提交一个 Slurm 作业；raw staging、作业产物读取、失败收尾与成功发布都必须重验同一个 ownership token，不能从后来可能重绑的 pathname 重新推导所有权；
 9. IFS/GFS 作业可并行，控制器等待两者；同一 tick 的 NFS publish 串行，避免两源同时创建/放宽共享 `output/<T>/` 层级；共享 scratch 祖先不进任一 source 的 staging rollback 账本；
 10. 成功源发布后以前沿规则立即推进到下一个 cycle，直到追到最新完整 raw；
-11. 某源作业明确返回 `FAILED`/`TIMEOUT` 后，控制器以该 job 的显式退出码先提交唯一失败日志、再只删除 ownership token 仍匹配的精确 work；本次停止该源，另一源继续追赶；
+11. 某源作业明确返回 `FAILED`/`TIMEOUT` 后，独立失败收尾 provider 对同一 job ID 恰执行一次 `sacct -j <job_id> -n -P --format=ExitCode`；轮询通道不取 `ExitCode`，`JobRecord` 七字段不变。控制器把所得字符串作为 `FailureInputs.exit_code`，先提交唯一失败日志、再只删除 ownership token 仍匹配的精确 work；本次停止该源，另一源继续追赶；
 12. 下次 cron 对已完成失败收尾的 cycle 从干净 work 重试一次。
 
 raw 一次补齐多轮时按时序全补；中间永久缺轮时停在缺口，运维人员补齐原始资料后自动继续。不自动跳过 cycle。
@@ -375,7 +375,7 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 
 - 不写 `DONE`；
 - 不推进状态链；
-- 从显式 job 退出码提供者取得同一 job 的退出码，不从终态枚举猜测；
+- 由 MUST 注入的失败收尾 provider 对同一 job ID 恰执行一次 `sacct -j <job_id> -n -P --format=ExitCode`，所得非空字符串作为 `FailureInputs.exit_code`；轮询通道不取 `ExitCode`，不从终态枚举猜测，`JobRecord` 七字段不变；
 - 把完整 stdout/stderr、命令、开始/结束时间和退出码合成一份 `logs/<source>/<T>.log`；
 - 日志提交成功后，只在 ownership token 仍匹配时删除整个精确 scratch work；若日志已提交但 work identity 已漂移，保留日志与当前 work，报告 cleanup error，不把 replacement 当成本 attempt 删除；
 - 下次 cron 干净重跑。进程崩溃留下、无法证明没有孤儿作业的 work 不走此自动删除路径，而是停源待人工确认。

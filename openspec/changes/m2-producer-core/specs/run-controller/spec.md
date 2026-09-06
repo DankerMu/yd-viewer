@@ -118,7 +118,7 @@ run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过�
 
 两源都正常返回时，`run_sources` MUST 返回 frozen、keyword-only 的 `RunSourcesReport(ifs: tuple[RunReport, ...], gfs: tuple[RunReport, ...])`。两个 tuple 都至少一项，按该源轮次顺序排列，所有非末项 MUST 为 `SUCCEEDED`，末项 MUST 为首次非 `SUCCEEDED`；每项 `source` 必须与字段一致。任一 worker 抛出 `RunError` 时，MUST 在两源都结束后抛 `RunSourcesError(RuntimeError)`；其 `reports: Mapping[str, tuple[RunReport, ...]]` 是构造时取得、精确含 `{ifs,gfs}` 的不可变快照，tuple 可为空；其 `errors: Mapping[str, RunError]` 是构造时取得的非空、不可变 source 子集。同一 source MAY 同时在 `reports` 中有此前成功轮并在 `errors` 中有最终异常；错误文本 MUST 按 `ifs`、`gfs` 固定顺序列出。组合层 MUST NOT 丢弃异常前已完成的报告或兄弟源的完整报告序列。
 
-`FAILED`/`TIMEOUT` 的自动失败收尾只属于 `run_sources` 路径：它 MUST 只调用本源 `failure_exit_codes[source]`，并把同一 terminal `JobRecord` 交给 provider；provider 的返回必须是 nonblank `str`，原值交给 `finalize_failed_job`。provider 或失败收尾的普通异常 MUST 变为同 source/cycle/job ID 的 `RunError(phase="cleanup")`，但不得取消兄弟 source；该源此前的成功报告仍保留。直接调用既有六参数 `run_once` 时 MUST 保持原行为：返回 `JOB_FAILED`，不取得退出码、不调用失败收尾并保留 work。
+`FAILED`/`TIMEOUT` 的自动失败收尾只属于 `run_sources` 路径：每源失败退出码 provider 是调用方 MUST 注入项，`run_sources` MUST 只调用本源 `failure_exit_codes[source]`，并把同一 terminal `JobRecord` 交给 provider。生产 provider MUST 对该 job ID 恰执行一次 `sacct -j <job_id> -n -P --format=ExitCode`，取得 nonblank 退出码字符串；轮询通道 MUST NOT 取 `ExitCode`，`JobRecord` 七字段不变。provider 返回原值 MUST 作为 `FailureInputs.exit_code` 传给 `finalize_failed_job`。provider 或失败收尾的普通异常 MUST 变为同 source/cycle/job ID 的 `RunError(phase="cleanup")`，但不得取消兄弟 source；该源此前的成功报告仍保留。直接调用既有六参数 `run_once` 时 MUST 保持原行为：返回 `JOB_FAILED`，不取得退出码、不调用失败收尾并保留 work。
 
 对 raw 完整的合法 T，controller MUST 在任何 staging 写入前通过 no-follow 父目录排他创建精确 `work/<source>/<T>`，并冻结该目录的 `(st_dev, st_ino)` 作为本 attempt 的 ownership token。竞争者先创建任何形态时 MUST 零 staging、零提交、保留现有条目并以本源 `RunError(phase="raw")` 失败；普通的 check-then-create 不构成认领。共享 `work/` 与 `work/<source>/` 祖先 MUST 在 exact root 认领前由不参与 raw rollback 的 no-follow 创建负责；raw staging 的 rollback MUST NOT 删除兄弟 source 创建的共享祖先。
 
@@ -155,8 +155,8 @@ raw staging 失败时 MUST 保持 rawcopy 既有“不留半套”和本控制�
 - **THEN** `run_sources` 等 GFS 结束后才抛 `RunSourcesError`；`reports["ifs"]` 保留异常前的全部成功报告，`errors["ifs"]` 保留原错误，`reports["gfs"]` 保留完整有序报告与已落盘 `DONE`
 
 #### Scenario: 失败退出码绑定同一 terminal record
-- **WHEN** IFS 返回 `FAILED` 且其 provider 对该 terminal job ID 返回非默认退出码，GFS 成功并继续追赶
-- **THEN** provider 只调用一次，IFS 唯一失败日志逐字含该 job ID 与退出码，IFS work 在日志提交后删除；GFS provider 不调用且 GFS 正常发布后续轮
+- **WHEN** IFS 返回 `FAILED` 且其 provider 对该 terminal job ID 执行退出码查询，GFS 成功并继续追赶
+- **THEN** provider 只调用一次，查询 argv 逐元素为 `sacct -j <job_id> -n -P --format=ExitCode`，所得字符串作为同一轮 `FailureInputs.exit_code`；IFS 唯一失败日志逐字含该 job ID 与退出码，IFS work 在日志提交后删除；GFS provider 不调用且 GFS 正常发布后续轮
 
 #### Scenario: 失败收尾异常按 source 聚合
 - **WHEN** 一个 source 的退出码 provider 抛错、返回空白，或失败日志/work 收尾失败
@@ -225,7 +225,7 @@ raw staging 失败时 MUST 保持 rawcopy 既有“不留半套”和本控制�
 - **THEN** 该源 `states/` 下只存在最新待跑状态及其前一份
 
 ### Requirement: 失败处理
-作业在 `run_sources` 的当前控制器实例中明确返回 `FAILED`/`TIMEOUT` 时 MUST 不写 `DONE`、不推进状态链；双源组合器 MUST 按「双源独立追赶组合公共契约」从本源显式退出码 provider 取得同一 job 的非空退出码，MUST NOT 从 `JobState` 猜测；随后 MUST 把完整 stdout/stderr、命令、job ID、起止时间与退出码合成一份 `logs/<source>/<T>.log`，日志原子提交成功后才删除整个精确 scratch work。失败收尾完成后，下次 run 从干净 work 对该 cycle 重试。MUST NOT 维护失败计数、退避或 `status.json`。一个源的失败或失败收尾错误 MUST NOT 取消另一源已经启动的作业；双源控制器在两源都结束后才返回或抛出错误。直接六参数 `run_once` 的兼容行为不在此自动收尾要求内：它仍返回 `JOB_FAILED` 并保留 work。
+作业在 `run_sources` 的当前控制器实例中明确返回 `FAILED`/`TIMEOUT` 时 MUST 不写 `DONE`、不推进状态链；双源组合器 MUST 按「双源独立追赶组合公共契约」调用 MUST 注入的本源失败收尾 provider。该 provider 对同一 job 恰执行一次 `sacct -j <job_id> -n -P --format=ExitCode` 并返回非空退出码字符串；轮询通道不得取 `ExitCode`，不得从 `JobState` 猜测，`JobRecord` 七字段不变。组合器 MUST 将该字符串作为 `FailureInputs.exit_code` 传给 `finalize_failed_job`，随后把完整 stdout/stderr、命令、job ID、起止时间与退出码合成一份 `logs/<source>/<T>.log`，日志原子提交成功后才删除整个精确 scratch work。失败收尾完成后，下次 run 从干净 work 对该 cycle 重试。MUST NOT 维护失败计数、退避或 `status.json`。一个源的失败或失败收尾错误 MUST NOT 取消另一源已经启动的作业；双源控制器在两源都结束后才返回或抛出错误。直接六参数 `run_once` 的兼容行为不在此自动收尾要求内：它仍返回 `JOB_FAILED` 并保留 work。
 
 #### Scenario: 失败轮产物
 - **WHEN** fake executor 返回失败

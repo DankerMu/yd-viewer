@@ -1434,7 +1434,7 @@ Project profile: yd-viewer
 **模块归属裁决（先读这条，它决定文件落点）**：issue 正文写"Module / Scope: producer 包 `yd_producer.executor`（Slurm 实现）"，但 Slurm 生产实现 **MUST NOT 写进 `producer/src/yd_producer/executor.py`**。理由是硬的：#10 fixture 把"源码机检"钉成了验收项，`producer/tests/test_executor.py:518-520` 逐字断言 `executor.py` 文本中不出现 `partition`/`account`/`cpus`/`memory`/`walltime` 任一字面量；而本 issue 的验收标准"装配产物含全部五项资源参数"必然要求这些字段名出现在装配层——`sbatch` flag 无法从键名推导（`cpus`→`--cpus-per-task`、`memory`→`--mem`、`walltime`→`--time`）。把实现塞进 `executor.py` 只有两条出路：删掉那条守卫测试（oracle 完整性违规，Phase 8 硬闸拦截），或让装配拿不到字段名（做不出验收）。故本 issue 落**同包新模块** `producer/src/yd_producer/slurm.py`：`executor.py` 是**不透明协议层**，`slurm.py` 是 #10 fixture 所称"调用方按 `required_fields` 的键取值"里的那个**受权解释点**。issue 的 "PR Boundary: executor 模块扩展" 按包义解读（`yd_producer` 的执行器面扩展），不按单文件解读。
 
 Change surface:
-- 新增 `producer/src/yd_producer/slurm.py`：`SBATCH_FLAGS`、`build_sbatch_command`、`parse_sbatch_job_id`、`build_sacct_command`、`SACCT_ENV`、`parse_sacct_record`、`SLURM_STATE_MAP`、`SlurmJobExecutor`、`subprocess_runner`
+- 新增 `producer/src/yd_producer/slurm.py`：`SBATCH_FLAGS`、`build_sbatch_command`、`parse_sbatch_job_id`、`build_sacct_command`、`SACCT_ENV`、`parse_sacct_record`、`SLURM_STATE_MAP`、`SlurmJobExecutor`、`subprocess_runner`；按 #47 收尾裁决补独立失败退出码 provider（含 ExitCode 命令构造与解析），供 CLI 注入 `run_sources`
 - 新增 `producer/tests/test_slurm.py`
 - 不改动 `executor.py`、`config.py`、`cli.py`、`geometry.py`、`nwm.py`、`pyproject.toml`、`uv.lock`
 
@@ -1472,10 +1472,7 @@ Must add/change（逐条钉死，实现方消费不重议）:
 
 **D. `sacct` 命令与输出解析（纯函数）**
 
-- `build_sacct_command(job_id: str) -> tuple[str, ...]` MUST 为 `("sacct", "-j", job_id, "-X", "--noheader", "--parsable2", "--format=JobID,State,Start,End")`。**四列止步于此是本 fixture 的明示裁决，不是遗漏**——两项本可加的列各有归属，逐条见下：
-  - **不取 `ExitCode`**：`specs/run-controller/spec.md`「失败处理」MUST 要求合并日志含退出码，但 `JobRecord`（#10 已合并、frozen、全字段无默认）没有承载它的字段；加字段即改 `executor.py` 的公共 schema，与本 issue「`executor.py` 零改动」和 #10 既有测试直接冲突，属跨 issue 变更。故本 issue **不取该列**，理由**只**有两条、且都是本 issue 自身的边界：`JobRecord`（#10 已合并、frozen、全字段无默认）没有承载退出码的字段，加字段即改 `executor.py` 的公共 schema，与本 issue「`executor.py` 零改动」冲突；且本 fixture 已把 `build_sacct_command` 的 argv 逐元素钉死，改列即改那条 oracle。
-
-承载体的裁决 issue 是**已存在的 #47**「失败日志退出码的载体待裁决」（PR #39 已 DEFER 到此），**不另开新 issue**——本 fixture 早先写的"Phase 8 经 issue-scribe 落一条 tracked issue"是重复路由，已更正。**本 fixture MUST NOT 替 #47 作裁决**：#47 的方案 (b) 含两个并列支——「由作业自身的批处理封装写进它自己的日志（该日志由 #24 合并）」**或**「由 #11 另起一次 `sacct` 取得」——**两支在 #47 处均保持开放**。本 fixture 早先的措辞只复述了前一支并加了"不经 `sacct` 取退出码"，等于替 #47 关掉了后一支（round 2 审核 cand-09，verifier CONFIRMED/FIX_NOW），已删除。若 #47 最终选 `sacct` 支，届时按文档优先原则先修订本 fixture 钉死的 argv 再动码。在 #47 落定前，**#24 的日志合成 MUST NOT 假定退出码来自本模块**。
+- `build_sacct_command(job_id: str) -> tuple[str, ...]` MUST 为 `("sacct", "-j", job_id, "-X", "--noheader", "--parsable2", "--format=JobID,State,Start,End")`。**轮询通道四列止步于此**；它 MUST NOT 取 `ExitCode`，`JobRecord` 继续保持 #10 钉死的七字段。#47 选择独立失败收尾 provider：仅当同一 terminal `JobRecord.state` 为 `FAILED`/`TIMEOUT` 时，provider 对该 `job_id` 恰执行一次 `sacct -j <job_id> -n -P --format=ExitCode`，将输出规范化为非空退出码字符串并原样返回；调用方把该字符串作为 `FailureInputs.exit_code` 传给 `finalize_failed_job`。这不是轮询的第二个状态通道，不改变 `build_sacct_command`、`parse_sacct_record` 或 `JobRecord`；成功与非终态作业 MUST 零调用。
   - **不取 `Submit`**：`submitted_at` 由 `submit` 取一次本地时钟写定（#10 fixture 的打戳时机 MUST），而 `sacct` 在作业刚提交时可能尚无记录（见 Known limits），提交那一刻根本取不到 `Submit`；若改为 `poll` 时用 `Submit` 覆写，同一字段会在一次 run 内先后报出两个值——一个字段两个权威，比时钟偏斜更坏。故保留本地钟，偏斜风险按 Known limits 归 M4。`-X` **不可省**：缺它 `sacct` 会连作业步（`.batch`/`.extern`）一起吐，解析拿到多行且首行未必是分配本体。
 - `SACCT_ENV: Mapping[str, str]` MUST 至少含 `{"TZ": "UTC", "SLURM_TIME_FORMAT": "standard"}`。**并入语义钉死为叠加而非替换**：`SlurmJobExecutor` 在调用 runner 前构造 `{**os.environ, **SACCT_ENV}` 传入；MUST NOT 只传 `SACCT_ENV`——那会让子进程丢掉 `PATH` 与 Slurm 客户端环境，M4 现场每次 `poll` 都失败，正是这条钉死本要防的失败类。叠加发生在 executor 侧（可测），不在 `subprocess_runner` 侧（不测）。理由：`sacct` 默认吐集群本地时间且格式受该环境变量左右，而 `JobRecord.__post_init__` 对 naive 与非零偏移 `datetime` 一律 fail closed（`executor.py:_require_utc`）——不钉死时区就是把一个必然的 `ExecutorError` 留到 M4 现场触发。
 - `parse_sacct_record(stdout: str, job_id: str) -> tuple[JobState, datetime | None, datetime | None]`：
@@ -1484,6 +1481,7 @@ Must add/change（逐条钉死，实现方消费不重议）:
   - State 列先按空格截首词（`sacct` 的 `CANCELLED by 1234` 形态 MUST 归一为 `CANCELLED`），再查 `SLURM_STATE_MAP`；**未知状态串 -> 抛 `ExecutorError(job_id=job_id)`，MUST NOT 兜底映射为 `FAILED`**（兜底会把"没见过的调度器状态"伪装成"作业自身失败"，正是 #10 拆分 `TIMEOUT`/`FAILED` 要保住的那条运维判据）；
   - Start/End 列为 `Unknown` / `None` / 空 -> `None`；否则按 `%Y-%m-%dT%H:%M:%S` 解析并挂 `timezone.utc`；格式不合 -> 抛 `ExecutorError(job_id=job_id)`。
 - `SLURM_STATE_MAP: Mapping[str, JobState]` MUST 逐条为：`PENDING`/`REQUEUED`/`REQUEUE_HOLD`→`PENDING`（重排队是健康作业的中间态，落进「未知串必抛」会把它变成假故障）；`RUNNING`/`CONFIGURING`/`COMPLETING`/`RESIZING`/`SUSPENDED`→`RUNNING`；`COMPLETED`→`SUCCEEDED`；`TIMEOUT`→`TIMEOUT`（**MUST NOT** 折叠进 `FAILED`）；`FAILED`/`CANCELLED`/`NODE_FAIL`/`OUT_OF_MEMORY`/`BOOT_FAIL`/`DEADLINE`/`PREEMPTED`/`REVOKED`→`FAILED`。
+- 独立失败退出码 provider MUST 接受一个 terminal `JobRecord`，且只接受 `FAILED`/`TIMEOUT`；它恰调用一次 runner，argv 逐元素为 `("sacct", "-j", record.job_id, "-n", "-P", "--format=ExitCode")`。输出中去除纯空白行后必须恰有一行、恰有一个非空字段，返回该字段的 `strip()` 结果（例如 `"42:7"`）；空、多行、多字段或 runner 异常统一抛 `ExecutorError(job_id=record.job_id)`。provider MUST 使用与 Slurm executor 相同的 runner 与环境/超时政策，但不得修改或复用轮询记录；每次失败收尾只查询一次，不重试。
 
 **E. `SlurmJobExecutor`（协议一致性，注入式运行器）**
 
@@ -1496,7 +1494,8 @@ Must add/change（逐条钉死，实现方消费不重议）:
 - `isinstance(SlurmJobExecutor(...), JobExecutor)` MUST 为真，且 `submit`/`poll` 的 `inspect.signature` 与协议同名方法逐参数一致（承 #10 evidence 先例）。
 
 Seams under test:
-- `build_sbatch_command` / `parse_sbatch_job_id` / `build_sacct_command` / `parse_sacct_record`（纯函数，可逐值断言——issue 正文所称"参数装配纯函数检查"）
+- `build_sbatch_command` / `parse_sbatch_job_id` / `build_sacct_command` / `parse_sacct_record`（轮询纯函数，可逐值断言——issue 正文所称"参数装配纯函数检查"）
+- 独立失败退出码 provider 配记录型假 runner：terminal `JobRecord` → 精确 `sacct -j <job_id> -n -P --format=ExitCode` argv → 非空退出码字符串；不经 `poll`、不改 `JobRecord`
 - `SlurmJobExecutor.submit/poll` 配记录型假 runner + `StepClock`（"协议一致性"）
 - `subprocess_runner`：**不测**（真实进程边界，M4 oracle）
 
@@ -1539,7 +1538,8 @@ Required evidence（每条 input -> expected output）:
 - `""`、`"   \n"`、`"abc"`、`";cluster0"` -> 各抛 `ExecutorError` 且 `exc.job_id is None`
 
 `sacct`（D）:
-- `build_sacct_command("12345")` -> 逐元素等于 `("sacct","-j","12345","-X","--noheader","--parsable2","--format=JobID,State,Start,End")`
+- `build_sacct_command("12345")` -> 逐元素等于 `("sacct","-j","12345","-X","--noheader","--parsable2","--format=JobID,State,Start,End")`，且不含 `ExitCode`
+- 独立失败退出码 provider 收到 `FAILED`/`TIMEOUT` 的 terminal record（job ID `12345`），runner 返回 `"42:7\n"` -> runner 恰调用一次，argv 逐元素等于 `("sacct","-j","12345","-n","-P","--format=ExitCode")`，返回值逐字为 `"42:7"`；成功/非终态 record 在 runner 零调用前被拒，空输出、多非空行、多字段与 runner 异常均抛 `ExecutorError` 且 `job_id == "12345"`
 - `SACCT_ENV["TZ"] == "UTC"` 且 `SACCT_ENV["SLURM_TIME_FORMAT"] == "standard"`
 - `"12345|COMPLETED|2026-08-28T00:00:00|2026-08-28T01:00:00"` -> `(SUCCEEDED, 2026-08-28T00:00:00+00:00, 2026-08-28T01:00:00+00:00)`，两个 `datetime` 断言 `tzinfo is not None and utcoffset() == timedelta(0)`
 - **参数化：** `SLURM_STATE_MAP` 的每个键各一行 -> 得到该键映射的 `JobState`；其中 `TIMEOUT` 行 -> `JobState.TIMEOUT`（**断言 `is not JobState.FAILED`**）
@@ -1579,12 +1579,12 @@ Non-goals:
 - `local.toml` 资源取值的语义校验（`walltime` 格式、`partition` 是否真实存在、`memory` 单位）—— 装载层只校验类型（#2 已裁决"不做值域校验"），真实取值的正确性归 M4 现场
 - **不钉以下三处 `strip()`，按 slack 处理**（round 3 的系统性归一化扫描共发现 6 个存活变异体，其余三处逐条裁决于此，使后续轮次不再重复发现同一批）：`_parse_sacct_time` 对时间列的 `raw.strip()`、JobID 串台比对的 `reported_id.strip()`、状态串截首词前的 `raw_state.strip()`。理由：三者都是 `--parsable2` 输出上不会出现的形态（该模式不产生列内 padding），且都不在 spec 或本 fixture 的任何 MUST 之下；它们是防御性余量，不是被钉死的属性。若日后现场证明 `sacct` 会吐 padding，按文档优先先修订本条再动码。
 - 跨进程的 job 记录持久化：`poll` 依赖实例内提交记录，故只支持"同一 run 进程内提交后轮询"。这正是 `specs/run-controller/spec.md`「并发与锁」的形态（单进程持 flock 覆盖提交→等待→发布全生命周期），非缺陷
-- `squeue` 回退：`sacct` 落库前的查询空窗按 fail closed 处理（见 Known limits），本 issue 不引入第二个查询通道
+- `squeue` 回退：`sacct` 落库前的查询空窗按 fail closed 处理（见 Known limits）；**轮询通道不取 `ExitCode`，退出码由失败收尾 provider 单独取一次**。该 provider 不参与状态轮询，不构成 `squeue` 回退或第二个轮询通道
 
 Known limits（每条在 PR 工作说明中复述，并按 Phase 8 规则路由）:
 - **`sacct` 落库延迟**：作业刚提交时 `sacct` 可能尚无记录，本模块按 fail closed 抛 `ExecutorError`。M2 无真实调度器，无法判定该窗口是否需要重试/回退 `squeue`；归 M4 现场验证。
 - **时钟偏斜**：`submitted_at` 取本地时钟、`started_at` 由 Slurm 报告，登录节点与计算节点时钟偏斜可能触发 `JobRecord` 的 `submitted_at <= started_at` 不变式而抛 `ExecutorError`。M2 不引入容差（容差是一个内置默认，正是本 issue 要消除的形态）；归 M4 现场验证。
-- **退出码不经本模块（承载体裁决仍在 #47，本 fixture 不预判）**：`specs/run-controller/spec.md`「失败处理」要求合并日志含退出码，本模块的 `sacct --format` 明示不取 `ExitCode`（理由见 §D，均为本 issue 自身边界）。承载体的裁决 issue 是已存在的 **#47**，不另开新件；其方案 (b) 的两个并列支（作业体自写日志由 #24 合并 / 由 #11 另起一次 `sacct`）**均未被本 fixture 关闭**。在 #47 落定前 **#24** 的日志合成 MUST NOT 假定退出码来自本模块。
+- **#47 已裁决为独立 `sacct ExitCode` provider**：轮询 `build_sacct_command` 仍不取 `ExitCode`；失败收尾 provider 对 terminal job 单独执行一次 `sacct -j <job_id> -n -P --format=ExitCode`，返回字符串作为 `FailureInputs.exit_code`。`JobRecord` 七字段不变，作业体自写退出码的备选不采用。真实站点输出形态仍须在 M4 oracle 复核，但生产 provider 的实现与 CLI 注入属于 M2 收尾任务。
 - **进程死亡窗口（孤儿作业）**：`poll` 只认本实例提交过的 `job_id`（fixture §E 的 MUST），故 run 进程在等待期被杀后，flock 随进程释放而 Slurm 作业仍在跑，下一个 tick 无从发现它——按「未提交残留清理重跑」删 work 并重新提交，会出现同源两个在途作业（违反 agent-ops §8.3），且孤儿作业继续往被删的目录写。**更正本 fixture 早先的措辞**：Non-goals 里「跨进程 job 记录持久化…正是「并发与锁」的形态，非缺陷」只对**进程存活**的正常路径成立；崩溃一支不被「并发与锁」覆盖。归属：崩溃恢复前置由 **#23/#28** 的 fixture 裁决（按 receipt 里的 job ID 作一次存活确认，或"见半成品 work 即停该源等人工"）。
 - **已提交但未登记窗口**：`submit` 先调 runner 再解析 job id，故 `sbatch` 退出 0、作业已排队、而 stdout 形态超出 §C 钉死的域时，`parse_sbatch_job_id` 抛错且 `self._records` 里什么都没有——后果与上一条同类。缓解：错误消息带原始行/原始 stdout，运维可人工定位。归属同上（**#23/#28**）。
 - **`poll` 抛错 ≠ 作业失败**：`ExecutorError` 只有 `job_id` 一个结构化属性，「`sacct` 尚未落库」与「解析失败」抛的是同一个无类别异常，控制器没有可机检的判别位。本 issue 不加判别位（那要么改 `executor.py` 的公共异常、要么在协议层外另立一套，均越界）；**#26** 的 fixture MUST 钉死「`poll` 抛出异常不得直接触发「失败处理」的 work 删除」。
@@ -4050,7 +4050,7 @@ Minimal mergeable slice: 任务 14.1 单源单轮；不吸收 14.2 多轮追赶�
 4. `rawcopy.stage_raw` 把其 `work_dir` 参数当 `LocalObjectStore` 根，而 #15 把真正 object-store 根固定为 `<attempt-work>/object-store`。14.1 因此传后者：raw/manifest/canonical/forcing/models 共根。已同步修订 compute-loop §3.3/§7.2 与 raw-scan spec 的整体布局；`stage_raw` standalone API/测试仍写“给定 staging root 下的 `raw/`”，不改其行为。
 5. #23 记录的顺序偏离在本 issue关闭：controller 先得到不含 raw 的合法 T，合法 00/12 T 先执行 residue plan/execute，再判 raw；raw 未齐时 residue 已清。任意越域小时在 residue 之前停止，避免 `ConfigError` 放大与非法前沿删除。
 6. #94 在本 PR 同批闭合，守卫落危险边界 `PublishInputs.__post_init__`：resolved `work_dir` 必须逐字等于 resolved `work_root/source/T`，不是只做 containment。#108 的 post-`DONE` 历史孤儿 sweeper不吸收；本轮若 `PublishCleanupError`，报告已完成/待清理，不触发失败回收。
-7. #47 的退出码载体尚未裁决，故 FAILED/TIMEOUT 日志/work 回收不在 14.1；由 #28 串 `finalize_failed_job`。14.1 只需对非成功终态返回 `JOB_FAILED` job report，零 collect/零 publish，保留 work 供后继失败 owner处理，不虚构 exit code。
+7. #47 现已裁决为独立 `sacct ExitCode` provider，但 FAILED/TIMEOUT 日志/work 回收仍不在 14.1；由 #28 / M2 CLI 收尾接线注入 provider 并串 `finalize_failed_job`。14.1 只需对非成功终态返回 `JOB_FAILED` job report，零 collect/零 publish，保留 work 供失败 owner 处理，不虚构 exit code。
 
 **公开面（逐字冻结）**：
 
@@ -4356,7 +4356,7 @@ Minimal mergeable slice: 只交付任务 14.3；14.1 与 14.2 已合并，本 is
 
 1. **消费 #27，不复制 #27**。`run_sources` 的两个 worker 各自采用 `catch_up_source` 已冻结的“仅 `SUCCEEDED` 继续、每轮重新发现前沿”规则；但 #27 的公开函数不能接收 failure provider/publish lock，且结构测试钉死其实现，所以 #28 在 `_controller_sources.py` 内保留极薄循环，逐轮调用带组合选项的私有 `_controller_run.run_once`。公开 `catch_up_source` 的签名、AST 形状与行为不改。
 2. **#59 选择 fail-closed 候选 (b)**。跨 tick 看到精确 `work/<source>/<T>` 任何形态，MUST 返回 `UNVERIFIED_WORK_RESIDUE`、保留证据、零 raw/driver/submit；不得删、续用、扫描 checkpoint 或猜“无在途”。运维确认无在途并移走 work 后，下一 tick 才重跑。NFS `output/states` 残留仍先按 #23 清理。
-3. **#47 选择带外显式 provider，不改 `JobRecord` 七字段**。公开双源入口接收每源 `failure_exit_codes[source](terminal_record) -> str`；只在该源 `FAILED/TIMEOUT` 后调用一次，返回值必须为 nonblank `str` 并原样交 `FailureInputs.exit_code`。生产 Slurm/receipt 适配仍归 M4。
+3. **#47 选择独立 `sacct ExitCode` provider，不改 `JobRecord` 七字段**。公开双源入口接收每源 `failure_exit_codes[source](terminal_record) -> str`；只在该源 `FAILED/TIMEOUT` 后调用一次，生产 provider 对同一 job ID 恰执行 `sacct -j <job_id> -n -P --format=ExitCode`，返回 nonblank 退出码字符串并原样交 `FailureInputs.exit_code`。provider 是 `run_sources` 的 MUST 注入项；轮询通道仍不取 `ExitCode`。真实 Slurm 输出的现场复核归 M4，provider 实现与注入不再推给 M4。
 4. **#106 在组合层串行 publish**。每个 `run_sources` 私建一把锁，只串行完整 `publish.publish`；raw/prepare/submit/poll/collect/失败 cleanup 仍可跨源并行。不得恢复无条件 `fchmod`；跨进程并发继续由外层同一 `runlock` 排除。
 5. **#108 不吸收**。本 issue 只清当前实例明确失败的精确 work；已有 `DONE(T)` 的 post-DONE 历史孤儿 work 扫描仍由 #108 跟踪。
 6. **Round 1 verified ownership closure**。cand-01（final guard 后 foreign exact root）、cand-02（terminal/log commit 后 pathname/root replacement）、cand-03（rawcopy rollback 删除 sibling 创建的 shared ancestor）均为 `CONFIRMED/P1/FIX_NOW`，且共享一条可复用不变量：**只有 staging 前由本 attempt 排他创建并持续 identity-bound 的 exact work 才可写、读、发布或删除；观察时不存在、pathname 形状正确或事后 realpath 相等都不构成 ownership**。按 high-risk pattern escalation 处理，不做三处独立 check 补丁。
@@ -4411,7 +4411,7 @@ Minimal mergeable slice: 只交付任务 14.3；14.1 与 14.2 已合并，本 is
 **Must preserve / unchanged siblings**：
 
 - #26 的单轮状态机和 #27 的公开追赶函数、AttemptDriver/RunReport/JobRunReport、executor/fake/slurm、residue/runlock 公开签名不改；StopReason/RunPhase 与 controller exports 不再扩。`rawcopy.stage_raw`、`PublishInputs`、`FailureInputs`、`remove_tree_allow_symlinks` 只允许末尾默认 `None` 的 additive claim/expected-identity 参数，既有不传调用的行为不改。
-- CLI `run` 继续 staged-unimplemented；不新增生产 worker、跨进程 receipt、`squeue`/`sacct` 第二查询、cancel/watchdog、cron 或 node-22 操作。
+- CLI `run` 的生产接线由新增 M2 收尾任务承担；本 #28 实现不新增生产 worker、跨进程 receipt、`squeue` 回退、cancel/watchdog、cron 或 node-22 操作。允许且只允许 #47 裁决的失败收尾 `sacct ExitCode` 单次查询；它不进入轮询通道。
 - publisher 七步序、DONE 后二分、预置 mode/setgid 不改；失败日志字节格式与“日志先于 work 删除”不改；新增 identity drift 只改变原本会误删 replacement 的未定义/不安全路径。
 - 每个新/修改非豁免文件≤1000行；允许既有私有 `_controller_sources.py` 承载双源组合与新私有 `_work_claim.py` 承载 ownership；公共 API 只从 `controller` 导出，不增 large-file exclude。
 
@@ -4520,7 +4520,7 @@ Minimal mergeable slice: 只交付任务 14.3；14.1 与 14.2 已合并，本 is
 
 - #108：post-DONE 硬杀/cleanup-pending 留下的历史 scratch work sweeper。
 - #127：Darwin `/dev/fd/FD_NUMBER` descriptor alias 瞬时不可用；测试只串行 synthetic heavy terminal hook，不为生产 controller 增加 forcing/collect 全局锁。
-- M4：真实 worker/receipt、Slurm 退出码 provider、跨进程活作业查询与人工操作 receipt、CLI/cron、node-22/NFS 真运行。
+- M4：真实 worker/receipt、`sacct ExitCode` 输出的现场复核、跨进程活作业查询与人工操作 receipt、cron、node-22/NFS 真运行；Slurm 退出码 provider 本身及 CLI 注入由 M2 收尾任务实现。
 
 **Non-goals**：
 

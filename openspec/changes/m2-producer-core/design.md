@@ -87,7 +87,7 @@ M2 的 `AttemptDriver` 是注入式计算节点边界，不是假成功入口：
 
 四份 mapping 在启动线程前快照并要求精确键集 `{ifs,gfs}`；两源 executor 与 driver 各为不同实例，避免把现有协议暗中升级为线程安全共享对象。每轮重新从已提交 `DONE`/state 发现前沿，不缓存或自增 T，不冻结调用开始时的 raw horizon；`STOPPED`、`JOB_FAILED`、`SUCCEEDED_CLEANUP_PENDING` 都终止该源，另一个源继续逐轮追赶。
 
-`_controller_run.run_once` 只增加供组合层使用的私有失败收尾参数，公开 `run_once` 与 `catch_up_source` 均保持既有签名和行为。组合层在本源 `FAILED/TIMEOUT` 后调用 `failure_exit_codes[source](terminal_record) -> str`，不从状态枚举猜退出码；同一 `JobSpec`/terminal `JobRecord` 交给 `cleanup.finalize_failed_job`，唯一日志提交成功后才删 exact work。provider 或收尾失败成为同 source/cycle/job 的 `RunError(phase="cleanup")`，此前成功报告仍保留。直接六参数 `run_once` 继续只返回 `JOB_FAILED` 并保留 work。
+`_controller_run.run_once` 只增加供组合层使用的私有失败收尾参数，公开 `run_once` 与 `catch_up_source` 均保持既有签名和行为。组合层在本源 `FAILED/TIMEOUT` 后调用 MUST 注入的 `failure_exit_codes[source](terminal_record) -> str`；生产 provider 对同一 job ID 恰执行一次 `sacct -j <job_id> -n -P --format=ExitCode`，不从状态枚举猜退出码，轮询通道也不取 `ExitCode`。所得字符串作为 `FailureInputs.exit_code` 交给 `cleanup.finalize_failed_job`；`JobRecord` 七字段不变，唯一日志提交成功后才删 exact work。provider 或收尾失败成为同 source/cycle/job 的 `RunError(phase="cleanup")`，此前成功报告仍保留。直接六参数 `run_once` 继续只返回 `JOB_FAILED` 并保留 work。
 
 #59 采用 fail-closed：无 `DONE(T)` 且精确 `work/<source>/<T>` 预存时，不能证明不存在孤儿 Slurm 作业，故返回 `UNVERIFIED_WORK_RESIDUE`，不读、不删、不复用、不提交；运维确认无在途并移走 work 后，下次 tick 从 T 状态干净重跑。NFS `output/states` 未提交残留仍按 #23 清理。#106 在组合层关闭：同一 `run_sources` 只用一把私有锁串行完整 `publish.publish`，不串行 raw/prepare/submit/poll/collect/失败 cleanup，也不恢复发布器被禁止的无条件 `fchmod`。已有 `DONE` 的历史孤儿 scratch work 仍归 #108。
 

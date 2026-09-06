@@ -201,7 +201,7 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 - forcing 与 SHUD 重任务都在 Slurm 作业内执行，不在登录节点直接计算；
 - 同源最多一个 job，IFS/GFS 最多各一个；
 - 只通过 yd CLI 提交，避免手拼 `sbatch` 参数；
-- 观察可用 `squeue`/`sacct`，但不能修改 NWM job；
+- 普通轮询用 `sacct` 读取 job ID/state/start/end，不取 `ExitCode`；仅在同一 yd job 已终态 `FAILED`/`TIMEOUT` 后，由失败收尾 provider 单独执行一次 `sacct -j <job_id> -n -P --format=ExitCode`，所得字符串进入失败日志；
 - 取消必须使用本次 yd receipt 中的精确 job ID；禁止 `scancel -u`、名称通配或模糊匹配；
 - 不为未观察到的卡死编写 watchdog；walltime 属 Slurm 配置，异常由日志和人工操作处理；
 - Slurm partition/account/CPU/内存/walltime 只放 `local.toml`。
