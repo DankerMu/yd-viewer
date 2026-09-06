@@ -12,7 +12,7 @@
 - [x] 1.6 将 `LocalConfig.slurm` 收口为无可变 backing 暴露的只读资源映射（issue #31）
 - [x] 1.7 在 `config.toml` 装载边界落实三条已裁决取值域及精确错误路径（issue #32）
 - [x] 1.8 在同一装载期 domain owner 内拒绝 IFS/GFS 各自重复的 raw variable（issue #72）
-- [ ] 1.9 将 config/local 齐备装载收口为两套完整取值的 provenance oracle（issue #48）
+- [x] 1.9 将 config/local 齐备装载收口为两套完整取值的 provenance oracle（issue #48）
 
 依赖：无
 §13.1 归属：无直接行（基础设施，支撑全部行）

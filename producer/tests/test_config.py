@@ -21,9 +21,17 @@ import pytest
 
 import yd_producer.config as config_module
 from yd_producer.config import (
+    CanonicalGridConfig,
     Config,
     ConfigError,
+    CronLocal,
+    CycleConfig,
     LocalConfig,
+    NwmLocal,
+    RawConfig,
+    RawSourceConfig,
+    SlurmSchema,
+    VariantsConfig,
     load_config,
     load_local,
 )
@@ -212,6 +220,203 @@ VALID_LOCAL: dict[str, Any] = {
 SLURM_COMMAND_TIMEOUT_SECONDS = "command_timeout_seconds"
 DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS = 60
 LARGE_SLURM_COMMAND_TIMEOUT_SECONDS = 2_147_483_647
+
+# B 是完整、独立的第二组 provenance 输入；不得由 A 或生产配置派生。
+VALID_CONFIG_B: dict[str, Any] = {
+    "forecast_days": 4,
+    "output_interval_minutes": 30,
+    "checkpoint_hours": [6, 30, 90],
+    "reach_count": 1777,
+    "nwm_mapping_builder_module": "alternate.mapping.builder",
+    "nwm_canonical_grid_id": {
+        "gfs": "alternate-grid-gfs-1km",
+        "ifs": "alternate-grid-ifs-9km",
+    },
+    "cycle": {"hours": [12]},
+    "variants": {
+        "gfs": "alternate/models/gfs",
+        "ifs": "alternate/models/ifs",
+    },
+    "raw": {
+        "ifs": {
+            "lead_hours": [1, 4, 7],
+            "variables": ["alternate-ifs-temperature", "alternate-ifs-precipitation"],
+            "bundles": [
+                "alternate-ifs-{lead}.grib2",
+                "alternate-ifs-surface-{lead}.grib2",
+            ],
+            "f000_special": True,
+        },
+        "gfs": {
+            "lead_hours": [2, 8, 14],
+            "variables": [
+                "alternate-gfs-pressure",
+                "alternate-gfs-wind",
+                "alternate-gfs-rain",
+            ],
+            "bundles": [
+                "alternate-gfs-{lead}.grib2",
+                "alternate-gfs-surface-{lead}.grib2",
+            ],
+            "f000_special": False,
+        },
+    },
+    "slurm": {
+        "required_fields": ["queue", "project_code", "tasks", "ram", "duration"],
+    },
+}
+
+# A/B expected 均独立手写，不得从对应输入、loader 或生产 config 生成。
+EXPECTED_CONFIG_A = Config(
+    forecast_days=7,
+    output_interval_minutes=60,
+    checkpoint_hours=(12,),
+    reach_count=3988,
+    nwm_mapping_builder_module="workers.mapping_builder.cli",
+    nwm_canonical_grid_id=CanonicalGridConfig(
+        gfs="fixture-grid-gfs",
+        ifs="fixture-grid-ifs",
+    ),
+    cycle=CycleConfig(hours=(0, 12)),
+    variants=VariantsConfig(
+        gfs="input/models/yd_gfs",
+        ifs="input/models/yd_ifs",
+    ),
+    raw=RawConfig(
+        ifs=RawSourceConfig(
+            lead_hours=(0, 3, 6),
+            variables=("fixture-var-a", "fixture-var-b"),
+            bundles=("fixture-ifs-{lead}.grib2",),
+            f000_special=False,
+        ),
+        gfs=RawSourceConfig(
+            lead_hours=(0, 6, 12),
+            variables=("fixture-var-c", "fixture-var-d"),
+            bundles=("fixture-gfs-{lead}.grib2",),
+            f000_special=True,
+        ),
+    ),
+    slurm=SlurmSchema(
+        required_fields=("partition", "account", "cpus", "memory", "walltime")
+    ),
+)
+
+EXPECTED_CONFIG_B = Config(
+    forecast_days=4,
+    output_interval_minutes=30,
+    checkpoint_hours=(6, 30, 90),
+    reach_count=1777,
+    nwm_mapping_builder_module="alternate.mapping.builder",
+    nwm_canonical_grid_id=CanonicalGridConfig(
+        gfs="alternate-grid-gfs-1km",
+        ifs="alternate-grid-ifs-9km",
+    ),
+    cycle=CycleConfig(hours=(12,)),
+    variants=VariantsConfig(
+        gfs="alternate/models/gfs",
+        ifs="alternate/models/ifs",
+    ),
+    raw=RawConfig(
+        ifs=RawSourceConfig(
+            lead_hours=(1, 4, 7),
+            variables=("alternate-ifs-temperature", "alternate-ifs-precipitation"),
+            bundles=(
+                "alternate-ifs-{lead}.grib2",
+                "alternate-ifs-surface-{lead}.grib2",
+            ),
+            f000_special=True,
+        ),
+        gfs=RawSourceConfig(
+            lead_hours=(2, 8, 14),
+            variables=(
+                "alternate-gfs-pressure",
+                "alternate-gfs-wind",
+                "alternate-gfs-rain",
+            ),
+            bundles=(
+                "alternate-gfs-{lead}.grib2",
+                "alternate-gfs-surface-{lead}.grib2",
+            ),
+            f000_special=False,
+        ),
+    ),
+    slurm=SlurmSchema(
+        required_fields=("queue", "project_code", "tasks", "ram", "duration")
+    ),
+)
+
+EXPECTED_LOCAL_A = LocalConfig(
+    yd_root="/fixture/yd",
+    scratch_root="/fixture/scratch",
+    shud_binary="/fixture/bin/shud",
+    nwm=NwmLocal(
+        raw_root="/fixture/nwm/raw",
+        checkout_root="/fixture/nwm/checkout",
+        python="/fixture/nwm/.venv/bin/python",
+    ),
+    slurm=MappingProxyType(
+        {
+            "partition": "cpu",
+            "account": "yd-forecast",
+            "cpus": 8,
+            "memory": "32G",
+            "walltime": "04:00:00",
+        }
+    ),
+    cron=CronLocal(
+        lock_path="/fixture/run/yd-producer.lock",
+        log_dir="/fixture/log/yd-producer",
+    ),
+    slurm_command_timeout_seconds=60,
+)
+
+EXPECTED_LOCAL_B = LocalConfig(
+    yd_root="/alternate/yd-root",
+    scratch_root="/alternate/scratch-root",
+    shud_binary="/alternate/bin/shud-model",
+    nwm=NwmLocal(
+        raw_root="/alternate/nwm/raw-store",
+        checkout_root="/alternate/nwm/checkout-root",
+        python="/alternate/nwm/venv/bin/python",
+    ),
+    slurm=MappingProxyType(
+        {
+            "queue": "alternate-batch",
+            "project_code": "alternate-forecast",
+            "tasks": 16,
+            "ram": "48G",
+            "duration": "02:30:00",
+        }
+    ),
+    cron=CronLocal(
+        lock_path="/alternate/run/producer.lock",
+        log_dir="/alternate/log/producer",
+    ),
+    slurm_command_timeout_seconds=37,
+)
+
+VALID_LOCAL_B: dict[str, Any] = {
+    "yd_root": "/alternate/yd-root",
+    "scratch_root": "/alternate/scratch-root",
+    "shud_binary": "/alternate/bin/shud-model",
+    "nwm": {
+        "raw_root": "/alternate/nwm/raw-store",
+        "checkout_root": "/alternate/nwm/checkout-root",
+        "python": "/alternate/nwm/venv/bin/python",
+    },
+    "slurm": {
+        "queue": "alternate-batch",
+        "project_code": "alternate-forecast",
+        "tasks": 16,
+        "ram": "48G",
+        "duration": "02:30:00",
+        "command_timeout_seconds": 37,
+    },
+    "cron": {
+        "lock_path": "/alternate/run/producer.lock",
+        "log_dir": "/alternate/log/producer",
+    },
+}
 
 # spec cli-config 反引号钉死的顶层 key，MUST NOT 被加上表前缀
 SPEC_PINNED_TOP_LEVEL_KEYS = (
@@ -683,28 +888,50 @@ def test_spec_pinned_keys_stay_top_level():
 # --- 齐备装载 ----------------------------------------------------------------
 
 
-def test_load_config_returns_all_fields(tmp_path):
-    config = _loaded_config(tmp_path)
+def _dataclass_leaf_values(value: object, prefix: str = "") -> dict[str, object]:
+    """展开 expected dataclass；只有嵌套 dataclass 实例递归，其余对象均为叶。"""
+    leaves: dict[str, object] = {}
+    for field in dataclasses.fields(value):
+        path = f"{prefix}.{field.name}" if prefix else field.name
+        field_value = getattr(value, field.name)
+        if dataclasses.is_dataclass(field_value) and not isinstance(field_value, type):
+            leaves.update(_dataclass_leaf_values(field_value, path))
+        else:
+            leaves[path] = field_value
+    return leaves
 
-    assert config.forecast_days == 7
-    assert config.output_interval_minutes == 60
-    assert config.checkpoint_hours == (12,)
-    assert config.reach_count == 3988
-    assert config.nwm_mapping_builder_module == "workers.mapping_builder.cli"
-    assert config.nwm_canonical_grid_id.gfs == "fixture-grid-gfs"
-    assert config.nwm_canonical_grid_id.ifs == "fixture-grid-ifs"
-    assert config.cycle.hours == (0, 12)
-    assert config.variants.gfs == "input/models/yd_gfs"
-    assert config.variants.ifs == "input/models/yd_ifs"
-    assert config.raw.ifs.lead_hours == (0, 3, 6)
-    assert config.raw.gfs.lead_hours == (0, 6, 12)
-    assert config.raw.ifs.variables == ("fixture-var-a", "fixture-var-b")
-    assert config.raw.ifs.bundles == ("fixture-ifs-{lead}.grib2",)
-    assert config.raw.ifs.f000_special is False
-    assert config.raw.gfs.variables == ("fixture-var-c", "fixture-var-d")
-    assert config.raw.gfs.bundles == ("fixture-gfs-{lead}.grib2",)
-    assert config.raw.gfs.f000_special is True
-    assert config.slurm.required_fields == SLURM_REQUIRED_FIELDS
+
+@pytest.mark.parametrize(
+    ("expected_a", "expected_b", "expected_leaf_count"),
+    [
+        pytest.param(EXPECTED_CONFIG_A, EXPECTED_CONFIG_B, 19, id="config"),
+        pytest.param(EXPECTED_LOCAL_A, EXPECTED_LOCAL_B, 10, id="local"),
+    ],
+)
+def test_complete_round_trip_expected_leaves_are_distinct(
+    expected_a, expected_b, expected_leaf_count
+):
+    leaves_a = _dataclass_leaf_values(expected_a)
+    leaves_b = _dataclass_leaf_values(expected_b)
+
+    assert set(leaves_a) == set(leaves_b)
+    assert len(leaves_a) == expected_leaf_count
+    assert len(leaves_b) == expected_leaf_count
+    for path in leaves_a:
+        assert leaves_a[path] != leaves_b[path], path
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        pytest.param(VALID_CONFIG, EXPECTED_CONFIG_A, id="A"),
+        pytest.param(VALID_CONFIG_B, EXPECTED_CONFIG_B, id="B"),
+    ],
+)
+def test_load_config_returns_all_fields(tmp_path, data, expected):
+    config = load_config(_write_toml(tmp_path / "config.toml", data))
+
+    assert config == expected
 
 
 def test_mapping_builder_module_follows_fixture_value(tmp_path):
@@ -757,20 +984,33 @@ def test_raw_sources_carry_independent_lead_hours(tmp_path):
     assert config.raw.gfs.lead_hours == (0, 1)
 
 
-def test_load_local_returns_all_site_fields(tmp_path):
-    config = _loaded_config(tmp_path)
-    local = load_local(_write_toml(tmp_path / "local.toml", VALID_LOCAL), config)
+@pytest.mark.parametrize(
+    ("config_data", "local_data", "expected_config", "expected_local"),
+    [
+        pytest.param(
+            VALID_CONFIG,
+            VALID_LOCAL,
+            EXPECTED_CONFIG_A,
+            EXPECTED_LOCAL_A,
+            id="A",
+        ),
+        pytest.param(
+            VALID_CONFIG_B,
+            VALID_LOCAL_B,
+            EXPECTED_CONFIG_B,
+            EXPECTED_LOCAL_B,
+            id="B",
+        ),
+    ],
+)
+def test_load_local_returns_all_site_fields(
+    tmp_path, config_data, local_data, expected_config, expected_local
+):
+    config = load_config(_write_toml(tmp_path / "config.toml", config_data))
+    local = load_local(_write_toml(tmp_path / "local.toml", local_data), config)
 
-    assert local.yd_root == "/fixture/yd"
-    assert local.scratch_root == "/fixture/scratch"
-    assert local.shud_binary == "/fixture/bin/shud"
-    assert local.nwm.raw_root == "/fixture/nwm/raw"
-    assert local.nwm.checkout_root == "/fixture/nwm/checkout"
-    assert local.nwm.python == "/fixture/nwm/.venv/bin/python"
-    assert local.cron.lock_path == "/fixture/run/yd-producer.lock"
-    assert local.cron.log_dir == "/fixture/log/yd-producer"
-    assert local.slurm == VALID_LOCAL["slurm"]
-    assert local.slurm_command_timeout_seconds == DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
+    assert config == expected_config
+    assert local == expected_local
 
 
 # --- #69 Slurm 客户端命令 timeout --------------------------------------------
