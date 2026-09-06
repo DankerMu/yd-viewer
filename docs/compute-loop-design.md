@@ -174,7 +174,7 @@ yd-producer prepare --baseline <基线模型包路径>
 yd-producer init
   只在系统历史上第一次建立两条状态链
 
-yd-producer run
+yd-producer run --config <path> --local <path>
   日常发现、追赶、提交、发布和清理
 ```
 
@@ -320,7 +320,7 @@ tracker 不按 pathname 删除任何 canonical checkpoint，包括本调用 O_EX
 
 ## 10. 控制器、Slurm 与积压
 
-cron 每小时调用 `yd-producer run` 的非阻塞 `flock` 包装：
+cron 每小时调用 `yd-producer run --config <path> --local <path>` 的非阻塞 `flock` 包装：
 
 - 前一实例仍持锁时，本 tick 直接跳过，不排队；
 - 锁覆盖发现、提交、等待、发布和清理的完整生命周期；

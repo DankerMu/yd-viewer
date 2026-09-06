@@ -26,6 +26,10 @@
 
 `run` 的退出码 MUST 为：`0` 表示锁竞争下的成功跳过或返回报告全部为 `SUCCEEDED`；`3` 表示任一源 `STOPPED`/`JOB_FAILED`，以及 `SUCCEEDED_CLEANUP_PENDING` 或运行期 controller/executor/driver/provider 错误；`2` 表示参数或配置错误。raw 缺口产生的 `STOPPED` 因而是 `3`，MUST NOT 为制造退出码 `0` 添加追赶轮数上限。该约定只修改 `run`；`prepare`/`init` 的既有退出码不变。
 
+#### Scenario: 文档中的 run 调用可直接执行
+- **WHEN** 运维从 compute-loop 的 synopsis 或 cron 段复制 `run` 命令
+- **THEN** 命令逐字包含 `--config <path> --local <path>`，不依赖任何内置配置路径
+
 #### Scenario: 生产依赖在同一锁内注入
 - **WHEN** 状态与配置齐备且锁可取得时执行 `run`
 - **THEN** `run_sources` 在锁内恰调用一次，四份按源 mapping 均恰含 `{ifs,gfs}`，两源 executor/driver 实例互不相同，poll wait 会实际等待，失败 provider 遵守独立一次 `sacct -j <job_id> -n -P --format=ExitCode` 契约
