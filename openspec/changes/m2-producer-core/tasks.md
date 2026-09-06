@@ -13,6 +13,7 @@
 - [x] 1.7 在 `config.toml` 装载边界落实三条已裁决取值域及精确错误路径（issue #32）
 - [x] 1.8 在同一装载期 domain owner 内拒绝 IFS/GFS 各自重复的 raw variable（issue #72）
 - [x] 1.9 将 config/local 齐备装载收口为两套完整取值的 provenance oracle（issue #48）
+- [x] 1.10 将 config/local dataclass 的 `kw_only` / `frozen` 守卫改为直接 metadata oracle（issue #46）
 
 依赖：无
 §13.1 归属：无直接行（基础设施，支撑全部行）
@@ -639,6 +640,105 @@ Review focus:
 - expected 是否真正独立手写，完整对象比较是否能杀 validate-then-discard，而非从输入反向生成同一答案
 - 29 个 mutant 是否每个保留校验调用、只改 provenance，并由这两条完整 round-trip oracle 杀死
 - 是否为测试增强越界修改 production source、共享 A fixture、其它测试或字段契约
+
+### Issue #46 fixture（任务 1.10）
+
+Fixture level: expanded
+Upstream suggested level: absent（legacy review-DEFER issue）
+Repair intensity / effective tier: medium（只改测试 oracle，不改运行时 source、IO、状态或外部边界；但同一守卫覆盖 10 个公开 config/local dataclass 的 constructor schema）
+Project profile: yd-viewer
+Minimal mergeable slice: 只修改 `producer/tests/test_config.py` 与 task 1.10 / 本 fixture；`producer/src/yd_producer/config.py`、生产 TOML 与其它测试零 diff
+
+Change surface:
+- `producer/tests/test_config.py`：把现有 `test_dataclass_rejects_positional_construction` 改为直接读取 `klass.__dataclass_params__` 并断言 `params.kw_only is True` 与 `params.frozen is True`；测试名同步改成准确描述 metadata 契约
+- 本任务 1.10 与本独立 fixture；不修改 cli-config userspace Requirement 或 design D4 的 loader 语义
+
+Governing invariant:
+- Config/LocalConfig 两棵 dataclass 树中的每个 class 都必须直接声明并保留 `kw_only=True, frozen=True`；测试必须观察 dataclass metadata 本身，不能用某次构造碰巧抛出的 `TypeError` 间接推断。
+
+Current class inventory:
+- `_dataclass_tree(Config)`：`Config`、`CanonicalGridConfig`、`CycleConfig`、`VariantsConfig`、`RawConfig`、`RawSourceConfig`、`SlurmSchema`
+- `_dataclass_tree(LocalConfig)`：`LocalConfig`、`NwmLocal`、`CronLocal`
+- `RawSourceConfig` 虽被 IFS/GFS 两个字段引用，参数化继续以 `dict.fromkeys(...)` 去重；`test_dataclass_tree_reaches_every_nested_dataclass` 与独立 `EXPECTED_DATACLASSES` 集合保持逐字不变，故类遗漏不能靠缩短遍历静默变绿
+
+Must preserve:
+- 上述 10 个 class 与遍历顺序/去重行为不变；`test_dataclass_tree_reaches_every_nested_dataclass`、`EXPECTED_DATACLASSES`、默认值测试和 #69 直接构造测试均不改
+- `producer/src/yd_producer/config.py` 的 dataclass decorator、field、default、loader、异常与 userspace 行为零变化；本 issue 修测试，不修产品
+- `test_executor.py` 已采用同一标准库 metadata oracle，不得回退或复制第二套 helper
+- Python 版本下界继续由 `producer/pyproject.toml` 的 `requires-python = ">=3.12"` 管理；本仓 Python 3.12 的 `_DataclassParams` 直接暴露 `frozen` / `kw_only`，不加兼容 fallback 或私有 wrapper
+
+Must add/change:
+- 参数化对象仍是 `list(dict.fromkeys(_dataclass_tree(Config) + _dataclass_tree(LocalConfig)))`，对每个 class 先取 `params = klass.__dataclass_params__`，再直接断言 `params.kw_only is True`、`params.frozen is True`
+- 删除 `[object()] * len(dataclasses.fields(klass))`、`pytest.raises(TypeError)` 与“给满实参即只有 kw_only 能抛”的间接推理；不得改成异常消息匹配、`inspect.signature`、`__match_args__`、构造实例或字段赋值等另一种间接 oracle
+- 保留现有 docstring 中位置实参会让同名/同类型字段静默互换的风险解释，但改为说明为何必须直接断言 metadata；不得声称 frozen 意味着深冻结、可哈希或 Mapping 不可变
+
+Seam under test:
+- 每个 class 的标准库 dataclass metadata `klass.__dataclass_params__.kw_only` / `.frozen`；不调用 loader、构造器、`__post_init__`、私有 builder 或实例赋值
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - Config/LocalConfig 是三入口共享公开输入结构，构造形态是 consumer compatibility contract
+- Config / project setup: selected - 本 issue 遍历 config/local dataclass 树
+- File IO / path safety / overwrite: not selected - metadata-only test，不读写产品文件
+- Schema / columns / units / field names: selected - `kw_only` 防同类型字段按位置静默错配，`frozen` 是返回结构声明
+- Auth / permissions / secrets: not selected - 无外部输入、凭据或权限面
+- Concurrency / shared state / ordering: not selected - 无运行时状态；frozen 只检查 decorator metadata，不外推深层可变性
+- Resource limits / large input / discovery: not selected - 固定 10-class 小集合，无发现或非界输入
+- Legacy compatibility / examples: selected - 直接关键字构造、默认值与现有消费者必须不变；只移除脆弱测试动作
+- Error handling / rollback / partial outputs: not selected - 不改异常、失败路径或写面；旧 TypeError 不是产品 error contract
+- Release / packaging / dependency compatibility: selected - 只用 stdlib dataclass metadata，Python >=3.12；不加依赖或 lock drift
+- Documentation / migration notes: selected - OpenSpec 只记录 oracle hardening；无 userspace 迁移
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: not selected - 无时间/forcing 行为
+- 状态链 / warm-start: not selected - 无状态链
+- NWM 快照溯源 / DB-free 隔离: not selected - 无 NWM 行为
+
+Invariant Matrix:
+- Source of truth: `@dataclass(frozen=True, kw_only=True)` 对应的 `_DataclassParams.frozen` / `.kw_only`
+- Producer: `producer/src/yd_producer/config.py` 的 10 个 dataclass decorators（只读、不改）
+- Validator/read surface: 参数化 metadata test + 独立 class-tree completeness test
+- Storage/cache/query: none
+- Public routes/entrypoints: Config/LocalConfig 类型被 prepare/init/run 消费；本 PR 不改调用路径
+- Frontend/downstream consumers: 现有全部 keyword construction 与 loader users；完整 producer suite 保持
+- Failure paths/rollback/stale state: `__post_init__` 是否抛 `TypeError` 不得影响 metadata oracle；无 IO rollback
+- Evidence/audit/readiness: 20 个 decorator-flag mutants + 一个 `__post_init__` confounder，focused/full suite 与结构 AST 审计
+- Valid row: 当前每个 class -> `kw_only is True` 且 `frozen is True`
+- Mismatch row: 任一 class 单独把 `kw_only=True` 改为 `False` 或 `frozen=True` 改为 `False` -> 对应参数化 case 变红
+- Confounder row: `VariantsConfig` 同时设 `kw_only=False` 并加一个对 positional `object()` 会抛 `TypeError` 的 `__post_init__` -> 直接 metadata case 仍因 `kw_only is False` 变红，证明不再被偶然 TypeError 满足
+- Compatibility row: tree completeness、默认值、timeout direct construction 与 full producer consumers 保持绿，production source/config 零 diff
+
+Boundary-surface checklist:
+- Shared helper roots: `_dataclass_tree` 与 `EXPECTED_DATACLASSES` 原样保留
+- Public entrypoints/read surfaces: class metadata only；不调用构造器或 loader
+- Write/delete/overwrite and staging/publish/rollback: none
+- Producer/consumer evidence boundary: decorator flags → `_DataclassParams` → direct boolean assertions
+- Stale-state/idempotency: none
+- Unchanged downstream consumers: producer full suite；executor/controller 的直接 metadata precedent不改
+
+Test-first / mutation evidence:
+- 当前 production decorators 正确，纯测试重写应直接 green；不得伪造旧 source red
+- 隔离 scratch 对 10 个 class 分别施加 `kw_only=True -> kw_only=False`，再分别施加 `frozen=True -> frozen=False`，共 20 个单 flag mutant；每个必须由对应具名参数化 metadata case杀死
+- 另施加一个 confounder：`VariantsConfig` 去掉 kw-only 并添加会在 positional `object()` 上抛 `TypeError` 的 `__post_init__`；新 test 必须仍因 metadata 断言变红。该变异不是第 21 个 decorator flag 覆盖量，不得拿它替代任一 class 的 kw-only mutant
+- scratch 遵守 project profile：唯一目录、排除 venv/cache、复制 producer/openspec/docs、清 `VIRTUAL_ENV`、禁写 bytecode、断言 import 根与 source marker、使用 `uv run python -m pytest`、每轮恢复 source/test hash；非零输出必须含精确参数化 node id
+
+Required evidence:
+- focused metadata/tree/default/direct-construction tests、完整 `test_config.py` 与 producer/viewer suites 全绿
+- 10/10 kw-only mutants、10/10 frozen mutants、1/1 TypeError-confounder killed；对应失败必须来自改写后的 direct metadata test
+- AST 结构审计：参数化 expression 与 tree completeness test 不变；改写测试包含恰一次 `__dataclass_params__` 读取及两个 `is True` 断言；不含 `object()`、constructor call、`pytest.raises`、signature 或 `__match_args__`
+- 产品源码、生产 config、其它 tests、依赖/lock 零 diff；producer/viewer frozen sync、Ruff/format、OpenSpec strict/all、stage anchor、`git diff --check` 通过
+
+Non-goals:
+- 不修改任何 dataclass decorator、字段、默认值、`__post_init__`、loader 或产品行为
+- 不新增运行时 frozen enforcement、深不可变、hash、equality、slots、match_args 或 assignment-error 承诺
+- 不把 test-only metadata guard 提升为新的 cli-config userspace Requirement；现有构造形态已由源码与测试约束，本 issue 只修 oracle
+- 不改 executor/controller/checkpoint 的兄弟 dataclass tests，不抽公共 test helper
+- 不实现其它 config cleanup 或改变 Issue #48 A/B oracle
+
+Review focus:
+- 是否直接观察 `__dataclass_params__.kw_only/frozen`，而不是换一种间接构造/签名/异常 oracle
+- 10-class 遍历与独立 completeness guard 是否原样保留，避免通过漏 class 让参数化变绿
+- frozen 断言是否没有越权承诺 deep immutability/hash/Mapping behavior
+- 21 个变异是否都由目标 metadata case 因目标 flag 失败，而非 import/collection/其它专项测试抢红
+- 是否严格 test-only，未修改 config source、其它 tests 或 userspace spec
 
 ### Issue #3 fixture（任务 1.3–1.4）
 

@@ -2043,7 +2043,7 @@ def test_dataclass_tree_reaches_every_nested_dataclass():
     list(dict.fromkeys(_dataclass_tree(Config) + _dataclass_tree(LocalConfig))),
     ids=lambda klass: klass.__name__,
 )
-def test_dataclass_rejects_positional_construction(klass):
+def test_dataclass_is_frozen_and_kw_only(klass):
     """全部 dataclass MUST 只接受关键字构造（`kw_only=True`）。
 
     `VariantsConfig(gfs, ifs)` 与 `RawConfig(ifs, gfs)` 用同一对字段名而顺序相反，
@@ -2051,13 +2051,12 @@ def test_dataclass_rejects_positional_construction(klass):
     互换实参不会报错，下游（#6 raw 完整性判定、#20 覆盖守卫）拿到的是一份"raw 永远缺"
     的静默错配，而不是一条红测试。
 
-    实参个数刻意取满字段数：少给实参时未加 `kw_only` 的类也会因"缺必需位置参数"而抛
-    `TypeError`，那是偶然判别力。给满实参时，只有 `kw_only=True` 能让它抛。
+    因此测试直接读取 dataclass metadata：构造器抛出的 `TypeError` 未来也可能来自
+    `__post_init__`，不是 `kw_only` 的证明。
     """
-    args = [object()] * len(dataclasses.fields(klass))
-
-    with pytest.raises(TypeError):
-        klass(*args)
+    params = klass.__dataclass_params__
+    assert params.kw_only is True
+    assert params.frozen is True
 
 
 def test_old_direct_local_construction_keeps_passed_slurm_mapping_and_defaults_timeout():
