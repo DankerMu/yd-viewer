@@ -731,9 +731,8 @@ def _write_cli_raw(raw_root: Path, cycle: datetime) -> None:
         base = raw_root / DIR_SEGMENTS[source] / cycle.strftime(CYCLE_DIR_FORMAT)
         base.mkdir(parents=True, exist_ok=True)
         for lead in leads:
-            (base / CLI_BUNDLES[source].format(lead=lead)).write_bytes(
-                b"GRIB\xff\x00stub"
-            )
+            name = CLI_BUNDLES[source].replace("{lead}", f"{lead:03d}")
+            (base / name).write_bytes(b"GRIB\xff\x00stub")
 
 
 def _write_cli_root(tmp_path: Path) -> tuple[Path, list[str]]:
@@ -825,7 +824,8 @@ def test_cli_init_turns_a_judge_config_error_into_exit_one(
     base = root / "nwm" / "raw" / DIR_SEGMENTS["ifs"] / cycle.strftime(CYCLE_DIR_FORMAT)
     base.mkdir(parents=True)
     for lead in CLI_LEADS["ifs"]:
-        (base / CLI_BUNDLES["ifs"].format(lead=lead)).write_bytes(b"GRIB\xff\x00stub")
+        name = CLI_BUNDLES["ifs"].replace("{lead}", f"{lead:03d}")
+        (base / name).write_bytes(b"GRIB\xff\x00stub")
 
     argv = ["init", "--config", str(config_path), "--local", str(local_path)]
     assert cli.main(argv, env={}) == cli.EXIT_GUARD

@@ -103,11 +103,11 @@ def step_clock() -> StepClock:
 #: source gfs 的 raw 规则（合成；与 `cli_fixtures` 无关，本 fixture 自行登记）。
 GFS_LEADS = (0, 3)
 GFS_VARIABLES = ("tmp2m",)
-GFS_BUNDLE = "gfs.t{cycle_hour:02d}z.pgrb2.0p25.f{lead:03d}.bundle.grib2"
+GFS_BUNDLE = "gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2"
 #: source ifs 的 raw 规则。
 IFS_LEADS = (0, 3)
 IFS_VARIABLES = ("2t",)
-IFS_BUNDLE = "ifs.t{cycle_hour:02d}z.f{lead:03d}.bundle.grib2"
+IFS_BUNDLE = "ifs.t{cycle_hour}z.f{lead}.bundle.grib2"
 
 #: 多变量判别器（contract-1 修复）：GFS ≥2 变量 × ≥2 lead，暴露 rawcopy 的
 #: 「每 (lead, 变量) 一条 entry、每 lead 一份 bundle 副本」共享键扇出。
@@ -338,7 +338,9 @@ def write_raw_cycle(
     if variables is None:
         variables = GFS_VARIABLES if source == "gfs" else IFS_VARIABLES
     for lead in leads:
-        name = pattern.format(cycle_hour=cycle.hour, lead=lead)
+        name = pattern.replace("{cycle_hour}", f"{cycle.hour:02d}").replace(
+            "{lead}", f"{lead:03d}"
+        )
         (base / name).write_bytes(b"GRIB\xff\x00lead-%03d" % lead)
     manifest = source_manifest(
         source=source, cycle=cycle, leads=leads, variables=variables
@@ -355,7 +357,9 @@ def source_manifest(
     pattern = GFS_BUNDLE if source == "gfs" else IFS_BUNDLE
     entries = []
     for lead in leads:
-        name = pattern.format(cycle_hour=cycle.hour, lead=lead)
+        name = pattern.replace("{cycle_hour}", f"{cycle.hour:02d}").replace(
+            "{lead}", f"{lead:03d}"
+        )
         cycle_iso = cycle.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
         valid_iso = (cycle + timedelta(hours=lead)).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
         remote = f"https://mirror.invalid/{segment}/{cycle_text(cycle)}/{name}"

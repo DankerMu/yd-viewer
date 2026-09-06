@@ -477,7 +477,7 @@ Review focus:
 
 - [x] 3.1 实现 IFS/GFS 完整性规则判定（00/12 限定、0–168h、变量/bundle 模式、GFS f000 特例、逐文件检查）
 - [x] 3.2 实现 raw 只读复制到调用方 staging root 的 `raw/`（源不可变断言）与同 root 临时 `raw-manifest.json` 生成（entry 只引用副本）；14.1 把该 root 固定为 `<attempt-work>/object-store`
-- [ ] 3.3 将 bundle grammar 收窄为简单字段并由渲染器统一补零，迁移全部生产消费者 fixture（issue #52）
+- [x] 3.3 将 bundle grammar 收窄为简单字段并由渲染器统一补零，迁移全部生产消费者 fixture（issue #52）
 
 依赖：组 1（规则来自 config）、组 2（manifest 结构）
 §13.1 归属：raw 扫描

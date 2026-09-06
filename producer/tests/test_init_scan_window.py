@@ -398,8 +398,8 @@ def test_config_error_from_judge_propagates_untouched(tmp_path: Path) -> None:
     """
     config = make_config(
         gfs_bundles=(
-            "gfs.f{lead:03d}.grib2",
-            "gfs.f{lead:03d}.grib2",
+            "gfs.t{cycle_hour}z.f{lead}.grib2",
+            "gfs.t00z.f{lead}.grib2",
         )
     )
     tree = Tree(tmp_path, config=config)
