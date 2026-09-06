@@ -706,3 +706,24 @@ M2 任务，本次继续不 archive。
 
 复议条件未触发：不存在后续综合轮、rotated catch 或已关闭 finding 重报。共享 `m2-producer-core` 仍承载
 #31、#32、#72、#48、#46 等后继配置任务，本次继续不 archive。
+
+---
+
+## 第 20 次复议（issue #134 / PR #140 合并后，2026-09-06）
+
+审计数字：30 行（29 merged、1 terminal），26 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #140 是 `fixture:none` 的 docs-only fixture 修复，`rounds=0`；独立
+Sonnet 文档审核是额外证据，不属于代码 PR 的综合 review round。因此本样本不进入 rotation attribution，
+也不改变 core/rotated 数字。
+
+本条只把 `none` 桶从 1 个 merged PR 增为 2 个，累计 `gate_net_catch=0`，尚未达到每个 fixture level
+至少 8 个样本的 keep/cut 门槛。即使未来达到，也只能裁定 docs-only none 路径是否需要额外审核，不能据此
+缩减 compact/expanded/high 代码 PR 的 reviewer 席位。当前 lens-rotation DECIDABLE 完全是前 26 个多轮代码
+PR 的既有信号，本 PR 没有后续轮次，既不能支持 rotation，也不能反对 rotation。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；不把
+零轮次的 docs-only clean 样本计作“轮换发生但零收益”，也不据此改变任何代码 fixture 的 seat cap。累计
+rotated 捕获仍显著，证据不足时默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：不存在综合轮、rotated catch、verifier candidate 或已关闭 finding 重报。共享
+`m2-producer-core` 仍服务 #135、#136、#137 与 #132，本次继续不 archive。
