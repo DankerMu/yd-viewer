@@ -4855,8 +4855,9 @@ Review focus:
 - [ ] 14.2 `yd-producer run` 接线：`cli.run` 调用 `controller.run_sources`，注入 Slurm executor、生产 attempt driver、poll wait 与独立 `sacct ExitCode` provider；退出码 0/2/3
 - [x] 14.3 多轮追赶与缺口停等：raw 一次补齐 T/T+12h/T+24h 时序推进、每源在途提交计数 ≤1、缺轮停在缺口（原任务 14.2；§13.1：同源顺序/raw 缺口）
 - [x] 14.4 双源并行、单源失败隔离与崩溃恢复端到端：IFS 失败 GFS 继续、失败日志与 work 清理、无 DONE 残留下次重跑（原任务 14.3；§13.1：双源并行/单源失败/无 DONE 崩溃恢复）
+- [ ] 14.5 `RunSourcesError` 按固定源顺序保留每个底层 `RunError` 正文与 `__notes__`（14.2 前置；issue #137）
 
-依赖：组 5、组 8、组 9、组 12、组 13；14.2 是后补的 M2 收尾接线，按实现依赖位于 14.4 之后
+依赖：组 5、组 8、组 9、组 12、组 13；14.2 是后补的 M2 收尾接线，按实现依赖位于 14.4 与窄前置 14.5 之后
 §13.1 归属：控制器/发布（逐 task 标注场景）
 Suggested fixture level: expanded - 多轮端到端目录树与可编排 fake executor
 Minimal mergeable slice: 单源单轮骨架（14.1）——一条端到端路径独立合并保绿；追赶（14.3）、双源（14.4）与生产 CLI 接线（14.2，最后实施）为后继
@@ -5387,6 +5388,75 @@ Minimal mergeable slice: 只交付任务 14.4（原 14.3）；14.1 与 14.3 已�
 - unknown work 是否 raw 前 fail closed 且 staging 前 point-of-use guard 仍无条件执行；publish lock 是否仅覆盖完整 publish且保留 mode。
 - #108 是否只在 mapping 校验与本源 preflight 后、首次 frontier 前执行一次；是否完整区分普通文件 DONE/无有效 DONE、目录/非目录、identity 稳定/漂移，并把删除审计送到首报告或原错误 notes/CLI；有没有错接到本轮 publish/failure、公开 catch_up、NFS residue/retention。
 - 是否改坏 #27 AST/public seam、越界吸收 M4/#127，或弱化 red/mutation/full/merge-ref oracle。
+
+### Issue #137 fixture（任务 14.5：`RunSourcesError` 保留底层 notes）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：`RunSourcesError.__str__` 是公开异常的人读文本格式，并由 #132 CLI 直接作为 stderr 消费，命中 public API / format / legacy compatibility 的 mandatory expanded trigger；代码边界仍严格两文件）
+Repair intensity: medium
+Project profile: yd-viewer
+Minimal mergeable slice: 只修改聚合消息构造与原测试模块中的判别矩阵；不实现 #108 hygiene，不修改 CLI
+
+**Risk triage / change surface**：
+
+- Issue type: bugfix；blast radius: medium。生产只改 `producer/src/yd_producer/_controller_sources.py` 的 `RunSourcesError` 消息构造；测试只改 `producer/tests/test_controller_sources.py`，该文件当前 795 行且最终 MUST <1000，不新增 large-file 豁免。
+- 已有 `run-controller` spec 的 startup-hygiene Requirement/Scenario 与 #28/#132 fixture 已冻结“聚合文本包含底层 error/notes、CLI 只打印整份一次”。本 issue 只补其被 #132 六文件边界挡住的私有实现前置；normative spec/design 无需重复 delta。
+
+**Must preserve**：
+
+- `RunSourcesError(reports, errors)` 构造签名、`RuntimeError` 基类、`reports`/`errors` properties、构造时 mapping/tuple 快照、同源 partial reports + 原 `RunError` identity/cause/notes、全部现有输入校验不变。
+- 每个无 notes 的 source block 逐字保持现有 `"<source>: phase=<phase> <str(error)>"`；多个 source block 仍以 `"; "` 连接，因此所有错误均无 notes 时完整 legacy message byte-for-byte 不变。
+- source block 顺序只取 `_SOURCE_ORDER == ("ifs", "gfs")`，不取 caller mapping 插入顺序、worker 完成顺序、set/dict 遍历或 lexical sort。
+
+**Must add/change / seam under test**：
+
+- 构造消息时，对每个存在的 source 先写既有 block 首行，再把 `getattr(error, "__notes__", ())` 中每个 note 按原 list 顺序、原字符串内容各追加一次，以 `"\n"` 连接；不得去重、排序、包装/复制底层异常或调用 `add_note`。
+- 唯一测试 seam 是公开 `str(RunSourcesError)` 加既有 `reports`/`errors` properties。不得用 `traceback.format_exception`、不得在 CLI 重复遍历 notes、不得新增 helper public API。
+
+**Risk packs considered（core）**：
+
+- Public API / CLI / script entry: selected - 公开异常文本由后继 #132 CLI 原样打印；本 PR 不改 CLI。
+- Config / project setup: not selected - 不读写 config/local。
+- File IO / path safety / overwrite: not selected - 纯内存字符串聚合，零路径与文件操作。
+- Schema / columns / units / field names: selected - source block、phase、换行及 `; ` 是人读错误格式；notes 顺序/次数是契约。
+- Auth / permissions / secrets: not selected - 无凭据或权限面。
+- Concurrency / shared state / ordering: selected - 双 worker 结果 mapping 的插入/完成顺序不得改变 `ifs,gfs` 输出；构造后不再读取 caller mapping。
+- Resource limits / large input / discovery: not selected - 固定两源、已有 Python exception note list，无扫描/递归/外部大输入。
+- Legacy compatibility / examples: selected - 零 notes 消息、properties、快照、partial overlap 与签名逐字保持。
+- Error handling / rollback / partial outputs: selected - 原错误正文/cause/notes 是失败路径唯一运维证据，必须无丢失/复制且不得替换异常对象。
+- Release / packaging / dependency compatibility: selected - stdlib-only、零依赖/lock/export变化、两文件均 <1000 行。
+- Documentation / migration notes: selected - 消费已合并 #108/#132 文本 owner，明确不重复实现或扩展其运行面。
+
+**Domain packs**：
+
+- Geospatial / CRS: not selected - 无几何。
+- Time series / forcing / temporal boundaries: not selected - cycle 只可能出现在 opaque note 文本中，本 seam 不解析时间。
+- 状态链 / warm-start 定戳一致性: selected - startup-cleanup note 是停源/历史 work 处置的唯一运维证据；这里只保证传播，不扫描或删除。
+- NWM snapshot / DB-free: not selected - 零 NWM import、数据库、环境与 registry 访问；现有 DB-free 边界不变。
+
+**Required evidence（input → exact output）**：
+
+1. 双源反向插入：先构造 gfs error、后构造 ifs error；正文互异且都不是任何 note 子串，ifs 两条 notes、gfs 一条 note -> `str(wrapper)` 精确等于 `ifs` 既有首行 + 两条原序换行 note + `; ` + `gfs` 既有首行 + 一条 note；每个独立 body/note token 恰出现一次。
+2. 单源/零 note：分别只含 ifs 或 gfs error且无 `__notes__` -> 精确等于改动前单 block 文本，无占位、尾换行或 `; `；双源均无 note -> 完整旧摘要逐字不变。
+3. 零/多 note 混合：ifs 无 note、gfs 至少三条有序 note -> 三条按 list 原序各一次；把 notes 改为 set/sorted、只取首条、倒序或重复追加均判红。
+4. snapshot/identity：构造后回改原 reports/errors mapping 不改变 wrapper properties或 `str(wrapper)`；`wrapper.errors[source] is 原 RunError`，其 cause 与 `__notes__` 内容/顺序未被聚合器改写；既有 partial-overlap 形态继续合法。
+5. 结构/boundary：`RunSourcesError.__init__` 与 properties 的公开签名不变；生产 diff 仅 `_controller_sources.py`，测试 diff 仅 `test_controller_sources.py`；CLI、#108 scan/delete、`RunReport`/`RunSourcesReport`、controller exports 与其它 tests 零 diff，两文件 <1000 行。
+6. batched pre-change red：final 新用例保留、只把生产文件临时恢复到本 fixture parent bytes，以 `uv run --project producer python -m pytest -q producer/tests/test_controller_sources.py` 进入 test body 后因 notes 缺失变红；按 SHA-256 恢复生产文件，不使用共享 stash，零 `red-proof` 残留。
+7. calibrated mutation：唯一仓外 scratch、排除 `.venv`/bytecode/cache、frozen sync、断言 import/source/marker 命中 scratch；至少杀死旧无-note摘要、完全跳过 notes、只取第一条、重复追加、按 errors mapping 插入顺序与 note 排序/集合化，0 survived/0 unrun，逐 mutant 恢复 source hash。
+8. final matrix：聚焦 `test_controller_sources.py` + controller source/failure/crash/catch-up sibling tests、producer full、producer/viewer frozen sync + Ruff/format、OpenSpec strict/all、stage anchor、line/scope gate与 `git diff --check` 全绿。
+
+**Non-goals / scope firewall**：
+
+- 不实现或修改 #108 startup hygiene 的扫描、DONE 判定、删除、detail/note 生产；不改任何 filesystem owner。
+- 不改 CLI stderr/退出码/traceback 行为；#132 后继只打印一次完整 `str(RunSourcesError)` 并自带 CLI 判别测试。
+- 不改 worker、driver、Slurm/provider、controller state machine、公开 report/error 字段、异常分类或 logging schema；不新增 note 前缀、JSON/结构化错误、去重策略。
+
+**Review focus**：
+
+- 零 notes 的 userspace 文本是否逐字不变；有 notes 时是否只做一次 construction-time flatten。
+- source 与 note 两层顺序是否分别来自 `_SOURCE_ORDER` 与原 `__notes__` sequence，而非 mapping/set/sort。
+- tests 的正文与 note token 是否互不包含、用 exact expected string 与多 note 杀死旧摘要/漏项/重复/无序变异。
+- 是否越界触碰 #108/CLI/#132，或为小改动增加 traceback formatter、公开 helper、第三文件/large-file 豁免。
 
 ### M2 收尾 fixture（任务 14.2：`yd-producer run` 接线；冲突来源 PR #129 / #28）
 
