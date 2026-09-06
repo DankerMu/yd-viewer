@@ -395,8 +395,27 @@ def _build_slurm_schema(table: Mapping[str, Any]) -> SlurmSchema:
     return SlurmSchema(required_fields=required_fields)
 
 
+def _validate_config_domain(config: Config) -> None:
+    """拒绝本装载边界认领的三条版本化配置取值域。"""
+    if any(hour not in {0, 12} for hour in config.cycle.hours):
+        raise ConfigError(
+            "配置项 `cycle.hours` 的每个值必须属于 {0, 12}", "cycle.hours"
+        )
+    if config.forecast_days <= 0:
+        raise ConfigError("配置项 `forecast_days` 必须大于 0", "forecast_days")
+    checkpoint_upper_bound = 24 * config.forecast_days
+    if any(
+        hour < 0 or hour >= checkpoint_upper_bound for hour in config.checkpoint_hours
+    ):
+        raise ConfigError(
+            "配置项 `checkpoint_hours` 的每个值必须满足 "
+            f"0 <= hour < {checkpoint_upper_bound}",
+            "checkpoint_hours",
+        )
+
+
 def _build_config(data: Mapping[str, Any]) -> Config:
-    return Config(
+    config = Config(
         forecast_days=_require_int(data, "forecast_days"),
         output_interval_minutes=_require_int(data, "output_interval_minutes"),
         checkpoint_hours=_require_int_list(data, "checkpoint_hours"),
@@ -410,6 +429,8 @@ def _build_config(data: Mapping[str, Any]) -> Config:
         raw=_build_raw(_require_table(data, "raw")),
         slurm=_build_slurm_schema(_require_table(data, "slurm")),
     )
+    _validate_config_domain(config)
+    return config
 
 
 def load_config(path: str | os.PathLike[str]) -> Config:

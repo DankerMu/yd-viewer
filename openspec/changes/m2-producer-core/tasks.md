@@ -10,6 +10,7 @@
 - [x] 1.4 实现 NWM 解释器薄外壳（精确路径调用、cwd/`PYTHONPATH` 取自 checkout 字段、fail-closed），以假解释器脚本测试调用形态
 - [x] 1.5 提交版本化 `producer/config.toml` 生产实例，以实际文件装载测试钉死文档与 NWM pin 的逐字段取值（issue #29）
 - [x] 1.6 将 `LocalConfig.slurm` 收口为无可变 backing 暴露的只读资源映射（issue #31）
+- [x] 1.7 在 `config.toml` 装载边界落实三条已裁决取值域及精确错误路径（issue #32）
 
 依赖：无
 §13.1 归属：无直接行（基础设施，支撑全部行）
@@ -348,6 +349,95 @@ Review focus:
 - 只读测试是否作用于映射内容本身，且赋值、删除、解析树别名三条反例都可杀
 - 动态 required-fields 的唯一权威和所有现有只读消费者是否保持兼容
 - 是否偷带 hash 语义、固定字段清单、timeout 或其它后继 issue
+
+### Issue #32 fixture（任务 1.7）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：`load_config` 是所有生产入口的共享 public reader，且三条规则命中 schema/field、cross-field 与 temporal-boundary 强制 expanded 触发）
+Repair intensity / effective tier: high（越域配置若在装载期漏过，会进入 raw/controller/tracker 并把配置错误延迟成运行时停等或无效 checkpoint）
+Project profile: yd-viewer
+
+Docs-first prerequisite satisfied:
+- Wave 0 裁决 6 已由提交 `1318c21312ebb3434fac86f1f58a7fa8069c8299` 先行进入 `master`，同步修改 `docs/compute-loop-design.md`、cli-config spec 与共享 #2 fixture。裁决只上提三条域，不授权其它值域。本 fixture 建立 #32 的独立实现/证据边界，不重裁该决定。
+
+Change surface:
+- `producer/src/yd_producer/config.py`：新增唯一的装载期 owner `_validate_config_domain(config: Config) -> None`，由 `_build_config` 在返回完整 `Config` 前调用
+- `producer/tests/test_config.py`：经公开 `load_config` 覆盖三条域的有效边界、无效边界、动态跨字段上界与精确 `ConfigError.path`
+- 本任务 1.7 与本 fixture；并只修正本文件 Issue #21/init fixture 中会被 #32 直接证伪的两处 owner 状态描述：把“rawscan 是全仓唯一取值域权威”改成“loader 是文件装载权威，init/rawscan 保留手构 `Config` 的防御边界”，不得改变 init 的任何行为要求、回归构造或实现归属
+- `producer/config.toml`、`local.toml`、rawscan/controller/tracker 产品代码及其它模块均不改
+
+Governing invariant:
+- 任何经 `load_config` 返回的 `Config` 都必须满足：`cycle.hours` 每项属于 `{0,12}`、`forecast_days > 0`、`checkpoint_hours` 每项落在 `[0, 24 * forecast_days)`；违反时在对象逃出装载器前以对应字段路径的 `ConfigError` 拒绝。
+
+Owner and ordering:
+- 三条规则共同且只落在 `_validate_config_domain`；`_build_config` 先完成既有存在性/类型装配，再调用一次该 owner，再返回对象
+- #72 后续的 `raw.ifs.variables` / `raw.gfs.variables` 单射性检查必须扩展同一个 `_validate_config_domain`，不得新建第二个装载期 domain owner
+- owner 内先校验 `cycle.hours`，再校验 `forecast_days`，最后用已经合法的 `forecast_days` 计算 checkpoint 上界；这是多重非法输入的稳定错误优先级，不改变缺字段/类型错误先于取值域的既有漏斗
+
+Must preserve:
+- 所有字段名、dataclass、loader 公共签名、类型转换、缺字段/类型错误、`ConfigError` 包装与 `path` 语义不变
+- 生产 `config.toml` 的 `[0,12]`、7、`[12]` 可继续装载；原有完整 config round-trip 与全部下游 suite 继续通过
+- rawscan 对 `cycle.hours` 的防御性守卫、controller 对生产 7 天/12 小时的更窄业务 preflight、tracker 的直接构造守卫均保留，防程序内手构 `Config` 绕过 loader；本 PR 不删不改
+- 空 `cycle.hours` 与空 `checkpoint_hours` 按“每项满足”的量词在本层可装载；非空性、基数、唯一性不是本裁决
+- `cycle.hours` 中重复的合法值也不在本裁决内；不得静默去重或规范化输入
+
+Must add/change:
+- `cycle.hours` 为 `[0]`、`[12]`、`[0,12]` 均成功；任一项为 `6`、`18`、`24` 或负数时抛 `ConfigError(path="cycle.hours")`
+- `forecast_days = 1` 成功；`0` 与负数抛 `ConfigError(path="forecast_days")`
+- `forecast_days = 7` 时 `checkpoint_hours = [0,167]` 成功；任一项为 `-1` 或 `168` 时抛 `ConfigError(path="checkpoint_hours")`
+- `forecast_days = 1` 时 `checkpoint_hours = [23]` 成功、`[24]` 拒绝，证明上界按当前 config 跨字段计算，未写死 168 或生产值 7
+- 每条失败测试同时断言结构化 `path` 与消息中的反引号字段路径；不得只断言异常类型或消息裸子串
+
+Seam under test:
+- `load_config(path) -> Config`（真实 TOML file→public object/error 边界）；测试通过独立 fixture 值生成 TOML，不直接调用私有 validator
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - 三入口共用 `load_config`，失败时机和公开异常是契约
+- Config / project setup: selected - 本 issue 只处理版本化 config 取值域
+- File IO / path safety / overwrite: not selected - 不新增路径解引用、写入或删除
+- Schema / columns / units / field names: selected - `days`/`hours` 与精确字段路径是核心
+- Auth / permissions / secrets: not selected - 无现场值、凭据或输出变化
+- Concurrency / shared state / ordering: selected - 多重非法输入的确定性校验顺序与对象不得先逃出 loader
+- Resource limits / large input / discovery: not selected - 固定小列表，无发现/递归
+- Legacy compatibility / examples: selected - 既有 production config、inline fixtures、直接构造下游守卫必须保持
+- Error handling / rollback / partial outputs: selected - 三条失败都收敛到 `ConfigError`，无半成品返回
+- Release / packaging / dependency compatibility: selected - stdlib-only，不改依赖/lock
+- Documentation / migration notes: not selected - Wave 0 文档裁决已先行合并，本 PR 只补 issue-specific fixture
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: selected - 00/12 cycle 与 forecast/checkpoint 上下界是本 issue 的域
+- 状态链 / warm-start: not selected - 不改状态读写；仅保持 tracker 的下游防御
+- NWM 快照溯源 / DB-free 隔离: not selected - 不触碰 NWM
+
+Invariant Matrix:
+- Source of truth: Wave 0 裁决 6、compute-loop §5 与 cli-config spec 的三条域及路径
+- Producer: `config.toml` / inline TOML 的 `cycle.hours`、`forecast_days`、`checkpoint_hours`
+- Validator/read surface: `load_config` → `_build_config` → 唯一 `_validate_config_domain`
+- Downstream consumers: rawscan、controller、tracker 继续接收已合法 loader 产物并保留手构对象的本地防御
+- Evidence independence: valid/invalid 输入是测试字面量矩阵；checkpoint 动态边界用第二个 `forecast_days=1` 防止复用生产 7/168；`path` 直接读异常属性
+- Valid row: 三组 cycle 合法值、forecast 1、checkpoint 0/167 与 forecast=1/checkpoint=23 均完整 round-trip
+- Mismatch row: 非 00/12、forecast 0/负数、checkpoint -1/等于上界分别在 public loader 以精确 path 拒绝
+- Compatibility row: 空列表/合法重复值仍按未认领语义装载；生产 config、现有 inline round-trip 与完整 producer suite 保持
+
+Required evidence:
+- test-first：所有新增 invalid-domain 用例在旧 loader 上因没有抛 `ConfigError` 而 red；所有新增 valid/boundary 用例同时 green，正常收集无 collection error
+- focused domain tests、`test_config.py` 与 producer 全套通过；producer/viewer frozen sync、Ruff、format 通过
+- OpenSpec strict/all、stage-pipeline anchor 与 `git diff --check` 通过
+- 判别变异至少覆盖：放行 cycle=6、放行 forecast=0、放行 checkpoint=-1、把上界 `>=` 错成 `>`、把动态上界写死 168；每个 mutant 必须由对应 public-loader oracle 杀死并逐轮恢复源码 hash
+- 结构审计：`_validate_config_domain` 是 `config.py` 唯一新增 domain owner，`_build_config` 恰调用一次；diff 不改 rawscan/controller/tracker 产品代码，不含静默去重、默认值或后继 issue 行为；Issue #21/init fixture 除两处 owner 状态描述外逐字不变，且修订后仍明确禁止 init 复制 `{0,12}` 或导入 rawscan 私有 validator
+
+Non-goals:
+- 不检查 `raw.*` 列表非空、lead 覆盖、variants/path、reach_count、output interval、checkpoint 基数/唯一性、合法 cycle 重复、unknown key 或字符串控制字符
+- 不实现 #72 variables 单射性；只预留并钉死它必须扩展的同一 owner
+- 不删除/放宽 rawscan/controller/tracker 的下游防御，不改变程序内直接构造 `Config` 的语义
+- `producer/src/yd_producer/init.py` 的 `_candidate_cycles` docstring 仍复制两处旧 owner 话术；该越界副本已核实、去重并路由到 [Issue #146](https://github.com/DankerMu/yd-viewer/issues/146)，须在 #32 合并后只迁移说明、保持可执行代码与 init 非空/0..23/不复制 `{0,12}` 的约束不变。本 PR 不修改 `init.py`
+- 不修改 `producer/config.toml`、`local.toml`、任何现场或 M4 行为，不新增默认值
+- 不实现 #48 或 #46 的测试重构
+
+Review focus:
+- 三条量词/边界是否逐字正确，特别是 0 可作 checkpoint、上界严格排除且随 forecast_days 变化
+- `ConfigError.path` 是否精确，类型/缺字段与多重域错误的优先级是否符合 owner 顺序
+- 是否出现写死 7/168、空列表/基数/去重等范围扩张，或误删下游防御
+- #72 是否确实只能扩同一 owner，而本 PR 没有提前实现其单射性
 
 ### Issue #3 fixture（任务 1.3–1.4）
 
@@ -3380,11 +3470,11 @@ Project profile: yd-viewer
    - `now` MUST 归一为 UTC aware；naive `now` MUST 抛 `ConfigError`（MUST NOT 按宿主时区静默重释——`restamp._ensure_utc` 的同类缺口已由 issue #67 立案）。
    - 严格 `cycle <= now`：未来 cycle 不进候选集。
    - `rawscan.judge` 抛的 `ConfigError`（配置取值域 / 请求校验 / 模式校验）**MUST 原样上抛**，MUST NOT 被吞成「不完整」——那会把一个配置错误伪装成「等 raw 补齐」，让运维永远重跑 init。本文件已钉死「cycle 目录整体不存在**不是**错误」（见 `rawscan.judge` 的验收条目），故只有 `complete is False` 这一条走「继续找下一个候选」。
-   - **`cycle.hours` 的取值域 MUST 在构造候选网格之前自查**（round 1 验证闸门 cand-01 CONFIRMED/FIX_NOW，两个子案例均实测）。全仓唯一的域校验 `rawscan._validate_config_domain` 位于 `judge` **体内**，而 `_candidate_cycles` 是本路径上 `config.cycle.hours` 的**第一个**消费者、跑在任何 `judge` 调用之前，于是有两个案例根本到不了域校验：
+   - **`cycle.hours` 的候选可构造性 MUST 在构造候选网格之前自查**（round 1 验证闸门 cand-01 CONFIRMED/FIX_NOW，两个子案例均实测）。#32 落地后，文件装载得到的 `Config` 已由 `config._validate_config_domain` 保证每项属于 `{0,12}`；但程序内手构对象仍可绕过 loader，而 `rawscan._validate_config_domain` 位于 `judge` **体内**，`_candidate_cycles` 又是本路径上 `config.cycle.hours` 的**第一个**消费者、跑在任何 `judge` 调用之前，于是下列两个案例仍根本到不了 rawscan 的防御：
      - `hours = ()` -> 候选集为空 -> `judge` 一次都不调 -> 返回 `NO_COMPLETE_RAW_CYCLE`「等待 raw 补齐后重跑 init」，而 raw 其实是齐的。这**逐字**就是本裁决上一段禁止的伪装。
      - `hours` 含 `0..23` 之外的值（`24`/`25`/`-1`）-> `datetime(..., hour=...)` 抛**裸 `ValueError`**，不是 `ConfigError`，`cli.main` 的 `except ConfigError` 接不住，traceback 逃逸出 CLI，违反裁决 6「MUST NOT 以异常逃逸」。
      故 `bootstrap`（或 `_candidate_cycles` 头部）MUST 在枚举之前校验：`hours` 非空、且每个值都在 `0..23` 内，不满足即抛 `ConfigError` 并点名 `cycle.hours`。
-     - **MUST NOT 在 `init` 内重新声明 `{0, 12}` 这个域**，也 MUST NOT 导入私有的 `rawscan._validate_config_domain`（`rawscan.py` 属 Must preserve 面）。理由：候选网格一旦非空且可构造，第一次 `judge` 调用就会施加 `{0, 12}`，`ConfigError` 原样上抛——实测 `hours=(13,)` 正是如此。本裁决只补上「域校验结构性不可达」的那两个洞，`rawscan` 仍是取值域的唯一权威。
+     - **MUST NOT 在 `init` 内重新声明 `{0, 12}` 这个域**，也 MUST NOT 导入私有的 `rawscan._validate_config_domain`（`rawscan.py` 属 Must preserve 面）。文件装载时的唯一权威是 #32 的 `config._validate_config_domain`；对绕过 loader 的手构 `Config`，候选网格一旦非空且可构造，第一次 `judge` 仍会施加 `{0, 12}` 并原样上抛 `ConfigError`——实测 `hours=(13,)` 正是如此。本 init 裁决只补上候选为空或 hour 无法构造时，rawscan 防御结构性不可达的两个洞。
      - 同一缺口的兄弟面：#26/#27 的 run 接线同样会在 `judge` 之前消费 `config.cycle.hours`。仅记录、不在本 issue 处理。
    - `local.nwm.raw_root` 是 `judge` 的 `raw_root` 入参。
 4. **任一源无完整 cycle 即整体拒绝**（spec MUST，逐字 fail closed）：**所有** source 的首轮 T 全部确定之前，MUST NOT 发生任何写入。
