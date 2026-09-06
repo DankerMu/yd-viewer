@@ -886,3 +886,25 @@ integrity、schema reconciliation、mutation 方法或 clean-closure 价值，�
 复议条件未触发：Round 2 无 rotated seat、无 finding，也没有重报已关闭项；两轮均零 candidate，故无
 verifier disposition 或 residual deferral。共享 `m2-producer-core` 仍服务 #46 等后继任务，本次继续不
 archive。
+
+---
+
+## 第 27 次复议（issue #136 / PR #155 docs-only fixture 合并后，2026-09-06）
+
+审计数字：37 行（36 merged、1 terminal），仍为 28 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #155 是 docs-only fixture 前置，问责口径为 `fixture=none`、`rounds=0`；
+其 Sonnet fixture review 不是产品综合 round，也没有 candidate、verifier 或 catch。因此本次 append 没有
+增加 rotation attribution 的分母或分子，不能从完全相同的样本重新推导一个相反决定。
+
+本 PR 唯一新增过程信号是 pre-merge base/tip 门禁再次生效：#48/PR #153 修改同一共享 `tasks.md` 后，旧
+head 的 PASS 与 CI 被作废；rebase 后才核对 task 1.9 与 #136 task 9.3、D12/D16/#59、#132 14.2 的语义
+并集。随后仅问责文件前进的 master 不触发无意义 rebase，当前 merge-result CI 仍覆盖最终 base。这个信号
+属于证据新鲜度与变更面分类，不是 reviewer lens 的边际收益样本。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审。
+Rotated-in lenses 累计仍贡献 96 条 later-round catch，对 core 的 125 条并非可忽略；本次没有新 attribution，
+无依据缩减或恢复固定 Round 1 阵容。证据不足时默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：本 PR rounds=0，故无 rotated seat、finding 重报、verifier disposition 或 residual deferral。
+Issue #136 保持 OPEN，后续代码 PR 才进入 expanded/high 综合审核；共享 `m2-producer-core` 继续服务
+#136、#137 与 #132，本次继续不 archive。
