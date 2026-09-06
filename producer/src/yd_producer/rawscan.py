@@ -16,6 +16,7 @@ bundle 文件模式、GFS f000 特例）、openspec `raw-scan` 的 Requirement�
 """
 
 import os
+import re
 import stat as stat_module
 import string
 from collections.abc import Iterable, Iterator
@@ -61,6 +62,11 @@ BUNDLE_PATTERN_FIELDS: tuple[str, ...] = ("cycle_hour", "lead")
 
 # 每个 bundle 模式 MUST 含该字段：预期集的单射性由它承担（见 `_validate_pattern`）。
 LEAD_FIELD = "lead"
+
+# bundle 模式的完整公开 grammar：普通文字与精确简单 token 的重复。`re.fullmatch`
+# 使 `{lead:}`、conversion、属性/下标、转义/孤立花括号和任何嵌套一律留在接受域外；
+# `Formatter.parse` 仍用于把语法失败归因成可行动的 ConfigError。
+_SIMPLE_BUNDLE_PATTERN = re.compile(r"(?:[^{}]|\{cycle_hour\}|\{lead\})*")
 
 # f000（分析时刻）无定义的累积/平均量。
 # 转录自 NWM@8ae9b8f2 workers/data_adapters/gfs_adapter.py:107
@@ -173,46 +179,57 @@ def _validate_request(source: str, cycle: datetime, config: Config) -> None:
 # --- 3. bundle 模式校验与渲染 ------------------------------------------------
 
 
-def _pattern_fields(pattern: str, path: str) -> list[str]:
-    """取出模式内的具名字段，顺带把语法损坏转成 `ConfigError`。
-
-    `string.Formatter().parse` 是惰性生成器，语法损坏在迭代中途才抛 `ValueError`，
-    故必须在 try 内物化。
-    """
+def _parsed_pattern(
+    pattern: str, path: str
+) -> list[tuple[str, str | None, str | None, str | None]]:
+    """物化 `Formatter.parse`，把损坏语法收敛成配置错误。"""
     try:
-        parsed = list(string.Formatter().parse(pattern))
+        return list(string.Formatter().parse(pattern))
     except ValueError as exc:
         raise ConfigError(
             f"配置项 `{path}` 的 bundle 模式语法错误：{pattern!r}（{exc}）", path
         ) from exc
-    return [field for _, field, _, _ in parsed if field is not None]
+
+
+def _grammar_error(pattern: str, path: str, reason: str) -> ConfigError:
+    return ConfigError(
+        f"配置项 `{path}` 的 bundle 模式 {pattern!r} {reason}；"
+        "只接受普通文字与 "
+        + "、".join(f"`{{{name}}}`" for name in BUNDLE_PATTERN_FIELDS),
+        path,
+    )
 
 
 def _validate_pattern(pattern: str, path: str) -> None:
-    fields = _pattern_fields(pattern, path)
-    for field in fields:
+    """只接受普通文字与精确 `{cycle_hour}` / `{lead}` token。"""
+    parsed = _parsed_pattern(pattern, path)
+    fields: list[str] = []
+    for _, field, format_spec, conversion in parsed:
+        if field is None:
+            continue
+        if format_spec or re.search(r"\{[^{}]*:", pattern):
+            raise _grammar_error(pattern, path, "含不允许的 format spec")
+        if conversion is not None:
+            raise _grammar_error(pattern, path, "含不允许的 conversion")
+        fields.append(field)
         if field in BUNDLE_PATTERN_FIELDS:
             continue
         if field == "":
-            reason = "自动编号的位置字段 `{}`"
+            reason = "含自动编号的位置字段 `{}`"
         elif field.isdigit():
-            reason = f"位置字段 `{{{field}}}`"
+            reason = f"含位置字段 `{{{field}}}`"
         else:
             # 属性/下标访问（`{lead.real}`、`{lead[0]}`）同样落在本支：字段名必须
             # 逐字落在词表内，否则渲染结果不再由词表决定。
-            reason = f"词表外的字段 `{{{field}}}`"
-        raise ConfigError(
-            f"配置项 `{path}` 的 bundle 模式 {pattern!r} 含{reason}；"
-            "只接受 " + "、".join(f"`{{{name}}}`" for name in BUNDLE_PATTERN_FIELDS),
-            path,
-        )
+            reason = f"含词表外的字段 `{{{field}}}`"
+        raise _grammar_error(pattern, path, reason)
+    if not _SIMPLE_BUNDLE_PATTERN.fullmatch(pattern):
+        raise _grammar_error(pattern, path, "含不允许的嵌套或转义花括号")
     if LEAD_FIELD not in fields:
         # 只做占位符白名单守不住「预期文件集 = lead_hours × bundles」：漏写 `{lead}`
         # 的模式让全部 lead 渲染成同一路径，预期集塌缩成一个点，57 个 lead 只要 1 个
         # 文件落盘即判整轮完整——与空列表是同一病理的两扇门，故一并 fail closed。
-        # 注意 `string.Formatter().parse` 不暴露嵌套格式说明符内的字段，故
-        # `"f{cycle_hour:0{lead}d}"` 这类只把 `lead` 写在 spec 里的模式也会被拒：
-        # 方向 fail-closed，属有意为之。漏写 `{cycle_hour}` 无害（cycle 目录已隔离）。
+        # 漏写 `{cycle_hour}` 无害（cycle 目录已隔离）。
         raise ConfigError(
             f"配置项 `{path}` 的 bundle 模式 {pattern!r} 不含 `{{{LEAD_FIELD}}}`；"
             "每个模式必须逐 lead 渲染出互不相同的文件名",
@@ -222,7 +239,7 @@ def _validate_pattern(pattern: str, path: str) -> None:
 
 def _render(pattern: str, cycle_hour: int, lead: int, path: str) -> str:
     try:
-        rendered = pattern.format(cycle_hour=cycle_hour, lead=lead)
+        rendered = pattern.format(cycle_hour=f"{cycle_hour:02d}", lead=f"{lead:03d}")
     except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
         raise ConfigError(
             f"配置项 `{path}` 的 bundle 模式 {pattern!r} 渲染失败"
@@ -389,6 +406,14 @@ def judge(
     _validate_config_domain(config)
     _validate_request(source, cycle, config)
 
+    source_config: RawSourceConfig = getattr(config.raw, source)
+    bundles_path = f"raw.{source}.bundles"
+    # Requested-source grammar is an admission gate, including for relative roots: cwd
+    # promotion is itself a filesystem primitive and must not obscure this ConfigError.
+    # Do not inspect the other source here; its configuration remains lazy by contract.
+    for pattern in source_config.bundles:
+        _validate_pattern(pattern, bundles_path)
+
     try:
         root = Path(os.fspath(raw_root))
     except TypeError as exc:
@@ -407,7 +432,6 @@ def judge(
                 f"当前工作目录不可用（{exc}）"
             ) from exc
 
-    source_config: RawSourceConfig = getattr(config.raw, source)
     # 目录段由 `SOURCE_DIR_NAMES` 翻译得到，MUST NOT 直接用入参 `source`：IFS 的
     # 存储身份是大写（见该常量的 pin 溯源注释）。
     cycle_root = (

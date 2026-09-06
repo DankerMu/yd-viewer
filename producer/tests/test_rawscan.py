@@ -8,8 +8,10 @@
 任何辅助函数——否则顺序断言会退化为拿实现自身当 oracle。
 """
 
+import ast
 import builtins
 import errno
+import inspect
 import os
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from yd_producer import rawscan as rawscan_module
 from yd_producer.config import (
     CanonicalGridConfig,
     Config,
@@ -27,7 +30,13 @@ from yd_producer.config import (
     SlurmSchema,
     VariantsConfig,
 )
-from yd_producer.rawscan import GFS_F000_UNAVAILABLE_VARIABLES, ScanVerdict, judge
+from yd_producer.rawscan import (
+    BUNDLE_PATTERN_FIELDS,
+    GFS_F000_UNAVAILABLE_VARIABLES,
+    ScanVerdict,
+    judge,
+    render_bundle_filename,
+)
 
 # --- 内联合成 fixture --------------------------------------------------------
 
@@ -41,10 +50,10 @@ CYCLE_DIR = "2026030400"
 DIR_SEGMENTS = {"ifs": "IFS", "gfs": "gfs"}
 
 IFS_BUNDLES = (
-    "ifs.t{cycle_hour:02d}z.f{lead:03d}.bundle.grib2",
-    "ifs.t{cycle_hour:02d}z.f{lead:03d}.sfc.grib2",
+    "ifs.t{cycle_hour}z.f{lead}.bundle.grib2",
+    "ifs.t{cycle_hour}z.f{lead}.sfc.grib2",
 )
-GFS_BUNDLES = ("gfs.t{cycle_hour:02d}z.pgrb2.0p25.f{lead:03d}.bundle.grib2",)
+GFS_BUNDLES = ("gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2",)
 
 IFS_LEADS = (0, 3, 6)
 GFS_LEADS = (0, 3, 6)
@@ -104,11 +113,18 @@ def cycle_dir(raw_root: Path, source: str) -> Path:
     return raw_root / DIR_SEGMENTS[source] / CYCLE_DIR
 
 
+def literal_bundle_filename(pattern: str, cycle_hour: int, lead: int) -> str:
+    """独立于被测 renderer 的字面 oracle：生产身份恒为两位/三位十进制。"""
+    return pattern.replace("{cycle_hour}", f"{cycle_hour:02d}").replace(
+        "{lead}", f"{lead:03d}"
+    )
+
+
 def literal_expected(raw_root: Path, source: str, leads, bundles) -> tuple[Path, ...]:
     """按 fixture 钉死的顺序字面构造预期清单：lead 升序，组内按 bundles 声明序。"""
     base = cycle_dir(raw_root, source)
     return tuple(
-        base / pattern.format(cycle_hour=CYCLE.hour, lead=lead)
+        base / literal_bundle_filename(pattern, CYCLE.hour, lead)
         for lead in sorted(leads)
         for pattern in bundles
     )
@@ -159,6 +175,51 @@ def test_complete_when_all_expected_files_exist(tmp_path, source, leads, bundles
     assert verdict.missing_files == ()
     assert verdict.unreadable_files == ()
     assert verdict.complete is True
+
+
+@pytest.mark.parametrize(
+    ("source", "bundles", "variables", "f000_special", "expected_files"),
+    [
+        (
+            "gfs",
+            ("gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2",),
+            GFS_VARIABLES,
+            True,
+            ("gfs.t00z.pgrb2.0p25.f003.bundle.grib2",),
+        ),
+        (
+            "ifs",
+            ("ifs.t{cycle_hour}z.f{lead}.bundle.grib2",),
+            IFS_VARIABLES,
+            False,
+            ("ifs.t00z.f003.bundle.grib2",),
+        ),
+    ],
+)
+def test_simple_pattern_judge_keeps_00z_f003_identity_for_both_sources(
+    tmp_path, source, bundles, variables, f000_special, expected_files
+):
+    expected = tuple(
+        tmp_path / DIR_SEGMENTS[source] / CYCLE_DIR / filename
+        for filename in expected_files
+    )
+    populate(expected)
+    source_config = make_source(
+        lead_hours=(3,),
+        variables=variables,
+        bundles=bundles,
+        f000_special=f000_special,
+    )
+    config = (
+        make_config(gfs=source_config)
+        if source == "gfs"
+        else make_config(ifs=source_config)
+    )
+
+    verdict = judge(tmp_path, source, CYCLE, config)
+
+    assert verdict.complete is True
+    assert verdict.expected_files == expected
 
 
 def test_12z_cycle_uses_12z_dir_and_12z_filenames(tmp_path):
@@ -591,30 +652,49 @@ def test_named_zero_offset_timezone_accepted(tmp_path, label, tzinfo):
     assert verdict.complete is True
 
 
-# --- bundle 模式校验 ---------------------------------------------------------
+# --- bundle grammar -----------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("label", "pattern", "field", "reason"),
+    ("label", "pattern", "reason"),
     [
-        ("unknown_named", "gfs.{member}.f{lead:03d}.grib2", "member", "词表外的字段"),
-        ("auto_positional", "gfs.{}.f{lead:03d}.grib2", "", "自动编号的位置字段"),
-        ("indexed_positional", "gfs.{0}.f{lead:03d}.grib2", "0", "位置字段"),
-        # 模式里另含一个裸 `{lead}`：否则 `fields` 只有 `lead.real`，"必须含
-        # `{lead}`"那道门会先拦下它，而两道门的报文都含模式本身与 `lead.real`
-        # 子串，本参数就分不出词表门在不在（削弱词表门后 `(0).real` 正常渲染，
-        # judge 直接返回 verdict，用例变红）。
+        ("cycle_format_spec", "gfs.{cycle_hour:02d}.f{lead}.grib2", "format spec"),
         (
-            "attribute_access",
-            "gfs.f{lead:03d}.{lead.real}.grib2",
-            "lead.real",
-            "词表外的字段",
+            "cycle_empty_format_spec",
+            "gfs.{cycle_hour:}.f{lead}.grib2",
+            "format spec",
         ),
-        ("broken_syntax", "a{lead", None, "语法错误"),
-        ("bad_format_spec", "gfs.f{lead:s}.grib2", None, "渲染失败"),
+        ("lead_empty_format_spec", "gfs.f{lead:}.{lead}.grib2", "format spec"),
+        ("lead_format_spec", "gfs.f{lead:03d}.{lead}.grib2", "format spec"),
+        ("lead_bad_format_spec", "gfs.f{lead:q}.{lead}.grib2", "format spec"),
+        ("conversion_s", "gfs.f{lead!s}.{lead}.grib2", "conversion"),
+        ("conversion_r", "gfs.f{lead!r}.{lead}.grib2", "conversion"),
+        ("conversion_a", "gfs.f{lead!a}.{lead}.grib2", "conversion"),
+        ("unknown_named", "gfs.{member}.f{lead}.grib2", "词表外的字段"),
+        ("auto_positional", "gfs.{}.f{lead}.grib2", "自动编号的位置字段"),
+        ("indexed_positional", "gfs.{0}.f{lead}.grib2", "位置字段"),
+        ("attribute_access", "gfs.f{lead}.{lead.real}.grib2", "词表外的字段"),
+        ("index_access", "gfs.f{lead}.{lead[0]}.grib2", "词表外的字段"),
+        ("broken_open", "gfs.f{lead}.broken{", "语法错误"),
+        ("broken_close", "gfs.f{lead}.broken}", "语法错误"),
+        ("escaped_open", "gfs.{{lead}}.f{lead}.grib2", "嵌套或转义花括号"),
+        ("escaped_close", "gfs.f{lead}.grib2}}", "嵌套或转义花括号"),
+        ("nested_cycle", "gfs.f{lead:{cycle_hour}}.{lead}.grib2", "format spec"),
+        ("nested_silent", "gfs.f{lead:{lead.real}}.{lead}.grib2", "format spec"),
+        ("nested_keyerror", "gfs.f{lead:{member}}.{lead}.grib2", "format spec"),
+        ("nested_indexerror", "gfs.f{lead:{0}}.{lead}.grib2", "format spec"),
+        ("nested_typeerror", "gfs.f{lead:{lead[0]}}.{lead}.grib2", "format spec"),
+        (
+            "nested_attributeerror",
+            "gfs.f{lead:{lead.nosuch}}.{lead}.grib2",
+            "format spec",
+        ),
     ],
 )
-def test_bundle_pattern_vocabulary_enforced(tmp_path, label, pattern, field, reason):
+def test_judge_rejects_non_simple_bundle_grammar_before_render_or_filesystem(
+    tmp_path, monkeypatch, label, pattern, reason
+):
+    """公开 `judge` 的 grammar gate 必须先于 renderer 与全部文件系统原语。"""
     config = make_config(
         gfs=make_source(
             lead_hours=GFS_LEADS,
@@ -623,71 +703,158 @@ def test_bundle_pattern_vocabulary_enforced(tmp_path, label, pattern, field, rea
             f000_special=True,
         )
     )
+    calls: list[str] = []
 
-    with pytest.raises(ConfigError) as excinfo:
-        judge(tmp_path, "gfs", CYCLE, config)
+    def boom(name: str):
+        def stub(*args, **kwargs):
+            calls.append(name)
+            raise AssertionError(f"grammar gate 后不应调用 {name}")
+
+        return stub
+
+    monkeypatch.setattr(rawscan_module, "_render", boom("_render"))
+    for module, attr in (
+        (os, "stat"),
+        (os, "scandir"),
+        (os, "listdir"),
+        (builtins, "open"),
+    ):
+        monkeypatch.setattr(module, attr, boom(f"{module.__name__}.{attr}"))
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            judge(tmp_path, "gfs", CYCLE, config)
+    finally:
+        monkeypatch.undo()
 
     assert excinfo.value.path == "raw.gfs.bundles"
-    message = str(excinfo.value)
-    assert pattern in message
-    # 拒绝**归因** MUST 落在真正犯规的那道门/那一类上：六个参数分属四种成因（词表外
-    # 具名、自动编号位置、编号位置、模式语法、渲染），报文若把它们混为一谈，运维就得
-    # 靠猜来改 `config.toml`。这条断言也是"分类支存在"的唯一取证——把 `field == ""`
-    # 或 `field.isdigit()` 支变异掉不改变任何返回值，只改这段归因文本。
-    assert reason in message
-    if field is not None:
-        # `is not None` 而非真值判断：`auto_positional` 的 field 是 `""`，真值判断会
-        # 把它静默跳过，该参数就退化成"只要抛 ConfigError 就算过"。
-        assert field in message
-        # 词表门 MUST 是拒绝的**来源**，MUST NOT 由 `_render` 的异常兜底偶然满足：
-        # 后者的 `__cause__` 是 KeyError/IndexError，且报文里没有词表枚举句。
-        assert not isinstance(excinfo.value.__cause__, (KeyError, IndexError))
-        assert "只接受" in message
+    assert pattern in str(excinfo.value)
+    assert reason in str(excinfo.value)
+    assert calls == []
+
+
+def test_relative_raw_root_rejects_requested_grammar_before_cwd_or_filesystem(
+    monkeypatch,
+):
+    """相对 raw 根不能让 cwd 提升遮蔽 requested-source grammar 拒绝。"""
+    pattern = "gfs.f{lead:03d}.{lead}.grib2"
+    config = make_config(
+        gfs=make_source(
+            lead_hours=GFS_LEADS,
+            variables=GFS_VARIABLES,
+            bundles=(pattern,),
+            f000_special=True,
+        )
+    )
+    calls: list[str] = []
+
+    def cwd_unavailable(*args, **kwargs):
+        calls.append("Path.cwd")
+        raise OSError("current directory unavailable")
+
+    def boom(name: str):
+        def stub(*args, **kwargs):
+            calls.append(name)
+            raise AssertionError(f"grammar gate 后不应调用 {name}")
+
+        return stub
+
+    monkeypatch.setattr(Path, "cwd", cwd_unavailable)
+    monkeypatch.setattr(rawscan_module, "_render", boom("_render"))
+    for module, attr in (
+        (os, "stat"),
+        (os, "scandir"),
+        (os, "listdir"),
+        (builtins, "open"),
+    ):
+        monkeypatch.setattr(module, attr, boom(f"{module.__name__}.{attr}"))
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            judge("relative-raw", "gfs", CYCLE, config)
+    finally:
+        monkeypatch.undo()
+
+    assert excinfo.value.path == "raw.gfs.bundles"
+    assert pattern in str(excinfo.value)
+    assert "format spec" in str(excinfo.value)
+    assert calls == []
+
+
+def test_renderer_rejects_ifs_non_simple_grammar_before_render(monkeypatch):
+    pattern = "ifs.t{cycle_hour!s}z.f{lead}.grib2"
+    calls: list[str] = []
+
+    def boom(*args, **kwargs):
+        calls.append("_render")
+        raise AssertionError("grammar gate 后不应调用 _render")
+
+    monkeypatch.setattr(rawscan_module, "_render", boom)
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            render_bundle_filename(
+                pattern, cycle_hour=0, lead=3, config_path="raw.ifs.bundles"
+            )
+    finally:
+        monkeypatch.undo()
+
+    assert excinfo.value.path == "raw.ifs.bundles"
+    assert pattern in str(excinfo.value)
+    assert "conversion" in str(excinfo.value)
+    assert calls == []
 
 
 @pytest.mark.parametrize(
-    "pattern",
+    ("pattern", "cycle_hour", "lead", "expected"),
     [
-        "gfs.f{lead:{member}}.grib2",
-        "gfs.f{lead:{0}}.grib2",
-        "gfs.f{lead:{lead[0]}}.grib2",
-        "gfs.f{lead:{lead.nosuch}}.grib2",
+        (
+            "gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2",
+            0,
+            3,
+            "gfs.t00z.pgrb2.0p25.f003.bundle.grib2",
+        ),
+        (
+            "ifs.t{cycle_hour}z.f{lead}.bundle.grib2",
+            0,
+            3,
+            "ifs.t00z.f003.bundle.grib2",
+        ),
+        (
+            "gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2",
+            12,
+            168,
+            "gfs.t12z.pgrb2.0p25.f168.bundle.grib2",
+        ),
+        (
+            "ifs.t{cycle_hour}z.f{lead}.bundle.grib2",
+            12,
+            168,
+            "ifs.t12z.f168.bundle.grib2",
+        ),
     ],
 )
-def test_nested_spec_render_failure_is_configerror(tmp_path, pattern):
-    """嵌套 format_spec 绕过词表门后的渲染失败（round 4 r4-cand-01）。
-
-    `string.Formatter().parse` 不暴露嵌套格式说明符内的字段（实现注释 rawscan.py:212
-    已载明），故内层字段对词表门不可见、`{lead}` 门放行，直到 `_render` 的
-    `str.format` 才抛。四个内层形态分别触发 `KeyError`/`IndexError`/`TypeError`/
-    `AttributeError`，是 `_render` 那个 except 五元组里除 `ValueError` 外四腿在本模块
-    被声明输入域上的唯一取证。
-
-    **MUST NOT 断言 `__cause__` 的异常类型**：日后若在 `_validate_pattern` 补
-    format_spec 门，该异常将由词表门直接 raise 而无 `__cause__`，钉 cause 会让用例
-    二次重写。
-    """
-    config = make_config(
-        gfs=make_source(
-            lead_hours=GFS_LEADS,
-            variables=GFS_VARIABLES,
-            bundles=(pattern,),
-            f000_special=True,
+def test_render_bundle_filename_preformats_simple_tokens(
+    pattern, cycle_hour, lead, expected
+):
+    assert (
+        render_bundle_filename(
+            pattern,
+            cycle_hour=cycle_hour,
+            lead=lead,
+            config_path="raw.gfs.bundles",
         )
+        == expected
     )
 
-    with pytest.raises(ConfigError) as excinfo:
-        judge(tmp_path, "gfs", CYCLE, config)
 
-    assert excinfo.value.path == "raw.gfs.bundles"
+def test_bundle_pattern_vocabulary_is_exact():
+    assert BUNDLE_PATTERN_FIELDS == ("cycle_hour", "lead")
 
 
 @pytest.mark.parametrize(
     ("label", "pattern"),
     [
-        ("parent_escape", "../{lead:03d}.grib2"),
-        ("subdirectory", "sub/{lead:03d}.grib2"),
-        ("absolute", "/etc/{lead:03d}.grib2"),
+        ("parent_escape", "../{lead}.grib2"),
+        ("subdirectory", "sub/{lead}.grib2"),
+        ("absolute", "/etc/{lead}.grib2"),
     ],
 )
 def test_bundle_pattern_must_render_single_filename(tmp_path, label, pattern):
@@ -707,10 +874,10 @@ def test_bundle_pattern_must_render_single_filename(tmp_path, label, pattern):
     assert pattern in str(excinfo.value)
 
 
-def test_bundle_pattern_of_other_source_is_not_rendered(tmp_path):
-    """模式校验只针对被请求的源；phase 1 的双源校验只看空列表。"""
+def test_invalid_bundle_pattern_of_other_source_is_lazy(tmp_path):
+    """未请求源可仅因 #52 grammar 非法，不能影响请求源的判定。"""
     config = make_config(
-        ifs=make_source(bundles=("sub/{lead:03d}.grib2",)),
+        ifs=make_source(bundles=("ifs.t{cycle_hour:02d}z.f{lead}.grib2",)),
     )
     expected = literal_expected(tmp_path, "gfs", GFS_LEADS, GFS_BUNDLES)
     populate(expected)
@@ -746,10 +913,7 @@ def test_source_directory_segment_is_pinned_case_sensitively(tmp_path, source, s
     ("label", "pattern"),
     [
         ("no_placeholder_at_all", "gfs.bundle.grib2"),
-        ("only_cycle_hour", "gfs.t{cycle_hour:02d}z.bundle.grib2"),
-        # `string.Formatter().parse` 不暴露嵌套格式说明符内的字段，故只把 `lead`
-        # 写在 spec 里同样被拒（fail-closed，实现注释已写明该方向）。
-        ("lead_only_inside_format_spec", "gfs.f{cycle_hour:0{lead}d}.grib2"),
+        ("only_cycle_hour", "gfs.t{cycle_hour}z.bundle.grib2"),
     ],
 )
 def test_bundle_pattern_without_lead_rejected(tmp_path, label, pattern):
@@ -784,15 +948,10 @@ def test_expected_files_have_no_duplicates_on_legal_config(tmp_path):
             "two_patterns_render_the_same_name",
             {
                 "bundles": (
-                    "gfs.f{lead:03d}.grib2",
-                    "gfs.f{lead:0>3d}.grib2",
+                    "gfs.t{cycle_hour}z.f{lead}.grib2",
+                    "gfs.t00z.f{lead}.grib2",
                 )
             },
-            "raw.gfs.bundles",
-        ),
-        (
-            "duplicate_bundle_element",
-            {"bundles": ("gfs.f{lead:03d}.grib2", "gfs.f{lead:03d}.grib2")},
             "raw.gfs.bundles",
         ),
         (
@@ -817,47 +976,51 @@ def test_expected_set_must_be_injective(tmp_path, label, source_kwargs, dotted_p
         judge(tmp_path, "gfs", CYCLE, config)
 
     assert excinfo.value.path == dotted_path
-    if label == "duplicate_lead_hours":
+    if label == "two_patterns_render_the_same_name":
+        assert "gfs.t00z.f000.grib2" in str(excinfo.value)
+    else:
         # 报文 MUST 点名重复的那个 lead。
         assert "lead 3" in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
-    ("label", "pattern", "rendered"),
+    ("pattern", "rendered"),
     [
-        # `{lead!r:.0}` 把 lead 转成 str 后截断到 0 位精度，渲染出空串；三个模式都含
-        # `{lead}`，故都越过"必须含 {lead}"那道门，专测渲染结果的单文件名约束。
-        ("renders_empty", "{lead!r:.0}", ""),
-        ("renders_dot", "{lead!r:.0}.", "."),
-        ("renders_dotdot", "{lead!r:.0}..", ".."),
+        ("{lead:.0}", ""),
+        ("{lead:.0}.", "."),
+        ("{lead:.0}..", ".."),
     ],
 )
-def test_bundle_pattern_rendering_to_degenerate_name_rejected(
-    tmp_path, label, pattern, rendered
-):
-    """`""`/`"."`/`".."` 三个退化取值都必须被单文件名约束拒。
-
-    构造上有两处刻意：模式 MUST 含 `{lead}`（裸 `".."` 会先被"必须含 `{lead}`"那道门
-    拦下，而"抛 `ConfigError` 且 `path` 为 bundles 点分路径"在两道门下同样成立，于是
-    对本约束零判别力）；`lead_hours` MUST 取单元素（多 lead 下这些模式会撞进单射性
-    那道门）。断言里比对渲染结果的 `repr` 也是为此：它把本门的报文与 `{lead}` 门的
-    报文区分开。
-    """
-    assert pattern.format(lead=0) == rendered
-    config = make_config(
-        gfs=make_source(
-            lead_hours=(0,),
-            variables=GFS_VARIABLES,
-            bundles=(pattern,),
-            f000_special=True,
-        )
-    )
-
+def test_private_render_rejects_degenerate_filename_defense(pattern, rendered):
+    """D1 私有纵深：公开 grammar 不可达的退化终名仍由 `_render` 拒绝。"""
     with pytest.raises(ConfigError) as excinfo:
-        judge(tmp_path, "gfs", CYCLE, config)
+        rawscan_module._render(pattern, 0, 3, "raw.gfs.bundles")
 
     assert excinfo.value.path == "raw.gfs.bundles"
     assert repr(rendered) in str(excinfo.value)
+
+
+def test_private_render_catches_value_error_defense():
+    with pytest.raises(ConfigError) as excinfo:
+        rawscan_module._render("gfs.f{lead:q}.grib2", 0, 3, "raw.gfs.bundles")
+
+    assert excinfo.value.path == "raw.gfs.bundles"
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+def test_private_render_keeps_the_five_exception_defense_legs():
+    tree = ast.parse(inspect.getsource(rawscan_module._render))
+    handlers = [node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)]
+    assert len(handlers) == 1
+    caught = handlers[0].type
+    assert isinstance(caught, ast.Tuple)
+    assert [element.id for element in caught.elts if isinstance(element, ast.Name)] == [
+        "ValueError",
+        "KeyError",
+        "IndexError",
+        "TypeError",
+        "AttributeError",
+    ]
 
 
 # --- lead 升序（字面 oracle，不复用助手内的 sorted）--------------------------
@@ -983,9 +1146,15 @@ def _reject_case_configs():
             make_config(
                 gfs=make_source(
                     lead_hours=GFS_LEADS,
-                    bundles=("gfs.{member}.f{lead:03d}.grib2",),
+                    bundles=("gfs.{member}.f{lead}.grib2",),
                 )
             ),
+        ),
+        (
+            "grammar_format_spec",
+            "gfs",
+            CYCLE,
+            make_config(gfs=make_source(bundles=("gfs.f{lead:03d}.grib2",))),
         ),
         (
             "pattern_without_lead",
@@ -996,27 +1165,16 @@ def _reject_case_configs():
             ),
         ),
         (
-            "pattern_escapes_cycle_dir",
-            "gfs",
-            CYCLE,
-            make_config(
-                gfs=make_source(lead_hours=GFS_LEADS, bundles=("sub/{lead:03d}.grib2",))
-            ),
-        ),
-        (
-            "pattern_renders_dotdot",
-            "gfs",
-            CYCLE,
-            make_config(gfs=make_source(lead_hours=(0,), bundles=("{lead!r:.0}..",))),
-        ),
-        (
             "colliding_bundles",
             "gfs",
             CYCLE,
             make_config(
                 gfs=make_source(
                     lead_hours=GFS_LEADS,
-                    bundles=("gfs.f{lead:03d}.grib2", "gfs.f{lead:0>3d}.grib2"),
+                    bundles=(
+                        "gfs.t{cycle_hour}z.f{lead}.grib2",
+                        "gfs.t00z.f{lead}.grib2",
+                    ),
                 )
             ),
         ),
@@ -1231,7 +1389,7 @@ def test_nul_in_bundle_pattern_does_not_leak_valueerror(tmp_path):
     抛裸 `ValueError`；被本模块替换掉的 `Path.is_file()` 原本把它吞成 False，漏接即
     是回归——`judge` 对外只抛 `ConfigError`，"不完整"必须以 verdict 返回。
     """
-    pattern = "gfs.f{lead:03d}\x00.grib2"
+    pattern = "gfs.f{lead}\x00.grib2"
     config = make_config(
         gfs=make_source(
             lead_hours=GFS_LEADS,

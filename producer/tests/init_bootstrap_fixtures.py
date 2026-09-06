@@ -85,8 +85,8 @@ DIR_SEGMENTS = {"ifs": "IFS", "gfs": "gfs"}
 #: 阶段 B 的写入序，逐字写死（fixture 裁决 5）。
 WRITE_ORDER = ("ifs", "gfs")
 
-IFS_BUNDLES = ("ifs.t{cycle_hour:02d}z.f{lead:03d}.bundle.grib2",)
-GFS_BUNDLES = ("gfs.t{cycle_hour:02d}z.pgrb2.0p25.f{lead:03d}.bundle.grib2",)
+IFS_BUNDLES = ("ifs.t{cycle_hour}z.f{lead}.bundle.grib2",)
+GFS_BUNDLES = ("gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2",)
 BUNDLES = {"ifs": IFS_BUNDLES, "gfs": GFS_BUNDLES}
 LEADS = (0, 3)
 
@@ -245,7 +245,9 @@ class Tree:
         base = self.cycle_dir(source, cycle)
         base.mkdir(parents=True, exist_ok=True)
         names = [
-            pattern.format(cycle_hour=cycle.hour, lead=lead)
+            pattern.replace("{cycle_hour}", f"{cycle.hour:02d}").replace(
+                "{lead}", f"{lead:03d}"
+            )
             for lead in LEADS
             for pattern in BUNDLES[source]
         ]

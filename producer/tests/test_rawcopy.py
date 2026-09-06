@@ -51,9 +51,9 @@ CYCLE_ISO = "2026-03-04T00:00:00+00:00"
 # 的 `_STORAGE_SOURCE_IDS = {"GFS": "gfs", "ERA5": "ERA5", "IFS": "IFS"}`。
 DIR_SEGMENTS = {"ifs": "IFS", "gfs": "gfs"}
 
-GFS_BUNDLE = "gfs.t{cycle_hour:02d}z.pgrb2.0p25.f{lead:03d}.bundle.grib2"
-IFS_BUNDLE = "ifs.t{cycle_hour:02d}z.f{lead:03d}.bundle.grib2"
-GFS_SECOND_BUNDLE = "gfs.t{cycle_hour:02d}z.pgrb2.0p25.f{lead:03d}.sfc.grib2"
+GFS_BUNDLE = "gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2"
+IFS_BUNDLE = "ifs.t{cycle_hour}z.f{lead}.bundle.grib2"
+GFS_SECOND_BUNDLE = "gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.sfc.grib2"
 
 LEADS = (0, 3, 6)
 GFS_VARIABLES = ("tmp2m", "apcp", "rh2m", "dswrf")
@@ -134,8 +134,11 @@ def make_config(
 
 
 def bundle_name(source: str, lead: int) -> str:
+    """独立字面 oracle：简单 token 仍须生成 pin 的两位/三位终名。"""
     pattern = GFS_BUNDLE if source == "gfs" else IFS_BUNDLE
-    return pattern.format(cycle_hour=CYCLE.hour, lead=lead)
+    return pattern.replace("{cycle_hour}", f"{CYCLE.hour:02d}").replace(
+        "{lead}", f"{lead:03d}"
+    )
 
 
 def cycle_dir(raw_root: Path, source: str) -> Path:
@@ -480,6 +483,13 @@ def test_full_cycle_copies_files_and_manifest_triples_match(tmp_path: Path) -> N
         keys = {e.local_key for e in result.entries if e.forecast_hour == lead}
         assert keys == {local_key("gfs", lead)}
         assert keys != {entry_payload("gfs", lead, "tmp2m")["local_key"]}
+    assert [
+        entry.local_key for entry in result.entries if entry.variable == "tmp2m"
+    ] == [
+        "raw/gfs/2026030400/gfs.t00z.pgrb2.0p25.f000.bundle.grib2",
+        "raw/gfs/2026030400/gfs.t00z.pgrb2.0p25.f003.bundle.grib2",
+        "raw/gfs/2026030400/gfs.t00z.pgrb2.0p25.f006.bundle.grib2",
+    ]
     # entry 顺序：lead 升序 × variables 声明序。
     assert [(e.forecast_hour, e.variable) for e in result.entries] == [
         (lead, var) for lead in LEADS for var in GFS_VARIABLES
@@ -559,6 +569,11 @@ def test_ifs_source_stages_without_any_idx_key(tmp_path: Path) -> None:
         work_dir / "raw" / "IFS" / CYCLE_DIR / bundle_name("ifs", lead)
         for lead in LEADS
     )
+    assert {entry["local_key"] for entry in payload["entries"]} == {
+        "raw/IFS/2026030400/ifs.t00z.f000.bundle.grib2",
+        "raw/IFS/2026030400/ifs.t00z.f003.bundle.grib2",
+        "raw/IFS/2026030400/ifs.t00z.f006.bundle.grib2",
+    }
 
 
 def test_source_without_requested_forecast_hours_still_stages(tmp_path: Path) -> None:
@@ -933,9 +948,10 @@ def test_two_bundle_layout_is_refused_with_zero_writes(tmp_path: Path) -> None:
     raw_root, work_dir = build_tree(tmp_path)
     base = cycle_dir(raw_root, "gfs")
     for lead in LEADS:
-        (base / GFS_SECOND_BUNDLE.format(cycle_hour=0, lead=lead)).write_bytes(
-            bundle_bytes(lead)
+        second_name = GFS_SECOND_BUNDLE.replace("{cycle_hour}", "00").replace(
+            "{lead}", f"{lead:03d}"
         )
+        (base / second_name).write_bytes(bundle_bytes(lead))
     verdict = judge(raw_root, "gfs", CYCLE, config)
     assert verdict.complete is True
     with pytest.raises(RawStagingError) as excinfo:
