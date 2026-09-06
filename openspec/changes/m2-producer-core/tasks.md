@@ -8,6 +8,7 @@
 - [x] 1.2 实现 `local.toml` 现场值装载（含 NWM checkout 根），缺失即报错、零内置默认；唯一例外为 #69 后补的 `[slurm].command_timeout_seconds`，缺席时版本化默认 60 秒
 - [x] 1.3 实现 argparse 三入口骨架（prepare/init/run 薄委托，注册 `[project.scripts]` 入口点）、未知子命令拒绝、`DATABASE_URL` 环境守卫、run 入口状态目录缺失/为空即报错停止且不触发 init 逻辑
 - [x] 1.4 实现 NWM 解释器薄外壳（精确路径调用、cwd/`PYTHONPATH` 取自 checkout 字段、fail-closed），以假解释器脚本测试调用形态
+- [ ] 1.5 提交版本化 `producer/config.toml` 生产实例，以实际文件装载测试钉死文档与 NWM pin 的逐字段取值（issue #29）
 
 依赖：无
 §13.1 归属：无直接行（基础设施，支撑全部行）
@@ -189,6 +190,81 @@ Review focus:
 - 失败路径是否全部收敛到单一公开异常 `ConfigError`
 - `LocalConfig.slurm` 的**资源投影**键集是否只有 `config.slurm.required_fields` 一个权威——TOML 表只额外允许保留策略键 `command_timeout_seconds` 并剥离到独立字段；代码里若再出现 partition/account/cpus/memory/walltime 的固定字段清单即为双权威，属实现缺陷
 - spec cli-config 用反引号钉死的 key 名（`forecast_days`、`output_interval_minutes`、`checkpoint_hours`、`reach_count`）是否逐字保留在顶层，未被加上表前缀
+
+### Issue #29 fixture（任务 1.5）
+
+Fixture level: expanded（生产配置属于 schema/field，且 raw/canonical grid 命中 profile 的 forcing、canonical、NWM snapshot expanded triggers）
+Repair intensity / effective tier: high（错误取值会静默改变生产 forcing 变量、时间轴或 grid identity）
+Project profile: yd-viewer
+
+Dependency satisfied:
+- #52 已由 PR #133 独立合并（merge commit `7878159976d87dcd190bf16c194dda284ac801fe`）：`rawscan.py` 已落实简单 `{cycle_hour}` / `{lead}` grammar 与 renderer 补零；#29 分支已 rebase 到包含该提交与其问责记录的 `master`。#29 仍不得修改 rawscan，也不得提交已被权威文档禁止的 format spec。
+
+Change surface:
+- 新增版本化 `producer/config.toml`
+- 修改 `producer/tests/test_config.py`，用 `load_config` 装载仓库实际文件并逐字段对拍
+- `producer/src/yd_producer/config.py`、rawscan 行为与 `local.toml` 均不改
+
+Governing invariant:
+- 版本化生产实例必须逐字段等于文档与 NWM pin 的业务事实；装载器返回值、磁盘 TOML 与 rawscan f000 词表三者不得漂移。
+
+生产值账本（完整字面量与来源）：
+- `forecast_days = 7`、`output_interval_minutes = 60`、`checkpoint_hours = [12]`：`docs/compute-loop-design.md` §5；前两项同时由 `docs/products-contract.md` §5.2 的 0–7 天、60 分钟、168 行约束交叉证明
+- `reach_count = 3988`：`docs/products-contract.md` §5.1
+- `nwm_mapping_builder_module = "workers.mapping_builder.cli"`：NWM `8ae9b8f2` 的 `workers/mapping_builder/cli.py` 模块路径与本 fixture 上方归属裁决
+- `nwm_canonical_grid_id.gfs = "gfs_0p25"`、`.ifs = "ifs_0p25"`：NWM `8ae9b8f2` 的 `canonical/gfs/grid/gfs_0p25/grid.json` 与 `canonical/IFS/grid/ifs_0p25/grid.json` 中 `grid_id`
+- `cycle.hours = [0, 12]`：`docs/compute-loop-design.md` §5、§7.1
+- `variants.gfs = "input/models/yd_gfs"`、`.ifs = "input/models/yd_ifs"`：`docs/compute-loop-design.md` §5、§6.1
+- `raw.gfs.lead_hours = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90, 93, 96, 99, 102, 105, 108, 111, 114, 117, 120, 123, 126, 129, 132, 135, 138, 141, 144, 147, 150, 153, 156, 159, 162, 165, 168]`：`nwm-snapshot-inventory.md` §3.1 GFS 默认 horizon/步长（pin `gfs_adapter.py` L314–320）
+- `raw.ifs.lead_hours = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90, 93, 96, 99, 102, 105, 108, 111, 114, 117, 120, 123, 126, 129, 132, 135, 138, 141, 144, 150, 156, 162, 168]`：`nwm-snapshot-inventory.md` §3.1 的 `IFS_DEFAULT_FORECAST_RESOLUTION_SEGMENTS=((144,3),(360,6))` 与 pin `ifs_adapter.py` 的 00/12Z horizon 168
+- `raw.gfs.variables = ["tmp2m", "apcp", "rh2m", "u10m", "v10m", "pressfc", "dswrf"]`：`nwm-snapshot-inventory.md` §3.1 GFS 变量集（pin `gfs_adapter.py` L48）
+- `raw.ifs.variables = ["2t", "2d", "10u", "10v", "tp", "sp", "ssr", "str"]`：`nwm-snapshot-inventory.md` §3.1 IFS 变量集（pin `ifs_adapter.py` L47）
+- `raw.gfs.bundles = ["gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2"]`、`f000_special = true`：`nwm-snapshot-inventory.md` §3.1 的最终文件名事实，经 raw-scan spec 与 #52 裁决适配为简单字段；渲染器负责两位/三位补零
+- `raw.ifs.bundles = ["ifs.t{cycle_hour}z.f{lead}.bundle.grib2"]`、`f000_special = false`：同上；f000 特例仅由 GFS pin 定义
+- `slurm.required_fields = ["partition", "account", "cpus", "memory", "walltime"]`：`docs/compute-loop-design.md` §5 与本 fixture 的 TOML key schema；只声明结构，不包含现场值
+
+Risk packs considered:
+- Public API / CLI / script entry: not selected - 不改装载器或 CLI 行为
+- Config / project setup: selected - 生产实例是本 issue 的交付物
+- File IO / path safety / overwrite: not selected - 只新增 Git 跟踪的静态 TOML，不运行时写删路径
+- Schema / columns / units / field names: selected - 每个 key、变量、时间单位和 grid identity 都须逐值对拍
+- Auth / permissions / secrets: not selected - 文件只含版本化业务事实，无现场值或凭据
+- Concurrency / shared state / ordering: not selected - 静态文件与纯装载测试
+- Resource limits / large input / discovery: not selected - 固定小文件，无目录发现
+- Legacy compatibility / examples: selected - 现有 `load_config` schema 与全部内联 fixture 测试必须不变
+- Error handling / rollback / partial outputs: not selected - 不改 loader 失败语义，无运行时写面
+- Release / packaging / dependency compatibility: selected - 文件必须已跟踪且不被 `.gitignore` 排除；不得新增依赖或 lock drift
+- Documentation / migration notes: not selected - 全新生产实例，无迁移；TOML 注释承担逐字段来源
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: selected - 两源完整 lead 序列、变量、bundle 与 f000 开关是生产 forcing 准入事实
+- 状态链 / warm-start: not selected - 不读写状态
+- NWM 快照溯源 / DB-free 隔离: selected - module、grid、变量、lead 与 bundle 均绑定 pin `8ae9b8f2`，不得引入运行时 NWM import
+
+Invariant Matrix:
+- Source of truth: 上述生产值账本及其文档/pin 路径
+- Producer: `producer/config.toml`
+- Validator/read surface: `yd_producer.config.load_config`
+- Downstream consumers: rawscan、prepare、controller 继续消费同一 `Config` 字段，不改 API
+- Evidence: `producer/tests/test_config.py` 的实际文件逐字段断言与 f000 子集断言
+- Valid row: 实际 `producer/config.toml` -> `load_config` 成功且完整 `Config` 等于账本
+- Mismatch row: 任一生产值漂移 -> 对应逐字段断言失败；`apcp`/`dswrf` 任一不在 GFS variables -> 子集断言失败
+- Compatibility row: 原有内联 fixture 全套继续通过，证明 loader/schema 未被生产实例反向改写
+
+Required evidence:
+- `git ls-files --error-unmatch producer/config.toml` 成功，`git check-ignore producer/config.toml` 不命中
+- 实际文件经 `load_config` 装载，返回值逐字段等于上方完整账本，不只抽查“关键字段”
+- 实际 GFS/IFS bundle 分别经 `render_bundle_filename` 在 00Z/f000 与 12Z/f168 渲染为 pin 的字面终名（`gfs.t00z.pgrb2.0p25.f000.bundle.grib2`、`gfs.t12z.pgrb2.0p25.f168.bundle.grib2`、`ifs.t00z.f000.bundle.grib2`、`ifs.t12z.f168.bundle.grib2`）
+- `GFS_F000_UNAVAILABLE_VARIABLES <= set(config.raw.gfs.variables)`
+- `cd producer && uv run pytest`、`uv run ruff check .`、`uv run ruff format --check .` 全绿；OpenSpec strict validation 全绿
+
+Non-goals:
+- `local.toml`、装载器/schema/value-domain 行为、rawscan 实现、node-22 真运行
+
+Review focus:
+- 测试是否直接读取仓库实际文件，且不从该文件反向生成期望值
+- 每个 TOML 值是否可追溯到上方唯一账本，尤其 IFS 分段 lead 与两个 canonical grid ID
+- f000 子集关系是否使用 rawscan 的真实模块常量，而非复制 `{"apcp", "dswrf"}`
+- 除本 fixture 文件外，最终实现是否严格限制为用户指定的 config/test 文件
 
 ### Issue #3 fixture（任务 1.3–1.4）
 
