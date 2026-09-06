@@ -26,7 +26,7 @@
 
 **D3 Slurm 注入式执行器**：控制器依赖 `JobExecutor` 协议（submit/poll 语义），生产实现封装 `sbatch`/`sacct`，测试注入进程内 fake（同步完成/失败/超时可编排）。备选是以 subprocess mock 替代 controller fake，弃——命令行 mock 测不到状态机。真实提交与响应时延属 M4 oracle；M2 本地判据 = 协议一致性 + fake 三态可编排 + `local.toml` 参数装配纯函数检查，并按 #69 直接 monkeypatch `subprocess.run` 验证真实 runner 的 `timeout=` 转发与 `TimeoutExpired` 异常边界（不启动真实 Slurm 命令）。
 
-**D4 配置装载**：stdlib `tomllib` + dataclass 显式校验；`config.toml` 版本化业务规则、`local.toml` gitignored 现场值（字段清单见 compute-loop §5）。任何必需字段缺失即 fail closed 报错；唯一例外是 #69 明确授权的 `[slurm].command_timeout_seconds`，缺席时使用唯一版本化默认 60 秒。该客户端策略键从 Slurm 资源映射剥离，不授权其它现场值默认猜测。
+**D4 配置装载**：stdlib `tomllib` + dataclass 显式校验；`config.toml` 版本化业务规则、`local.toml` gitignored 现场值（字段清单见 compute-loop §5）。任何必需字段缺失即 fail closed 报错；`config.toml` 的集中取值域 owner 是 `config._validate_config_domain`，#32 的 cycle/forecast/checkpoint 三条规则与 #72 的 IFS/GFS 逐源 variables 单射性共同在完整装配后、对象返回前执行，后者不得静默去重或迁入 rawscan/rawcopy。唯一默认例外是 #69 明确授权的 `[slurm].command_timeout_seconds`，缺席时使用唯一版本化默认 60 秒。该客户端策略键从 Slurm 资源映射剥离，不授权其它现场值默认猜测。
 
 **D5 依赖策略**：骨架 `dependencies = []` 为刻意留空；numpy/xarray/cfgrib 随 forcing-chain 依赖任务加入并 `uv lock`；cfgrib 的 eccodes 运行时库经 `eccodeslib`（ECMWF 官方二进制 wheel，含 manylinux_2_28）显式引入，不依赖系统 `libeccodes`（组 6 已落地）。几何选轻量组合 pyshp + pyproj + shapely（读 shp/dbf、重投影、合并边界），不引入 GDAL/geopandas——viewer 契约本就禁 GDAL 运行时，producer 侧同样够用且 CI 安装面小；随 prepare-variants 任务加入。CLI 用 stdlib `argparse`，零框架依赖（KISS；三个子命令不值 click/typer）。
 

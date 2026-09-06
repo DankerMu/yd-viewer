@@ -53,7 +53,7 @@ worker 只可消费由 prepare 已验证变体显式交接的 `DirectGridForcing
 ### Requirement: config.toml 装载与校验
 装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构、NWM mapping-builder module 点分名 `nwm_mapping_builder_module` 与每 source 的 NWM canonical grid 标识 `nwm_canonical_grid_id.gfs`/`.ifs`（两者均为版本化快照事实，非现场值）；任何必需字段缺失或类型错误 MUST fail closed。
 
-装载器还 MUST 且只 MUST 在本裁决中认领三条取值域：`cycle.hours` 的每个值都属于 `{0,12}`、`forecast_days > 0`、`checkpoint_hours` 的每个值满足 `0 <= hour < 24 * forecast_days`。违反时抛 `ConfigError`，其结构化 `path` 分别为 `cycle.hours`、`forecast_days`、`checkpoint_hours`。其它取值域仍归既有下游 owner，不得借本 Requirement 擅自迁入装载器。
+装载器 MUST 且只 MUST 认领四类取值域：`cycle.hours` 的每个值都属于 `{0,12}`、`forecast_days > 0`、`checkpoint_hours` 的每个值满足 `0 <= hour < 24 * forecast_days`，以及 `raw.ifs.variables` / `raw.gfs.variables` 各自在 source 内单射。前三类违反时抛 `ConfigError`，其结构化 `path` 分别为 `cycle.hours`、`forecast_days`、`checkpoint_hours`；variables 同一 source 内出现重复精确字符串时同样抛 `ConfigError`，`path` 精确为对应的 `raw.<source>.variables`。跨 source 同名与同一 source 内大小写不同的字符串不构成重复；不得大小写归一或静默去重。其它取值域仍归既有下游 owner，不得借本 Requirement 擅自迁入装载器。
 
 #### Scenario: 完整配置装载成功
 - **WHEN** 载入包含全部必需字段的 `config.toml`
@@ -63,9 +63,13 @@ worker 只可消费由 prepare 已验证变体显式交接的 `DirectGridForcing
 - **WHEN** 载入缺少 `forecast_days` 的 `config.toml`
 - **THEN** 装载器报错并指明缺失字段名，不返回带默认值的配置
 
-#### Scenario: 三条取值域在装载边界 fail closed
+#### Scenario: cycle、forecast 与 checkpoint 取值域在装载边界 fail closed
 - **WHEN** `cycle.hours` 含非 00/12、`forecast_days <= 0`，或 `checkpoint_hours` 含小于 0 / 大于等于 `24 * forecast_days` 的值
 - **THEN** 装载器抛 `ConfigError`，`path` 精确指向对应字段，不返回配置对象；checkpoint 上界随 `forecast_days` 改变，不写死 168
+
+#### Scenario: raw variables 在每个 source 内保持单射
+- **WHEN** `raw.ifs.variables` 或 `raw.gfs.variables` 在同一列表中重复任一精确字符串
+- **THEN** 装载器抛 `ConfigError`，`path` 精确指向该 source 的 `raw.<source>.variables`，消息把每个具体重复变量名各列一次且不列未重复名，不返回配置对象且不静默去重；另一个 source 是否含同名变量不影响判定（不承诺重复名的显示顺序）
 
 ### Requirement: local.toml 现场值不得猜测
 装载器 MUST 从 gitignored `local.toml` 读取现场值（`yd_root`、`scratch_root`、NWM raw 根、NWM checkout 根与解释器路径（仅 prepare）、SHUD 二进制、Slurm partition/account/CPU/内存/walltime、cron lock 与日志位置）；文件缺失或必需字段缺失 MUST 明确报错。唯一例外是 #69 明确授权的 `[slurm].command_timeout_seconds`：它是每次 `sbatch`/`sacct` 客户端子进程的时限，缺席时 MUST 使用唯一内部版本化常量 `yd_producer.config._DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS = 60`，显式值 MUST 是 strict positive `int`，不是 Slurm 作业 walltime。
