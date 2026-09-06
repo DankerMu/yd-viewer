@@ -9,6 +9,7 @@
 - [x] 1.3 实现 argparse 三入口骨架（prepare/init/run 薄委托，注册 `[project.scripts]` 入口点）、未知子命令拒绝、`DATABASE_URL` 环境守卫、run 入口状态目录缺失/为空即报错停止且不触发 init 逻辑
 - [x] 1.4 实现 NWM 解释器薄外壳（精确路径调用、cwd/`PYTHONPATH` 取自 checkout 字段、fail-closed），以假解释器脚本测试调用形态
 - [x] 1.5 提交版本化 `producer/config.toml` 生产实例，以实际文件装载测试钉死文档与 NWM pin 的逐字段取值（issue #29）
+- [ ] 1.6 将 `LocalConfig.slurm` 收口为无可变 backing 暴露的只读资源映射（issue #31）
 
 依赖：无
 §13.1 归属：无直接行（基础设施，支撑全部行）
@@ -267,6 +268,86 @@ Review focus:
 - 每个 TOML 值是否可追溯到上方唯一账本，尤其 IFS 分段 lead 与两个 canonical grid ID
 - f000 子集关系是否使用 rawscan 的真实模块常量，而非复制 `{"apcp", "dswrf"}`
 - 除本 fixture 文件外，最终实现是否严格限制为用户指定的 config/test 文件
+
+### Issue #31 fixture（任务 1.6）
+
+Fixture level: expanded
+Upstream suggested level: compact（override：`LocalConfig` 是 `load_local` 的公开返回契约，字段注解与映射可变性命中 public API / schema / shared-state 兼容触发词）
+Repair intensity / effective tier: high（同一 `LocalConfig` 会被 controller 的多 source/cycle 追赶循环复用，资源映射被一次调用改写会静默污染后续 Slurm 提交）
+Project profile: yd-viewer
+
+Docs-first prerequisite satisfied:
+- Wave 0 裁决 5 已由提交 `328c953ed33852d534eefdb8cd340629a808b0e2` 先行进入 `master`，同步修改 `docs/compute-loop-design.md`、cli-config spec 与本文件的共享 #2 fixture：公开类型为 `Mapping[str, str | int]`，装载器返回 `MappingProxyType(dict(values))`，不暴露 mutable backing dict，也不新增 hash 承诺。本 fixture 只为 #31 建立独立 PR 边界与关门证据，不重裁该决定。
+
+Change surface:
+- `producer/src/yd_producer/config.py`：`LocalConfig.slurm` 注解改为只读 `Mapping[str, str | int]`；`_build_local_slurm` 精确返回 `MappingProxyType(dict(values))`
+- `producer/tests/test_config.py`：补公开类型与 `load_local` 产物的只读快照判别；既有动态 required-fields 行为 oracle 保持原样
+- 本任务 1.6 与本 fixture；`producer/config.toml`、`local.toml`、其它产品/测试模块均不改
+
+Governing invariant:
+- `load_local` 返回的 Slurm 资源投影必须是与解析输入隔离的只读快照：键集仍只由 `Config.slurm.required_fields` 决定，值逐字保留；消费者可以查询、迭代和 `dict(...)` 复制，但不能经 `LocalConfig.slurm` 增删改资源。
+
+Must preserve:
+- `load_local(path, config) -> LocalConfig`、所有 `ConfigError.path`、缺项/多余项/类型错误行为与零现场默认值不变
+- `config.slurm.required_fields` 仍是唯一键集权威；不得增加固定的 partition/account/cpus/memory/walltime dataclass 或第二份字段清单
+- controller 的 `set(local.slurm)`、`local.slurm["partition"]` 与 `_controller_run` 的 `dict(local.slurm)` 读取/快照路径继续工作；既有完整 producer suite 是兼容性闸门
+- 映射相等性与值的原样透传不变；不改 `Config`、生产 `config.toml` 或其它 dataclass 字段
+
+Must add/change:
+- `typing.get_type_hints(LocalConfig)["slurm"] == Mapping[str, str | int]`
+- loader 产物满足 `type(local.slurm) is MappingProxyType`
+- 对 loader 产物分别执行键赋值与键删除均抛 `TypeError`；两条操作必须独立行使，不能只证明 frozen dataclass 禁止字段重绑定
+- 保留 `tomllib.load` 返回树的测试别名并在装载后增、删、改其 `[slurm]` 内容，`local.slurm` 仍保持装载时的键值，证明 proxy 不直接包住解析器的 mutable table
+- 实现只用 stdlib `types.MappingProxyType`，不新增依赖或 lock drift
+
+Seam under test:
+- `load_local(path, config) -> LocalConfig`（公开 file→object 边界）；类型注解由 `typing.get_type_hints(LocalConfig)` 直接机检
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - `LocalConfig` 是三入口及 controller 的共享公开输入形状
+- Config / project setup: selected - 只读化的是现场配置装载结果
+- File IO / path safety / overwrite: not selected - 仍只读同一 TOML，不新增文件访问或写删面
+- Schema / columns / units / field names: selected - `slurm` 的公开注解从 concrete mutable dict 收口为 abstract read-only Mapping
+- Auth / permissions / secrets: not selected - 不改变现场值内容、输出或凭据处理
+- Concurrency / shared state / ordering: not selected - 不引入并发或全局共享状态；对象内可变性由本 invariant 直接处理，保留共享 #2 fixture 的既有选型
+- Resource limits / large input / discovery: not selected - 固定小映射，无发现或扩容
+- Legacy compatibility / examples: selected - 现有 controller/slurm 消费者必须继续查询、迭代和复制该映射
+- Error handling / rollback / partial outputs: selected - 赋值/删除以稳定 `TypeError` 拒绝，现有 `ConfigError` 装载失败漏斗不得变化
+- Release / packaging / dependency compatibility: selected - stdlib-only，`pyproject.toml`/`uv.lock` 零 diff
+- Documentation / migration notes: not selected - Wave 0 docs-first 裁决已由 `328c953` 合并，本 PR 只补 issue-specific fixture
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: not selected - 不解释时间字段
+- 状态链 / warm-start: not selected - 不读写状态
+- NWM 快照溯源 / DB-free 隔离: not selected - 不触碰 NWM
+
+Invariant Matrix:
+- Source of truth: `Config.slurm.required_fields` 的键序 + `local.toml` 对应资源值；Wave 0 裁决 5 定义只读表示
+- Producer: `_build_local_slurm`
+- Validator/read surface: `_build_local_slurm` 的键集/标量校验与 `load_local`
+- Downstream consumers: `controller` 查询键集/partition，`_controller_run` 以 `dict(local.slurm)` 构造独立 `JobSpec.resources`；其它消费者只读
+- Evidence independence: 类型 oracle 直接读注解；运行期 oracle 经公共 loader；解析树别名由测试持有而不从 `local.slurm` 反向构造
+- Valid row: 齐备 TOML -> 返回 `MappingProxyType`，键序/键值与 required-fields 投影相等，查询/迭代/复制可用
+- Mismatch row: 返回普通 dict -> 赋值/删除成功而测试失败；proxy 直接包 parser table -> 测试回写别名会改变产物而失败；注解仍为 dict -> 类型 oracle 失败
+- Compatibility row: 动态增加、删除及零重名 `required_fields` 的既有用例继续通过，完整 producer suite 证明当前消费者未依赖 dict 写 API
+
+Required evidence:
+- test-first：新只读/类型用例在实现前因 `dict` 注解或运行期可写而 red，正常收集且无 collection error
+- focused config tests 与 producer 全套通过；producer `uv sync --frozen`、Ruff check、format check 通过
+- OpenSpec strict/all、stage-pipeline anchor 与 `git diff --check` 通过
+- 判别变异：把注解退回 `dict[...]`、把返回值退回普通 `values`、把返回值改成直接 `MappingProxyType(table)` 时，各有对应新 oracle 变红；每轮恢复原文件并核对源码 hash
+- 最终源码精确含 `MappingProxyType(dict(values))`，且 diff 不含固定 Slurm 五字段清单、hash 测试/承诺或 #69 timeout 实现
+
+Non-goals:
+- 不让 `LocalConfig` 可哈希，也不新增“必须不可哈希”的反向承诺；本 PR 新测试不得调用 `hash(local)`
+- 不用 `tuple[tuple[...]]`、第三方 frozen mapping、五字段 dataclass 或 `__post_init__` 改写程序内直接构造语义
+- 不实现 #69 的 `slurm_command_timeout_seconds`，不改 local TOML schema/value-domain/error 文案
+- 不实现 #32、#72、#48、#46，不顺带修改生产配置、controller、executor 或其它测试模块
+
+Review focus:
+- 是否精确复制后冻结，而非返回普通 dict、可变别名或只改类型注解
+- 只读测试是否作用于映射内容本身，且赋值、删除、解析树别名三条反例都可杀
+- 动态 required-fields 的唯一权威和所有现有只读消费者是否保持兼容
+- 是否偷带 hash 语义、固定字段清单、timeout 或其它后继 issue
 
 ### Issue #3 fixture（任务 1.3–1.4）
 
