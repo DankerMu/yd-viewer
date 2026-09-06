@@ -34,11 +34,27 @@ tracker MUST 在 SHUD 运行期间轮询 `<project>.cfg.ic.update` 的 header �
 - **THEN** tracker 不新增捕获 authority，本 source/cycle 判失败，无状态推进、无 `DONE`
 
 ### Requirement: attempt-local authority 与残留隔离
-每棵 scratch work MUST 只服务一个 Slurm attempt；捕获 authority MUST 是同一 tracker 实例的记录及其 checksum，MUST NOT 由规范文件名存在、目录扫描或上一次 attempt 的 recovery 产物推导。新 tracker/recovery 见到同名 checkpoint 或既有 recovery root 时 MUST 保留残留并 fail closed，MUST NOT 覆盖、删除或采纳。tracker 在 O_EXCL 创建 canonical 后也 MUST NOT 按 pathname 删除校验/回读失败的条目：创建成功不能证明当前 pathname 未被竞争者替换，失败条目 MUST 作为未验证残留保留且不得记为 authority，最终随整棵失败 work 由 controller 回收。产品补跑目标 MUST 恰为 12 小时；其它目标（含把 720 分钟误写为 720 小时）MUST 在任何 runner 调用和文件写入前拒绝。
+每棵 scratch work MUST 只服务一个 Slurm attempt；捕获 authority MUST 是同一 tracker 实例的记录及其 checksum，MUST NOT 由规范文件名存在、目录扫描、旧 receipt 或上一次 attempt 的 recovery 产物推导。唯一授权的跨进程交接是仍在运行的同一 controller attempt 已经验证自己提交的 worker receipt 的 source/cycle/work/job/`WorkIdentity` 信封后，调用 tracker owner 的 `import_verified_checkpoint(*, tracker, record) -> CapturedCheckpoint`，其中两个参数均 keyword-only、无默认且分别 MUST 是 `CheckpointTracker` 与 `CapturedCheckpoint`。tracker 不拥有 receipt 信封或 JSON schema，MUST NOT 声称本 seam 验证这些字段；record 是必要输入，不是充分证明。
+
+import seam MUST 要求 tracker targets 恰为 `(12,)` 且 `tracker.run_dir` 为绝对路径，以 tracker 自己的 `checkpoint_dir` / `project_name` 唯一推导 canonical。它 MUST 复用既有 captured point-of-use verifier，对传入 record 的 `lead_hours == 12`、`relative_minute == 720.0`、canonical path、source name 以及 canonical 当前 bytes 的有界 no-follow 普通文件形态、SHA-256、relative-720 header 和 `state.parse` 全部重验；有界读沿用 `state.MAX_STATE_IC_BYTES` 及其 `max_bytes + 1` sentinel，超限的唯一尺寸 authority 仍是 `state.parse`，MUST NOT 复制第二个 `len()` 判据。只有全部通过才可把传入的**同一对象**写为 `tracker._captured[12]` 并原样返回。已有同一对象时 MUST 再次 point-of-use 重验后幂等返回；已有任何不同对象（即使字段逐值相等）MUST 拒绝且不替换。随后 controller MUST 继续调用既有 `ensure_twelve_hour_checkpoint`，要求返回值 `is tracker.captured[12]`，再做一次 point-of-use 重验且 recovery runner 零调用。
+
+这不是 crash recovery：重排队、controller 进程重启、下次 cron 或另一个 attempt 没有原 controller 的在途 attempt/terminal-job identity，MUST NOT 从旧 receipt、旧 work、规范文件名或目录扫描调用 import seam 恢复 `_captured`。新 tracker 未显式导入 record 时，见到同名 checkpoint 或既有 recovery root仍 MUST 保留残留并 fail closed，MUST NOT 覆盖、删除或采纳。import 本身只读 canonical，零 runner、零 recovery root/参数写入、零删除；任一类型、targets、字段、路径、文件形态、大小、checksum、header 或 body 失败时 MUST 抛 `TrackerError`，首次导入不记账，已有记录不替换，盘上 entry 的 bytes/identity 不变。tracker 在 O_EXCL 创建 canonical 后也 MUST NOT 按 pathname 删除校验/回读失败的条目：创建成功不能证明当前 pathname 未被竞争者替换，失败条目 MUST 作为未验证残留保留且不得记为 authority，最终随整棵失败 work 由 controller 回收。产品补跑目标 MUST 恰为 12 小时；其它目标（含把 720 分钟误写为 720 小时）MUST 在任何 runner 调用和文件写入前拒绝。
+
+#### Scenario: 同一 attempt receipt 记录验证后导入
+- **WHEN** 当前 controller 已验证同一 attempt receipt 信封，并把其中五字段正确、指向当前合法 canonical bytes 的 `CapturedCheckpoint` 交给 targets `(12,)` 的 fresh tracker
+- **THEN** `import_verified_checkpoint` 返回并记入传入的同一对象，`missing_hours()` 不含 12；随后 `ensure_twelve_hour_checkpoint` 返回同一对象且 recovery runner 调用数为 0
+
+#### Scenario: receipt 记录或 canonical 任一腿不可信
+- **WHEN** 首次导入时 tracker/record 类型错误、targets 非 `(12,)`、run_dir 非绝对，record 的 lead/minute/path/source/checksum 任一不符，或 canonical 缺失、越 containment、symlink、目录、其它非普通文件、超限、header 非有限/非 720、body 截断或 checksum 漂移
+- **THEN** import seam 抛 `TrackerError`，`captured` 仍空，盘上 entry 的 bytes/identity 不变，且零 runner、零写入、零删除
+
+#### Scenario: 导入幂等不降格为值相等
+- **WHEN** 同一 record 对象已成功导入后再次导入，或改用字段逐值相等但对象不同的 record
+- **THEN** 前者再次重验 canonical 后原样返回同一对象；后者在读取/替换 authority 前拒绝，既有 `captured[12]` 保持同一对象
 
 #### Scenario: 旧规范文件不是 checkpoint authority
-- **WHEN** 新 tracker 的 `state_checkpoints/` 已有一个 header/body 均合法的规范文件，但实例内无对应捕获记录
-- **THEN** 实时观测不覆盖或删除该文件，补跑不采纳它，并以未验证残留失败
+- **WHEN** 新 tracker 的 `state_checkpoints/` 已有一个 header/body 均合法的规范文件，但当前同一 attempt 没有经验证 receipt record 的显式 import 调用
+- **THEN** 实时观测不覆盖或删除该文件，补跑不采纳它，并以未验证残留失败；旧 receipt、进程重启或目录扫描也不得补出 import 调用
 
 #### Scenario: O_EXCL 后 canonical 回读不一致
 - **WHEN** 捕获或补跑安装的 O_EXCL 写返回后、canonical 回读前，同名 entry 的 bytes 被改成另一份不同内容的合法或损坏状态，或回读本身失败
@@ -46,7 +62,7 @@ tracker MUST 在 SHUD 运行期间轮询 `<project>.cfg.ic.update` 的 header �
 
 #### Scenario: 不可达目标小时早拒绝
 - **WHEN** tracker 目标为 `[720]` 或任何不等于 `[12]` 的集合
-- **THEN** 补跑在 runner 调用数为 0、参数和输入 bytes 不变时抛出领域错误
+- **THEN** import 与补跑都在 runner 调用数为 0、参数和输入 bytes 不变时抛出领域错误
 
 ### Requirement: job-local 执行归属
 tracker 与漏采补跑 MUST 在该 source/cycle 的同一个 Slurm 作业内完成（job-local，compute-loop §9.2）；控制器只观察作业结束后有无有效 checkpoint，MUST NOT 在登录节点侧轮询 `cfg.ic.update`，补跑 MUST NOT 触发第二次作业提交。

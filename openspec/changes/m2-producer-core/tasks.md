@@ -2727,6 +2727,7 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 
 - [x] 9.1 快照并适配 `cfg.ic.update` 轮询捕获（命中 720 分钟复制 + 分段格式校验；产物保持相对时间头），以模拟覆写序列测试正常/漏采/副本损坏三态
 - [x] 9.2 快照并适配漏采补跑（同一 Slurm 作业内、同初态同 forcing、END=0.5、末态采纳；注入假 SHUD 调用测试；补跑失败传导整轮失败；控制器提交计数不变）
+- [ ] 9.3 为 #132 的当前同一 attempt 跨进程 receipt 增加 tracker-owned `import_verified_checkpoint`：完整重验 canonical 后才恢复内存 authority，旧 work/旧 receipt/目录扫描仍禁止（issue #136）
 
 依赖：组 2（勘察清单定原路径）、组 4（分段校验）、组 8（运行目录形态）
 §13.1 归属：tracker
@@ -3211,6 +3212,126 @@ def ensure_twelve_hour_checkpoint(
 - runner非零但留下 valid candidate、wrong-header但结构合法、720-header但body截断三类是否各自能被拒绝。
 - default参数 bytes/#16 capture/#24 explicit-path consumer是否保持，是否偷渡 manifest/controller/timeout 面。
 - pin adaptation与cap 6b登记是否如实，不把 yd 新 fake伪称逐字移植，也不漏掉1000行/DB-free/provenance闸。
+
+### Issue #136 fixture（任务 9.3：同一 attempt receipt → T+12 tracker authority）
+
+Fixture level: expanded；Upstream suggested level: expanded（agree：公开 API、跨进程 evidence handoff、文件 path/schema 与 attempt-local state transition）
+Repair intensity / effective tier: high（错误导入会把旧/外来状态升格为下一轮 warm-start，且绕过 controller 发布前的唯一 checkpoint authority）
+Project profile: yd-viewer
+Minimal mergeable slice: 一个 tracker-owned import seam、包导出、checkpoint-tracker spec delta 与独立聚焦测试；receipt 信封/worker/driver/controller 仍归 #132
+
+**冲突裁决与改动面**：
+
+- D12/#17 原合同「新 tracker 见 canonical 即未验证 residue」「进程重启不得恢复 `_captured`」继续成立；D16/#132 新增的不是 crash recovery，而是**当前仍在运行的同一 controller attempt**接收自己提交的 worker receipt。只有 production `collect` 先完成 source/cycle/work/job/`WorkIdentity` 信封校验，才有权限把 receipt 明示 record 交给本 seam。
+- `CapturedCheckpoint` 只有 `lead_hours`、`relative_minute`、`path`、`source_name`、`checksum` 五字段，不承载 source/cycle/work/job/`WorkIdentity`。tracker MUST NOT 接收 receipt JSON/信封或声称验证这些字段；record 是必要输入而非充分证明。旧 receipt、旧 work、重排队、controller 进程重启、下一 cron 或其它 attempt 均不获授权。
+- docs-only fixture PR 修改 `docs/compute-loop-design.md`、`design.md`、本 tasks 与 `specs/checkpoint-tracker/spec.md`，先合并。后续代码 PR 精确限于 `producer/src/yd_producer/tracker/checkpoint_tracker.py`、`tracker/__init__.py` 和新 `producer/tests/test_checkpoint_receipt.py`；不再改 docs/spec，不触碰 controller/driver/其它 tests。
+- `checkpoint_tracker.py` 当前 949 行，代码 PR MUST ≤1000 行且不增 `.large-file-guard.json`。因此必须复用现有 `_verify_captured_point_of_use`，新 seam 只负责类型/targets/绝对根/冲突与验证后记账；不得复制五字段、canonical 回读、checksum/header/body 或尺寸 verifier。
+
+**公开 seam（逐字冻结）**：
+
+```python
+def import_verified_checkpoint(
+    *,
+    tracker: CheckpointTracker,
+    record: CapturedCheckpoint,
+) -> CapturedCheckpoint: ...
+```
+
+- 两参数 keyword-only、无默认；从 `yd_producer.tracker.checkpoint_tracker` 与包级 `yd_producer.tracker` 的 `__all__` 导出。`ensure_twelve_hour_checkpoint` 的名称、三参数 keyword-only 签名、语义与导出不变。
+- 输入类型分别必须是 `CheckpointTracker` / `CapturedCheckpoint`；错误统一 `TrackerError`，不外泄 `AttributeError`、`TypeError`、`ValueError`、`OSError` 或 `SafeFilesystemError`。
+
+**状态转换与复用判据**：
+
+1. 在任何文件系统调用前要求 `tracker.targets == (12,)`、`tracker.run_dir` 为绝对路径。canonical 只由 `tracker.checkpoint_dir / f"{tracker.project_name}.f012.cfg.ic.update"` 推导；不接受调用方路径、不扫描目录、不读 recovery root。
+2. 先读取既有 `tracker._captured.get(12)`：若是不同对象，必须在任何 canonical read/内存写前拒绝；即使 `existing == record` 也不算幂等。只有 `existing is record` 才进入重复导入支。
+3. fresh 与同对象重复导入都恰调用现有 `_verify_captured_point_of_use(tracker, record, canonical)` 一次。该 helper 已验证五字段并经 `read_bytes_limited_no_follow(max_bytes=state.MAX_STATE_IC_BYTES, containment_root=tracker.run_dir)` 读取 current canonical，再检查 SHA-256、relative-720 header 与 `state.parse`。
+4. 有界读最多返回 `MAX_STATE_IC_BYTES + 1` sentinel bytes；超限的唯一尺寸 authority 是 `state.parse` 自带的 `MAX_STATE_IC_BYTES`。新 seam 不加 `len()`、不复制数值 64 MiB、不设 receipt-specific cap。
+5. fresh 只在 helper 正常返回后执行一次 `tracker._captured[12] = record`，并返回同一对象；同对象重复导入只重验并原样返回，不重写 mapping。任一失败保持 `_captured` 原快照（含既有对象 identity）不变。
+6. seam 全程只读 canonical：零 safe-fs write/unlink/rename/rmtree、零 recovery runner、零 recovery root、零 parameter/input 触碰、零 manifest/DONE。失败前后 canonical leaf 的 lstat identity、类型与 bytes/外部 symlink target 均不变。
+7. 导入成功后 `missing_hours()` 不再含 12；#132 controller 仍必须调用 `ensure_twelve_hour_checkpoint(..., runner=_require_no_recovery)`。既有 record 分支再次 point-of-use 重验、返回值必须 `is tracker.captured[12]`，runner 0 调用；import 不是绕过该层。
+
+**Risk packs considered（core）**：
+
+- Public API / CLI / script entry: selected - 新 public seam 与两层 `__all__`；CLI/worker entry 不在本 issue。
+- Config / project setup: not selected - config schema不改；targets consumer 边界只接受既有 `(12,)`。
+- File IO / path safety / overwrite: selected - canonical exact path、absolute root、no-follow containment、symlink/nonregular/oversize；严格零写删。
+- Schema / columns / units / field names: selected - `CapturedCheckpoint` 五字段、12 小时/720 相对分钟与 SHA-256。
+- Auth / permissions / secrets: not selected - attempt work-local，无凭据/mode 修改。
+- Concurrency / shared state / ordering: selected - `_captured` 验证后写、同对象幂等、不同对象冲突、controller 二次重验。
+- Resource limits / large input / discovery: selected - 64 MiB owner复用、有界 sentinel read、零目录 discovery。
+- Legacy compatibility / examples: selected - #16 capture、#17 recovery/ensure、#26 controller object-identity consumer保持。
+- Error handling / rollback / partial outputs: selected - 任一失败零内存/磁盘 mutation；全部文件系统异常收敛。
+- Release / packaging / dependency compatibility: selected - stdlib-only、exports additive、≤1000 行、无 lock/large-file豁免 drift。
+- Documentation / migration notes: selected - 明确窄化 D12 与 D16 冲突，不授权 crash recovery。
+
+**Domain packs**：
+
+- Geospatial / CRS: not selected - 无几何。
+- Time series / forcing / temporal boundaries: selected - 12 h 与 relative 720 必须同一 identity，不接受 719.6/720.4 的捕获容差作为 receipt record；record 值须精确 720.0。
+- 状态链 / warm-start 定戳一致性: selected - relative T+12 canonical 是下一步绝对重戳输入，误采会断链。
+- NWM snapshot / DB-free: selected - 只复用现有 tracker/state/safe_fs，无 NWM runtime、数据库、环境或 registry。
+
+**Invariant Matrix**：
+
+- Governing invariant: 只有当前同一 controller attempt 已验证信封后明示、且 tracker 对 current canonical bytes 完整重验通过的**同一** T+12 record 对象，才能成为 `captured[12]`；文件名、旧 receipt 与值相等对象均不是 authority。
+- Source-of-truth identity/contract: 调用方拥有 receipt envelope；tracker 拥有 `targets/run_dir/project_name`、record 五字段与 canonical current bytes SHA/header/body。
+- Producers: #132 worker/receipt（本 issue不实现）；#16 capture/#17 recovery 已生产 canonical 与 record。
+- Validators/preflight: #132 envelope validator在外；本 seam 类型/targets/absolute/conflict；复用 `_verify_captured_point_of_use`。
+- Storage/cache/query: `CheckpointTracker._captured` 唯一写点；`captured` 继续只读，无 manifest/cache/query。
+- Public routes/entrypoints: `import_verified_checkpoint`; `ensure_twelve_hour_checkpoint` unchanged；CLI/controller不改。
+- Frontend/downstream consumers: #132 collect 调用后交既有 #26 controller；publisher仍只收显式 scratch checkpoint；viewer无直接消费。
+- Failure paths/rollback/stale state: import零磁盘 mutation；首次失败 captured空；重复/冲突失败保留既有对象；fresh tracker无 record时 canonical仍是 residue。
+- Evidence/audit/readiness: independent test file、pre-change execution-time red、calibrated mutation、full suites/format/OpenSpec/large-file gate；真实 receipt envelope端到端归 #132。
+- Regression rows:
+  - current-attempt valid record + current canonical -> 记入并返回同一对象；ensure二次重验同一对象且runner 0。
+  - field/path/bytes/type/target/shape/size mismatch -> TrackerError、captured与盘上identity/bytes不变。
+  - same object reimport -> current bytes再次重验后同一对象；field-equal foreign object -> pre-read reject、existing不替换。
+  - fresh tracker + valid canonical但无 explicit import -> existing ensure residue behavior unchanged。
+
+**Boundary-surface checklist**：
+
+- Shared helper roots: `_verify_captured_point_of_use` 与 `safe_fs` 只复用不修改；`state.parse` 保持唯一尺寸/结构 owner。
+- Public entrypoints: tracker module/package additive export；ensure/RecoveryRunner/CheckpointTracker signatures不改。
+- Read surfaces: exact canonical，单次 bounded no-follow read；无 caller path或目录枚举。
+- Write/delete/overwrite: only in-memory fresh assignment after verification；零 filesystem mutation。
+- Staging/publish/rollback: none；controller/publisher不改。
+- Producer/consumer evidence: validated receipt record -> tracker import -> ensure second recheck；envelope与record owner分层。
+- Stale/idempotency: old receipt/work禁止；same-object repeat revalidates；foreign-object conflict pre-read rejects。
+- Unchanged downstream: #16 capture tests、#17 recovery tests、#26 controller object-identity/checksum tests、#24 publish。
+
+**Required evidence（input → exact output）**：
+
+1. 结构：模块属性/两层 `__all__`、精确 keyword-only/no-default签名与返回 annotation；`ensure_twelve_hour_checkpoint` 的既有签名/导出逐字不变。源码 AST 证明新 seam 恰调用 `_verify_captured_point_of_use` 一次且不调用/复制 `_candidate_gate`、`state.parse`、safe-fs read/write/delete 或 recovery/ensure。
+2. valid fresh：targets `(12,)` + absolute run dir + canonical valid relative-720 bytes + matching five-field record -> returned `is record is tracker.captured[12]`，`missing_hours()==()`；canonical lstat identity/bytes不变。
+3. downstream：上述导入后调用 existing ensure + exploding runner -> `is record`，runner 0；把 canonical bytes换成另一份结构合法内容 -> ensure checksum failure、record仍同一对象、零 DONE/publish（本测试只声明 tracker/runner面）。
+4. 类型/早拒：tracker/record错误类型、targets `(720,)`/`(6,)`/`(6,12)`、relative run_dir -> `TrackerError`；monkeypatch canonical reader/writers为爆炸函数证明零 filesystem、零 `_captured` mutation。
+5. 五字段独立篡改：lead 24、minute 1440/719.6/720.4/nonfinite、外指/相对/错误 canonical path、wrong source、wrong/None checksum；每支让前置腿通过到目标腿，首次导入失败且盘上identity/bytes不变。record path外指必须在外部目标读取前由字段比对拒绝。
+6. canonical shape：missing、leaf symlink-to-outside、symlink ancestor、directory、FIFO（nonblocking/no hang）及普通文件 read `PermissionError`/`SafeFilesystemError` -> 统一 `TrackerError`，不外泄裸异常；外部target与entry identity/类型不变。
+7. bytes gate独立：checksum drift；同步更新 record checksum 后分别给 invalid UTF-8/nonfinite/1440/truncated native body；确保每支前置 checksum通过并由目标 header/body gate拒绝。
+8. oversize：写一份恰 `MAX_STATE_IC_BYTES + 1` bytes、同步 record checksum，使 checksum通过并由 `state.parse` 的显式 size guard拒绝；reader实参精确为 `max_bytes=state.MAX_STATE_IC_BYTES` 与 containment tracker.run_dir。不得用偶然 header坏掉代替尺寸判据。
+9. idempotency/conflict：同一对象第二次导入必须再发生一次 canonical read并返回原对象；其后 current bytes漂移则重复导入失败且existing identity不变。`dataclasses.replace(record)` 的同值异对象在reader调用前失败，不能以 `==` 放行或覆盖。
+10. failure atomicity：private verifier 的字段/checksum/header/body失败，以及其底层 safe-fs reader 分别抛 `OSError` / `SafeFilesystemError`（由现有 helper 收敛为 `TrackerError`）时，首次 captured空、已有同对象/foreign对象均不变；不得直接 monkeypatch private verifier 外抛它在生产中已收敛的文件异常来伪造可达 lane，新 seam 也不新增吞掉任意异常的宽 catch。
+11. no mutation：对 safe_fs filesystem write/delete/rename/tree函数与 recovery runner设记录/爆炸探针；成功、类型失败、字段失败、bytes失败、重复/冲突所有路径调用集均为空。
+12. legacy：不调用 import 的 fresh tracker + valid preexisting canonical -> existing ensure仍按 residue抛 `TrackerError`、runner 0、bytes不删；#16 capture/#17 recovery全套不改且green。
+13. source line budget：`checkpoint_tracker.py <= 1000`、new test `<1000`；`.large-file-guard.json`、`safe_fs.py`、`state/**`、existing checkpoint tests diff为空。
+14. pre-change red：docs fixture commit上加入final test file，但新 seam只在测试函数执行时经 `getattr(tracker_module, ...)`/`getattr(package, ...)` 取，禁止顶层import造成collection-only红；至少结构/valid用例到test body后red。行为判别力最终由下面actual mutants证明。
+15. calibrated mutation（唯一仓外scratch、正确import path/bytecode清理/源码hash恢复）：至少覆盖去类型/targets/absolute守卫、`is`降为`==`、foreign conflict改成覆盖、跳过same-object recheck、跳过private verifier、验证前记账、失败后仍记账、返回copy/新对象、复制/放宽五字段或size gate、filesystem mutation与exports；0 survived/0 unrun。
+16. commands：new focused + existing tracker/recovery/controller checkpoint tests；producer full、Ruff/format、frozen sync；viewer profile、OpenSpec strict/all、committed stage anchor、large-file hook、`git diff --check` 全绿。
+
+**Non-goals / scope firewall**：
+
+- receipt JSON schema、原子提交/读取、source/cycle/work/job/`WorkIdentity`/DAT/log/binding/`.sp.att` 信封、worker/driver/CLI/Slurm/controller调用；全部归 #132。
+- crash recovery、旧 receipt replay、跨 tick持久 authority、目录扫描、state_checkpoints manifest、registry/status、reset/retry API。
+- 修改 `_verify_captured_point_of_use`、`ensure_twelve_hour_checkpoint`、capture/recovery语义、shared safe_fs/state、header tolerance/epoch裁决、parameter/forcing、publisher/DONE/work cleanup。
+- 新尺寸/config/env authority、NWM runtime/PostgreSQL/`DATABASE_URL`、依赖/lock/large-file豁免。
+
+**Review focus**：
+
+- 是否把调用方 receipt-envelope 权限误下沉到 tracker，或反向漏写“只有当前同一 attempt 才能调用”的前置条件。
+- 是否先写 `_captured` 再验证、把 `==` 当幂等、跳过同对象重验，或返回非传入对象而破坏 controller identity。
+- 是否复用 private verifier与唯一 size authority，而不是为赶行数复制/删弱某条 gate；949→≤1000预算是否真实。
+- 是否任何路径读 caller-supplied/outside path、扫描目录、写删 canonical、启动 recovery，或让fresh tracker凭文件名自恢复。
+- tests 是否逐腿抵达目标 guard、保留 inode/bytes证据，并用actual mutants而非 collection error/结构断言冒充行为覆盖。
 
 ## 10. prepare-variants：变体与几何
 
@@ -5172,14 +5293,14 @@ Minimal mergeable slice: 只交付任务 14.4（原 14.3）；14.1 与 14.3 已�
 Fixture level: expanded（CLI 入口、生产 Slurm、跨进程 worker/receipt、双源控制器、锁与退出码均是公共/状态边界）
 Repair intensity: high
 Project profile: yd-viewer
-依赖：14.1、14.3、14.4、#47；编号 14.2 是用户指定的收尾编号，不表示它先于已完成的 14.3/14.4 实施
+依赖：14.1、14.3、14.4、#47、#134、#135、#136、#137；编号 14.2 是用户指定的收尾编号，不表示它先于已完成的 14.3/14.4 实施
 
 **裁决与范围**：
 
 1. `cli.run(local, config)` MUST 不再调用 `_unimplemented`，而是在 `run_with_lock(lock_path=local.cron.lock_path, action=...)` 的同一次持锁生命周期内恰调用一次 `controller.run_sources`。锁必须覆盖双源发现、全部追赶轮、Slurm 等待、失败收尾、发布与清理；锁已被占用时沿用既有成功跳过语义，零 controller/driver/executor 调用。
 2. `run` MUST 为固定键集 `{ifs,gfs}` 构造四份 mapping 并注入 `run_sources`：两份互不相同的 `SlurmJobExecutor`、两份互不相同且满足 `AttemptDriver` 的生产 driver、两个生产 poll-wait callable、两个 #47 独立 `sacct ExitCode` provider。不得把测试 `FakeJobExecutor`、terminal hook、fixture driver 或 no-op wait 作为生产默认。
 3. `SlurmJobExecutor` 的资源键集与值来自 `config.slurm.required_fields` / `local.slurm`，后者不含 #69 策略键。生产入口用 `partial(subprocess_runner, command_timeout_seconds=local.slurm_command_timeout_seconds)` 恰构造一份无状态 bounded runner，并把同一 callable 注入两份 executor 与两个 ExitCode provider；因此 `sbatch`、普通 `sacct` 和 #47 失败查询都显式使用同一时限。provider 仍逐源独立且只执行钉死的一次 `sacct -j <job_id> -n -P --format=ExitCode`；轮询与退出码查询不得合并，`JobRecord` 七字段不变。
-4. PR #129 留给 M4 的生产 `AttemptDriver`/worker/receipt 现在由本任务认领，不能只接一个不存在的对象。最小实现 MUST 是既有 `AttemptDriver` 协议的生产适配器：`prepare` 只生成 identity、精确 worker argv 与 work 内 DAT 终名；重 canonical/forcing/assemble/SHUD/tracker/recovery 在 Slurm job 内执行；`collect` 只读取该 job 原子提交、checksum/identity 绑定的 work-local receipt，并据此交回既有 `AttemptProducts`。receipt 必须绑定 source/cycle/work/job ID、`WorkIdentity`、`RunDirectory`、DAT、merged log 与已验证 T+12 checkpoint；不得扫描规范文件名、改写私有 `_captured`、在登录节点补跑 SHUD，或用测试 terminal hook 伪装生产 worker。若现有 tracker 公共面不足以导入 receipt authority，本任务只可在 tracker owner 中增加一个窄的、验证后构造入口，并保持现有捕获/补跑语义；不得让 driver 绕过 `ensure_twelve_hour_checkpoint` 的 point-of-use 重验。
+4. PR #129 留给 M4 的生产 `AttemptDriver`/worker/receipt 现在由本任务认领，不能只接一个不存在的对象。最小实现 MUST 是既有 `AttemptDriver` 协议的生产适配器：`prepare` 只生成 identity、精确 worker argv 与 work 内 DAT 终名；重 canonical/forcing/assemble/SHUD/tracker/recovery 在 Slurm job 内执行；`collect` 只读取该 job 原子提交、checksum/identity 绑定的 work-local receipt，并据此交回既有 `AttemptProducts`。receipt 必须绑定 source/cycle/work/job ID、`WorkIdentity`、`RunDirectory`、DAT、merged log 与已验证 T+12 checkpoint；不得扫描规范文件名、改写私有 `_captured`、在登录节点补跑 SHUD，或用测试 terminal hook 伪装生产 worker。`collect` 在完整验证 receipt 信封后 MUST 调用 #136 已落地的 tracker-owned `import_verified_checkpoint(*, tracker, record)`，由 tracker 对五字段与 current canonical bytes 重验后恢复同一对象 authority；随后既有 controller 仍调用 `ensure_twelve_hour_checkpoint` 做第二次 point-of-use 重验。driver 不得直接写 `_captured`、拿值相等对象替换 record、从旧 receipt/文件名恢复，或绕过任一层。
 
    `WorkIdentity` 的唯一来源为：`source_id`/`cycle_time` 逐字取 `AttemptRequest.source`/`.cycle`；`project_name` 只从 `prepare.calibrated_state_path(request.variant_dir)` 指向、prepare 已验证的率定状态文件名仅移除末尾一次 `.cfg.ic` 后取得，绝不取变体目录 basename；`model_id`、`basin_id`、`basin_version_id`、`river_network_version_id` 是该 production driver 为一次 attempt 唯一拥有的一组 versioned、work-local registry identifier。后四值没有 M2 的持久/外部 authority，不能写入 config/local，不能编造生产字符串；只在同一 scratch registry → forcing → assemble 链中使用并逐字写入 receipt，M4 才以真实 node-22 builder/site artifact 对账。`DirectGridForcingContract` 只取 prepare-owned 验证 handoff，不从 raw builder 文件在运行时反推；`yd.binding` 只读 prepare 已验证的 `request.variant_dir/yd.binding`，`.sp.att` 只取 prepare 明示 handoff；driver 写入已认领 work 前和 worker 使用前都只对 handoff 明示的 path 作有界、逐分量 no-follow 普通文件读取，重验 handoff source/cycle/project/work identity、contract current-source identity 和声明的 SHA-256。receipt 必须逐字记录同一 `WorkIdentity`（含四个 identifier）及 binding/`.sp.att` checksum。禁止从 TOML、环境、`DATABASE_URL`、NWM PostgreSQL/服务型 registry、目录扫描、`yd.binding` 内容或测试 fixture 推导上述任一值/路径/bytes。`contract.binding_uri`/`contract.sp_att_path` 仅是 registry commit 后的 work-local relative keys，不能拿来发现变体输入；现有 M2 文档没有真实 `.sp.att` 位置/parser，handoff 未给出 D11 work-local key shape 的 contract 与明示 asset path 时 driver MUST 在 submit 前 fail closed。
 5. poll wait MUST 是会实际等待的生产 callable，不能 busy-loop；等待策略固定为版本化常量 `POLL_INTERVAL_SECONDS = 10`，生产 callable 每次调用恰执行 `time.sleep(POLL_INTERVAL_SECONDS)`。这是调度查询节律而非现场资源值，不新增 TOML 字段。它只控制两次非终态 `sacct` 轮询之间的等待，不是作业 watchdog、总超时、重试或取消。
