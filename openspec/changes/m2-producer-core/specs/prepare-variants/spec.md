@@ -102,6 +102,8 @@
 ### Requirement: 生成两个 source-specific 变体
 `prepare` MUST 经薄外壳按 source 各调用一次 mapping-builder，按 GFS、IFS 各自 canonical grid 生成两份 binding、重写后的 `sp.att` 与 forcing station 索引，产出完整运行变体 `yd_gfs`、`yd_ifs`；两者水文参数与率定状态来自同一基线，网格 binding MUST NOT 共用；变体 reach 数 MUST 等于 `config.toml` 的 `reach_count`，不一致时 MUST 拒绝提交。
 
+每个变体目录的**顶层** MUST 恰有一份文件名匹配 `*.cfg.ic` 的普通文件，作为 `init` 消费的率定末态。`prepare` MUST 在搬运到 `YD_ROOT` staging 和提交任何终名之前完成该基数校验；零份或多于一份均抛 `PrepareError`，不递归搜索、不按项目名猜候选，也不提交任何终名。
+
 #### Scenario: 编排按源各调用一次 builder
 - **WHEN** 对合成基线包运行 prepare 编排（记录型假 builder 注入）
 - **THEN** builder 恰被调用两次，两次入参的 `source_id` 与 `grid_id` 不同，两次输出分别落入 `yd_gfs` 与 `yd_ifs`，两变体的水文参数文件同源一致
@@ -117,6 +119,10 @@
 #### Scenario: 变体率定末态缺 river 段即拒绝
 - **WHEN** 假 builder 产出的变体率定末态 `cfg.ic` 没有 river 段
 - **THEN** prepare 拒绝提交（MUST NOT 判定为 0 条 reach），`YD_ROOT` 无新写入
+
+#### Scenario: 变体顶层必须恰有一份率定末态
+- **WHEN** 任一假 builder 产出的变体分别为「顶层 0 份、嵌套子目录 1 份」或「顶层 2 份」`*.cfg.ic` 普通文件
+- **THEN** prepare 分别按顶层命中数 0/2 抛 `PrepareError`，错误点名 source、变体目录与候选路径；嵌套文件不计入候选，`YD_ROOT` 四个终名均未提交
 
 ### Requirement: viewer GeoJSON 生成
 `prepare` MUST 从基线 GIS 生成 EPSG:4326 的 `rivers.geojson` 与 `boundary.geojson`，落点固定为 `YD_ROOT/input/viewer/rivers.geojson` 与 `YD_ROOT/input/viewer/boundary.geojson`（products-contract §2）：河段要素带 SHUD `Index` 作为 `reach_id` 且数量与基线河网一致；boundary 为单元合并边界；坐标 MUST 按基线 `.prj` 自定义 Albers 投影重投影。

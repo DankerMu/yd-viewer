@@ -191,7 +191,7 @@ yd-producer run --config <path> --local <path>
 2. 检查本次将要写的**全部四个终名**——两个变体目录（路径取自 `config.toml` 的 `variants.gfs`/`variants.ifs`，相对 `yd_root`）与两份 viewer GeoJSON `input/viewer/rivers.geojson`、`input/viewer/boundary.geojson`——均不存在；任一存在即拒绝，不提供覆盖参数。被检查的路径与提交时实际写入的路径必须同源计算；
 3. 在 scratch 中通过薄外壳调用 NWM mapping-builder；
 4. 按 GFS、IFS 各自 canonical grid 生成两份 binding、重写后的 `sp.att` 和 forcing station 索引；
-5. 生成完整运行变体 `yd_gfs`、`yd_ifs`；两者水文参数和率定状态来自同一基线，但网格 binding 不共用；
+5. 生成完整运行变体 `yd_gfs`、`yd_ifs`；两者水文参数和率定状态来自同一基线，但网格 binding 不共用。提交前逐个只枚举变体顶层并要求恰有一份 `*.cfg.ic` 普通文件；零份或多于一份均以 `PrepareError` 拒绝，四个终名一个也不提交，不递归搜索或按项目名猜文件名；
 6. 从基线 GIS 生成 EPSG:4326 的 `rivers.geojson` 与 `boundary.geojson`；
 7. 把校验通过的产物搬运到 `YD_ROOT` 之内的本次专属 staging 位置（按发布权限新建条目，不把计算节点的 uid/gid/mode 带进 NFS），再逐个 rename 到四个终名——rename 的源与终名必须同一文件系统，故不能直接把 scratch 目录 rename 过去（scratch 在计算节点本地盘、`YD_ROOT` 在 NFS）；
 8. 删除 scratch 中间物与该 staging 位置（无论成败）。

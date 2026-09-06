@@ -2650,7 +2650,7 @@ def ensure_twelve_hour_checkpoint(
 
 - [x] 10.1 引入几何依赖（pyshp/pyproj/shapely）并 `uv lock`，构造带自定义 Albers `.prj` 的合成 shapefile 基线 fixture，实现 `.prj` 解析与重投影工具，CI 绿
 - [x] 10.2 实现 `rivers.geojson`（`reach_id`=DBF Index、数量一致）与 `boundary.geojson`（单元合并边界）生成，落点 `input/viewer/`
-- [x] 10.3 实现 prepare 编排：拒绝覆盖检查 → 薄外壳按源两次调用 builder（记录型假 builder 断言两次入参 source/grid 不同、输出分别落 `yd_gfs`/`yd_ifs`）→ 变体 reach 数等于 `reach_count` 校验 → 提交到 `input/models/` 与 `input/viewer/` → scratch 清理
+- [x] 10.3 实现 prepare 编排：拒绝覆盖检查 → 薄外壳按源两次调用 builder（记录型假 builder 断言两次入参 source/grid 不同、输出分别落 `yd_gfs`/`yd_ifs`）→ 每变体顶层 `*.cfg.ic` 普通文件基数恰为 1 且 reach 数等于 `reach_count` → 提交到 `input/models/` 与 `input/viewer/` → scratch 清理
 
 依赖：组 1（薄外壳、`reach_count`）
 §13.1 归属：prepare
@@ -2894,6 +2894,8 @@ Project profile: yd-viewer
 
 **#83 收尾裁决（遗留 staging 只拒绝、不回收）**：`prepare` 在运行根预检后、任何 scratch 写入、四终名探测、builder 调用或其它副作用之前，MUST 枚举 `YD_ROOT` 顶层，收集所有名字以 `prepare._STAGING_PREFIX` 开头的条目。命中目录、普通文件、symlink、断链或其它类型中的任一项即 `PrepareError`；错误按确定顺序列出全部匹配绝对路径并要求依 `docs/agent-ops.md` 人工清理。不得跟随 symlink，不得按 PID/mtime/类型推断陈旧，不得删除、改名、覆盖或自动认领；顶层枚举失败同样 fail closed。该选择与总不变量“任何既有条目不得删除”相容：旧 staging 就是既有条目，不进入本次 cleanup 账本；本次 token 创建的 staging 才按既有成功/失败路径清理。`init` 不获得该命名空间的删除权；正常操作顺序仍要求 `prepare` 成功且确认无匹配残留后再执行 `init`。
 
+**#97 收尾裁决（prepare 侧率定末态基数）**：每个 builder 产出的变体目录只枚举顶层，文件名匹配 `*.cfg.ic` 且类型为普通文件的候选必须恰有一份。零份或多份均在任何 `YD_ROOT` staging/终名提交之前抛 `PrepareError`，错误点名 source、目录、命中数与候选路径；不递归、不按项目名猜文件名。该定位谓词与 `init` 的率定末态定位共用同一实现，防止 prepare 成功提交一个必然被 init 拒绝且只能人工移除的变体。
+
 Change surface:
 - 新增 `producer/src/yd_producer/prepare.py`：`run_prepare` 编排、`VariantBuildRequest`、`PrepareError`、生产 builder 绑定、变体终名解析函数
 - 扩展 `producer/src/yd_producer/config.py`：新增必需字段 `nwm_canonical_grid_id`（表，含 `gfs`/`ifs` 两个 `str`），与既有 `nwm_mapping_builder_module` 同纪律——只校验存在性与类型
@@ -2927,7 +2929,7 @@ Must add/change:
   2. **拒绝覆盖**：四个终名（两变体目录 + 两 GeoJSON）任一 `lexists` 即 `PrepareError`，此时 MUST NOT 创建 scratch、MUST NOT 调 builder
   3. 在 `local.scratch_root` 下建**本次运行专属**工作目录（名字含 pid + 随机 token，避免并发/重跑互相覆写）
   4. 对 `("gfs","ifs")` 各建一个**此前不存在**的 `variant_root` 子目录，各调 `builder(request)` 一次
-  5. **产物校验**（逐变体）：`variant_root` 存在且为目录；率定末态 `cfg.ic` 可 `cfg_ic.parse`；`doc.river` 非 `None`（`Section | None` —— 缺 river 段 MUST 判失败，MUST NOT 当 0 条）；`doc.river.row_count == config.reach_count`；目录内无 `.tmp` 后缀或其它未预期残留条目
+  5. **产物校验**（逐变体）：`variant_root` 存在且为目录；只枚举其顶层，筛出文件名匹配 `*.cfg.ic` 且类型为普通文件的候选并要求基数恰为 1；零份/多份即 `PrepareError`，不递归或按项目名猜文件名；唯一率定末态可 `cfg_ic.parse`；`doc.river` 非 `None`（`Section | None` —— 缺 river 段 MUST 判失败，MUST NOT 当 0 条）；`doc.river.row_count == config.reach_count`；目录内无 `.tmp` 后缀或其它未预期残留条目
   6. **搬运到 `YD_ROOT` 内 staging**：在 `YD_ROOT` 之内建本次专属 staging 位置，把校验通过的两棵变体树按**发布权限新建条目**的方式复制进去（MUST NOT `cp -a`/`copytree(copy2)` 把计算节点 uid/gid/mode 带进 NFS，agent-ops §10）
   7. **GeoJSON 直接落 staging**：`geometry.write_viewer_geojson` 的 `out_dir` 取该 `YD_ROOT` 内 staging 位置，两份 GeoJSON **不经 scratch**（唯一落点，无第二处 staging）。staging 位置 MUST NOT 落在 `input/viewer/` 之内——products-contract §2 只允许该目录存在两个文件，把 staging 建在里面等于让 viewer 看见中间态
   8. **提交**：四个终名逐个 rename 提交（`safe_fs.rename_entry_no_follow`），源为 staging 内条目——**同文件系统**；顺序钉死为「两变体 → rivers → boundary」
@@ -2953,7 +2955,7 @@ Seams under test:
 - 合成率定末态 `cfg.ic` 复用既有 `producer/tests/cfg_ic_fixtures.py` 的原生分段生成器，**不在本 issue 手写第二套格式**——reach 数的期望值由生成器写入的 river 行数给定
 - 合成基线 GIS 复用 `producer/tests/geometry_fixtures.py`（10.1/10.2 已钉死的锚点纪律）；GeoJSON 内容正确性归 10.2 的既有用例，本 issue 只断言**落点、数量与提交/清理语义**
 - "无新写入"一律以**执行前后 `YD_ROOT` 全树快照（相对路径 + 文件字节）逐一比对**断言，不用"某个特定文件不存在"这种单点探测——单点探测对"写到别处去了"的实现恒真
-- 基线包内部布局与变体内率定末态的文件名是**本 fixture 定义的合成约定**，以 `prepare.py` 的共享常量/函数暴露给 11.1 消费；真实布局的核实归 M4（tasks.md 组 10 已记：真实外部基线模型包的读取与其现场路径属 M4）
+- 合成 builder 仍以 `prepare.VARIANT_CALIBRATED_STATE_NAME = "yd.cfg.ic"` 造样；该字面量只是 fixture 文件名，不替代 #97 的顶层 `*.cfg.ic` 基数判据。prepare 与 init 必须共用该定位谓词，至少保证第二份不同名的 `*.cfg.ic` 不能被固定名检查遮蔽；真实外部基线模型包的布局核实仍归 M4
 
 Required evidence（每条 input -> expected output）:
 - 干净 `YD_ROOT` + 合法合成基线 -> 退出成功；`YD_ROOT` **全树条目集合**等于「执行前 ∪ 恰好四个终名及其必要父目录」——即**无 staging 残留、无多余目录**（单点探测 `input/models/`、`input/viewer/` 各有几个条目对"staging 留在 `YD_ROOT` 顶层"恒真，故此处必须走全树）；`input/viewer/` 下**恰有** `rivers.geojson` 与 `boundary.geojson` 两个条目；`scratch_root` 下无任何残留条目
@@ -2967,6 +2969,7 @@ Required evidence（每条 input -> expected output）:
 - **守卫/写入同源判别性证据**：把 `variants.gfs` 改成非默认相对值（如 `models/alt_gfs`），预先在**该新路径**上放一个同名目录 -> 必须被拒绝（守卫跟着 config 走，而非钉死字面量 `input/models/yd_gfs`）；反向：字面量 `input/models/yd_gfs` 存在但 config 指向别处 -> 提交落在 config 指定处
 - 假 builder 产出的变体 river 段行数 ≠ `reach_count` -> `PrepareError` 点名该 source、期望值与实际值；`YD_ROOT` 全树快照与执行前一致；`scratch_root` 无残留
 - 假 builder 产出的率定末态 `cfg.ic` **无 river 段** -> `PrepareError`（消息区分于"数量不符"）；MUST NOT 判为 0 条；`YD_ROOT` 无新写入
+- **#97 顶层率定末态基数矩阵**：逐源让假 builder 在 `variant_root` 顶层产出 0 份或 2 份 `*.cfg.ic` 普通文件 -> 均在搬运到 `YD_ROOT` staging 前 `PrepareError`，消息点名 source、目录、命中数与候选路径，四个终名零提交、scratch 清理；定位 helper 的直接用例在顶层恰一份、嵌套子目录另有匹配文件时仍只返回顶层候选，证明不递归（整次 prepare 可由既有“未预期顶层条目”合同独立拒绝其它残留）。把基数闸退化为“只确认 `yd.cfg.ic` 存在而忽略第二份”、递归 glob、接受第一份或只判非空的变异分别必红
 - 假 builder 在 `variant_root` 内留下一个 `.tmp` 文件（其余合法）-> `PrepareError` 点名该残留条目；`input/models/` 下无任何变体目录
 - 假 builder 对 `ifs` 抛异常（`gfs` 已成功建好）-> `PrepareError`；`YD_ROOT` 全树快照与执行前一致（**`gfs` 变体不得被提交**）；`scratch_root` 无残留
 - **失败路径清理**：上述每一条失败用例都断言 `scratch_root` 下无本次工作目录
@@ -3082,7 +3085,7 @@ Upstream suggested level: compact（override：正面命中 `openspec/project-pr
 Repair intensity: high（首次写 NFS 发布根、部分产物即把系统**永久砖化**——「已有任一状态即拒绝」使一次半写死锁住所有后续 init；同时命中 profile 首位风险轴「断链即整链失效」的**链起点**。适用 `Invariant Matrix`）
 Project profile: yd-viewer
 
-**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #21 的验收标准依赖「从两个变体内各自同源率定末态复制首态」（`specs/init-bootstrap/spec.md`、compute-loop §6.2 第 4 步），但**率定末态在变体目录内的落点，全仓无任何文档、spec 或配置钉死**：compute-loop §6.1 只说变体「水文参数和率定状态来自同一基线」，`config.toml` 的 `variants.*` 只到变体目录一级，`nwm-snapshot-inventory.md:132` 的 `_project_name` 只决定 tracker 轮询的 `<project>.cfg.ic.update` 文件名、且该 manifest 在 init 期不存在。该 seam 由本 issue 自行补齐（裁决 2），按核心规则「needed-but-missing seam is a reported deviation」记录在此，并**约束尚未落地的 #20 / 任务 10.3**（prepare 提交变体时必须满足裁决 2 的形态）。
+**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #21 落地时，其验收标准依赖「从两个变体内各自同源率定末态复制首态」（`specs/init-bootstrap/spec.md`、compute-loop §6.2 第 4 步），但**当时**率定末态在变体目录内的落点尚无文档、spec 或配置钉死：compute-loop §6.1 只说变体「水文参数和率定状态来自同一基线」，`config.toml` 的 `variants.*` 只到变体目录一级，`nwm-snapshot-inventory.md:132` 的 `_project_name` 只决定 tracker 轮询的 `<project>.cfg.ic.update` 文件名、且该 manifest 在 init 期不存在。该 seam 由本 issue 裁决 2 先在 init 侧补齐；#97 M2 收尾现已把同一顶层 `*.cfg.ic` 基数谓词回填到 #20 / 任务 10.3 的 prepare 文档、spec、提交前校验与证据面，关闭写侧缺口。
 
 **#96 收尾裁决（修订本 fixture 的 symlink 例外）**：`states/<source>` 条目自身及其树内的任何 symlink 都视为已有状态条目，阶段 A MUST 以 `STATES_NOT_EMPTY` fail closed；不跟随目标，不按目标为普通文件、目录、断链或其它类型分流。该修订只给 symlink 单列：普通（非 symlink）空目录仍不触发守卫，`output/` 的 `DONE` 可见性也不在 #96 内扩大。由此撤销本 fixture 中“state symlink 可穿过阶段 A、到阶段 B 再作为外来阻塞物”的旧构造；阶段 B 同类证据改用普通空目录、FIFO 等非 symlink 载体。
 
