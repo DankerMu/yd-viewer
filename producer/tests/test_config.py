@@ -12,10 +12,12 @@ import re
 import typing
 from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pytest
 
+import yd_producer.config as config_module
 from yd_producer.config import (
     Config,
     ConfigError,
@@ -396,7 +398,7 @@ def _scalar_leaves(cls: type, prefix: str = "") -> list[tuple[str, type]]:
     那两份清单只带点分名、不带类型信息，无从判断 33 个 key 里哪 10 个是 `str` 标量。
     **dataclass 树是唯一带类型的来源。**
 
-    非标量叶子（`tuple[int, ...]`、`tuple[str, ...]`、`dict[str, str | int]`）**显式跳过**，
+    非标量叶子（`tuple[int, ...]`、`tuple[str, ...]`、`Mapping[str, str | int]`）**显式跳过**，
     不属于本轴：它们走 `_require_list`/`_require_table` 而非 `_require_scalar`，"无歧义错
     类型"的形态也不同（非 list、元素类型错、非 table），已由本文件的列表/表用例分别覆盖。
     这里写成显式的 `field_type in _SCALAR_TYPES` 白名单判定，而不是"取不到类型就算了"，
@@ -756,6 +758,62 @@ def test_load_local_returns_all_site_fields(tmp_path):
     assert local.cron.lock_path == "/fixture/run/yd-producer.lock"
     assert local.cron.log_dir == "/fixture/log/yd-producer"
     assert local.slurm == VALID_LOCAL["slurm"]
+
+
+# --- local.[slurm] 只读资源快照 ---------------------------------------------
+
+
+def test_local_slurm_annotation_is_read_only_mapping():
+    assert typing.get_type_hints(LocalConfig)["slurm"] == Mapping[str, str | int]
+
+
+def test_load_local_slurm_is_mapping_proxy(tmp_path):
+    config = _loaded_config(tmp_path)
+    local = load_local(_write_toml(tmp_path / "local.toml", VALID_LOCAL), config)
+
+    assert type(local.slurm) is MappingProxyType
+
+
+def test_load_local_slurm_rejects_resource_assignment(tmp_path):
+    config = _loaded_config(tmp_path)
+    local = load_local(_write_toml(tmp_path / "local.toml", VALID_LOCAL), config)
+
+    with pytest.raises(TypeError):
+        local.slurm["cpus"] = 16
+
+
+def test_load_local_slurm_rejects_resource_deletion(tmp_path):
+    config = _loaded_config(tmp_path)
+    local = load_local(_write_toml(tmp_path / "local.toml", VALID_LOCAL), config)
+
+    with pytest.raises(TypeError):
+        del local.slurm["cpus"]
+
+
+def test_load_local_slurm_isolated_from_parsed_tree_alias(tmp_path, monkeypatch):
+    config = _loaded_config(tmp_path)
+    local_path = _write_toml(tmp_path / "local.toml", VALID_LOCAL)
+    expected_slurm = copy.deepcopy(VALID_LOCAL["slurm"])
+    original_load = config_module.tomllib.load
+    parsed_trees: list[dict[str, Any]] = []
+
+    def retain_parsed_tree(handle) -> dict[str, Any]:
+        parsed = original_load(handle)
+        parsed_trees.append(parsed)
+        return parsed
+
+    monkeypatch.setattr(config_module.tomllib, "load", retain_parsed_tree)
+
+    local = load_local(local_path, config)
+
+    assert type(local.slurm) is MappingProxyType
+    assert len(parsed_trees) == 1
+    parsed_slurm = parsed_trees[0]["slurm"]
+    parsed_slurm["cpus"] = 16
+    del parsed_slurm["account"]
+    parsed_slurm["qos"] = "normal"
+
+    assert dict(local.slurm) == expected_slurm
 
 
 # --- 缺字段 fail closed（schema 驱动参数化）---------------------------------
