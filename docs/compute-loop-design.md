@@ -158,7 +158,7 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 - `scratch_root`；
 - NWM raw 根和 NWM checkout/解释器（仅 prepare）；
 - SHUD 二进制；
-- Slurm partition、account、CPU、内存和 walltime；
+- Slurm partition、account、CPU、内存和 walltime；装载后以 `MappingProxyType` 只读映射暴露，调用方不得改写；
 - cron lock 与日志位置。
 
 项目不维护动态 registry。复制来的 file backend 如要求 NWM 结构的 registry/model manifest，控制器根据 TOML 在本轮 work 内临时生成，用完随 work 删除。

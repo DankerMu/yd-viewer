@@ -50,7 +50,7 @@
 - **THEN** 装载器报错并指明缺失字段名，不返回带默认值的配置
 
 ### Requirement: local.toml 现场值不得猜测
-装载器 MUST 从 gitignored `local.toml` 读取现场值（`yd_root`、`scratch_root`、NWM raw 根、NWM checkout 根与解释器路径（仅 prepare）、SHUD 二进制、Slurm partition/account/CPU/内存/walltime、cron lock 与日志位置）；文件缺失或字段缺失 MUST 明确报错，代码中 MUST NOT 内置任何现场默认值。
+装载器 MUST 从 gitignored `local.toml` 读取现场值（`yd_root`、`scratch_root`、NWM raw 根、NWM checkout 根与解释器路径（仅 prepare）、SHUD 二进制、Slurm partition/account/CPU/内存/walltime、cron lock 与日志位置）；文件缺失或字段缺失 MUST 明确报错，代码中 MUST NOT 内置任何现场默认值。`LocalConfig.slurm` MUST 以只读 `Mapping[str, str | int]` 暴露，装载器复制校验后的值并用 `types.MappingProxyType` 冻结；调用方不得通过该字段增删改资源配置。键集的唯一权威仍是 `Config.slurm.required_fields`，不得改成固定 Slurm 字段 dataclass。
 
 #### Scenario: local.toml 缺失
 - **WHEN** 指定路径不存在 `local.toml`
@@ -58,7 +58,7 @@
 
 #### Scenario: 现场字段齐备
 - **WHEN** `local.toml` 提供全部必需现场字段
-- **THEN** 配置对象暴露这些值供 `prepare`/`init`/`run` 使用
+- **THEN** 配置对象暴露这些值供 `prepare`/`init`/`run` 使用；`LocalConfig.slurm` 是 `MappingProxyType` 只读快照，装载后修改输入或尝试改写该映射均不能改变配置对象
 
 ### Requirement: run 永不自动 bootstrap
 `run` 发现状态目录缺失或为空时 MUST 报错停止，MUST NOT 调用 init 逻辑或自建状态。
