@@ -732,6 +732,53 @@ def test_judge_rejects_non_simple_bundle_grammar_before_render_or_filesystem(
     assert calls == []
 
 
+def test_relative_raw_root_rejects_requested_grammar_before_cwd_or_filesystem(
+    monkeypatch,
+):
+    """相对 raw 根不能让 cwd 提升遮蔽 requested-source grammar 拒绝。"""
+    pattern = "gfs.f{lead:03d}.{lead}.grib2"
+    config = make_config(
+        gfs=make_source(
+            lead_hours=GFS_LEADS,
+            variables=GFS_VARIABLES,
+            bundles=(pattern,),
+            f000_special=True,
+        )
+    )
+    calls: list[str] = []
+
+    def cwd_unavailable(*args, **kwargs):
+        calls.append("Path.cwd")
+        raise OSError("current directory unavailable")
+
+    def boom(name: str):
+        def stub(*args, **kwargs):
+            calls.append(name)
+            raise AssertionError(f"grammar gate 后不应调用 {name}")
+
+        return stub
+
+    monkeypatch.setattr(Path, "cwd", cwd_unavailable)
+    monkeypatch.setattr(rawscan_module, "_render", boom("_render"))
+    for module, attr in (
+        (os, "stat"),
+        (os, "scandir"),
+        (os, "listdir"),
+        (builtins, "open"),
+    ):
+        monkeypatch.setattr(module, attr, boom(f"{module.__name__}.{attr}"))
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            judge("relative-raw", "gfs", CYCLE, config)
+    finally:
+        monkeypatch.undo()
+
+    assert excinfo.value.path == "raw.gfs.bundles"
+    assert pattern in str(excinfo.value)
+    assert "format spec" in str(excinfo.value)
+    assert calls == []
+
+
 def test_renderer_rejects_ifs_non_simple_grammar_before_render(monkeypatch):
     pattern = "ifs.t{cycle_hour!s}z.f{lead}.grib2"
     calls: list[str] = []

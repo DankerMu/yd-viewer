@@ -406,6 +406,14 @@ def judge(
     _validate_config_domain(config)
     _validate_request(source, cycle, config)
 
+    source_config: RawSourceConfig = getattr(config.raw, source)
+    bundles_path = f"raw.{source}.bundles"
+    # Requested-source grammar is an admission gate, including for relative roots: cwd
+    # promotion is itself a filesystem primitive and must not obscure this ConfigError.
+    # Do not inspect the other source here; its configuration remains lazy by contract.
+    for pattern in source_config.bundles:
+        _validate_pattern(pattern, bundles_path)
+
     try:
         root = Path(os.fspath(raw_root))
     except TypeError as exc:
@@ -424,7 +432,6 @@ def judge(
                 f"当前工作目录不可用（{exc}）"
             ) from exc
 
-    source_config: RawSourceConfig = getattr(config.raw, source)
     # 目录段由 `SOURCE_DIR_NAMES` 翻译得到，MUST NOT 直接用入参 `source`：IFS 的
     # 存储身份是大写（见该常量的 pin 溯源注释）。
     cycle_root = (
