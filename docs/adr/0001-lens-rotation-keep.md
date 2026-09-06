@@ -679,3 +679,30 @@ spec-compliance 对**组合输入**的审查：绝对 `tmp_path` 下的零文件
 复议条件未触发：显式 Sonnet Round 2 与 Phase 7 均未重报已关闭的 C1；rotating invariant-state 没有
 产生 P2/P3 finding，更不存在连续两个 rotated P3 样本。共享 `m2-producer-core` 仍服务 #29 等后继
 M2 任务，本次继续不 archive。
+
+---
+
+## 第 19 次复议（issue #29 / PR #139 合并后，2026-09-06）
+
+审计数字：29 行（28 merged、1 terminal），26 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #139 只有 Round 1：四席合计覆盖六个 canonical lens，候选 finding 为 0，
+随后独立 Phase 7 Gap Sweep 同样 clean。因为 `rotation_attribution()` 只统计 `rounds >= 2` 的 PR，本样本
+没有进入 26 个 rotation 样本，也没有改变 core/rotated 数字。
+
+这一轮零 catch 也不构成 high fixture 的 cut 信号。当前 high 桶为 9 个 merged PR、累计
+`gate_net_catch=49`，远非「样本达到门槛且总捕获为零」；#139 只是一个完整生产值账本在 fixture review、
+测试先行、19+3 个变异和本地矩阵已充分闭合后，综合审核没有发现新增缺陷的正常 clean 样本。把 clean
+误读成 reviewer 无价值，会混淆「没有新 bug」与「没有独立核对」，也忽略本轮四席分别确认了来源、TOML
+表边界、下游消费者、oracle 独立性、tracking/packaging 与凭据 hygiene。
+
+它同样不能支持或反对 free-slot rotation：本 PR 没有修复后综合轮，因而根本没有轮换机会。将该零事件
+归入“轮换发生但零收益”会重复第 13、15、16、17 次复议已拒绝的归因错误。per-lens seated 次数因 Round 1
+各增加一次而 catch 不变，只能说明这一份已被前置证据闭合的 production-config PR 初审 clean，不能估计
+后轮换入某 lens 的边际收益。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；
+本次不把单轮 clean 样本纳入 rotation 的正反证，也不按它缩减 high-tier Round 1 覆盖。现有累计 rotated
+捕获仍显著，且证据不足时默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：不存在后续综合轮、rotated catch 或已关闭 finding 重报。共享 `m2-producer-core` 仍承载
+#31、#32、#72、#48、#46 等后继配置任务，本次继续不 archive。
