@@ -2088,7 +2088,7 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
    - `assemble(*, registry, variant_dir, forcing, states_root, state_path) -> RunDirectory`。
    不新增只转调 `ForcingProducer.produce` 的 `forcing.build` facade；D10/旧 sketch 已由 design.md D11 修订。`WorkRegistry` 只返回既有 `LocalObjectStore` / `FileForcingRepository` 的构造事实，调用方按 `object_store_root` + `registry_manifest` 构造；不在结果里藏可变 repository/cache。
 2. `WorkIdentity` 是 registry/forcing/assembler/tracker 后继接线唯一字符串/时间 owner。`source_id` 必须归一为 `gfs|ifs`；cycle 必须是 tz-aware UTC 00Z/12Z 整点；五个 identity 文本必须是非空 string，`model_id`、`basin_version_id`、`project_name` 还必须是安全单路径分量（拒绝 `.`/`..`、斜杠、反斜杠、NUL、前导 `-` 与非 ASCII allowlist）。不把 naive datetime 解释成宿主时区，不按 variant basename 猜 project/model，不从 `yd.binding` 文本反造 contract。
-3. 现有 `Config` schema 没有 model/basin/project identity，任务 1.1 已完成、#29 只生产其实例。本 issue 不改 `config.py`、`config.toml`、`local.toml` 或 CLI；identity、direct-grid contract 与同一已验证 binding/`.sp.att` bytes 是显式入参。#26/M4 后继从 config、prepare 与现场 builder 结果接线，不能由 #15 发明默认值。
+3. 现有 `Config`/`LocalConfig` schema 没有任何 identity 字段，任务 1.1 已完成、#29 只生产其实例。本 issue 不改 `config.py`、`config.toml`、`local.toml` 或 CLI；identity、direct-grid contract 与同一已验证 binding/`.sp.att` bytes 是显式入参，不能由 #15 发明默认值。#134/14.2 的 production driver 只可令 `source_id`/`cycle_time` 逐字来自 `AttemptRequest.source`/`.cycle`，令 `project_name` 只从 `prepare.calibrated_state_path(variant_dir)` 指向、prepare 已验证的率定状态文件名仅移除末尾一次 `.cfg.ic` 后取得；四个 versioned registry identifier 只由该 driver 在单一 work/receipt 链拥有。不得从 TOML、variant basename、`yd.binding`、环境、数据库、目录扫描或测试 fixture 补值。`DirectGridForcingContract`、binding/`.sp.att` bytes 的真实输入只可走 prepare-owned 验证 handoff；当前无获证 `.sp.att` layout/parser 时 submit 前拒绝，M2 独立进程合成 handoff 仅作本地 oracle，真实 builder/site 值归 M4。
 4. `work_dir` 逐字派生为 `<absolute-existing-work_root>/<source>/<YYYYMMDDHH>`，调用时必须已存在、逐分量 no-follow 且不等于 work_root；其中可已有 raw/canonical/object-store 内容。所有新增 registry/run 产物只能在该 work 内。手工构造 `WorkRegistry` 不能绕过：`__post_init__` 与 `assemble` point-of-use 都重验 identity、物理路径和精确 relative layout。
 
 **8.2 临时 file backend 精确形状**：
@@ -4682,6 +4682,8 @@ Project profile: yd-viewer
 2. `run` MUST 为固定键集 `{ifs,gfs}` 构造四份 mapping 并注入 `run_sources`：两份互不相同的 `SlurmJobExecutor`、两份互不相同且满足 `AttemptDriver` 的生产 driver、两个生产 poll-wait callable、两个 #47 独立 `sacct ExitCode` provider。不得把测试 `FakeJobExecutor`、terminal hook、fixture driver 或 no-op wait 作为生产默认。
 3. `SlurmJobExecutor` 的资源键集与值来自 `config.slurm.required_fields` / `local.slurm`，后者不含 #69 策略键。生产入口用 `partial(subprocess_runner, command_timeout_seconds=local.slurm_command_timeout_seconds)` 恰构造一份无状态 bounded runner，并把同一 callable 注入两份 executor 与两个 ExitCode provider；因此 `sbatch`、普通 `sacct` 和 #47 失败查询都显式使用同一时限。provider 仍逐源独立且只执行钉死的一次 `sacct -j <job_id> -n -P --format=ExitCode`；轮询与退出码查询不得合并，`JobRecord` 七字段不变。
 4. PR #129 留给 M4 的生产 `AttemptDriver`/worker/receipt 现在由本任务认领，不能只接一个不存在的对象。最小实现 MUST 是既有 `AttemptDriver` 协议的生产适配器：`prepare` 只生成 identity、精确 worker argv 与 work 内 DAT 终名；重 canonical/forcing/assemble/SHUD/tracker/recovery 在 Slurm job 内执行；`collect` 只读取该 job 原子提交、checksum/identity 绑定的 work-local receipt，并据此交回既有 `AttemptProducts`。receipt 必须绑定 source/cycle/work/job ID、`WorkIdentity`、`RunDirectory`、DAT、merged log 与已验证 T+12 checkpoint；不得扫描规范文件名、改写私有 `_captured`、在登录节点补跑 SHUD，或用测试 terminal hook 伪装生产 worker。若现有 tracker 公共面不足以导入 receipt authority，本任务只可在 tracker owner 中增加一个窄的、验证后构造入口，并保持现有捕获/补跑语义；不得让 driver 绕过 `ensure_twelve_hour_checkpoint` 的 point-of-use 重验。
+
+   `WorkIdentity` 的唯一来源为：`source_id`/`cycle_time` 逐字取 `AttemptRequest.source`/`.cycle`；`project_name` 只从 `prepare.calibrated_state_path(request.variant_dir)` 指向、prepare 已验证的率定状态文件名仅移除末尾一次 `.cfg.ic` 后取得，绝不取变体目录 basename；`model_id`、`basin_id`、`basin_version_id`、`river_network_version_id` 是该 production driver 为一次 attempt 唯一拥有的一组 versioned、work-local registry identifier。后四值没有 M2 的持久/外部 authority，不能写入 config/local，不能编造生产字符串；只在同一 scratch registry → forcing → assemble 链中使用并逐字写入 receipt，M4 才以真实 node-22 builder/site artifact 对账。`DirectGridForcingContract` 只取 prepare-owned 验证 handoff，不从 raw builder 文件在运行时反推；`yd.binding` 只读 prepare 已验证的 `request.variant_dir/yd.binding`，`.sp.att` 只取 prepare 明示 handoff；driver 写入已认领 work 前和 worker 使用前都只对 handoff 明示的 path 作有界、逐分量 no-follow 普通文件读取，重验 handoff source/cycle/project/work identity、contract current-source identity 和声明的 SHA-256。receipt 必须逐字记录同一 `WorkIdentity`（含四个 identifier）及 binding/`.sp.att` checksum。禁止从 TOML、环境、`DATABASE_URL`、NWM PostgreSQL/服务型 registry、目录扫描、`yd.binding` 内容或测试 fixture 推导上述任一值/路径/bytes。`contract.binding_uri`/`contract.sp_att_path` 仅是 registry commit 后的 work-local relative keys，不能拿来发现变体输入；现有 M2 文档没有真实 `.sp.att` 位置/parser，handoff 未给出 D11 work-local key shape 的 contract 与明示 asset path 时 driver MUST 在 submit 前 fail closed。
 5. poll wait MUST 是会实际等待的生产 callable，不能 busy-loop；等待策略固定为版本化常量 `POLL_INTERVAL_SECONDS = 10`，生产 callable 每次调用恰执行 `time.sleep(POLL_INTERVAL_SECONDS)`。这是调度查询节律而非现场资源值，不新增 TOML 字段。它只控制两次非终态 `sacct` 轮询之间的等待，不是作业 watchdog、总超时、重试或取消。
 6. `run` 的退出码逐字为：`0` = 锁竞争成功跳过，或控制器返回且两源全部报告均为 `SUCCEEDED`；`3` = 任一报告为 `STOPPED` 或 `JOB_FAILED`。`SUCCEEDED_CLEANUP_PENDING`、`RunSourcesError` 及其它运行期 controller/executor/driver/provider 错误也不是“全部成功”，统一返回 `3` 并向 stderr 输出可定位信息，不打印 traceback。`RunSourcesError` 的单份人读文本必须按 `ifs,gfs` 固定顺序包含每个底层 `RunError` 及其每条 `__notes__`，每项恰一次；CLI 把该完整文本输出一次，不得沿用不含 notes 的旧聚合摘要或另行重复打印而丢失/复制 #108 startup-cleanup 清单。参数解析错误及 `run` 的 `ConfigError`/配置装配错误返回 `2`；`prepare`/`init` 既有退出码不因本任务改变。当前 `run_sources` 的实时追赶合同正常会以首次非 `SUCCEEDED` 末项结束，因此 raw 缺口的 `STOPPED` 按本裁决确实返回 `3`；入口不得把“追到当前 raw 尽头”静默改算成 `0`，也不得为制造 `0` 增加追赶 cap。
 7. `build_parser()` 仍且只暴露三个子命令，`run --config/--local` 参数形态不变；不新增公开 `worker` 子命令。若生产 worker 需要入口，只能是包内私有 module/console target，且 argv 由 production driver 精确构造，不通过 shell 拼接。
@@ -4693,7 +4695,94 @@ Project profile: yd-viewer
 - 锁已被另一实例持有 -> 退出 `0`，`run_sources`、bounded runner、四类工厂与任何 subprocess/discovery/文件写入均零调用；锁释放后同一入口可真正执行。
 - 参数化报告矩阵：两源全 `SUCCEEDED` -> `0`；任一 `STOPPED`、任一 `JOB_FAILED`、任一 `SUCCEEDED_CLEANUP_PENDING` -> `3`；`RunSourcesError`/driver/provider/ExecutorError -> `3` 且 stderr 指名 source/phase/job（可用字段存在时），无 traceback。聚合错误的两源底层 `RunError` 各带互异 note、其中一条含不在正文里的 #108 startup source/cycle/path 清单 -> `str(RunSourcesError)` 按 `ifs,gfs` 含每个错误和每条 note 恰一次，stderr 对整份文本也恰一次；恢复不含 notes 的旧摘要、漏 note、CLI 二次逐项导致重复或集合无序遍历的变异必红。
 - 缺/坏 `--config`、`--local`、生产装配字段，或 `command_timeout_seconds` 为 bool/float/string/非正整数 -> `2`，在锁、bounded runner、driver、executor、controller 之前失败；省略 timeout 则绑定 60。`prepare`/`init` 的既有退出码用例逐项不变。
-- 生产 driver 的端到端合成子进程 fixture（不是 terminal hook）-> worker 在独立进程写原子 receipt，`collect` 逐项重验 source/cycle/work/job/identity/checksum 后构造 `AttemptProducts`；篡改任一 receipt 字段、路径越 work、checkpoint checksum 或 job ID -> `RunError`/driver error，零 `DONE`。
+- **#132 M2-only 合成资产 oracle（非生产事实，且不复用既有测试 fixture 字面量）**：生产 driver 的端到端合成子进程 fixture（不是 terminal hook）固定下列独立字节/identity；`stage_work_registry(..., max_asset_bytes=4096)` 必须能消费它们：
+
+  ```python
+  from datetime import UTC, datetime
+  from hashlib import sha256
+
+  from yd_producer.assemble import WorkIdentity, stage_work_registry
+  from yd_producer.forcing import DirectGridForcingContract, DirectGridStationBinding
+  from yd_producer.prepare import calibrated_state_path
+  from yd_producer.state import parse as parse_cfg_ic
+  from yd_producer.store.safe_fs import read_bytes_limited_no_follow
+
+  source = "gfs"
+  cycle_time = datetime(2026, 1, 2, 0, tzinfo=UTC)
+  BINDING = b'{"schema_version":"m2.synthetic.binding.v1","source_id":"gfs"}\n'
+  BINDING_SHA256 = "2629f48afb580b6ce1c657a1c612ae97217016c36d23e94b5f7209f7d5100a30"
+  SP_ATT = b"1 1\nTRI\tA\tB\tC\tFORC\n1\t0\t0\t0\t1\n"
+  SP_ATT_SHA256 = "d0754333bd8783f3c95052cd9e53a8d22c1e165f3133ce787d686c5b59b55bad"
+  # Independent stdlib SHA-256 oracle for one ordered canonical grid point:
+  # ("m2-synthetic-cell", 0.0, 0.0).
+  GRID_SIGNATURE = "912736a2ef764f4f5487bd185f86b678c3272c3e938f8a35c609a11382ddc6fa"
+  SYNTHETIC_GRID_DEFINITION = {
+      "cells": [{
+          "grid_cell_id": "m2-synthetic-cell",
+          "longitude": 0.0,
+          "latitude": 0.0,
+      }],
+  }
+  VALID_SYNTHETIC_CFG_IC = (
+      b"1 6 0 0\n"
+      b"Index Canopy Snow Surface Unsat GW\n"
+      b"1 0 0 0 0 0\n"
+      b"Index Stage\n"
+      b"1 0\n"
+  )
+  assert sha256(BINDING).hexdigest() == BINDING_SHA256
+  assert sha256(SP_ATT).hexdigest() == SP_ATT_SHA256
+  assert sha256(
+      b'{"grid_points":[["m2-synthetic-cell",0.0,0.0]]}'
+  ).hexdigest() == GRID_SIGNATURE
+  assert parse_cfg_ic(VALID_SYNTHETIC_CFG_IC).river is not None
+  identity = WorkIdentity(
+      source_id=source, cycle_time=cycle_time,
+      model_id="m2-synthetic-model", basin_id="m2-synthetic-basin",
+      basin_version_id="m2-synthetic-basin-v1",
+      river_network_version_id="m2-synthetic-rivnet-v1", project_name="yd",
+  )
+  contract = DirectGridForcingContract(
+      forcing_mapping_mode="direct_grid",
+      binding_uri="models/m2-synthetic-model/direct-grid/binding.json",
+      binding_checksum="sha256:" + BINDING_SHA256,
+      model_input_package_id="m2-synthetic-package",
+      sp_att_path="input/yd.sp.att", sp_att_checksum="sha256:" + SP_ATT_SHA256,
+      applicable_source_ids=(source,), grid_id="m2-synthetic-gfs-grid",
+      grid_signature=GRID_SIGNATURE,
+      stations=(DirectGridStationBinding(
+          station_id="m2-synthetic-station", shud_forcing_index=1,
+          forcing_filename="m2-synthetic-station.csv", longitude=0.0,
+          latitude=0.0, x=0.0, y=0.0, z=0.0,
+          grid_id="m2-synthetic-gfs-grid", grid_cell_id="m2-synthetic-cell",
+      ),),
+  )
+  work_root = tmp_path / "work"
+  attempt_work = work_root / "gfs" / "2026010200"
+  attempt_work.mkdir(parents=True)
+  variant_dir = tmp_path / "variant"
+  variant_dir.mkdir()
+  calibrated_state_path(variant_dir).write_bytes(VALID_SYNTHETIC_CFG_IC)
+  assert calibrated_state_path(variant_dir).name.removesuffix(".cfg.ic") == identity.project_name
+  (variant_dir / "yd.para").write_bytes(b"# m2 synthetic parameters\n")
+  (variant_dir / "yd.binding").write_bytes(BINDING)
+  sp_att_handoff_path = tmp_path / "explicit-synthetic.sp.att"
+  sp_att_handoff_path.write_bytes(SP_ATT)
+  registry = stage_work_registry(
+      work_root=work_root, identity=identity, contract=contract,
+      binding_content=read_bytes_limited_no_follow(
+          variant_dir / "yd.binding", max_bytes=4096, containment_root=variant_dir,
+      ),
+      sp_att_content=read_bytes_limited_no_follow(
+          sp_att_handoff_path, max_bytes=4096, containment_root=tmp_path,
+      ),
+      max_asset_bytes=4096,
+  )
+  assert registry.identity == identity
+  ```
+
+  fixture 在 `prepare.calibrated_state_path(variant_dir)` 返回的 `yd.cfg.ic` 安装独立有效的合成率定状态，故期望 `project_name == "yd"`，并将 `BINDING` 写入精确 `variant_dir/yd.binding`；`SP_ATT` 写入 handoff 明示的 no-follow 普通临时文件，绝非从 `contract.sp_att_path` 或变体扫描推导。上述 `binding_uri`/`sp_att_path` 是 `stage_work_registry` 的提交后 work-local keys，不是生产或合成来源路径。返回的 `registry` MUST 进入同一独立 worker 的真实 `FileForcingRepository -> ForcingProducer -> assemble` 链：独立 canonical catalog 的每个 required GFS product 都使用同一 source/cycle、`m2-synthetic-gfs-grid`、一格 `SYNTHETIC_GRID_DEFINITION`、上面的 `GRID_SIGNATURE`、以及 contract station 的 `m2-synthetic-cell`；NetCDF 的自描述 identity 必须与各 catalog 行相同。其它 canonical/SHUD/tracker 输入可以是独立构造的合成工件，但不得以测试 fixture 取代本段明确的 contract/binding/`.sp.att` handoff。该 `yd` 仅行使既有 `calibrated_state_path` 的 M2 合成 seam，不声明 project/site 生产值；synthetic `.sp.att` 只行使既有 UTF-8、SHA-256 与单一 `FORC=1` 对应单一 synthetic station 的最小现有生产校验，不把该字面量或该局部语法校验宣称为真实模型 `.sp.att` layout/parser。worker 在独立进程仅从该 handoff 写原子 receipt，`collect` 逐项重验 source/cycle/work/job/identity/checksum 后构造 `AttemptProducts`。篡改任一 receipt 字段、路径越 work、checkpoint checksum、job ID、binding/`.sp.att` bytes/checksum、contract current-source 或 handoff source/cycle/project/work binding、四个 identifier 的链内一致性，以及任一 handoff leaf/ancestor symlink、非普通文件或超过显式 `max_asset_bytes` -> `RunError`/driver error，零 `DONE`；没有显式 `.sp.att` handoff 同样在 submit 前拒绝。该 oracle 不声明这些 literal 是生产 model/basin/site 值，也不扫描变体或从 `contract.sp_att_path` 猜路径。
+- M2 证据只证明上述本地合成进程、checksum/identity/no-follow handoff 与 receipt 交接；M4 必须另用真实 node-22 builder/site artifact 核验 `.sp.att` layout/parser、四个 registry identifier、Slurm/NFS/SHUD 与真实 receipt，不能用 M2 fixture 代替。
 - 源码/结构守卫：`cli.run` 不含 `_unimplemented`；生产默认 import 不含 `FakeJobExecutor` 或 tests fixture；timeout 数字字面量 60 只在 `yd_producer.config._DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS` 出现，`slurm.py` 引用该内部常量、CLI 只读配置字段，`config.__all__` 不扩；parser 子命令集合仍恰为三项；`controller.run_sources`、`run_once`、`catch_up_source` 与 `JobRecord` 公共签名不改。
 - `cd producer && uv run pytest -q`、ruff/format、frozen sync 与 `openspec validate m2-producer-core --strict --no-interactive` 全绿。
 
