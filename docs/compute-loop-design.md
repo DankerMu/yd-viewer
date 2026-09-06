@@ -252,7 +252,7 @@ yd-producer run --config <path> --local <path>
   → 7 天 SHUD
 ```
 
-canonical、forcing 和临时 manifest 都是本轮工件，不写 NFS，也不跨轮复用。direct-grid forcing 将 canonical 格点直接作为 SHUD forcing 站点，binding 权重为 1；不走旧的 105 站 IDW。
+canonical、forcing 和临时 manifest 都是本轮工件，不写 NFS，也不跨轮复用。IFS 网格定义在该临时 object-store 中的唯一键为 `canonical/ifs/grid/ifs_0p25/grid.json`；catalog 行逐字引用该小写键，不保留 `canonical/IFS/` 别名或大小写 fallback。direct-grid forcing 将 canonical 格点直接作为 SHUD forcing 站点，binding 权重为 1；不走旧的 105 站 IDW。
 
 IFS/GFS forcing 原生 3 小时并不限制水文输出为 3 小时：SHUD 求解按自身步长推进，forcing 在相邻时刻间保持当前值，`DT_QR_DOWN=60` 独立输出逐小时平均流量。
 

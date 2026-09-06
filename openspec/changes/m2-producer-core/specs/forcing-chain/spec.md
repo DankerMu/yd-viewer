@@ -5,7 +5,7 @@
 ## ADDED Requirements
 
 ### Requirement: DB-free canonical 转换（NWM 快照）
-canonical converter MUST 以同一 `LocalObjectStore` 根内的本轮临时 raw manifest 与 `raw/` 副本为输入，并在该根内生成 canonical NetCDF 与 catalog；任务 14.1 的根逐字为 `<attempt-work>/object-store`。MUST NOT 依赖 PostgreSQL、NWM registry 服务或 NWM checkout import。
+canonical converter MUST 以同一 `LocalObjectStore` 根内的本轮临时 raw manifest 与 `raw/` 副本为输入，并在该根内生成 canonical NetCDF 与 catalog；任务 14.1 的根逐字为 `<attempt-work>/object-store`。IFS 网格定义对象的唯一 URI MUST 为 `canonical/ifs/grid/ifs_0p25/grid.json`，converter 的写入/存在性/签名检查与每条 catalog 行 MUST 共用该值；MUST NOT 保留 `canonical/IFS/...` 别名或大小写 fallback。converter MUST NOT 依赖 PostgreSQL、NWM registry 服务或 NWM checkout import。
 
 #### Scenario: 合成 raw 到 canonical
 - **WHEN** 对合成 raw fixture 与对应 manifest 运行 converter
@@ -14,6 +14,10 @@ canonical converter MUST 以同一 `LocalObjectStore` 根内的本轮临时 raw 
 #### Scenario: 真实 GRIB 读路径被覆盖
 - **WHEN** 对**合成 GRIB2 样本**（非 NetCDF 替身）与携带 `metadata.grib_short_name` 的 manifest entry 运行 converter
 - **THEN** converter 经 cfgrib 后端读取该样本并产出 canonical NetCDF 与 catalog；**MUST NOT** 静默回退到 netcdf4 后端——回退是生产路径未被覆盖的假绿形态，测试 MUST 能把回退判红
+
+#### Scenario: IFS 网格定义 URI 统一小写
+- **WHEN** 对完整 IFS manifest 执行转换并读取生成的 catalog
+- **THEN** 网格定义对象写在 `canonical/ifs/grid/ifs_0p25/grid.json`，每条 product row 的 `grid_definition_uri` 逐字等于该值；字符串级断言 MUST 能在大小写不敏感文件系统上判红旧值 `canonical/IFS/grid/ifs_0p25/grid.json`
 
 #### Scenario: 运行期无出站连接
 - **WHEN** 在拦截出站 socket 连接的闸门下执行完整的 manifest 转换（读 raw → 转换 → 写产物 → 写 catalog）
