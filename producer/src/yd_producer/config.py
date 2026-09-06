@@ -396,7 +396,7 @@ def _build_slurm_schema(table: Mapping[str, Any]) -> SlurmSchema:
 
 
 def _validate_config_domain(config: Config) -> None:
-    """拒绝本装载边界认领的三条版本化配置取值域。"""
+    """拒绝本装载边界认领的四类版本化配置取值域。"""
     if any(hour not in {0, 12} for hour in config.cycle.hours):
         raise ConfigError(
             "配置项 `cycle.hours` 的每个值必须属于 {0, 12}", "cycle.hours"
@@ -412,6 +412,20 @@ def _validate_config_domain(config: Config) -> None:
             f"0 <= hour < {checkpoint_upper_bound}",
             "checkpoint_hours",
         )
+    for source, variables in (
+        ("ifs", config.raw.ifs.variables),
+        ("gfs", config.raw.gfs.variables),
+    ):
+        duplicates = sorted(
+            {variable for variable in variables if variables.count(variable) > 1}
+        )
+        if duplicates:
+            path = f"raw.{source}.variables"
+            raise ConfigError(
+                f"配置项 `{path}` 存在重复项："
+                + "、".join(f"`{variable}`" for variable in duplicates),
+                path,
+            )
 
 
 def _build_config(data: Mapping[str, Any]) -> Config:

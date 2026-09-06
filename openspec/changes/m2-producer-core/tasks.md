@@ -11,6 +11,7 @@
 - [x] 1.5 提交版本化 `producer/config.toml` 生产实例，以实际文件装载测试钉死文档与 NWM pin 的逐字段取值（issue #29）
 - [x] 1.6 将 `LocalConfig.slurm` 收口为无可变 backing 暴露的只读资源映射（issue #31）
 - [x] 1.7 在 `config.toml` 装载边界落实三条已裁决取值域及精确错误路径（issue #32）
+- [x] 1.8 在同一装载期 domain owner 内拒绝 IFS/GFS 各自重复的 raw variable（issue #72）
 
 依赖：无
 §13.1 归属：无直接行（基础设施，支撑全部行）
@@ -36,7 +37,7 @@ Must preserve:
 Must add/change:
 - 按下方「TOML key schema」装载 `config.toml` 与 `local.toml`，返回类型化 dataclass 树
 - 任何必需字段缺失或类型错误 fail closed，错误信息含该字段的完整点分路径（如 `raw.gfs.variables`）；除 #69 明确授权的 Slurm 客户端命令时限默认 60 秒外，代码中零内置现场默认值
-- #32 裁决仅把三条取值域上提给装载器：`cycle.hours` 的每个值都属于 `{0,12}`、`forecast_days > 0`、`checkpoint_hours` 的每个值都满足 `0 <= hour < 24 * forecast_days`。违反时抛 `ConfigError`，`path` 分别精确为 `cycle.hours`、`forecast_days`、`checkpoint_hours`；其它取值域仍按既有 owner/Non-goal 处理
+- config 装载期集中认领四类取值域：#32 的 `cycle.hours`、`forecast_days`、`checkpoint_hours` 三条规则，以及 #72 的 `raw.ifs.variables` / `raw.gfs.variables` 各自在 source 内单射。违反时抛 `ConfigError` 并指向对应完整点分路径；variables 重复消息列出具体重复名，不跨 source 比较、不大小写归一、不静默去重；其它取值域仍按既有 owner/Non-goal 处理
 - 两个装载器的全部失败路径抛同一个公开异常类型 `yd_producer.config.ConfigError`（本 fixture 钉死类名），不抛裸 `KeyError`/`TypeError`/`tomllib.TOMLDecodeError`
 
 TOML key schema（本 issue 钉死；下游 issue 与生产 `config.toml` 实例必须对齐此 schema）:
@@ -137,12 +138,12 @@ Risk packs considered (core):
 - File IO / path safety / overwrite: not selected - 只读单个 TOML 文件，不写、不删、不遍历目录；`local.toml` 内的路径本 issue 只装载不解引用（路径存在性校验归 1.3/1.4 与各业务模块）
 - Schema / columns / units / field names: selected - config 字段全集即 schema，字段名/类型/单位（minutes、hours、days）错配会传导到全部下游模块
 - Auth / permissions / secrets: not selected - `local.toml` 已 gitignored，字段为路径与 Slurm 资源，无凭据；装载器不打印文件内容
-- Concurrency / shared state / ordering: not selected - 无共享状态、无并发，纯函数
+- Concurrency / shared state / ordering: selected - 无并发，但完整结构装配与 domain owner 内的确定性错误优先级是公共错误契约；#72 必须保留 #32 三条在前，再按 IFS/GFS 顺序检查
 - Resource limits / large input / discovery: not selected - 输入为人工维护的小 TOML，无发现逻辑
-- Legacy compatibility / examples: not selected - 首个功能模块，仓库此前无业务代码，无既有消费者
+- Legacy compatibility / examples: selected - 生产配置、内联 fixture、直接构造 `Config` 与 rawscan/rawcopy/forcing 既有消费者已存在；#72 只拒绝此前无效的同源重复变量
 - Error handling / rollback / partial outputs: selected - fail-closed 是本 issue 的核心验收项，需要稳定异常类型与含字段名的错误信息；除 #69 明确授权的 timeout=60 外，不得返回带默认值的半成品配置对象
 - Release / packaging / dependency compatibility: selected - 必须只用 stdlib `tomllib`，不得引入新依赖，`uv sync --frozen` 无 drift
-- Documentation / migration notes: not selected - 无迁移；字段清单由本 fixture 的「TOML key schema」钉死，下游 issue 直接读该 schema，无需另写文档
+- Documentation / migration notes: selected - #72 必须先同步 compute-loop、D4、cli-config spec 与归属账本，消除“仅三条/variables 仍在下游”的旧边界；无持久数据迁移
 
 Domain packs (from active profile):
 - Geospatial / CRS: not selected - 无几何
@@ -158,6 +159,7 @@ Required evidence（每条 input -> expected output）:
 - 类型错误 `reach_count = "3988"`（字符串）-> 抛 `ConfigError`，消息含 `reach_count` 与期望类型
 - 类型错误 `cycle.hours = 0`（非列表）-> 抛 `ConfigError`，消息含 `cycle.hours` 与期望类型
 - #32 值域矩阵：`cycle.hours = [0]`、`[12]`、`[0,12]` 均可装载；含 `6`、`18`、`24` 或负数 -> 抛 `ConfigError` 且 `path == "cycle.hours"`。`forecast_days = 1` 可装载，`0`/负数 -> 抛 `ConfigError` 且 `path == "forecast_days"`。在 `forecast_days = 7` 下，`checkpoint_hours = [0,167]` 可装载，含 `-1` 或 `168` -> 抛 `ConfigError` 且 `path == "checkpoint_hours"`；把 `forecast_days` 改为 1 后 `23` 可装载、`24` 被拒（证明上界来自跨字段值而非写死 168）
+- #72 单射矩阵：分别让 `raw.ifs.variables` / `raw.gfs.variables` 含一个重复名 -> public `load_config` 抛 `ConfigError` 且 `path` 精确指向该 source；单列表含多个重复组时消息把每个重复名各列一次且不列未重复名，显示顺序不作承诺。两个 source 各含一次同名字符串、同一 source 含大小写不同字符串、空列表、以及齐备无重复列表均原样装载（证明逐源、精确字符串比较，且没有越界认领非空性或规范化）
 - `local.toml` 路径不存在 -> 抛 `ConfigError`，消息提示需现场创建，且不返回任何对象
 - TOML 语法损坏（如未闭合字符串）-> 抛 `ConfigError`（不外泄 `tomllib.TOMLDecodeError`）
 - **参数化：** 对 `slurm.required_fields` 的每一项，各生成一份"`local.[slurm]` 删该项"的 TOML -> 每份都抛 `ConfigError`，消息含该缺失键名
@@ -181,7 +183,7 @@ Non-goals:
 - **不做 `local.toml` 路径的绝对路径形态校验**：schema 把这些字段标注为 `<绝对路径>`，但装载器只校验其为 `str`。这条**不被上一行覆盖**——相对路径与 `~` 的危害不是"不存在"，而是被正常创建、正常打开却落在错的地方，使用点的存在性检查永远不报警（实测 `Path("~/x") / "y"` → `'~/x/y'`，`~` 不展开）。最尖锐的是 `cron.lock_path`：cron 以 cwd=`$HOME` 调 `run`、人工补跑在 checkout 目录走同一入口，相对路径会让两边 `flock` 拿到两个不同的锁文件，`specs/run-controller/spec.md:60` 的互斥静默失效，两个 controller 同时进入发布段（违反 agent-ops §8.4）。归属：`cron.lock_path` 归 **#23** task 12.3 的 flock 封装；`yd_root`/`scratch_root` 归各自写入面；裁决记录在 **#32**（若决定统一在装载期强制，按文档优先原则先改 `specs/cli-config/spec.md:19` 扩大 MUST 范围再动码）
 - **不提交版本化 `producer/config.toml` 生产实例**：`raw.ifs`/`raw.gfs` 的变量名、bundle 文件模式与 GFS f000 具体取值出自 compute-loop §7.1 所称"NWM adapter 的当前事实"，由 issue #4 勘察与 issue #6 完整性判定确立，此刻不可知；本 issue 只钉 schema，测试全部用内联 TOML。生产实例落库已路由为 issue #29（`Depends on #2, #6`），并已挂入 epic #1 依赖图。
 - 不提交 `local.toml.example`：compute-loop §5 明确 `local.toml` 不入库，现场值由实施方创建（agent-ops）
-- **#32 对值域作有限上提，其余仍不在装载器**：装载器现在 MUST 校验 `cycle.hours ⊆ {0,12}`、`forecast_days > 0`、`checkpoint_hours ⊆ [0, 24 * forecast_days)`，并按上方路径抛 `ConfigError`。下列仍沿用既有 owner/Non-goal，不因本裁决顺带迁入 `config.py`：`raw.*.variables`/`bundles`/`lead_hours` 的空列表拒绝（#6）；`variants.*` 相对性（#20）；`reach_count > 0`（#24）；`len(checkpoint_hours) == 1` 与 `output_interval_minutes > 0`；`lead_hours` 覆盖范围；`raw.<source>.variables` 单射性（#72）。禁止静默去重或擅自补默认值
+- **#32/#72 对值域作有限上提，其余仍不在装载器**：装载器现在 MUST 校验 `cycle.hours ⊆ {0,12}`、`forecast_days > 0`、`checkpoint_hours ⊆ [0, 24 * forecast_days)`，以及 `raw.ifs.variables` / `raw.gfs.variables` 各自在 source 内单射，并按上方路径抛 `ConfigError`。下列仍沿用既有 owner/Non-goal，不顺带迁入 `config.py`：`raw.*.variables`/`bundles`/`lead_hours` 的空列表拒绝（#6）；`variants.*` 相对性（#20）；`reach_count > 0`（#24）；`len(checkpoint_hours) == 1` 与 `output_interval_minutes > 0`；`lead_hours` 覆盖范围。禁止静默去重、跨 source 唯一化、大小写归一或擅自补默认值
 - **#31 已裁决并由装载器认领只读化**：`LocalConfig.slurm` 的公开类型为 `Mapping[str, str | int]`，装载器返回 `MappingProxyType(dict(values))`；调用方拿不到可变 backing dict。`MappingProxyType` 自身不可哈希，故不顺带解决 `hash(LocalConfig)` 与 `hash(Config)` 的不对称，也不新增哈希承诺
 
 Review focus:
@@ -192,6 +194,7 @@ Review focus:
 - 失败路径是否全部收敛到单一公开异常 `ConfigError`
 - `LocalConfig.slurm` 的**资源投影**键集是否只有 `config.slurm.required_fields` 一个权威——TOML 表只额外允许保留策略键 `command_timeout_seconds` 并剥离到独立字段；代码里若再出现 partition/account/cpus/memory/walltime 的固定字段清单即为双权威，属实现缺陷
 - spec cli-config 用反引号钉死的 key 名（`forecast_days`、`output_interval_minutes`、`checkpoint_hours`、`reach_count`）是否逐字保留在顶层，未被加上表前缀
+- `raw.ifs.variables` / `raw.gfs.variables` 是否各自按精确字符串判重、错误 path 与 source 对齐，且未出现跨 source 唯一化、大小写归一或静默去重
 
 ### Issue #29 fixture（任务 1.5）
 
@@ -371,7 +374,7 @@ Governing invariant:
 
 Owner and ordering:
 - 三条规则共同且只落在 `_validate_config_domain`；`_build_config` 先完成既有存在性/类型装配，再调用一次该 owner，再返回对象
-- #72 后续的 `raw.ifs.variables` / `raw.gfs.variables` 单射性检查必须扩展同一个 `_validate_config_domain`，不得新建第二个装载期 domain owner
+- #72 / task 1.8 的 `raw.ifs.variables` / `raw.gfs.variables` 单射性检查必须扩展同一个 `_validate_config_domain`，不得新建第二个装载期 domain owner；本段记录 #32 当时预留的后继 seam
 - owner 内先校验 `cycle.hours`，再校验 `forecast_days`，最后用已经合法的 `forecast_days` 计算 checkpoint 上界；这是多重非法输入的稳定错误优先级，不改变缺字段/类型错误先于取值域的既有漏斗
 
 Must preserve:
@@ -427,7 +430,7 @@ Required evidence:
 
 Non-goals:
 - 不检查 `raw.*` 列表非空、lead 覆盖、variants/path、reach_count、output interval、checkpoint 基数/唯一性、合法 cycle 重复、unknown key 或字符串控制字符
-- 不实现 #72 variables 单射性；只预留并钉死它必须扩展的同一 owner
+- #32 产品 PR 当时不实现 #72 variables 单射性，只预留同一 owner；该后继行为由 task 1.8 与下方独立 #72 fixture 接续，不把历史 #32 diff 伪写成已含 #72
 - 不删除/放宽 rawscan/controller/tracker 的下游防御，不改变程序内直接构造 `Config` 的语义
 - `producer/src/yd_producer/init.py` 的 `_candidate_cycles` docstring 仍复制两处旧 owner 话术；该越界副本已核实、去重并路由到 [Issue #146](https://github.com/DankerMu/yd-viewer/issues/146)，须在 #32 合并后只迁移说明、保持可执行代码与 init 非空/0..23/不复制 `{0,12}` 的约束不变。本 PR 不修改 `init.py`
 - 不修改 `producer/config.toml`、`local.toml`、任何现场或 M4 行为，不新增默认值
@@ -438,6 +441,103 @@ Review focus:
 - `ConfigError.path` 是否精确，类型/缺字段与多重域错误的优先级是否符合 owner 顺序
 - 是否出现写死 7/168、空列表/基数/去重等范围扩张，或误删下游防御
 - #72 是否确实只能扩同一 owner，而本 PR 没有提前实现其单射性
+
+### Issue #72 fixture（任务 1.8）
+
+Fixture level: expanded
+Upstream suggested level: absent（legacy issue；原 issue 把实现落点建议在 rawscan，但用户本轮明确要求改为 config 装载期并扩展 #32 的同一 owner，故以该后继裁决为准）
+Repair intensity / effective tier: high（共享 public loader 的变量身份会流入 rawscan/rawcopy/forcing；漏拒会让同一 `(lead, variable, local_key)` 重复进入 raw manifest）
+Project profile: yd-viewer
+Minimal mergeable slice: 扩展 `config._validate_config_domain` + public `load_config` 回归；不修改 rawscan/rawcopy 或生产配置
+
+Docs-first prerequisite:
+- 同一提交先同步 `docs/compute-loop-design.md` §5、design D4、cli-config spec 与共享 #2 fixture：装载期 owner 在 #32 三条域之后新增 IFS/GFS 逐源 variables 单射性；其它 raw 域仍不迁入。#32 历史 fixture 只作当时 PR 边界记录，由本 task 1.8 接续，不回写成 #32 已实现本行为。
+
+Change surface:
+- `producer/src/yd_producer/config.py`：只扩展既有 `_validate_config_domain(config: Config) -> None`，不得新增第二个 domain owner 或把校验移入 `_build_raw_source`
+- `producer/tests/test_config.py`：只经公开 `load_config` 覆盖两源重复、合法兼容、多重错误顺序与具体重复名消息
+- 本任务 1.8 与本 fixture；产品文件只允许上述两份
+- `producer/config.toml`、rawscan/rawcopy/forcing/controller/tracker 产品代码与其它测试模块均零 diff
+
+Governing invariant:
+- 任何经 `load_config` 返回的 `Config`，`raw.ifs.variables` 与 `raw.gfs.variables` 必须分别是精确字符串的单射序列；重复配置必须在对象逃出 loader、raw manifest 扇出或任何下游处理之前响亮拒绝，绝不静默规范化。
+
+Owner and deterministic order:
+- `_build_config` 仍先完成全部既有存在性/类型/嵌套装配，再恰调用一次 `_validate_config_domain`；完整装配错误继续优先于任何 domain 错误
+- owner 内先完整保留 #32 的 `cycle.hours` → `forecast_days` → `checkpoint_hours` 顺序，再检查 `raw.ifs.variables`，最后检查 `raw.gfs.variables`；多重非法输入按该顺序返回唯一稳定 path
+- 每个 source 独立判重；跨 source 相同名字合法。判据是 Python 字符串精确相等，不 trim、不 casefold、不 Unicode 规范化
+
+Must preserve:
+- #32 三条域的代码、path、边界、量词及错误优先级不变；空 `cycle.hours` / `checkpoint_hours` 与合法重复 cycle 值仍按既有契约装载
+- `raw.<source>.variables` 的 tuple 顺序和值逐字保留；无重复时不得重排、集合化或复制另一个 source
+- raw variables 空列表仍可通过 loader（非空性归 rawscan #6）；同一 source 中 `"TMP2M"` 与 `"tmp2m"` 仍是两个不同值
+- 生产 `config.toml` 与所有现有 inline fixture 可继续装载；直接程序构造 `Config` 的语义和下游防御不改
+- `ConfigError` 包装、完整点分 `path`、public signature、dataclass schema 与依赖/lock 不变
+
+Must add/change:
+- `raw.ifs.variables` 含任意重复项 -> `ConfigError(path="raw.ifs.variables")`；同法独立覆盖 GFS path
+- 单个列表含至少两个不同重复组、且重复次数不同 -> 消息把每个重复名各列一次且不列未重复名；不承诺显示顺序，测试按反引号 token 的集合与计数断言
+- IFS/GFS 同时重复且前三条域合法 -> 稳定报告 `raw.ifs.variables`；GFS 重复且任一 #32 域非法 -> 仍先报告对应 #32 path
+- 两源各含一次同名变量 -> 成功并分别原样返回；同源含大小写不同字符串 -> 成功并原样返回；空列表 -> 成功并原样返回
+- 不得用 `set(...)` 作为返回值、静默去重、排序、大小写/空白/Unicode 归一或跨 source 合并
+
+Seam under test:
+- `load_config(path) -> Config`（真实 TOML file → public object/error）；测试用独立内联字面量，不直接调用私有 validator
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - 三入口共用 loader，失败类型与时机是公共契约
+- Config / project setup: selected - 本 issue 全部内容
+- File IO / path safety / overwrite: not selected - 只读取既有 TOML，不新增路径或写面
+- Schema / columns / units / field names: selected - source 与 variable identity/path 是核心
+- Auth / permissions / secrets: not selected - 无现场值或凭据
+- Concurrency / shared state / ordering: selected - 无线程，但多重非法配置的错误优先级必须稳定，且对象不得先逃出
+- Resource limits / large input / discovery: not selected - 人工维护的小列表，无递归/发现
+- Legacy compatibility / examples: selected - 生产配置、inline fixture、直接构造和下游消费者必须保持
+- Error handling / rollback / partial outputs: selected - 重复项在 public boundary 以精确 `ConfigError.path` 拒绝，无半成品
+- Release / packaging / dependency compatibility: selected - stdlib-only，不改依赖/lock
+- Documentation / migration notes: selected - 先修订四处 owner/Non-goal 文档；无持久数据迁移
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: selected - variables 是 raw forcing 扇出身份轴，必须防重数进入 manifest
+- 状态链 / warm-start: not selected - 不读写状态
+- NWM 快照溯源 / DB-free 隔离: not selected - 不改变量值账本或 NWM 快照，只校验列表单射性
+
+Invariant Matrix:
+- Source of truth: cli-config spec + compute-loop §5 的逐源 raw variables 单射契约；source identity 仅为 `ifs` / `gfs`
+- Producer: `config.toml` / inline TOML 的两个 `raw.<source>.variables` 序列
+- Validator/read surface: `load_config` → `_build_config` → 既有唯一 `_validate_config_domain`
+- Downstream consumers: rawscan/rawcopy/forcing 接收已验证的 file-loaded Config；直接构造防御不由本 PR扩大
+- Failure/evidence boundary: `ConfigError.path` 绑定触发重复的 source，消息具名所有且仅重复变量；不返回半成品
+- Evidence independence: 多重复组字面量与消息 token 多重数 oracle；跨源同名字面量证明不是全局集合；大小写对证明精确相等
+- Valid row: 两源无重复、跨源同名、同源大小写差异、空列表 -> public loader 原样返回
+- Mismatch row: IFS/GFS 各自重复 -> 对应 path；双源重复 -> IFS 优先；#32 + GFS 重复 -> #32 path 优先
+- Compatibility row: 生产 config、现有 #32 matrix、完整 config suite 与下游 suite 保持；rawscan/rawcopy/forcing 零 diff
+
+Boundary-surface checklist:
+- Shared helper roots: only existing `config._validate_config_domain`; no second duplicate helper
+- Public entrypoints/read surfaces: `load_config`; no private-validator-only evidence
+- Write/delete/overwrite and staging/publish/rollback: none
+- Producer/consumer evidence boundaries: source-specific path and downstream raw-manifest identity; consumers unchanged
+- Stale-state/idempotency: none
+- Unchanged downstream consumers: rawscan/rawcopy/forcing/controller/tracker full-suite evidence
+
+Required evidence:
+- Test-first batched red against pre-implementation `config.py`: every new duplicate rejection/priority test fails for the expected old-loader reason, while new legal compatibility rows pass; normal collection, no collection error
+- Focused #72 tests, complete `test_config.py`, complete producer and viewer suites, frozen sync, Ruff, format, OpenSpec strict/all, stage anchor and `git diff --check` pass on final head
+- Discriminating mutations at minimum: skip IFS check, skip GFS check, global cross-source duplicate rejection, case-insensitive duplicate rejection, silent per-source dedup/normalization or incomplete duplicate-message collection. Each mutant must be killed by its named public-loader oracle; use project-profile scratch/import/pyc/restoration discipline
+- Structural audit: exactly one `_validate_config_domain` definition/call; #32 conditions remain AST-equivalent and before variables checks; IFS before GFS; no rawscan/rawcopy/config.toml/product files outside allowed two; no normalization/defaults
+
+Non-goals:
+- 不拒绝 raw variables 空列表，不校验变量名 allowlist/非空字符串/空白/大小写/Unicode 形态
+- 不检查 `lead_hours` / `bundles` 单射性、空列表、覆盖范围或变量与 bundle 的映射
+- 不在 rawscan/rawcopy/manifest 写出侧加第二道闸门，不修改 manifest schema 或 forcing 行为
+- 不改生产 `config.toml`；其现有字面值已无重复，完整 suite 足以证明兼容
+- 不实现 #48、#46、#146 或其它 config cleanup
+
+Review focus:
+- 是否真正逐 source 判重并报告正确 path，而非全局 set、跨源比较或复制错 source
+- 消息 oracle 是否对多组重复有判别力，同时没有无需求的显示顺序承诺
+- #32 的装配/域错误优先级和所有兼容量词是否原样保持
+- 是否只有一个 owner/call，且没有静默去重、规范化或下游重复校验
 
 ### Issue #3 fixture（任务 1.3–1.4）
 
@@ -1190,7 +1290,7 @@ Regression rows:
 - IFS 累积语义缺口（上方 Non-goals 第 4 条）
 - `work_dir` 的创建/清理生命周期归组 12，本 issue 只保证自己不留半套
 - 目标侧**无**逐段 symlink 拒绝：`work_dir` 之下的链段会让副本物理落在 work 树之外（源侧有 `_reject_symlinks` 逐段 `os.lstat`，目标侧的 `_ensure_dir` 用跟随 symlink 的 `exists()` 探测）。round 1 verifier CONFIRMED/DEFER，承重理由只有一条：它与「work 是全新单次目录」这条组 12 的契约是同一个设计决策、应一起落地。（勘误：本行原以「下游 `object_store` 的 `*_no_follow` 已实测 fail-closed」作降级理由。该观察本身为真，但**用错了侧**——`rawcopy` 全文不经 `object_store`，写侧四个原语 `mkdir(parents=True)`/`os.open`/`unlink`/`rmdir` 全是裸的、都跟随父目录链，读侧的 no-follow 撑不起写侧降级。round 2 verifier CONFIRMED/FIX_NOW。）severity 维持 minor，依据是写侧爆炸半径有界（work 为一次性隔离单元）。follow-up：**issue #71**
-- `raw.<source>.variables` 轴无单射性闸门，重复变量会产出重数 >1 的三元组（本 issue 的集合相等断言对重数失明）。归配置取值域，follow-up：**issue #72**（并已补入任务 2.x 的取值域归属账本）
+- `raw.<source>.variables` 轴无单射性闸门，重复变量会产出重数 >1 的三元组（本 issue 的集合相等断言对重数失明）。归配置装载期集中取值域 owner，follow-up：**issue #72 / task 1.8**
 - 多 bundle 配置（`len(bundles) != 1`）在 staging 侧不受支持，需 config 长出 variable→bundle 映射后才能放开（上方单 bundle 约束）
 - 源侧 symlink 一律拒绝，与 3.1 的 `is_file()` 跟随语义有意不对称（上方复制语义）
 - **源 `manifest.json` 叶子段自身不查 symlink，本 issue 有意排除**：symlink MUST 的作用域由上方复制语义逐字限定为「每个源 **bundle 路径**」，Regression rows 有链 bundle 行与链 cycle 目录行、无叶子行。该叶子的**全部祖先段**已被 bundle 走查覆盖，故缺口仅限「叶子自身是链」这一形态。round 1 verifier REFUTED、round 2 复现机制为真后仍维持 REFUTED（无绑定文本归属，verifier 不以翻转判决来裁定范围）。若后续要收口，属 fixture 修订而非实现缺陷
