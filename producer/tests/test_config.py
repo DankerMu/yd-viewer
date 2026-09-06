@@ -10,6 +10,7 @@ import dataclasses
 import json
 import re
 import typing
+from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
@@ -954,6 +955,130 @@ def test_load_config_finishes_assembly_before_domain_validation(tmp_path):
         _loaded_config(tmp_path, data)
 
     _assert_locates(excinfo, "slurm.required_fields")
+
+
+# --- Issue #72：raw variables 逐 source 单射 ---------------------------------
+
+
+def test_issue72_load_config_rejects_duplicate_ifs_variables(tmp_path):
+    data = _with(VALID_CONFIG, "raw.ifs.variables", ["ifs-a", "ifs-b", "ifs-a"])
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "raw.ifs.variables")
+
+
+def test_issue72_load_config_rejects_duplicate_gfs_variables(tmp_path):
+    data = _with(VALID_CONFIG, "raw.gfs.variables", ["gfs-a", "gfs-b", "gfs-a"])
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "raw.gfs.variables")
+
+
+def test_issue72_load_config_names_every_and_only_repeated_gfs_variable_once(
+    tmp_path,
+):
+    repeated = {"gfs-triple", "gfs-double"}
+    unique = "gfs-unique"
+    data = _with(
+        VALID_CONFIG,
+        "raw.gfs.variables",
+        ["gfs-triple", unique, "gfs-double", "gfs-triple", "gfs-double", "gfs-triple"],
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "raw.gfs.variables")
+    tokens = Counter(_BACKTICKED.findall(str(excinfo.value)))
+    assert tokens["raw.gfs.variables"] == 1
+    assert {name: tokens[name] for name in repeated} == {
+        "gfs-triple": 1,
+        "gfs-double": 1,
+    }
+    assert tokens[unique] == 0
+    assert set(tokens) == {"raw.gfs.variables", *repeated}
+
+
+def test_issue72_load_config_prioritizes_ifs_duplicate_before_gfs_duplicate(tmp_path):
+    data = _with(VALID_CONFIG, "raw.ifs.variables", ["ifs-a", "ifs-a"])
+    data = _with(data, "raw.gfs.variables", ["gfs-a", "gfs-a"])
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "raw.ifs.variables")
+
+
+@pytest.mark.parametrize(
+    ("domain_path", "value"),
+    [
+        ("cycle.hours", [6]),
+        ("forecast_days", 0),
+        ("checkpoint_hours", [-1]),
+    ],
+)
+def test_issue72_load_config_prioritizes_existing_domain_error_before_gfs_duplicate(
+    tmp_path, domain_path, value
+):
+    data = _with(VALID_CONFIG, domain_path, value)
+    data = _with(data, "raw.gfs.variables", ["gfs-a", "gfs-a"])
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, domain_path)
+
+
+def test_issue72_load_config_prioritizes_structural_error_before_variable_duplicate(
+    tmp_path,
+):
+    data = _without(VALID_CONFIG, "slurm.required_fields")
+    data = _with(data, "raw.ifs.variables", ["ifs-a", "ifs-a"])
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "slurm.required_fields")
+
+
+def test_issue72_load_config_accepts_cross_source_same_variable_verbatim(tmp_path):
+    data = _with(VALID_CONFIG, "raw.ifs.variables", ["shared-variable"])
+    data = _with(data, "raw.gfs.variables", ["shared-variable"])
+
+    config = _loaded_config(tmp_path, data)
+
+    assert config.raw.ifs.variables == ("shared-variable",)
+    assert config.raw.gfs.variables == ("shared-variable",)
+
+
+def test_issue72_load_config_accepts_case_different_variables_verbatim(tmp_path):
+    data = _with(VALID_CONFIG, "raw.ifs.variables", ["TMP2M", "tmp2m"])
+
+    config = _loaded_config(tmp_path, data)
+
+    assert config.raw.ifs.variables == ("TMP2M", "tmp2m")
+
+
+@pytest.mark.parametrize("source", ["ifs", "gfs"])
+def test_issue72_load_config_accepts_empty_source_variables_verbatim(tmp_path, source):
+    data = _with(VALID_CONFIG, f"raw.{source}.variables", [])
+
+    config = _loaded_config(tmp_path, data)
+
+    assert getattr(config.raw, source).variables == ()
+
+
+def test_issue72_load_config_preserves_unique_variable_order_and_contents(tmp_path):
+    variables = ["gfs-third", "gfs-first", "gfs-second"]
+    data = _with(VALID_CONFIG, "raw.gfs.variables", variables)
+
+    config = _loaded_config(tmp_path, data)
+
+    assert config.raw.gfs.variables == tuple(variables)
 
 
 # --- 缺字段 fail closed（schema 驱动参数化）---------------------------------
