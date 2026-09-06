@@ -936,3 +936,29 @@ confounder 已封闭主要 oracle 风险；三席随后独立确认 10-class com
 复议条件未触发：不存在后续综合轮、rotated catch 或已关闭 finding 重报；Round 1 零 candidate，故无
 verifier disposition 或 residual deferral。共享 `m2-producer-core` 仍服务 #136/#132 等后继任务，本次继续
 不 archive。
+
+---
+
+## 第 29 次复议（issue #136 / PR #161 产品实现合并后，2026-09-06）
+
+审计数字：39 行（38 merged、1 terminal），仍为 28 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #161 只有 Round 1：四席 `correctness`、`invariant-state`、
+`test-evidence+spec-compliance`、`security-perf+integration` 均零 candidate，Phase 7 fresh Gap Sweep
+同样 CLEAN。它不满足 `rounds >= 2`，所以不进入 rotation attribution，也没有改变 core/rotated 数字。
+
+High 桶现在有 15 个 merged PR、累计 `gate_net_catch=49`，远非整个桶零捕获的 cut 条件。本次实现进入
+综合审核前已由 execution-time red、61-case 聚焦矩阵、23/23 calibrated mutation、完整 Phase 2 和 exact-head
+CI 封闭主要风险；四席与终审随后独立核对 same-object authority、foreign pre-read conflict、bounded no-follow
+current bytes、唯一 size owner、失败原子性与既有 controller identity consumer。一次证据充分后的 clean 是正常
+收敛，不支持缩减 high-tier Round 1。
+
+本 PR 没有 free-slot rotation 机会：Round 1 零 finding，故没有修复和后续综合轮。把本次各 lens 的 seated 次数
+增加而 catches 不变解释成“轮换零收益”，会再次把初审席位与修复后轮换混为一谈。它只能证明 #136 的
+expanded/high authority seam 在单轮综合审核与独立终审均 clean，不能估计新 lens 在后轮换入时的边际收益。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；
+不以单轮 clean 缩减 high-tier 初审，也不把它纳入 rotation 的正反证。累计 rotated 捕获仍显著，且证据不足时
+默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：不存在后续综合轮、rotated catch、已关闭 finding 重报或 residual deferral。Issue #136 已由
+PR #161 关闭；共享 `m2-producer-core` 仍服务 #137 与 #132，本次继续不 archive。
