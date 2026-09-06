@@ -816,6 +816,146 @@ def test_load_local_slurm_isolated_from_parsed_tree_alias(tmp_path, monkeypatch)
     assert dict(local.slurm) == expected_slurm
 
 
+# --- Issue #32：装载期三条取值域 --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("hours", "expected"),
+    [
+        ([], ()),
+        ([0], (0,)),
+        ([12], (12,)),
+        ([0, 12], (0, 12)),
+        ([0, 0, 12], (0, 0, 12)),
+    ],
+)
+def test_load_config_accepts_cycle_hours_domain_values_verbatim(
+    tmp_path, hours, expected
+):
+    data = _with(VALID_CONFIG, "cycle.hours", hours)
+
+    config = _loaded_config(tmp_path, data)
+
+    assert config.cycle.hours == expected
+
+
+@pytest.mark.parametrize(
+    "hours",
+    [
+        [0, 6, 12],
+        [0, 18, 12],
+        [0, 24, 12],
+        [0, -1, 12],
+    ],
+)
+def test_load_config_rejects_cycle_hours_outside_domain(tmp_path, hours):
+    data = _with(VALID_CONFIG, "cycle.hours", hours)
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "cycle.hours")
+
+
+def test_load_config_accepts_forecast_days_one(tmp_path):
+    data = _with(VALID_CONFIG, "forecast_days", 1)
+
+    config = _loaded_config(tmp_path, data)
+
+    assert config.forecast_days == 1
+
+
+@pytest.mark.parametrize("forecast_days", [0, -1])
+def test_load_config_rejects_nonpositive_forecast_days(tmp_path, forecast_days):
+    data = _with(VALID_CONFIG, "forecast_days", forecast_days)
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "forecast_days")
+
+
+def test_load_config_accepts_checkpoint_hours_within_seven_day_boundary(tmp_path):
+    data = _with(VALID_CONFIG, "checkpoint_hours", [0, 167])
+
+    config = _loaded_config(tmp_path, data)
+
+    assert config.forecast_days == 7
+    assert config.checkpoint_hours == (0, 167)
+
+
+@pytest.mark.parametrize("checkpoint_hours", [[0, -1, 167], [0, 168, 167]])
+def test_load_config_rejects_checkpoint_hours_outside_seven_day_boundary(
+    tmp_path, checkpoint_hours
+):
+    data = _with(VALID_CONFIG, "checkpoint_hours", checkpoint_hours)
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "checkpoint_hours")
+
+
+def test_load_config_uses_forecast_days_for_checkpoint_upper_boundary(tmp_path):
+    data = _with(VALID_CONFIG, "forecast_days", 1)
+    data = _with(data, "checkpoint_hours", [23])
+
+    config = _loaded_config(tmp_path, data)
+
+    assert config.forecast_days == 1
+    assert config.checkpoint_hours == (23,)
+
+
+def test_load_config_rejects_checkpoint_at_dynamic_upper_boundary(tmp_path):
+    data = _with(VALID_CONFIG, "forecast_days", 1)
+    data = _with(data, "checkpoint_hours", [24])
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "checkpoint_hours")
+
+
+def test_load_config_accepts_empty_checkpoint_hours_verbatim(tmp_path):
+    data = _with(VALID_CONFIG, "checkpoint_hours", [])
+
+    config = _loaded_config(tmp_path, data)
+
+    assert config.checkpoint_hours == ()
+
+
+def test_load_config_prioritizes_cycle_hours_across_multiple_domain_errors(tmp_path):
+    data = _with(VALID_CONFIG, "cycle.hours", [6])
+    data = _with(data, "forecast_days", 0)
+    data = _with(data, "checkpoint_hours", [-1])
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "cycle.hours")
+
+
+def test_load_config_prioritizes_forecast_days_after_legal_cycle_hours(tmp_path):
+    data = _with(VALID_CONFIG, "cycle.hours", [0, 12])
+    data = _with(data, "forecast_days", 0)
+    data = _with(data, "checkpoint_hours", [-1])
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "forecast_days")
+
+
+def test_load_config_finishes_assembly_before_domain_validation(tmp_path):
+    data = _with(VALID_CONFIG, "forecast_days", 0)
+    data = _without(data, "slurm.required_fields")
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "slurm.required_fields")
+
+
 # --- 缺字段 fail closed（schema 驱动参数化）---------------------------------
 #
 # 断言以结构化的 `ConfigError.path` 为准（与措辞解耦）；同时要求消息里出现反引号

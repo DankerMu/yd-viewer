@@ -10,7 +10,7 @@
 - [x] 1.4 实现 NWM 解释器薄外壳（精确路径调用、cwd/`PYTHONPATH` 取自 checkout 字段、fail-closed），以假解释器脚本测试调用形态
 - [x] 1.5 提交版本化 `producer/config.toml` 生产实例，以实际文件装载测试钉死文档与 NWM pin 的逐字段取值（issue #29）
 - [x] 1.6 将 `LocalConfig.slurm` 收口为无可变 backing 暴露的只读资源映射（issue #31）
-- [ ] 1.7 在 `config.toml` 装载边界落实三条已裁决取值域及精确错误路径（issue #32）
+- [x] 1.7 在 `config.toml` 装载边界落实三条已裁决取值域及精确错误路径（issue #32）
 
 依赖：无
 §13.1 归属：无直接行（基础设施，支撑全部行）
