@@ -5,11 +5,16 @@
 ## ADDED Requirements
 
 ### Requirement: 只在全新根执行
-`init` 发现 `states/` 下已有任一状态文件、或 `output/` 下已有任一 `DONE` 时，MUST 直接拒绝执行。
+`init` 发现 `states/` 下已有任一普通文件、任一 `states/<source>` 条目自身或其树内的 symlink，或 `output/` 下已有任一 `DONE` 时，MUST 直接拒绝执行。symlink 一律视为已有状态条目，MUST NOT 跟随，也 MUST NOT 按其目标是文件、目录、断链或其它类型分流。普通（非 symlink）空目录仍不算已有状态。
 
 #### Scenario: 已有状态即拒绝
 - **WHEN** 模拟根中存在 `states/gfs/2026082700.cfg.ic` 时执行 init
 - **THEN** 拒绝退出，`states/` 与 `output/` 无任何变化
+
+#### Scenario: states source 下任一 symlink 即拒绝
+- **WHEN** `states/<source>` 自身或其树内存在 symlink，分别指向普通文件、目录、断链或其它类型
+- **THEN** init 在阶段 A 以已有状态条目拒绝，不跟随目标，两个 source 均零新增写入
+- **AND** 把同一位置换成普通（非 symlink）空目录时不因本条拒绝
 
 #### Scenario: 已有 DONE 即拒绝
 - **WHEN** 模拟根中存在任一 `output/<cycle>/<source>/DONE` 时执行 init
@@ -54,7 +59,7 @@
 - **THEN** 每个建链 source 得到一个重戳到其首轮 T 的状态文件，`output/` 下无 `DONE`
 
 #### Scenario: 写入阶段失败的收尾可观测
-- **WHEN** 前序 source 的首态已写入后，后续 source 的目标路径上已存在一个条目（非普通文件，故未被「已有状态即拒绝」守卫拦下）导致排他写入被拒
+- **WHEN** 前序 source 的首态已写入后，后续 source 的目标路径上已存在一个普通（非 symlink）空目录，故未被「已有状态即拒绝」守卫拦下并导致排他写入被拒
 - **THEN** init 以非零退出码报告失败，理由列出全部已落盘 source 的路径与「根已非全新，重跑前需人工清理 `states/`」，且已落盘文件 MUST NOT 被删除
 
 #### Scenario: 零残留的写入失败不得宣称需要清理
@@ -62,9 +67,9 @@
 - **THEN** init 以非零退出码报告失败，理由 MUST 指出零写入、根仍是全新根并给出根因，MUST NOT 宣称根已非全新或需要人工清理 `states/`
 
 #### Scenario: 写入路径被持久外来条目挡住时不得宣称根仍是全新根
-- **WHEN** 写入序首位 source 的首态写入被一个**非本次写入产生**的持久外来条目挡住，尚无任何 source 落盘，盘上零普通文件残留；该条目既可能占住终名 `states/<source>/<T>.cfg.ic`（排他创建撞已存在条目），也可能占住其**父目录分量** `states/<source>`（symlink、FIFO 或普通文件，使目录创建失败）
+- **WHEN** 写入序首位 source 的首态写入被一个**非本次写入产生**、且阶段 A 未归为已有状态的持久外来条目挡住，尚无任何 source 落盘，盘上零普通文件残留；例如终名 `states/<source>/<T>.cfg.ic` 被普通空目录占住，或父目录分量 `states/<source>` 被 FIFO 占住
 - **THEN** init 以非零退出码报告失败，理由 MUST 点名**被占住的那个路径本身**并要求重跑前先确认并移除它，MUST NOT 宣称根仍是全新根（重跑必然以同样理由再次失败），MUST NOT 宣称该目标可能已被部分写入
-- **AND** 两种载体 MUST 走同一路话术：判据是「阻塞物是否为持久外来条目」，MUST NOT 由「哪条腿抛的异常」或「条目是否恰好落在终名 target 上」决定
+- **AND** 终名与父目录两种位置 MUST 走同一路话术：判据是「阻塞物是否为持久外来条目」，MUST NOT 由「哪条腿抛的异常」或「条目是否恰好落在终名 target 上」决定；symlink 不属于本 Scenario，因为它已在阶段 A 拒绝
 
 #### Scenario: 写入中途的 I/O 失败点名可能的半写产物
 - **WHEN** 目标文件被排他创建后，写入过程中途因 I/O 或配额错误失败
