@@ -4,14 +4,7 @@
 `openspec/changes/m2-producer-core/specs/run-controller/spec.md` 的
 「失败处理」与「保留窗口与安全清理」两条 Requirement。
 
-本模块是独立 seam：不改 `controller` / `residue` / `publish` / `executor` /
-`slurm` / `cli`，主循环接线归 #26/#28。公开失败一律 `CleanupError`，底层
-`ValueError` / `DiscoveryUnreadableError` / `SafeFilesystemError` / `OSError`
-不得穿透；`MemoryError` / `KeyboardInterrupt` / `SystemExit` 不包。
-
-失败收尾顺序固定为「先原子提交唯一失败日志，成功后才删除当前精确 work」。
-保留清理以该源最新普通文件 `DONE` 锚定 cutoff = D-14d，只删严格早于 cutoff
-且经 realpath 确认位于已解析 `YD_ROOT` 内的本源对象。两条路径都不推进状态链。
+本模块是独立 seam：公开失败一律 `CleanupError`。失败收尾先提交唯一日志再删 work。
 """
 
 from __future__ import annotations
@@ -26,11 +19,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from yd_producer.controller import (
-    DiscoveryUnreadableError,
-    cycle_id,
-    parse_cycle_id,
+from yd_producer._work_claim import (
+    ClaimLostError,
+    WorkClaim,
+    open_claimed_file,
+    stat_claimed,
+    validate_claim,
 )
+from yd_producer.controller import DiscoveryUnreadableError, cycle_id, parse_cycle_id
 from yd_producer.executor import JobRecord, JobSpec, JobState
 from yd_producer.store.safe_fs import (
     SafeFilesystemError,
@@ -61,24 +57,12 @@ _STDOUT_STDERR_SEPARATOR = b"--- stdout/stderr ---\n"
 _LOG_COPY_CHUNK_BYTES = 64 * 1024
 _RETENTION_WINDOW = timedelta(days=14)
 _DONE_NAME = "DONE"
-_TEMP_FILE_FLAGS = (
-    os.O_WRONLY
-    | os.O_CREAT
-    | os.O_EXCL
-    | getattr(os, "O_NOFOLLOW", 0)
-    | getattr(os, "O_CLOEXEC", 0)
-)
-_DISCOVERY_DIRECTORY_FLAGS = (
-    os.O_RDONLY
-    | os.O_DIRECTORY
-    | getattr(os, "O_NOFOLLOW", 0)
-    | getattr(os, "O_CLOEXEC", 0)
-)
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_TEMP_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC
+_DISCOVERY_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW | _CLOEXEC
 _DISCOVERY_FILE_FLAGS = (
-    os.O_RDONLY
-    | getattr(os, "O_NOFOLLOW", 0)
-    | getattr(os, "O_CLOEXEC", 0)
-    | getattr(os, "O_NONBLOCK", 0)
+    os.O_RDONLY | _NOFOLLOW | _CLOEXEC | getattr(os, "O_NONBLOCK", 0)
 )
 _TERMINAL_FAILURE_STATES = frozenset({JobState.FAILED, JobState.TIMEOUT})
 _WRAP_ERRORS = (
@@ -147,16 +131,22 @@ def _wrap_validate(error: BaseException, *, path: Path | None = None) -> Cleanup
     return CleanupError(str(error), phase="validate", path=path)
 
 
-def _require_regular_merged_log(path: Path, work_root: Path) -> None:
+def _require_regular_merged_log(
+    path: Path, work_root: Path, *, claim: WorkClaim | None = None
+) -> None:
     try:
-        info = stat_no_follow(path, containment_root=work_root)
+        info = (
+            stat_claimed(claim, path)
+            if claim is not None
+            else stat_no_follow(path, containment_root=work_root)
+        )
     except FileNotFoundError as error:
         raise CleanupError(
             f"作业合并日志 {path} 不存在",
             phase="log",
             path=path,
         ) from error
-    except (SafeFilesystemError, OSError) as error:
+    except (SafeFilesystemError, OSError, ClaimLostError) as error:
         raise CleanupError(
             f"作业合并日志 {path} 不可用（{error}）",
             phase="log",
@@ -181,6 +171,7 @@ class FailureInputs:
     job_spec: JobSpec
     job_record: JobRecord
     exit_code: str
+    claim: WorkClaim | None = None
 
     root: Path = field(init=False)
     resolved_work_root: Path = field(init=False)
@@ -233,7 +224,13 @@ class FailureInputs:
                     path=merged,
                 )
             object.__setattr__(self, "merged_log", merged)
-            _require_regular_merged_log(merged, work_root)
+            claim = self.claim
+            if claim is not None:
+                try:
+                    validate_claim(claim, path=exact)
+                except ClaimLostError as orig:
+                    raise _wrap_validate(orig, path=exact) from orig
+            _require_regular_merged_log(merged, work_root, claim=claim)
         except CleanupError:
             raise
         except _WRAP_ERRORS as error:
@@ -678,8 +675,12 @@ def _commit_failure_log(inputs: FailureInputs) -> Path:
         _reject_non_regular_log_target(parent_fd, log_path)
         dest_fd = os.open(temp_name, _TEMP_FILE_FLAGS, 0o666, dir_fd=parent_fd)
         _write_all(dest_fd, header)
-        src_fd = open_file_no_follow(
-            inputs.merged_log, containment_root=inputs.resolved_work_root
+        src_fd = (
+            open_claimed_file(inputs.claim, inputs.merged_log)
+            if inputs.claim is not None
+            else open_file_no_follow(
+                inputs.merged_log, containment_root=inputs.resolved_work_root
+            )
         )
         while True:
             chunk = os.read(src_fd, _LOG_COPY_CHUNK_BYTES)
@@ -701,7 +702,7 @@ def _commit_failure_log(inputs: FailureInputs) -> Path:
         if not replaced:
             _unlink_temp(parent_fd, temp_name)
         raise
-    except (SafeFilesystemError, OSError, ValueError) as error:
+    except (SafeFilesystemError, OSError, ValueError, ClaimLostError) as error:
         if not replaced:
             _unlink_temp(parent_fd, temp_name)
         raise CleanupError(
@@ -717,18 +718,20 @@ def _commit_failure_log(inputs: FailureInputs) -> Path:
 
 
 def _delete_work(inputs: FailureInputs) -> None:
+    claim = inputs.claim
     try:
+        if claim is not None:
+            validate_claim(claim)
         remove_tree_allow_symlinks(
             inputs.exact_work_dir.parent,
             inputs.exact_work_dir.name,
             containment_root=inputs.resolved_work_root,
-            missing_ok=True,
+            missing_ok=claim is None,
+            expected_root_identity=None if claim is None else claim.identity,
         )
-    except (SafeFilesystemError, OSError) as error:
+    except (ClaimLostError, SafeFilesystemError, OSError) as error:
         raise CleanupError(
-            f"失败日志已提交，但 work 删除失败：{error}",
-            phase="work",
-            path=inputs.exact_work_dir,
+            str(error), phase="work", path=inputs.exact_work_dir
         ) from error
 
 

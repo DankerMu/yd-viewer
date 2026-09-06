@@ -807,7 +807,7 @@ def test_pseudo_done_entries_fall_back_to_no_initial_state(
 
 
 def test_stop_reason_vocabulary_is_closed() -> None:
-    """裁决 9 起词表由 5 项扩为 6 项：新增 `DISCOVERY_UNREADABLE`。"""
+    """词表由 6 项扩为 7 项：#28 新增 `UNVERIFIED_WORK_RESIDUE`。"""
     assert {reason.name for reason in controller.StopReason} == {
         "NO_INITIAL_STATE",
         "DISCOVERY_UNREADABLE",
@@ -815,6 +815,7 @@ def test_stop_reason_vocabulary_is_closed() -> None:
         "STATE_UNREADABLE",
         "HEADER_TIME_MISMATCH",
         "RAW_INCOMPLETE",
+        "UNVERIFIED_WORK_RESIDUE",
     }
 
 

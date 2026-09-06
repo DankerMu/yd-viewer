@@ -2245,15 +2245,24 @@ def test_admission_phase_is_structurally_enclosed_by_one_floor() -> None:
     )
 
     kinds = [ast.unparse(handler.type) for handler in node.handlers]
-    assert kinds == ["(ConfigError, RawStagingError)", "Exception"], kinds
-    # 第一层只做原样外抛（保 kind/`__cause__`/`is` 身份）。
-    assert [type(s).__name__ for s in node.handlers[0].body] == ["Raise"]
-    # 第二层把非词表异常收敛成 `RawStagingError`，且**不吞 BaseException**：
-    # `KeyboardInterrupt`/`SystemExit` MUST 照常传播。
-    assert "BaseException" not in kinds
+    assert kinds == [
+        "(ConfigError, RawStagingError)",
+        "Exception",
+        "BaseException",
+    ], kinds
+    # 第一层只做原样外抛（保 kind/`__cause__`/`is` 身份），再走 claim release。
+    first_handler = ast.unparse(node.handlers[0])
+    assert "release_raw_claim_after_stage_failure" in first_handler
+    assert first_handler.rstrip().endswith("raise")
+    # 第二层把非词表异常收敛成 `RawStagingError`，并在 raise 前走同一 claim release。
     source = ast.unparse(node.handlers[1])
     assert "RawStagingError" in source and "ADMISSION_FALLBACK_KIND" in source
+    assert "release_raw_claim_after_stage_failure" in source
     assert "from exc" in source  # `__cause__` 保留
+    # BaseException 不包装/吞掉；只在原样 raise 前释放已认领的 empty exact root。
+    base_handler = ast.unparse(node.handlers[2])
+    assert "release_raw_claim_after_stage_failure" in base_handler
+    assert base_handler.rstrip().endswith("raise")
     # 收口器自身不得抛：kind 取自闭合词表，消息拼装走不抛的 `_safe_repr`。
     assert rawcopy_module.ADMISSION_FALLBACK_KIND in rawcopy_module.ERROR_KINDS
     assert "_safe_repr" in source and "!r}" not in source

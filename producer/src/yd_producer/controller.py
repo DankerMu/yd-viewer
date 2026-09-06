@@ -98,6 +98,8 @@ __all__ = [
     "RunError",
     "RunOutcome",
     "RunReport",
+    "RunSourcesError",
+    "RunSourcesReport",
     "StopReason",
     "catch_up_source",
     "cycle_id",
@@ -105,6 +107,7 @@ __all__ = [
     "done_cycles",
     "parse_cycle_id",
     "run_once",
+    "run_sources",
     "visible_state_cycles",
 ]
 
@@ -122,7 +125,7 @@ MAX_HEADER_LINE_BYTES = 64 * 1024
 
 
 class StopReason(enum.Enum):
-    """本次不提交该源的原因。闭合词表（6 项），逐项可区分。"""
+    """本次不提交该源的原因。闭合词表（7 项），逐项可区分。"""
 
     #: 该源既无任何 `DONE`，也没有任何合法命名的状态文件（链尚未由 init 建立）。
     NO_INITIAL_STATE = "no_initial_state"
@@ -140,6 +143,8 @@ class StopReason(enum.Enum):
     HEADER_TIME_MISMATCH = "header_time_mismatch"
     #: T 的 raw 未齐；停在 T 等待补齐，MUST NOT 跳轮。
     RAW_INCOMPLETE = "raw_incomplete"
+    #: 精确 `work/<source>/<T>` 预存任何形态：未验证跨进程残留。
+    UNVERIFIED_WORK_RESIDUE = "unverified_work_residue"
 
 
 @dataclass(frozen=True)
@@ -527,29 +532,16 @@ def _decode_line(raw: bytes) -> str | None:
 
 # --- 单源单轮 / 多轮追赶（issue #26/#27）：类型在此，实现在 `_controller_run`。
 
+# fmt: off
 RunPhase = Literal[
-    "preflight",
-    "frontier",
-    "residue",
-    "raw",
-    "prepare",
-    "submit",
-    "poll",
-    "collect",
-    "publish",
+    "preflight", "frontier", "residue", "raw", "prepare",
+    "submit", "poll", "collect", "publish", "cleanup",
 ]
-
 _RUN_PHASES: tuple[str, ...] = (
-    "preflight",
-    "frontier",
-    "residue",
-    "raw",
-    "prepare",
-    "submit",
-    "poll",
-    "collect",
-    "publish",
+    "preflight", "frontier", "residue", "raw", "prepare",
+    "submit", "poll", "collect", "publish", "cleanup",
 )
+# fmt: on
 
 
 class RunError(RuntimeError):
@@ -995,3 +987,10 @@ def catch_up_source(
         driver=driver,
         poll_wait=poll_wait,
     )
+
+
+from yd_producer._controller_sources import (
+    RunSourcesError,
+    RunSourcesReport,
+    run_sources,
+)
