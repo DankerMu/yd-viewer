@@ -185,7 +185,7 @@ run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过�
 
 对 raw 完整的合法 T，controller MUST 在任何 staging 写入前通过 no-follow 父目录排他创建精确 `work/<source>/<T>`，并冻结该目录的 `(st_dev, st_ino)` 作为本 attempt 的 ownership token。竞争者先创建任何形态时 MUST 零 staging、零提交、保留现有条目并以本源 `RunError(phase="raw")` 失败；普通的 check-then-create 不构成认领。共享 `work/` 与 `work/<source>/` 祖先 MUST 在 exact root 认领前由不参与 raw rollback 的 no-follow 创建负责；raw staging 的 rollback MUST NOT 删除兄弟 source 创建的共享祖先。
 
-controller 路径的 scratch 读取、失败收尾与成功发布 MUST 消费并重验同一个 token，不得从后来可能重绑的 pathname、父 symlink 或 `realpath` 重新推导 ownership。`DONE` 前 identity 漂移 MUST 保留当前条目、不写 `DONE` 并产生对应 raw/collect/publish `RunError`；失败日志已提交后、work 删除前漂移 MUST 保留日志与 replacement 并成为 `RunError(phase="cleanup")`；`DONE` 已写后漂移 MUST 保留 replacement 并返回 `SUCCEEDED_CLEANUP_PENDING`。删除操作 MUST 在打开 named root 后和最终移除 root 前校验 expected identity，不能只在函数入口比较一次。standalone `rawcopy.stage_raw`、`PublishInputs`/`publish` 与 `FailureInputs`/`finalize_failed_job` 的既有调用形态 MUST 保持兼容；新增 claim 输入只能是末尾有默认值的 additive 参数，controller 路径则必须传入非空 token。
+controller 路径的 scratch 读取、失败收尾与成功发布 MUST 消费并重验同一个 token，不得从后来可能重绑的 pathname、父 symlink 或 `realpath` 重新推导 ownership。`DONE` 前 identity 漂移 MUST 保留当前条目、不写 `DONE` 并产生对应 raw/collect/publish `RunError`；失败日志已提交后、work 删除前漂移 MUST 保留日志与 replacement 并成为 `RunError(phase="cleanup")`；`DONE` 已写后漂移 MUST 保留 replacement 并返回 `SUCCEEDED_CLEANUP_PENDING`。删除操作 MUST 在打开 named root 后和最终移除 root 前校验 expected identity，不能只在函数入口比较一次。standalone `rawcopy.stage_raw`、`PublishInputs`/`publish` 与 `FailureInputs`/`finalize_failed_job` 的既有调用形态 MUST 保持兼容；新增 claim 输入保持默认 `None`，controller 路径必须传入非空 token。#109 只允许 `PublishInputs` 在既有字段后追加默认 60 的 `output_interval_minutes` 以兼容旧构造；生产 controller MUST 显式传 `config.output_interval_minutes`。
 
 raw staging 失败时 MUST 保持 rawcopy 既有“不留半套”和本控制器“下次从干净 work 重试”语义：controller 成功取得 token 后，`stage_raw` 在零写入 admission、写期 rollback、普通异常或 `BaseException` 的任一出口，都 MUST 执行同一 identity-bound exact-root release；本轮后代已完整 rollback 或尚未写入，且 exact root 仍匹配 token、确认为空时，只删除该 exact root，MUST NOT 递归删除或删除 source/shared ancestor。若 root 非空、漂移或无法确定，MUST 保留当前 entry，并在原 `RunError(phase="raw")` 中携带 cleanup 失败证据；原异常类型、kind、cause 与 `BaseException` 传播 MUST 保持。若排他 mkdir 后在 token 冻结/返回前失败，则无 claim 可授权删除，MUST fail closed 保留该 pre-token 条目，MUST NOT 仅凭 pathname 推导 ownership。ownership helper 打开的每个 directory/file fd MUST 在所有正常、`Exception` 与 `BaseException` 路径中恰当关闭；成功返回给 caller 的文件 fd 只由 caller 关闭。
 
@@ -257,7 +257,7 @@ raw staging 失败时 MUST 保持 rawcopy 既有“不留半套”和本控制�
 
 复制进 NFS 的正式文件 MUST NOT 继承 scratch 源文件的 uid/gid/mode，由控制器按发布权限创建（agent-ops §10）。
 
-写 `DONE` 前 MUST 通过自身契约检查：DAT 为 v2、行数等于 `forecast_days*24`、数据列数等于 `config.toml` 的 `reach_count` 且等于模型变体 reach 数、T+12 状态可按分段格式读取、本轮合并 stdout/stderr 日志可用。
+写 `DONE` 前 MUST 通过自身契约检查：DAT 为 v2、行数等于 `forecast_days*24`、数据列数等于 `config.toml` 的 `reach_count` 且等于模型变体 reach 数、数据区第 `i` 行（从 0 起）的第 0 列逐值等于 `i * config.output_interval_minutes`、T+12 状态可按分段格式读取、本轮合并 stdout/stderr 日志可用。分钟列必须在 scratch 侧以 descriptor-bound 有界读取逐行校验，MUST NOT 整读数据区或在发布器中写死/反推间隔。
 
 #### Scenario: 提交顺序可观测
 - **WHEN** 以可记录文件系统操作的发布器完成一轮成功发布
@@ -274,6 +274,10 @@ raw staging 失败时 MUST 保持 rawcopy 既有“不留半套”和本控制�
 #### Scenario: reach 数不符不写 DONE
 - **WHEN** DAT 数据列数不等于 `reach_count`
 - **THEN** 不创建 `DONE`，本轮按失败处理并留日志
+
+#### Scenario: DAT 相对分钟列不符不写 DONE
+- **WHEN** DAT 的 v2 头、行数、列数与总字节数均正确，但任一数据行的第 0 列不等于该行序乘 `output_interval_minutes`（含整体偏移或非有限值）
+- **THEN** 发布器在任何 NFS 写入前抛 `PublishError`，不创建 `DONE`，正式 output/states 逐项不变；检查只读取每行该一个 float64，不整读流量矩阵
 
 #### Scenario: 发布文件不带 scratch 权限
 - **WHEN** scratch 中的 DAT 与状态文件 mode 为 0600

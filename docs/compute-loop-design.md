@@ -359,7 +359,7 @@ Slurm 的 partition/account/资源/walltime 来自 `local.toml`。同一表的 `
 
 作业退出成功后，控制器确认本轮至少具备：
 
-- v2 `yd.rivqdown.dat`，168 行、3988 个河段；
+- v2 `yd.rivqdown.dat`，168 行、3988 个河段，且第 `i` 行（从 0 起）的数据区第 0 列逐值等于 `i * output_interval_minutes`（生产配置为 60，即 `0, 60, …, 10020`）；
 - T+12 原生 `cfg.ic`；
 - 本轮合并 stdout/stderr 可供失败时回收。
 
