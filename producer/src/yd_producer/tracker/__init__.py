@@ -9,6 +9,7 @@ from yd_producer.tracker.checkpoint_tracker import (
     RecoveryRunner,
     TrackerError,
     ensure_twelve_hour_checkpoint,
+    import_verified_checkpoint,
 )
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "RecoveryRunner",
     "TrackerError",
     "ensure_twelve_hour_checkpoint",
+    "import_verified_checkpoint",
 ]

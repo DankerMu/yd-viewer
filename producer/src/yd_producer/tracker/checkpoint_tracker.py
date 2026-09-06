@@ -122,6 +122,7 @@ __all__ = [
     "RecoveryRunner",
     "TrackerError",
     "ensure_twelve_hour_checkpoint",
+    "import_verified_checkpoint",
 ]
 
 #: `safe_fs` 的两种失败形态：`SafeFilesystemError` 是 `RuntimeError` 子类而**不是**
@@ -407,6 +408,38 @@ class CheckpointTracker:
         except _FS_FAILURES:
             return None
         return _header_minute_of(data)
+
+
+# --- 同一 attempt receipt 导入（任务 9.3）-------------------------------------
+
+
+def import_verified_checkpoint(
+    *,
+    tracker: CheckpointTracker,
+    record: CapturedCheckpoint,
+) -> CapturedCheckpoint:
+    """将当前 attempt 已验证 receipt 的 T+12 记录记为 tracker authority。"""
+    if not isinstance(tracker, CheckpointTracker):
+        raise TrackerError("tracker must be a CheckpointTracker.")
+    if not isinstance(record, CapturedCheckpoint):
+        raise TrackerError("record must be a CapturedCheckpoint.")
+    if tracker.targets != (RECOVERY_TARGET_HOUR,):
+        raise TrackerError(
+            f"checkpoint targets must be exactly (12,), got {tracker.targets!r}"
+        )
+    if not tracker.run_dir.is_absolute():
+        raise TrackerError("tracker.run_dir must be an absolute path")
+
+    canonical = tracker.checkpoint_dir / (
+        f"{tracker.project_name}.f{RECOVERY_TARGET_HOUR:03d}.cfg.ic.update"
+    )
+    existing = tracker._captured.get(RECOVERY_TARGET_HOUR)
+    if existing is not None and existing is not record:
+        raise TrackerError("captured checkpoint authority differs from supplied record")
+    _verify_captured_point_of_use(tracker, record, canonical)
+    if existing is None:
+        tracker._captured[RECOVERY_TARGET_HOUR] = record
+    return record
 
 
 # --- 漏采补跑（任务 9.2 / design D12）----------------------------------------
