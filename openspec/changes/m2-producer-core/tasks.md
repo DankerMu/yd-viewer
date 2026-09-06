@@ -310,6 +310,8 @@ Minimal mergeable slice: 勘察清单（2.1）——纯文档产物独立合并�
 
 ### 组 2 剩余任务（2.2/2.3）的 issue #5 fixture
 
+**M2 收尾裁决（#42/#55/#122/#63/#102/#103/#104，覆盖本 change 内更早的 pin 等价措辞）**：`producer/src/yd_producer/store/safe_fs.py`、`store/object_store.py`、`canonical/converter.py`、`state/cfg_ic.py` 仍以 `NWM@8ae9b8f2` 为溯源和差异审计基线，但 yd MAY 在本仓修复该快照的缺陷，不再要求逐字、逐字节或 AST 等价。每一处偏离 MUST 先在 `nwm-snapshot-inventory.md` 对应目标路径行的「剥离点」列登记一句“问题 + 修法”；模块头或 PR 说明只能补充，不能替代该登记。这个裁决只解锁上述四个生产模块，不自动扩大任何既有 issue 的实现范围，也不解除其它快照文件和快照测试的等价约束。
+
 Fixture level: expanded（issue #5 分诊上调，理由见 `.workplans/5/triage.md`）
 Repair intensity: high（File IO/path safety + 新建共享 helper 根）
 
@@ -321,7 +323,7 @@ Change surface:
 - 新增 `producer/tests/test_snapshot_provenance.py`（任务 2.3）
 
 Must preserve:
-- pin `8ae9b8f2` 上被保留符号的语义逐字节等价（modulo 清单 §1 逐行枚举的剥离点）
+- pin `8ae9b8f2` 仍是溯源与差异审计基线；`object_path.py` 与快照测试继续遵守清单既有等价约束。`store/safe_fs.py`、`store/object_store.py`、`canonical/converter.py` 与 `state/cfg_ic.py` 不再要求逐字或 AST 等价：yd MAY 在本仓修复 pin 快照缺陷，但每一处偏离 MUST 在 `nwm-snapshot-inventory.md` 对应行的「剥离点」列登记一句“问题 + 修法”，不得只写在模块头、PR 或备注列
 - `producer/` 既有测试（config/geometry/smoke）全绿
 - `docs/products-contract.md:37`「`source` 固定小写 `gfs`/`ifs`」
 
@@ -335,7 +337,7 @@ Seams under test（design.md「Sketch seams under test」第 4 条「快照模�
 - 溯源检查的 seam 是仓库文件树本身（路径表 → 文件头字面量）
 
 Invariant Matrix
-Governing invariant: 每个快照文件（含测试）头部含字面量 `NWM@8ae9b8f2 <NWM 原路径>`，文件内零 DB/scheduler/registry/journal/reservation 面与零环境变量默认，且被保留符号与 pin 语义等价（只允许清单 §1 该行 `剥离点` 枚举的偏差）。
+Governing invariant: 每个快照文件（含测试）头部含字面量 `NWM@8ae9b8f2 <NWM 原路径>`，文件内零 DB/scheduler/registry/journal/reservation 面与零环境变量默认；pin 只作溯源与差异审计基线。四个允许分叉的生产模块（`safe_fs.py`、`object_store.py`、`converter.py`、`cfg_ic.py`）可修复快照缺陷，但每处偏离必须先在清单对应行「剥离点」登记问题与修法；其余快照仍只允许清单枚举的偏差。
 Source-of-truth identity/contract: 清单 §1 表的「目标路径 ↔ NWM 原路径 ↔ 剥离点」三元组；pin commit `8ae9b8f29c8b72c574e8cbd95f2994160bd42832`。
 Surfaces:
 - Producers: 七个快照源模块 + 四个快照测试文件（写入方即本 PR 的实现者）
@@ -390,7 +392,7 @@ Regression rows:
 - 每个新增快照文件（源与测试） -> 前 5 行内存在一条 `#` 注释行，其内容含 `NWM@8ae9b8f2 <该文件在清单里的原路径>`。**正反向必须共用同一个「什么算溯源头部」的谓词**：注释形式（规格「原路径注释」的字面要求）+ 行预算只作用于正向。守卫自身不得出现第二份口径——round 1（位置维度）与 round 2（形式维度）两次失守都源于正反向各有一套定义
 - `yd_producer`/`producer/tests` 内任一文件带上述谓词命中的溯源注释、却不在清单路径表内 -> 检查测试失败（反向守卫，无行预算，保证后续组落地必须登记）。反向侧刻意锚在注释行而非裸串：裸串会命中守卫文件自身拼出的 `PROVENANCE_MARKER` 常量，逼出第二份手工豁免名单
 - `store/`、`raw/` 全目录跑 Required evidence 里以 `禁区 grep：` 开头的那一条命令 -> 零命中。**本行刻意不复述词表**：先前这里另写了一份 6 词表（缺 `journal`、`reservation`），与 `禁区 grep：` 的 8 词表内容不一致，构成同一禁区面的两份互相矛盾的声明（round-4 修复轮报出）。词表的唯一真源是 `禁区 grep：` 那一行，测试侧由 `_declared_forbidden_surfaces()` 从该行解析、并断言全文恰有一处该锚点。
-- **pin 等价性（`剥离点` 为 `无` 或仅注释改写的四行）**：`producer/src/yd_producer/store/object_path.py`、`store/safe_fs.py`、`producer/tests/test_data_adapter_resolution.py`、`store/object_store.py`，各自 `diff` `git -C <NWM 本地 checkout> show 8ae9b8f29c8b72c574e8cbd95f2994160bd42832:<清单该行原路径>`，忽略新增的溯源头部与 import 路径改写（`packages.common.*`/`workers.data_adapters.*` → `yd_producer.*`）、object_store 行 `剥离点` 点名改写的那条注释，**以及一批纯换行重排（如 `_DIR_FLAGS`）**——该重排面是 round-4 实测补记的，先前的忽略清单漏了它。因此本行钉的是 **AST 全等**（`ast.dump(parse(pin)) == ast.dump(parse(本仓))`，round 4 对 `safe_fs.py` 与 `object_path.py` 实测为 `True`），**不是字节等价**；先前写作「字节等价」不准。抽取/改写式的七行（`:40` source_identity、`:41` manifest、`:42` cycle_hours、`:43` region、`:50` test_safe_fs、`:51` test_object_path、`:52` test_source_identity）不适用本行，其等价证据是实现者的逐文件剥离点符合性说明
+- **pin 差异审计**：`producer/src/yd_producer/store/object_path.py` 与 `producer/tests/test_data_adapter_resolution.py` 继续按既有规则证明 pin 等价；`store/safe_fs.py` 与 `store/object_store.py` 从本行移出等价闸，改为逐处审计其相对 pin 的差异是否都在清单对应行「剥离点」登记了“问题 + 修法”。四者仍运行 `diff` 对照 `git -C <NWM 本地 checkout> show 8ae9b8f29c8b72c574e8cbd95f2994160bd42832:<清单该行原路径>`；对前两者，忽略溯源头、import 重映射与纯格式重排后要求 AST 全等；对后两者，不要求 AST 全等，但任何未登记的语义差异均为契约违反。抽取/改写式的其余七行（`:40` source_identity、`:41` manifest、`:42` cycle_hours、`:43` region、`:50` test_safe_fs、`:51` test_object_path、`:52` test_source_identity）继续按各自行「剥离点」证明符合性
 - `normalize_source_id("IFS"/"ifs"/"Ifs")` -> `"ifs"`；`normalize_source_id("ERA5")` -> 抛错（ERA5 条目已删）
 - `ManifestEntry`/`DownloadManifest` 的 `as_dict` → `from_dict` roundtrip -> 字段等价
 - **`from_dict` 的拒绝面只覆盖「缺字段」与「两个强制转换字段」，不做类型校验**（探针实测，勿写成笼统的类型拒绝）：缺必需字段 -> 稳定 `KeyError`（`ManifestEntry` 缺 `remote_url`、`DownloadManifest` 缺 `source_id`），不返回半成品对象；`forecast_hour` 走 `int()`、`cycle_time` 走 `parse_cycle_time`，**畸形值的异常类型按实测分三种、不是笼统的 `ValueError`**：`forecast_hour`：`'abc'` -> `ValueError`，`None`/`[]`/`{}` -> `TypeError`，而 `3.7` **根本不被拒绝、静默截断为 `3`**；`cycle_time`：`'not-a-time'` -> `ValueError`，`None`/`123`/`[]` -> `AttributeError`。组 3/7 写 `except ValueError` 会漏掉 `TypeError`/`AttributeError` 两类并放过静默截断。**其余字段类型错一律不拒**——`from_dict({"remote_url": 123, "local_key": ["not","a","str"], "expected_size_bytes": "abc", ...})` 实测**正常返回**一个字段类型全错的 `ManifestEntry`。这是 pin 语义（`raw/manifest.py:192,222`），本 PR 不改；具名用例 `test_manifest.py:196,220` 探的正是那两个强制转换字段，勿把它们读成通用类型闸门。组 3/7 若需要类型校验须自建
@@ -406,7 +408,7 @@ Regression rows:
   - 超限读的**两个方向要分开记**：下界（溢出可检测，即必须多读出一个哨兵字节）由 `test_object_store.py::test_read_bytes_limited_refuses_beyond_the_byte_ceiling` 经 `LocalObjectStore.read_bytes_limited` 覆盖；上界（有界读本身，即绝不把整个文件读进内存）由本 PR 新写的 `test_safe_fs_refusals.py::test_read_bytes_limited_reads_at_most_one_sentinel_byte_past_the_ceiling` 直接钉 `read_bytes_limited_no_follow`。**原措辞把上界也算在 object_store 那条名下是假覆盖**（round 3 r3-cand-01）：把 `safe_fs.py` 的上限整段删掉、或放大一千倍，那条用例照样绿——它由 `object_store.py:220` 自己的事后 `len(content) > max_bytes` 检查满足，与内层是否有界无关
   - **非常规文件（FIFO/设备，`safe_fs.py` 的 `S_ISREG` 前后置校验）-> 本 PR 新写具名用例**
   - **写入面符号链接，两个函数语义不同，勿合并成一句拒绝声明**：`atomic_write_bytes_no_follow` 的符号链接叶与符号链接祖先 -> 拒绝，本 PR 新写具名用例；`rename_entry_no_follow` 的符号链接**祖先（父目录，源与目的两侧）** -> 拒绝（两侧父目录均 `O_DIRECTORY|O_NOFOLLOW` 打开并自 containment root 逐段走），本 PR 新写具名用例；`rename_entry_no_follow` 的符号链接**叶** -> **不拒绝，按搬移语义整体移动该链接本身**（pin docstring 原文：a symlink at `name` is MOVED as a link and never followed or inspected），本 PR 新写具名用例钉死这一搬移语义，不得写成拒绝断言
-  - 新用例禁止写进 `producer/tests/test_safe_fs.py`（该文件是逐字节快照，改它即破坏 pin 等价性行）
+  - 新用例禁止写进 `producer/tests/test_safe_fs.py`（该测试文件仍是 pin 快照，允许分叉的只是生产 `safe_fs.py`）；yd 专属缺陷回归继续落 `producer/tests/test_safe_fs_refusals.py`
 - 既有 `producer/tests/{test_config,test_geometry,test_smoke}.py` -> 保持全绿（未改动兄弟面）
 
 Boundary-surface checklist（high 强度）:
@@ -424,7 +426,7 @@ Risk packs considered (core):
 - Auth / permissions / secrets: not selected - 无凭据面；umask/mode 语义归 File IO 包
 - Concurrency / shared state / ordering: not selected - 本组交付的是纯数据结构与无状态文件操作函数，无并发与共享状态；flock 与 NFS 提交顺序归组 12/13
 - Resource limits / large input / discovery: selected - `read_bytes_limited_no_follow` 的字节上限语义随 safe_fs 快照，是后续组读取外部文件的唯一上限闸门
-- Legacy compatibility / examples: selected - 快照必须与 pin `8ae9b8f2` 语义等价（modulo 清单 §1 逐行枚举的剥离点），否则后续 5 组消费出静默偏差
+- Legacy compatibility / examples: selected - pin `8ae9b8f2` 是兼容性基线；允许分叉的四个生产模块可修缺陷，但必须逐处在清单「剥离点」登记问题与修法，其余快照仍按清单枚举保持等价，避免下游静默偏差
 - Error handling / rollback / partial outputs: selected - safe_fs 的稳定拒绝分型、`normalize_source_id` 未知源抛错、`from_dict` 畸形输入抛错、缺参 fail closed
 - Release / packaging / dependency compatibility: not selected - 七个模块全部纯 stdlib，本 PR 不新增依赖（D5：numpy/xarray/cfgrib 归组 6）；`uv sync --frozen` 无 drift 仍在证据里
 - Documentation / migration notes: not selected - 无对外文档变更；模块头溯源注释即迁移记录，其正确性由 2.3 检查测试机检
@@ -452,7 +454,7 @@ Non-goals:
 - raw 完整性判定与 `raw-manifest.json` 生成逻辑——归任务 3.1/3.2（本 PR 只交付数据结构）
 - `config.toml` 的 bbox / forcing 上限字段落地——清单 §4 风险 14 已显式交接任务 1.1；本 PR 只保证缺参 fail closed
 - 不为 `manifest.py` 保留的排程函数族新写测试——`test_data_adapter_resolution.py` 整文件快照（10 个用例）已覆盖，重写等于二次实现
-- 不改动 pin 上被保留符号的语义以"顺手改好"——语义等价是本 PR 的验收项；改进意见记为 follow-up issue
+- `object_path.py` 与快照测试仍不得顺手改 pin 语义；`safe_fs.py`、`object_store.py`、`converter.py`、`cfg_ic.py` 的确认缺陷允许在 yd 本仓修复，但实现 PR 必须先在清单对应行「剥离点」登记一句“问题 + 修法”，不得以未登记的顺手修改落码
 - **不把反向扫描面扩到 `producer/` 之外**（如仓库根、`viewer/`）——本 PR 的守卫只对快照落地面负责，跨面扫描属组 13 的仓库级检查；此边界经 round 1/2 三名 reviewer 复核接受，记录在此以免后续轮次重开庭（PR #40 偏离记录 F2）
 - **不认 docstring / 字符串形式的溯源标记**：正反两向共用注释谓词后，`"""NWM@8ae9b8f2 ..."""` 这类写法**不算**溯源头部，因而一个未登记、仅带 docstring 标记的散落文件不承担登记义务、也不被守卫接触。这是「单一谓词 + 反向必须保持注释锚」的必然推论——反向若放宽成裸串，守卫会命中自身拼出的 `PROVENANCE_MARKER` 常量，逼出一份手工豁免名单。该语义由具名用例 `test_forward_guard_rejects_docstring_form_markers` 钉死，非疏漏
 - **已知限度：完全失去竖线的表体行不可达**。§1 的游离行检查抓的是「含 `|` 却不以 `|` 起头」；一行若把**所有**竖线都丢掉就退化成散文，除非冻结一份路径名单否则无法机械发现。影响面不对称：该行若标 `本 issue 落地` 且文件在盘上带头部，反向守卫仍会因「未登记」报错；若标 `待落地` 则静默。不冻结名单是刻意取舍——名单正是本守卫要消灭的东西。留给组 13 的仓库级检查，或清单结构化（如 §1 转 YAML）时一并解决
@@ -919,7 +921,7 @@ Change surface:
 - 快照清单 `nwm-snapshot-inventory.md:44` 的目标路径 `state/state_qc.py` 由 **#9** 补齐：本 issue 只落格式层子集到 `state/cfg_ic.py`，不建空的 `state_qc.py` 占位（避免死代码），该行的落地状态在本 PR 内标注为「部分（格式层）」
 
 Must preserve:
-- 移植函数的判定语义与 NWM pin 逐字一致（分段识别、lake preamble 处理、declared-vs-actual lake 行数校验）；偏离 MUST 在模块头注明
+- `cfg_ic.py` 以 NWM pin 的分段识别语义为兼容基线，但不再要求逐字等价；yd MAY 修复确认缺陷。每一处偏离 MUST 在快照清单对应行「剥离点」登记“问题 + 修法”，并在模块头注明，二者缺一不可
 - 本模块 MUST 保持 stdlib-only、零运行时 NWM import、零数据库/scheduler 依赖（agent-ops §2.2 / §7.2）；不依赖 #5 在途的 object-store 工作
 - 不新增依赖、`producer/uv.lock` 不变
 
@@ -1006,7 +1008,7 @@ Non-goals:
 Review focus:
 - `render` 是否真由逐字行还原——任何经 `float`/格式化字符串重建行文本的路径都是缺陷（会在脏输入上丢字节，而干净输入恒绿，看不出来）
 - roundtrip 断言是否具判别力：脏输入矩阵是否真覆盖 CRLF / 尾空格 / 空行 / 记法混合 / 无末尾换行五类，结构索引 oracle 是否用了两种 mesh 规模而非常量期望
-- 移植函数是否与 NWM pin 逐字一致、是否逐函数带溯源注释；有无引入运行时 NWM import 或数据库符号
+- 移植函数相对 NWM pin 的每处语义偏离是否都在快照清单「剥离点」登记“问题 + 修法”并在模块头注明；是否逐函数带溯源注释；有无引入运行时 NWM import 或数据库符号
 - `MAX_STATE_IC_BYTES` 是否在**读取前**生效（有界读），而非先读满再判断
 - 是否越界落地了 #9 的结构检查/重戳/负残差符号（含"顺手先放着"的死代码）
 
@@ -1636,13 +1638,13 @@ Project profile: yd-viewer
 
 **核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
 
-1. **清单 §1 第 35/51/52 行的 `剥离点` 列是本任务的封闭规范，逐字执行、不得自行增删**。清单约定 3 明写「规范性动作只能写在 `剥离点` 列」，故：`剥离点` 点名的动作 MUST 全部执行；`剥离点` **未**点名的符号、分支、常量 MUST 原样保留，即便它在剥离后变成无调用者的死代码。实现者对任一条有异议时，MUST 作为偏离上报，MUST NOT 自行裁决。
+1. **清单 §1 第 35/51/52 行的 `剥离点` 列是差异账本**。清单约定 3 明写「规范性动作只能写在 `剥离点` 列」，故：已点名动作 MUST 全部执行；对快照测试与非 `converter.py` 文件，未点名内容仍按原规则保留。对 `canonical/converter.py`，M2 收尾 pin 分叉裁决允许 yd 在本仓修复确认缺陷，但实现前 MUST 先把每处偏离以“问题 + 修法”登记到第 35 行「剥离点」；未登记的语义编辑仍是违规。
 2. **落码方式 MUST 是 `git show` 基线复制 + 定点编辑，MUST NOT 手抄**。三个文件各自的基线命令写死：
    - `git -C <NWM> show 8ae9b8f2:workers/canonical_converter/converter.py > producer/src/yd_producer/canonical/converter.py`
    - `git -C <NWM> show 8ae9b8f2:tests/test_canonical_converter.py > producer/tests/test_canonical_converter.py`
    - `git -C <NWM> show 8ae9b8f2:packages/common/test_netcdf4.py > producer/tests/netcdf_fixture.py`（清单 §1 第 52 行的强制改名：原名会被 pytest 误收集）
 
-   `<NWM>` = 本机 `/Users/danker/Desktop/Hydro-SHUD/NWM`（pin `8ae9b8f2` 已实测可读）。基线之上**只允许四类编辑**，任何第五类编辑都是偏离。**yd 自撰的新用例 MUST NOT 写进这三个快照文件**（写进去就在 diff-vs-pin 里造出无法归类的差异段，把裁决 2 的机械收敛证据废掉）：它们落在未登记的新文件 `producer/tests/test_canonical_db_free.py`（yd 自撰，无溯源头，不进清单路径表）：
+   `<NWM>` = 本机 `/Users/danker/Desktop/Hydro-SHUD/NWM`（pin `8ae9b8f2` 已实测可读）。基线之上的既有四类编辑如下；`converter.py` 还允许按 M2 收尾 pin 分叉裁决增加**已在清单第 35 行「剥离点」登记“问题 + 修法”**的缺陷修复，未登记语义编辑仍是偏离。**yd 自撰的新用例 MUST NOT 写进三个快照测试/fixture 文件**；converter 专属回归继续落在未登记的新文件 `producer/tests/test_canonical_db_free.py`（yd 自撰，无溯源头，不进清单路径表）：
    (a) 清单 `剥离点` 点名的删除/改写；
    (b) import 重映射：`packages.common.object_store` → `yd_producer.store.object_store`、`packages.common.storage` → `yd_producer.store.object_path`、`packages.common.source_identity` → `yd_producer.raw.source_identity`、`packages.common.test_netcdf4` → `netcdf_fixture`、`workers.canonical_converter.converter` → `yd_producer.canonical.converter`（全集以实跑 `grep -n '^from \|^import \|importlib.import_module' ` 收敛，逐个报告）；
    (c) 溯源头部注释（裁决 3）；
@@ -1754,7 +1756,7 @@ Selected risk packs（逐项给项目具体检查）:
 - **File IO / path safety / overwrite**: selected - 产物与 catalog 经 `LocalObjectStore.write_bytes_atomic` 落盘；键由 `source_id`/`cycle`/`variable`/`forecast_hour` 拼接，须经 `object_path.validate_object_path` 既有约束；重复转换的覆写语义按裁决 6 的**重写幂等**读法取证（`_existing_product_is_current` 在 DB-free 下不可达，MUST NOT 拿它当断言目标）
 - **Schema / columns / units / field names**: selected - catalog 的 16 个行字段与 4 个 payload 字段、`schema_version` 串、`VARIABLE_MAPPING`/`STANDARD_UNITS`/`CONVERSION_PARAMS` 的单位契约，是组 8 的下游 schema 真相
 - **Resource limits / large input / discovery**: selected - `_read_records` 逐 entry 打开数据集；`_configured_forecast_hours` 的 lead 全集；合成 fixture 规模须小到 CI 可跑
-- **Legacy compatibility / examples**: selected - 快照忠实度本身：`剥离点` 之外零改写，diff-vs-pin 必须只含四类允许编辑
+- **Legacy compatibility / examples**: selected - pin 是差异审计基线；快照测试仍只含既有四类允许编辑，`converter.py` 的额外缺陷修复必须逐处登记在清单「剥离点」，diff-vs-pin 不得出现未登记语义差异
 - **Error handling / rollback / partial outputs**: selected - `CanonicalConversionError` 是唯一的公开失败类型；缺变量/缺 lead/不可解析 raw/序列化失败四条路径各须有用例；catalog **自身**原子写（`write_bytes_atomic`），且转换失败时**不写** catalog。**MUST NOT 断言产物级回滚**：pin 逐份写产物、写完才写 catalog，失败时已写的产物对象留在 object-store，pin 无回滚——按裁决 1 这是继承行为，登记为已知非目标，不是本 issue 要补的缺口
 - **Release / packaging / dependency compatibility**: **selected** - 本 PR 引入 `netCDF4`，`uv sync --frozen` 与 CI producer job 是硬证据
 - **Documentation / migration notes**: selected - 清单 `落地状态` 翻面、§4 风险 7 结论回填、spec delta
@@ -1786,7 +1788,7 @@ Required evidence（输入 → 期望输出）:
 
 **红证明（red-proof）义务**：yd 自撰或改写的新断言（no-DB 运行期闸门、合成 GRIB e2e、溯源守卫扩面、裁决 6 改写出的三条取反/幂等断言）MUST 各给一条实跑过的红证据——把闸门/断言反过来、删掉溯源头、或让失败路径提前写一份 catalog，粘贴红输出。逐字移植的快照用例不承担红证明（它们在 pin 上已有历史），但 MUST 报告移植后首次运行的完整结果。
 
-**忠实度证明（本任务的判别力承重条）**：MUST 提交三份 `diff` 的机械收敛证据，即对每个快照文件跑 `diff <(git -C <NWM> show 8ae9b8f2:<pin路径>) <目标文件>`，并把每一段差异归入裁决 2 的四类允许编辑之一；无法归类的差异即偏离。另 MUST 重跑清单第 35 行自带的再生命令并报告命中数：
+**差异审计证明（本任务的判别力承重条）**：MUST 提交三份 `diff` 的机械收敛证据，即对每个快照文件跑 `diff <(git -C <NWM> show 8ae9b8f2:<pin路径>) <目标文件>`。快照测试/fixture 的每段差异须归入裁决 2 的四类既有编辑；`converter.py` 可额外归入清单第 35 行已登记的缺陷修复。任何无法对应到既有类别或“问题 + 修法”登记的语义差异即违规。另 MUST 重跑清单第 35 行自带的再生命令并报告命中数：
 - `grep -c 'repository' producer/src/yd_producer/canonical/converter.py` -> 0
 - `grep -nE 'os\.getenv|_float_env\(|_env_flag\(' producer/src/yd_producer/canonical/converter.py` -> 0 行
 - `grep -n 'from_env' producer/src/yd_producer/canonical/converter.py` -> 0 行
@@ -1795,7 +1797,7 @@ Required evidence（输入 → 期望输出）:
 - `grep -c '^def test_' producer/tests/test_canonical_db_free.py` -> yd 自撰用例数（no-DB 闸门 + 合成 GRIB e2e，单独报数）
 
 Invariant Matrix:
-- **Governing invariant**: 落进 `yd_producer/canonical/` 的每一个字节，要么与 pin `8ae9b8f2` 逐字对应，要么落在裁决 2 的四类允许编辑内；且该模块在任何执行路径上都不建立出站连接、不读环境变量、不 import NWM。
+- **Governing invariant**: 落进 `yd_producer/canonical/` 的每一处相对 pin 的语义差异，要么属于裁决 2 的既有编辑，要么在清单第 35 行「剥离点」以“问题 + 修法”登记；且该模块在任何执行路径上都不建立出站连接、不读环境变量、不 import NWM。
 - **Source-of-truth identity/contract**: pin commit `8ae9b8f2` + 清单 §1 第 35/51/52 行的 `剥离点`/`抽取`/`落地状态` 三列
 - **Producers**: `CanonicalConverter.convert_manifest` / `convert_manifest_uri`、`_serialize_product`、`_write_product_catalog`
 - **Validators/preflight**: `_missing_required_pairs`、`_ensure_grid_definition`、`_select_cfgrib_data_variable`、`required_standard_variables_for_source`
@@ -1830,10 +1832,10 @@ Known limits（须走 Phase 8 的 deferral routing：每条配 follow-up issue �
 - **无产物级回滚**：转换中途失败时已写的 canonical 产物对象留在 object-store（pin 行为，无回滚）
 - **【round-2 补登记】`canonical/` 网格键的大小写裂口**：裁决 12 的入口归一之后，IFS 产物与 catalog 落 `canonical/ifs/<cycle>/…`，而 `IFSCanonicalConverterConfig.grid_definition_uri`(`converter.py:206`) 是 pin 常量，网格定义仍落 `canonical/IFS/grid/ifs_0p25/grid.json`。按裁决 16 不改常量：写入点与全部读出点共用同一 config 字段，无查找会断；`canonical/` 树是每轮删的 work 内工件。**下游义务**：组 8/组 13 对 canonical 前缀做枚举、保留或清理时 MUST 同时覆盖两种大小写，且 `store/object_path.py` 会把该网格键解析成幻影 source `IFS`；darwin 的 APFS 大小写不敏感会把两棵树合并，本机测试**无法**用存在性判别这道裂口（IFS e2e 只做字符串级断言）。配 follow-up issue。
 - **【round-2 补登记】被丢弃的 pin oracle**：`8ae9b8f2:tests/test_ifs_canonical.py`（15 用例）覆盖 `convert_ifs_precipitation_with_metadata` / `convert_ifs_radiation_values` / `convert_ifs_shortwave_down_values` 并带值 oracle，本 PR 未快照它（清单第 35 行那句「均不快照」是构造点枚举的附带说明，不构成覆盖后果登记）。裁决 15 的三条值断言只结清三处单位换算；**残量**——负降水小/显著/连续三分支(`:940-965`)、shortwave 量化与告警(`:1053-1075`)、Magnus RH、lineage 结构——在 yd 侧零覆盖。配 follow-up issue。
-- **【round-1 补登记】读侧 symlink 不走 no-follow**：`converter.py` 由 `object_store.resolve_path()` 取裸 `Path` 交给 `xr.open_dataset`，而 `resolve_path`(object_store.py:314-326) 只做键归一 + `validate_object_path` + 字符串级容纳，**无 `O_NOFOLLOW`**；`LocalObjectStore` 的其它每一个消费者都走 `*_no_follow(..., containment_root=self.root)`。store 根内 `raw/<source>/<cycle>/<file>` 任一段的 symlink 会被 eccodes/netCDF4 跟随，读到容纳根之外的字节并据以产出 canonical 产物与 catalog。pin 逐字继承（pin `object_store.py:273-285` 的 `resolve_path` 与 yd 逐字符相同），故裁决 1 禁止在本 PR 修。
+- **【round-1 补登记】读侧 symlink 不走 no-follow**：`converter.py` 由 `object_store.resolve_path()` 取裸 `Path` 交给 `xr.open_dataset`，而 `resolve_path`(object_store.py:314-326) 只做键归一 + `validate_object_path` + 字符串级容纳，**无 `O_NOFOLLOW`**；`LocalObjectStore` 的其它每一个消费者都走 `*_no_follow(..., containment_root=self.root)`。store 根内 `raw/<source>/<cycle>/<file>` 任一段的 symlink 会被 eccodes/netCDF4 跟随，读到容纳根之外的字节并据以产出 canonical 产物与 catalog。该缺陷在 #13 当时因 pin 等价规则未修；M2 收尾分叉裁决现已解锁，后续 #103 实现前须先在清单 converter 行「剥离点」登记问题与修法。
   **两点必须写进 follow-up，否则会传播一条陈旧论据**：(a) 「object-store 树只由 `write_bytes_atomic`（no-follow）写入、symlink 须带外植入」对 `raw/` 子树**不成立**——`rawcopy.py:736-737` 把 object-store 根取作 `work_dir`，而 `raw/` 由 `rawcopy.py:893` 自己的 `mkdir` 建立，不经 store；(b) **issue #71 把自身严重性上限建立在「最终消费者经 `object_store.py:190,206,263` 的 `*_no_follow` 读取、故转换器 fail-closed」这一前提上，而本 PR 落地的转换器正是那个消费者且不走那三行**——#71 的 fail-closed 上限自本 PR 起不再成立。
 - **【round-1 补登记】对半可信输入无规模上界**：`load_manifest`(:1213-1216) 与 `grid_definition_uri` 读(:1922) 用无上限的 `read_bytes`，而 store 自带 `MAX_OBJECT_MANIFEST_BYTES = 16MiB`(object_store.py:24) 与 `read_bytes_limited`(:212)，本模块**从不使用**；raw 文件交给 cfgrib/netCDF4 前无 size/stat 检查（模块内 `grep MAX_` 零命中）；`:1502` 把整张格点物化成 Python float 元组，IFS 路径(:2082-2094) 一次持有一小时的全部八个原生变量。
-  **量级按实测写，不用全球网格的数字**：真实 raw 由 NWM 下载器按 `download_bbox = {east:145, north:64, south:8, west:63}` 裁剪，约 329x225 ≈ 74k 点 ≈ **2.4MB/变量、8 变量的 IFS 小时约 19MB**（不是全球 0.25° 的约 265MB）。输入域为**半可信**：自家 NWM 下载器写在共享 NFS 上，非对抗，但跨节点、在 yd 写控制之外、且从不做尺寸校验。三个面在 pin 上皆逐字，裁决 1 禁止在本 PR 修。
+  **量级按实测写，不用全球网格的数字**：真实 raw 由 NWM 下载器按 `download_bbox = {east:145, north:64, south:8, west:63}` 裁剪，约 329x225 ≈ 74k 点 ≈ **2.4MB/变量、8 变量的 IFS 小时约 19MB**（不是全球 0.25° 的约 265MB）。输入域为**半可信**：自家 NWM 下载器写在共享 NFS 上，非对抗，但跨节点、在 yd 写控制之外、且从不做尺寸校验。该缺陷在 #13 当时因 pin 等价规则未修；M2 收尾分叉裁决现已解锁，后续 #102 实现前须先在清单 converter 行「剥离点」登记问题与修法。
 
 Non-goals:
 - direct-grid forcing 生产、work 内临时 registry、SHUD 输入组装（组 8）

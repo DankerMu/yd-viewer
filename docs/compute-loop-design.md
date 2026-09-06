@@ -127,7 +127,9 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 - T+12 checkpoint tracker 与漏采补跑；
 - 上述能力的最小测试。
 
-每个快照模块记录 NWM 来源 commit。不得复制或运行时依赖：
+每个快照模块记录 NWM 来源 commit。pin 只作为溯源与差异审计基线，不把缺陷永久冻结：yd 允许在本仓修复 `store/safe_fs.py`、`store/object_store.py`、`canonical/converter.py` 与 `state/cfg_ic.py` 的快照缺陷，不要求逐字或 AST 等价；每一处偏离必须先在 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md` 对应行的「剥离点」列登记一句“问题 + 修法”。其它快照文件与测试仍按清单既有约束维护。
+
+不得复制或运行时依赖：
 
 - PostgreSQL repository、迁移和数据库模型；
 - scheduler/orchestrator、候选、reservation、file journal；

@@ -126,7 +126,11 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 - **THEN** final `<work>/model` 不存在，variant/state/forcing package 的全树 bytes/类型快照不变；只允许本次 staging 作为可由整棵 work 清理 owner 回收的残留并把清理失败附到原异常
 
 ### Requirement: 快照模块可追溯
-每个从 NWM 复制的模块 MUST 在文件头部记录来源 `NWM@8ae9b8f2` 与原仓相对路径；快照 MUST NOT 包含 DB/scheduler 分支代码。
+每个从 NWM 复制的模块 MUST 在文件头部记录来源 `NWM@8ae9b8f2` 与原仓相对路径；快照 MUST NOT 包含 DB/scheduler 分支代码。pin 是溯源与差异审计基线，不是逐字冻结：yd MAY 在本仓修复 `store/safe_fs.py`、`store/object_store.py` 与 `canonical/converter.py` 的快照缺陷，但每一处偏离 MUST 先在 `nwm-snapshot-inventory.md` 对应行的「剥离点」列登记一句“问题 + 修法”；未登记的语义偏离 MUST 被拒绝。
+
+#### Scenario: 已登记的本仓缺陷修复
+- **WHEN** 上述三个生产快照模块相对 `NWM@8ae9b8f2` 修复一处缺陷
+- **THEN** 差异审计不要求逐字或 AST 等价，但清单对应行的「剥离点」必须能逐处解释问题与修法；模块头或 PR 说明不得替代该登记
 
 #### Scenario: 溯源头部检查
 - **WHEN** 对 `yd_producer` 内标记为快照的模块运行溯源检查测试

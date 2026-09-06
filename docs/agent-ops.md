@@ -40,7 +40,7 @@ yd 内部冲突顺序：
 
 - NWM downloader 在 node-27 将 raw GRIB 写入共享 NFS；node-22 yd 控制器只读该 NFS，并把本轮所需文件临时复制到 yd scratch；
 - `yd-producer prepare` 一次性调用 NWM mapping-builder；
-- canonical、direct-grid forcing、state 和前端的最小代码按来源 commit 快照进本仓，之后独立维护；
+- canonical、direct-grid forcing、state 和前端的最小代码按来源 commit 快照进本仓，之后独立维护；其中 `safe_fs.py`、`object_store.py`、`converter.py`、`cfg_ic.py` 可在 yd 本仓修复缺陷，但每处相对 pin 的偏离须先在 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md` 对应行「剥离点」登记“问题 + 修法”，不要求逐字等价；
 - node-27 复用现有域名和有效天地图配置，但 yd 使用独立容器、端口和 `/yd/` location。
 
 ### 2.2 禁止的关系
