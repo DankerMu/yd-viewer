@@ -12,6 +12,7 @@
 - [x] 1.6 将 `LocalConfig.slurm` 收口为无可变 backing 暴露的只读资源映射（issue #31）
 - [x] 1.7 在 `config.toml` 装载边界落实三条已裁决取值域及精确错误路径（issue #32）
 - [x] 1.8 在同一装载期 domain owner 内拒绝 IFS/GFS 各自重复的 raw variable（issue #72）
+- [ ] 1.9 将 config/local 齐备装载收口为两套完整取值的 provenance oracle（issue #48）
 
 依赖：无
 §13.1 归属：无直接行（基础设施，支撑全部行）
@@ -152,8 +153,8 @@ Domain packs (from active profile):
 - NWM 快照溯源 / DB-free 隔离: not selected - 本 issue 无快照代码
 
 Required evidence（每条 input -> expected output）:
-- 齐备 `config.toml`（内联 TOML）-> 返回 `Config`，逐字段值与文件一致（含 `raw.ifs`/`raw.gfs` 嵌套表、`slurm.required_fields`、顶层 `reach_count`）
-- 齐备 `local.toml` -> 返回 `LocalConfig`，暴露全部现场字段供三入口使用
+- 至少两套彼此独立、字段齐备的内联 `config.toml` 输入 A/B -> 均经 public `load_config` 返回完整 `Config`，且 19 个当前输出叶在 A/B 间逐项取不同值；expected 必须是与输入 dict 分开手写的完整 dataclass 字面量树，不得从输入、loader 或 production config 反向生成
+- 与 A/B config 分别配对的两套字段齐备 `local.toml` -> 均经 public `load_local` 返回完整 `LocalConfig`，且 9 个当前输出叶（`slurm` 按动态映射整体计一叶）在 A/B 间逐项取不同值；expected 同样独立手写，不得从输入映射派生。两条齐备 oracle 自身必须能杀死当前 28 个输出叶各自的 validate-then-discard-to-A-literal 变异
 - **参数化：** 对上方 schema 中 `config.toml` 的每个必需 key 各生成一份"删该 key"的 TOML -> 每份都抛 `ConfigError`，消息含该 key 的完整点分路径；测试以 schema 的必需 key 清单驱动，新增字段不加测试即漏测
 - **参数化：** 对 `local.toml` 的每个必需 key 同上 -> 每份都抛 `ConfigError`，消息含完整点分路径
 - 类型错误 `reach_count = "3988"`（字符串）-> 抛 `ConfigError`，消息含 `reach_count` 与期望类型
@@ -538,6 +539,106 @@ Review focus:
 - 消息 oracle 是否对多组重复有判别力，同时没有无需求的显示顺序承诺
 - #32 的装配/域错误优先级和所有兼容量词是否原样保持
 - 是否只有一个 owner/call，且没有静默去重、规范化或下游重复校验
+
+### Issue #48 fixture（任务 1.9）
+
+Fixture level: expanded
+Upstream suggested level: absent（legacy review-DEFER issue）
+Repair intensity / effective tier: high（本 PR 不改生产行为，但它重建三入口共享 config/local reader 的完整 provenance oracle；假绿会让 validate-then-discard 回归穿过全部消费者）
+Project profile: yd-viewer
+Minimal mergeable slice: 只修改 `producer/tests/test_config.py` 与 task 1.9 / 本 fixture；`config.py`、生产 TOML 与其它测试零 diff
+
+Change surface:
+- `producer/tests/test_config.py`：把现有 `test_load_config_returns_all_fields` / `test_load_local_returns_all_site_fields` 从单值 fixture 改为至少两套完整 A/B pair 的参数化 round-trip，并增加 A/B 每个当前输出叶都不同的自证
+- 本任务 1.9、共享 #2 fixture 的两条齐备证据与本独立 fixture
+- `producer/src/yd_producer/config.py`、`producer/config.toml`、`local.toml`、`producer/tests/cli_fixtures.py` 与其它产品/测试模块均不改
+
+Governing invariant:
+- 完整装载 oracle 必须区分“返回文件中本次写入的值”和“照常校验后丢弃结果、返回唯一 fixture 常量”：对每个 Config/LocalConfig 输出叶，至少有两份完整合法输入提供不同值，并由不依赖输入 dict/loader 的 expected 对象分别对拍。
+
+Current output-leaf inventory:
+- `Config` 19 叶：`forecast_days`、`output_interval_minutes`、`checkpoint_hours`、`reach_count`、`nwm_mapping_builder_module`、两个 `nwm_canonical_grid_id`、`cycle.hours`、两个 `variants`、IFS/GFS 各自的 `lead_hours` / `variables` / `bundles` / `f000_special`、`slurm.required_fields`
+- `LocalConfig` 9 叶：`yd_root`、`scratch_root`、`shud_binary`、`nwm.raw_root`、`nwm.checkout_root`、`nwm.python`、`slurm` 动态映射整体、`cron.lock_path`、`cron.log_dir`
+- B 必须在上述 28 叶上逐项不同于 A；两个布尔值翻转，tuple 内容不同，B 的 `slurm.required_fields` 与 B local `[slurm]` 键集匹配且整体不同于 A
+
+Must preserve:
+- `VALID_CONFIG` / `VALID_LOCAL` 继续作为仓库大量测试共享的基准输入，不改其值，不把其它测试迁到 B
+- 两套 config 都满足 #32/#72 loader domain；两套 local 都满足各自 config 的动态 Slurm 键集。测试不得靠构造非法输入制造红
+- 既有缺字段、类型错误、domain、MappingProxyType/alias、动态 Slurm 键集、production config、mapping module/grid、lead-hours 与 NWM checkout/python 专项 oracle 全部原样保留
+- `test_config.py` 与 `cli_fixtures.py` 继续刻意不共用 fixture；不得从 production `config.toml` 生成 A/B 或 expected
+- loader、dataclass、异常、默认值、字段清单、生产配置和任何 userspace 行为零变化
+
+Must add/change:
+- A/B 各包含完整 `config.toml` 与匹配的完整 `local.toml`；不得用 `_with` 叠出 B、不得只覆盖单字段、不得让 B 缺任一表/叶
+- expected A/B 分别以独立、完整的 `Config(...)` / `LocalConfig(...)` dataclass 字面量树手写；不得读取 A/B dict、调用 loader、`dataclasses.asdict` 后回算或复用 production 对象生成 expected
+- `test_load_config_returns_all_fields` 参数化跑 A/B，public `load_config` 结果直接等于各自完整 expected；`test_load_local_returns_all_site_fields` 参数化跑两套完整 config/local pair，public `load_local` 结果直接等于各自完整 expected
+- 增加结构自证：递归 dataclass 叶遍历将 tuple 与 Mapping 当叶，确认 Config A/B 叶路径集合相同且恰 19 项、Local A/B 相同且恰 9 项，并对每个路径断言 A 值不等于 B 值。该 helper 只检查 expected 对象，不生成 expected
+- 参数 id 明确为 A/B；失败应定位到 pair 与完整对象差异，不增加 28 个散落的单字段正常路径测试
+
+Seam under test:
+- `load_config(path) -> Config` 与 `load_local(path, config) -> LocalConfig`（真实完整 TOML file → public object）；不调用任何 `_build_*` 私有函数
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - 三入口共用两份 loader，返回值 provenance 是公共契约
+- Config / project setup: selected - 完整 config/local schema 是本 issue 全部对象
+- File IO / path safety / overwrite: not selected - 仍只向 `tmp_path` 写测试 TOML，不新增生产路径行为
+- Schema / columns / units / field names: selected - 28 个输出叶必须完整且 A/B 都覆盖
+- Auth / permissions / secrets: not selected - 全部为合成值，无凭据
+- Concurrency / shared state / ordering: not selected - 纯同步 test-only 改动
+- Resource limits / large input / discovery: not selected - 两份小型固定 fixture
+- Legacy compatibility / examples: selected - 大量现有测试继续依赖 A；B 只服务完整 provenance oracle
+- Error handling / rollback / partial outputs: selected - 既有缺项/类型/domain fail-closed oracle不得削弱，完整合法 pair 都必须成功
+- Release / packaging / dependency compatibility: selected - 不改依赖/lock/生产代码
+- Documentation / migration notes: selected - 只更新 OpenSpec evidence/fixture；无 userspace 或数据迁移
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: selected - A/B 的 cycle/lead/forecast/checkpoint 均不同且合法，但不新增域
+- 状态链 / warm-start: not selected - 不读写状态
+- NWM 快照溯源 / DB-free 隔离: not selected - NWM module/grid/path 只作合成第二值，不声明现场事实
+
+Invariant Matrix:
+- Source of truth: 两份独立完整 TOML 输入 A/B + 两份独立完整 expected dataclass 树；二者不得互相生成
+- Producer: `_render_toml` / `_write_toml` 只把选中的完整输入写到 `tmp_path`，不参与 expected
+- Validator/read surface: public `load_config` 与 `load_local`
+- Downstream consumers: 无改动；完整 producer suite 证明已有 A fixture 消费者与 loader userspace 保持
+- Failure/evidence boundary: 任一 validate-then-discard-to-A-literal 变异在 B case 的完整对象比较处失败；缺项/类型/domain 错误仍走原测试
+- Evidence independence: A/B 输入 dict 与 expected dataclass 在源码中分开手写；叶差异自证只读 expected，不从输入推导值
+- Valid row: A/B 两套完整 pair 均成功且等于各自 expected
+- Mismatch row: 当前 28 个输出叶各自硬编码回 A 值、同时保留原校验调用 -> 对应 B round-trip case 变红
+- Compatibility row: 现有专项第二值测试不删除不改；生产 config、完整 config test 与 producer/viewer suite 保持
+
+Boundary-surface checklist:
+- Shared helper roots: 测试侧 `_render_toml` / `_write_toml`；不得改 production builder
+- Public entrypoints/read surfaces: `load_config`、`load_local`
+- Write/delete/overwrite and staging/publish/rollback: 仅 pytest `tmp_path`，无产品写面
+- Producer/consumer evidence boundaries: TOML input bytes → loader object → independent expected dataclass
+- Stale-state/idempotency: none
+- Unchanged downstream consumers: producer full suite；`cli_fixtures.py` 与 NWM 专项测试零 diff
+
+Test-first / mutation evidence:
+- 本 issue 的生产 loader 当前行为正确，纯测试增强在未改 `config.py` 上应直接 green；不得伪造“旧 source red”或为制造 red 暂时破坏生产代码
+- 判别力 red 由隔离 scratch 的 28 个 validate-then-discard-to-A-literal mutant 提供：每个 mutant 必须保留对应 `_require_*` / `_build_*` 校验调用，只丢弃其合法返回值；Config 19 叶与 LocalConfig 9 叶逐项各一个，且每个都由 A/B 完整 round-trip 测试自身杀死
+- Shared raw-source builder 的 IFS/GFS 变异必须只硬编码目标 source，另一个 source 保持原值；bool false/true 两向、tuple 与动态 Slurm mapping 均有真实差异，不能用等价 mutant 凑数
+- scratch 遵守 project profile：排除 venv/cache、清 `VIRTUAL_ENV`、`PYTHONDONTWRITEBYTECODE=1`、断言 import 根、使用 `uv run python -m pytest`、每轮恢复源码 hash；非零输出必须含具名完整 round-trip oracle
+
+Required evidence:
+- 两套完整 config/local pair 的 focused 测试与叶差异自证通过；`test_config.py`、producer/viewer 全套通过
+- 28/28 validate-then-discard mutants killed；至少包含 issue 原已实测存活的 `forecast_days` 与 `variants.gfs` 两例
+- 源码结构审计：A/B 输入和 expected 对象无数据依赖；两个 round-trip 测试参数化 A/B；叶 helper 只读 expected；无 production source/config/其它 test diff
+- 既有 B 表专项（lead hours、Slurm 动态键/值、NWM module/grid/checkout/python）不重复新增散测且保持绿
+- producer/viewer frozen sync、Ruff、format、OpenSpec strict/all、stage anchor 与 `git diff --check` 通过
+
+Non-goals:
+- 不修改 `producer/src/yd_producer/config.py` 或任何 loader 行为；不存在待修生产 bug
+- 不增加第三套以上完整 pair，不引入 fixture factory/builder/随机值/property-testing 库
+- 不把 28 个第二值拆成 28 个独立正常路径测试，不删除既有专项测试
+- 不实现 #46 dataclass params 守卫，不混入 #69 或其它 schema/default 变更
+- 不改变 production config/local 值，不创建 `local.toml.example`
+
+Review focus:
+- B 是否真完整且 28 叶全部不同，而不是 `_with(A, one_field)` 的单字段矩阵
+- expected 是否真正独立手写，完整对象比较是否能杀 validate-then-discard，而非从输入反向生成同一答案
+- 28 个 mutant 是否每个保留校验调用、只改 provenance，并由这两条完整 round-trip oracle 杀死
+- 是否为测试增强越界修改 production source、共享 A fixture、其它测试或字段契约
 
 ### Issue #3 fixture（任务 1.3–1.4）
 
