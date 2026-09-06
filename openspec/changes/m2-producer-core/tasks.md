@@ -1746,7 +1746,7 @@ Domain packs (from active profile):
 
 - [x] 5.1 定义 `JobExecutor` 协议（submit/poll、job ID/partition/终态/起止时间语义）与进程内 fake（成功/失败/超时可编排），接口契约测试
 - [x] 5.2 实现 Slurm 生产执行器（`sbatch`/`sacct` 封装，资源参数全部装配自 `local.toml` 且零默认）；本地验证参数装配与协议一致性，真实 Slurm 行为归 M4
-- [ ] 5.3 由 #135 消费已完成的 1.6/#31，只落地 #69：唯一客户端命令 timeout 配置及真实 `subprocess_runner` 的 timeout 转发/异常边界；CLI/provider 的生产绑定仍归 14.2
+- [x] 5.3 由 #135 消费已完成的 1.6/#31，只落地 #69：唯一客户端命令 timeout 配置及真实 `subprocess_runner` 的 timeout 转发/异常边界；CLI/provider 的生产绑定仍归 14.2
 
 依赖：组 1（Slurm 字段结构）
 §13.1 归属：控制器（支撑）
