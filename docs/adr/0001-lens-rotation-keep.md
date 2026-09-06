@@ -620,3 +620,32 @@ lens，且没有捕获；没有真正的新 lens，就无法估计「轮入新�
 
 复议条件未触发：Round 3 与 Phase 7 没有重报五项已关闭 finding；Phase 6.2 的唯一二阶加固候选经独立
 verifier 判 REFUTED；没有连续 rotated P3 样本。共享 `m2-producer-core` 仍有 14.3，继续不 archive。
+
+---
+
+## 第 17 次复议（issue #28 / PR #129 合并后，2026-09-05）
+
+审计数字：27 行（26 merged、1 terminal），25 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #129 的 Round 1 有 6 条经 verifier 确认的 FIX_NOW；Round 2
+三名 reviewer 零候选，因此对 later-round attribution 的数值增量为 **core +0 / rotated +0**。
+
+本 PR 不是 rotation 的有效零收益样本。Round 1 已使用六个 canonical reviewer package；Round 2
+按 post-fix 成本规则保留 invariant-state、security-perf、test-evidence 三个 pinned lens，没有任何
+“尚未使用”的 free slot 可轮入。**没有发生轮换**时得到零 catch，不能推导“发生轮换也不会有收益”。
+这与第 13、15、16 次复议的判据一致。
+
+本 PR 反而再次量出当前算法的确定性盲区：最有价值的后轮净捕获不是 Round 2 reviewer finding，
+而是 Phase 6.2 完整 ownership inventory 找到的 post-claim zero-write admission 漏口。该项有实际
+next-tick `UNVERIFIED_WORK_RESIDUE` red、depth retro、RE31、修复与第二次 clean audit；问责行如实
+把它记为 round 1.5。`rotation_attribution()` 对 `round < 2` 直接跳过，所以这条 P1 对 125/96
+两边都贡献 0。CI 后续抓到的 fixture-only concurrent NetCDF segfault 同样来自机械执行，不是 lens，
+且按定义不进入 `gate_net_catch`。本样本再次说明：数字只统计综合复审中的 finding，既看不见
+method-change audit 的正向发现，也看不见 CI 诊断与 clean-closure 的价值。
+
+**决策不变：keep。** 继续保留 pinned core + 条件式 free-slot rotation + 独立终审；不把
+125/96 解释成 keep 的数值支持，也不据此 cut。在日志能区分“未发生轮换”与“发生轮换但零 catch”，
+并纳入 Phase 6.2 / diagnosis / mechanical evidence 方法之前，lens-rotation DECIDABLE 仍只触发人工
+复议，不足以自动改变策略。证据不足时默认 keep 符合本工作流优先正确性的规则。
+
+复议条件未触发：Round 2 与两次 Phase 7 均未重报已关闭 finding；没有任何后轮 rotated catch，
+因此不存在连续两个 rotated P3 样本。共享 `m2-producer-core` 仍服务后继 M2 任务，本次继续不 archive。
