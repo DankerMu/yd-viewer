@@ -1,8 +1,10 @@
 """`yd_producer.rawcopy.stage_raw` 只读复制与临时 raw manifest 测试（任务 3.2）。
 
-全部用例使用**内联合成配置值与合成源 manifest**：仓库刻意不提供版本化 `config.toml`
-生产实例（归 issue #29），下方的变量名、bundle 模式与 manifest 取值只用于行使 staging
-规则，不代表生产取值。
+本模块每个用例仍使用**内联合成配置值与合成源 manifest**。下方的本地变量名、bundle
+模式、lead 与 manifest 取值只用于行使本模块的 staging 规则，不代表生产取值。
+
+版本化生产实例由 `producer/tests/test_config.py` 独立验证；本模块 MUST NOT 从它派生
+oracle（包括配置值、bundle 模式、lead 或 manifest 取值）。
 
 期望值一律在用例内**字面构造**：目录段、`local_key` 形态、承接键名、manifest 级四键
 都不从被测模块 import——两侧共用一个字面量会让断言随实现同步漂移，退化成恒真式。
