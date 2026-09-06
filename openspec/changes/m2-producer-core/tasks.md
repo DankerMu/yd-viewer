@@ -5,7 +5,7 @@
 ## 1. cli-config：配置装载与 CLI 骨架
 
 - [x] 1.1 实现 `config.toml` 类型化装载与 fail-closed 校验（业务规则字段全集含 `reach_count`，spec cli-config）
-- [x] 1.2 实现 `local.toml` 现场值装载（含 NWM checkout 根），缺失即报错、零内置默认
+- [x] 1.2 实现 `local.toml` 现场值装载（含 NWM checkout 根），缺失即报错、零内置默认；唯一例外为 #69 后补的 `[slurm].command_timeout_seconds`，缺席时版本化默认 60 秒
 - [x] 1.3 实现 argparse 三入口骨架（prepare/init/run 薄委托，注册 `[project.scripts]` 入口点）、未知子命令拒绝、`DATABASE_URL` 环境守卫、run 入口状态目录缺失/为空即报错停止且不触发 init 逻辑
 - [x] 1.4 实现 NWM 解释器薄外壳（精确路径调用、cwd/`PYTHONPATH` 取自 checkout 字段、fail-closed），以假解释器脚本测试调用形态
 
@@ -32,7 +32,8 @@ Must preserve:
 
 Must add/change:
 - 按下方「TOML key schema」装载 `config.toml` 与 `local.toml`，返回类型化 dataclass 树
-- 任何必需字段缺失或类型错误 fail closed，错误信息含该字段的完整点分路径（如 `raw.gfs.variables`）；代码中零内置现场默认值
+- 任何必需字段缺失或类型错误 fail closed，错误信息含该字段的完整点分路径（如 `raw.gfs.variables`）；除 #69 明确授权的 Slurm 客户端命令时限默认 60 秒外，代码中零内置现场默认值
+- #32 裁决仅把三条取值域上提给装载器：`cycle.hours` 的每个值都属于 `{0,12}`、`forecast_days > 0`、`checkpoint_hours` 的每个值都满足 `0 <= hour < 24 * forecast_days`。违反时抛 `ConfigError`，`path` 分别精确为 `cycle.hours`、`forecast_days`、`checkpoint_hours`；其它取值域仍按既有 owner/Non-goal 处理
 - 两个装载器的全部失败路径抛同一个公开异常类型 `yd_producer.config.ConfigError`（本 fixture 钉死类名），不抛裸 `KeyError`/`TypeError`/`tomllib.TOMLDecodeError`
 
 TOML key schema（本 issue 钉死；下游 issue 与生产 `config.toml` 实例必须对齐此 schema）:
@@ -88,15 +89,16 @@ required_fields = ["partition", "account", "cpus", "memory", "walltime"]
 
 `nwm_mapping_builder_module` 是 `prepare` 薄外壳要以 NWM 解释器调用的 module 点分名（spec cli-config「以该路径调用**配置的** mapping-builder module」）。它落在 `config.toml` 而非 `local.toml`，是 **#32 更正 5 的用户裁决**：module 名随 NWM 快照固定、不随现场变化，属 `docs/agent-ops.md` §7.2「已确认的」版本化事实；放 `local.toml` 等于要求每个部署点重填一个非现场值，放版本化常量则要放宽 spec 的「配置的」限定语。取值 `workers.mapping_builder.cli` 由对 pin 的只读取证确立（`git -C <NWM> ls-tree 8ae9b8f2 workers/__init__.py workers/mapping_builder/__init__.py` 两者均在，`workers/mapping_builder/cli.py` 末尾有 `if __name__ == "__main__"` 守卫，故 `-m` 形态在 cwd=`checkout_root` 下可解析可执行）；取证与「#4 不会产出该名字（mapping-builder 不快照）」的说明记在 **#32**。装载层对它与其它标量同等待遇——只校验存在性与 `str` 类型，**不校验该 module 是否可导入**（那需要 NWM 环境，归 1.4 的运行期 fail-closed 与 prepare 编排）。
 
-`[slurm].required_fields` 即 compute-loop §5 的"Slurm 资源配置字段结构"：config 侧声明必需字段名，值只在 `local.toml` 提供。**它是 `local.toml` 的 `[slurm]` 表唯一的键集权威**——装载器不对 `local.[slurm]` 另设静态 schema，只按这份运行期列表校验，避免"静态 schema 与列表互相矛盾"的双权威。约束：
+`[slurm].required_fields` 即 compute-loop §5 的"Slurm **资源**配置字段结构"：config 侧声明必需资源字段名，值只在 `local.toml` 提供。它仍是 `LocalConfig.slurm` **资源投影**的唯一键集权威；#69 只在同一 TOML 表增加一个保留的客户端策略键 `command_timeout_seconds`，不把它伪装成 `sbatch` 资源。约束：
 
-- `required_fields` MUST 是非空字符串列表，元素唯一；
-- `local.[slurm]` 的键集 MUST 与 `required_fields` **完全相等**：缺项与多余项都抛 `ConfigError` 并指名该键（多余项必须报错，否则现场把 `partition` 写成 `partiton` 会被静默忽略）;
-- `LocalConfig.slurm` 以映射（`dict[str, str | int]`）暴露，不做成五个固定 dataclass 字段——固定字段等于把键集第二次写死在代码里，正是这条要消除的双权威。
+- `required_fields` MUST 是非空字符串列表，元素唯一，且 MUST NOT 含保留名 `command_timeout_seconds`；违反时抛 `ConfigError(path="slurm.required_fields")`；
+- `local.[slurm]` 的资源键投影 MUST 与 `required_fields` **完全相等**：缺资源项，以及除可选 `command_timeout_seconds` 外的任何多余项，都抛 `ConfigError` 并指名该键（多余项必须报错，否则现场把 `partition` 写成 `partiton` 会被静默忽略）；
+- `command_timeout_seconds` 缺席时使用唯一内部版本化常量 `yd_producer.config._DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS = 60`；显式值只接受 strict positive `int`（bool/float/string/0/负数均抛 `ConfigError(path="slurm.command_timeout_seconds")`）。它是每次 `sbatch`/`sacct` 客户端子进程的时限，不是 Slurm job walltime；`slurm.py` 与 CLI 不得复制第二个 60；
+- `LocalConfig.slurm` 仍以只读 `Mapping[str, str | int]` 暴露且只含资源投影；装载器复制已校验资源并以 `types.MappingProxyType` 冻结。新增 additive `LocalConfig.slurm_command_timeout_seconds: int = _DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS`，loader 把 TOML 显式值写入该字段；字段有默认只为保持既有程序内 `LocalConfig(...)` 构造兼容，除此之外不放宽任何 local 字段。`MappingProxyType` 本身不可哈希，因此 `LocalConfig` 不提供哈希语义。
 
 因此交叉校验要求先有 `Config`，`load_local` 的签名为 `load_local(path, config) -> LocalConfig`。
 
-`local.toml` — `[slurm]` 之外全部 key 必需，无可选字段（NWM checkout/解释器仅 `prepare` 消费，但装载期一律必需：做成条件可选就必须引入条件性缺省，正是"零内置默认"禁止的）：
+`local.toml` — 除 `[slurm].command_timeout_seconds` 有 #69 唯一授权默认外，其余全部 key 必需、无可选字段（NWM checkout/解释器仅 `prepare` 消费，但装载期一律必需；不得把 timeout 例外扩成其它条件性缺省）：
 
 ```toml
 yd_root = "<绝对路径>"
@@ -109,15 +111,17 @@ checkout_root = "<绝对路径>"
 python = "<解释器绝对路径>"
 
 [slurm]
-# 键集完全由 config.toml 的 slurm.required_fields 决定，此处仅示例其生产取值形态
+# 资源键集由 config.toml 的 slurm.required_fields 决定；timeout 是独立客户端策略
 partition = "<名称>"
 account = "<名称>"
 cpus = 8
 memory = "<如 32G>"
 walltime = "<如 04:00:00>"
+command_timeout_seconds = 60
 
 [cron]
-lock_path = "<绝对路径>"
+# node-22 本地文件系统上的专属长期哨兵；不得位于 yd/NWM NFS、scratch_root 或清理根
+lock_path = "<本地绝对路径>"
 log_dir = "<绝对路径>"
 ```
 
@@ -133,7 +137,7 @@ Risk packs considered (core):
 - Concurrency / shared state / ordering: not selected - 无共享状态、无并发，纯函数
 - Resource limits / large input / discovery: not selected - 输入为人工维护的小 TOML，无发现逻辑
 - Legacy compatibility / examples: not selected - 首个功能模块，仓库此前无业务代码，无既有消费者
-- Error handling / rollback / partial outputs: selected - fail-closed 是本 issue 的核心验收项，需要稳定异常类型与含字段名的错误信息，且不得返回带默认值的半成品配置对象
+- Error handling / rollback / partial outputs: selected - fail-closed 是本 issue 的核心验收项，需要稳定异常类型与含字段名的错误信息；除 #69 明确授权的 timeout=60 外，不得返回带默认值的半成品配置对象
 - Release / packaging / dependency compatibility: selected - 必须只用 stdlib `tomllib`，不得引入新依赖，`uv sync --frozen` 无 drift
 - Documentation / migration notes: not selected - 无迁移；字段清单由本 fixture 的「TOML key schema」钉死，下游 issue 直接读该 schema，无需另写文档
 
@@ -150,13 +154,15 @@ Required evidence（每条 input -> expected output）:
 - **参数化：** 对 `local.toml` 的每个必需 key 同上 -> 每份都抛 `ConfigError`，消息含完整点分路径
 - 类型错误 `reach_count = "3988"`（字符串）-> 抛 `ConfigError`，消息含 `reach_count` 与期望类型
 - 类型错误 `cycle.hours = 0`（非列表）-> 抛 `ConfigError`，消息含 `cycle.hours` 与期望类型
+- #32 值域矩阵：`cycle.hours = [0]`、`[12]`、`[0,12]` 均可装载；含 `6`、`18`、`24` 或负数 -> 抛 `ConfigError` 且 `path == "cycle.hours"`。`forecast_days = 1` 可装载，`0`/负数 -> 抛 `ConfigError` 且 `path == "forecast_days"`。在 `forecast_days = 7` 下，`checkpoint_hours = [0,167]` 可装载，含 `-1` 或 `168` -> 抛 `ConfigError` 且 `path == "checkpoint_hours"`；把 `forecast_days` 改为 1 后 `23` 可装载、`24` 被拒（证明上界来自跨字段值而非写死 168）
 - `local.toml` 路径不存在 -> 抛 `ConfigError`，消息提示需现场创建，且不返回任何对象
 - TOML 语法损坏（如未闭合字符串）-> 抛 `ConfigError`（不外泄 `tomllib.TOMLDecodeError`）
 - **参数化：** 对 `slurm.required_fields` 的每一项，各生成一份"`local.[slurm]` 删该项"的 TOML -> 每份都抛 `ConfigError`，消息含该缺失键名
-- `local.[slurm]` 含 `required_fields` 之外的多余键（如把 `partition` 误写为 `partiton`）-> 抛 `ConfigError`，消息含该多余键名（不得静默忽略）
-- `slurm.required_fields = []`（空列表）-> 抛 `ConfigError`；元素重复 -> 抛 `ConfigError`；元素非字符串 -> 抛 `ConfigError`
-- `required_fields` 增删一项后 `local.[slurm]` 同步增删 -> `load_local` 成功，`LocalConfig.slurm` 映射键集等于 `required_fields`（证明键集权威唯一，代码未第二次写死五个字段）
-- 零默认值行为断言：`Config`/`LocalConfig` 及其全部嵌套 dataclass 的字段均无默认值（以 `dataclasses.fields()` 断言每个 field 的 `default` 与 `default_factory` 均为 `MISSING`），因此任何缺失只能走 fail-closed 路径而非静默填值
+- `local.[slurm]` 含 `required_fields` 与保留 `command_timeout_seconds` 之外的多余键（如把 `partition` 误写为 `partiton`）-> 抛 `ConfigError`，消息含该多余键名（不得静默忽略）
+- `slurm.required_fields = []`（空列表）-> 抛 `ConfigError`；元素重复、非字符串或含保留名 `command_timeout_seconds` -> 抛 `ConfigError`，最后一项的 `path == "slurm.required_fields"`
+- `required_fields` 增删一项后 `local.[slurm]` 同步增删资源项 -> `load_local` 成功，`LocalConfig.slurm` 映射键集恰等于 `required_fields` 且不含 `command_timeout_seconds`（证明资源键集权威唯一，策略不泄漏进 JobSpec/`sbatch`）；装载后对原输入 dict 增删改不影响 `local.slurm`，对 `local.slurm` 执行赋值/删除均抛 `TypeError`，且 `type(local.slurm) is MappingProxyType`
+- #69 timeout 配置矩阵：`[slurm]` 缺 `command_timeout_seconds` -> `local.slurm_command_timeout_seconds == 60`；显式 `1`/`60`/大正整数逐字保留；`true`/`1.5`/`"60"`/`0`/负数 -> `ConfigError.path == "slurm.command_timeout_seconds"`。程序内用旧参数直接构造 `LocalConfig(...)` -> 字段为 60；其它 dataclass 字段仍无默认值
+- 默认值结构断言：`Config` 与全部嵌套 dataclass、`LocalConfig` 除 `slurm_command_timeout_seconds` 外的字段都以 `dataclasses.MISSING` 为 default/default_factory；timeout 字段默认精确等于内部常量 60。任何其它缺失只能 fail closed，不得借 #69 新增第二个默认值
 - 全部失败路径断言以 `pytest.raises(ConfigError)` 表达，不接受 `pytest.raises(Exception)`
 - **字段定位可机检**：`ConfigError` MUST 暴露结构化属性 `path: str | None`，凡涉及具体字段的失败（缺字段、类型错误、`[slurm]` 键集不等）都 MUST 设为该字段的完整点分路径；全部缺字段与类型错误用例 MUST 断言 `excinfo.value.path == <期望点分路径>`，MUST NOT 仅用 `<key> in str(exc)` 子串探测。理由（round 1 审核 cand-08/cand-09，verifier CONFIRMED/FIX_NOW）：子串探测对"一次列出全部必需项"的消息恒真——实测把 `_require` 换成固定目录消息后 53 条测试全绿，25 条参数化用例合起来只等价于一条；且顶层标量类型错误可以整个丢掉字段名而无人发现。消息中仍保留人读的路径，但断言以 `path` 属性为准，与措辞解耦
 - 非 UTF-8 编码的 `config.toml` / `local.toml`（GBK 中文注释、UTF-16 存盘）-> 两个装载器都抛 `ConfigError`，消息含文件路径，MUST NOT 外泄 `UnicodeDecodeError`（round 1 审核 cand-01）
@@ -172,16 +178,16 @@ Non-goals:
 - **不做 `local.toml` 路径的绝对路径形态校验**：schema 把这些字段标注为 `<绝对路径>`，但装载器只校验其为 `str`。这条**不被上一行覆盖**——相对路径与 `~` 的危害不是"不存在"，而是被正常创建、正常打开却落在错的地方，使用点的存在性检查永远不报警（实测 `Path("~/x") / "y"` → `'~/x/y'`，`~` 不展开）。最尖锐的是 `cron.lock_path`：cron 以 cwd=`$HOME` 调 `run`、人工补跑在 checkout 目录走同一入口，相对路径会让两边 `flock` 拿到两个不同的锁文件，`specs/run-controller/spec.md:60` 的互斥静默失效，两个 controller 同时进入发布段（违反 agent-ops §8.4）。归属：`cron.lock_path` 归 **#23** task 12.3 的 flock 封装；`yd_root`/`scratch_root` 归各自写入面；裁决记录在 **#32**（若决定统一在装载期强制，按文档优先原则先改 `specs/cli-config/spec.md:19` 扩大 MUST 范围再动码）
 - **不提交版本化 `producer/config.toml` 生产实例**：`raw.ifs`/`raw.gfs` 的变量名、bundle 文件模式与 GFS f000 具体取值出自 compute-loop §7.1 所称"NWM adapter 的当前事实"，由 issue #4 勘察与 issue #6 完整性判定确立，此刻不可知；本 issue 只钉 schema，测试全部用内联 TOML。生产实例落库已路由为 issue #29（`Depends on #2, #6`），并已挂入 epic #1 依赖图。
 - 不提交 `local.toml.example`：compute-loop §5 明确 `local.toml` 不入库，现场值由实施方创建（agent-ops）
-- **不做值域校验**：装载器只校验存在性与类型（spec cli-config 把 fail-closed MUST 限定为"任何必需字段缺失或类型错误"）。以下经 round 1 审核确认存在、但按 verifier 裁决 DEFER，本 issue 明确不做，归属逐条具名于 **issue #32**：`raw.*.variables`/`bundles`/`lead_hours` 的空列表拒绝（归 #6 task 3.1——空集会让"所有预期文件存在才算完整"恒真）；`variants.*` 的相对性校验（归 #20 task 10.3——绝对路径会让 `Path(yd_root) / variants.gfs` 静默丢弃 `yd_root`，使覆盖守卫检查的目录与实际写入目录分叉）；`cycle.hours ⊆ {0,12}`（归 #6 task 3.1，fail-closed 下游闸门）；`forecast_days` 与 `reach_count` 的正数约束（归 #24 task 13.1，DONE 前行数/列数校验）；`len(checkpoint_hours) == 1` 与 `output_interval_minutes` 的正数约束（**两项均为零归属项**，需 #32 裁决；建议同法由 #29 以生产实例钉死 `[12]` / `60` 并断言）；`lead_hours` 全集覆盖 0–168h 且与 `forecast_days*24` 一致（本 amendment 新增 `lead_hours` 后才存在，#32 原文早于该字段，已补入其验收标准）；`raw.<source>.variables` 的**单射性**（重复变量不报错，会让任务 3.2 的 manifest 产出重数 >1 的 `(lead, variable, local_key)` 三元组，而 spec `raw-scan` :58 的集合相等断言是集合式的、对重数天然失明；`lead_hours` 轴的对称闸门已在 `rawscan._expected_leads` 落地，`bundles` 轴由 `_reject_collisions` 守，唯独本轴无守卫。本条原为**零归属项**——issue #7 round 1 verifier CONFIRMED/DEFER 时本账本完全没有它——现已具名为 **issue #72**，仍需 #32 裁决认领。禁止静默去重：那等于替运维发明一份他没写的配置）
-- **不做 `LocalConfig.slurm` 的只读化**：fixture 于本块「TOML key schema」下方逐字钉死"以映射（`dict[str, str | int]`）暴露"，改为只读映射需先修订该钉死标注，归 **issue #31**（其中记录了一处关键更正：`MappingProxyType` 自身不可哈希，不能顺带解决 `hash(LocalConfig)` 与 `hash(Config)` 的不对称）
+- **#32 对值域作有限上提，其余仍不在装载器**：装载器现在 MUST 校验 `cycle.hours ⊆ {0,12}`、`forecast_days > 0`、`checkpoint_hours ⊆ [0, 24 * forecast_days)`，并按上方路径抛 `ConfigError`。下列仍沿用既有 owner/Non-goal，不因本裁决顺带迁入 `config.py`：`raw.*.variables`/`bundles`/`lead_hours` 的空列表拒绝（#6）；`variants.*` 相对性（#20）；`reach_count > 0`（#24）；`len(checkpoint_hours) == 1` 与 `output_interval_minutes > 0`；`lead_hours` 覆盖范围；`raw.<source>.variables` 单射性（#72）。禁止静默去重或擅自补默认值
+- **#31 已裁决并由装载器认领只读化**：`LocalConfig.slurm` 的公开类型为 `Mapping[str, str | int]`，装载器返回 `MappingProxyType(dict(values))`；调用方拿不到可变 backing dict。`MappingProxyType` 自身不可哈希，故不顺带解决 `hash(LocalConfig)` 与 `hash(Config)` 的不对称，也不新增哈希承诺
 
 Review focus:
 - 字段名/类型/单位是否与上方 TOML key schema 逐字对应，且 schema 的每个叶子字段可回溯到 compute-loop §5/§7.1 或 products-contract §5
-- 是否存在任何隐式默认值、`.get(k, fallback)` 式兜底，或 dataclass 字段默认值
+- 除 #69 明确授权的 `_DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS = 60` 外，是否出现任何隐式默认值、`.get(k, fallback)` 式兜底或 dataclass 字段默认值；timeout 是否从资源投影剥离而未进入 JobSpec/`sbatch`
 - 错误信息是否总能定位到具体字段的完整点分路径（含嵌套表内字段）
 - 是否引入了 stdlib 之外的依赖
 - 失败路径是否全部收敛到单一公开异常 `ConfigError`
-- `local.[slurm]` 的键集是否只有 `config.slurm.required_fields` 一个权威——代码里若再出现 partition/account/cpus/memory/walltime 的固定字段清单即为双权威，属实现缺陷
+- `LocalConfig.slurm` 的**资源投影**键集是否只有 `config.slurm.required_fields` 一个权威——TOML 表只额外允许保留策略键 `command_timeout_seconds` 并剥离到独立字段；代码里若再出现 partition/account/cpus/memory/walltime 的固定字段清单即为双权威，属实现缺陷
 - spec cli-config 用反引号钉死的 key 名（`forecast_days`、`output_interval_minutes`、`checkpoint_hours`、`reach_count`）是否逐字保留在顶层，未被加上表前缀
 
 ### Issue #3 fixture（任务 1.3–1.4）
@@ -210,7 +216,7 @@ Must add/change:
 - `run` 发现 `<yd_root>/states/` 不存在或为空即报错停止，MUST NOT 调用 init 逻辑或自建该目录
 - `nwm.invoke_mapping_builder`：以 `local.nwm.python` 的**精确路径**、`config.nwm_mapping_builder_module` 的 module 名构造 `[<python>, "-m", <module>, *args]`，cwd 与 `PYTHONPATH` 取自 `local.nwm.checkout_root`；解释器路径不存在 / 非普通文件 / 不可执行即报错，且**不发起任何子进程**
 - `prepare` 在守卫通过后 MUST 做解释器 fail-closed **预检**（`local.nwm.python` 存在 / 是普通文件 / 可执行），预检失败即报错退出且不发起任何 builder 调用——这是 spec Scenario「解释器缺失即停」的入口层落点，主语是 `prepare` 而非薄外壳，故不能只靠 seam 7 的单元级证据
-- 退出码约定（本 fixture 钉死，测试逐条断言）：argparse 用法错误（未知子命令、缺子命令）= `2`（argparse 默认）；守卫或配置失败（`DATABASE_URL`、`ConfigError`、`states/` 缺失或为空、解释器 fail-closed）= `1`；分阶段未实现的业务体 = `3` 并在 stderr 指名归属任务号。**重叠规则**：`DATABASE_URL` 守卫在 `parse_args` 之前，故它与用法错误同时成立时守卫胜出，退出码为 `1`
+- 退出码约定（本 #3 fixture 当时钉死，后由任务 14.2 只覆盖 `run` 分支）：argparse 用法错误（未知子命令、缺子命令）= `2`（argparse 默认）；`DATABASE_URL` 与 `prepare`/`init` 的配置或入口守卫失败 = `1`；分阶段未实现的业务体 = `3`。任务 14.2 落地后，`run` 的参数/配置错误改为 `2`，状态/控制器结局按 0/3 规则，且不再有 staged-unimplemented 分支。**重叠规则**仍不变：`DATABASE_URL` 守卫在 `parse_args` 之前，故它与用法错误同时成立时守卫胜出，退出码为 `1`
 
 Seams under test:
 - `cli.main(argv, env) -> int`（design.md「Sketch seams under test」seam 6，本 issue 随 spec Scenario 补入）——进程内调用，不起子进程；配套取用点 `cli.build_parser()`，子命令集合断言经它行使，`main(["--help"])` 只断言 `SystemExit(0)`
@@ -256,7 +262,7 @@ Required evidence（每条 input -> expected output）:
 - **正控制**：`main(["prepare", <齐备参数>])` 且 `local.nwm.python` 指向**可执行**的假解释器 -> 越过守卫与预检，进入分阶段未实现分支，退出码 `3`，stderr 指名归属任务号；runner fake 调用次数为 0（预检不代替调用）。没有这条，"预检恒失败"的实现也能满足上面两条负例
 - **正控制**：`main(["init", <齐备参数>])` 且全部守卫通过 -> 退出码 `3`，stderr 指名归属任务号
 - `main(["run"])` 缺 `--config` 或缺 `--local` -> 退出码 `2`（argparse 必需参数缺失），错误信息指名缺失参数；**MUST NOT** 回退到任何内置路径
-- `main(["run", "--config", "<不存在>", "--local", "<齐备 local.toml>"])` -> 退出码 `1`，`ConfigError` 被入口层捕获并转成退出码，**MUST NOT** 抛 traceback 到用户面（断言无 `Traceback` 字样）
+- `main(["run", "--config", "<不存在>", "--local", "<齐备 local.toml>"])` -> 在 #3 初始交付为退出码 `1`；任务 14.2 覆盖后 MUST 为 `2`。两阶段都要求 `ConfigError` 被入口层捕获且 **MUST NOT** 抛 traceback 到用户面（断言无 `Traceback` 字样）
 - `--config` / `--local` 传相对路径 -> 传给装载器的实参是 `Path.resolve()` 后的绝对路径（记录型 fake 断言），错误信息中出现的是解析后的绝对路径
 - `nwm.invoke_mapping_builder`，解释器路径不存在 -> 抛 `ConfigError`，`path == "nwm.python"`，且注入 runner 的调用次数为 **0**
 - 同上，路径存在但是目录 -> 抛 `ConfigError`，runner 零调用
@@ -276,13 +282,14 @@ Required evidence（每条 input -> expected output）:
 2. **`DATABASE_URL` 守卫位于 `parse_args` 之前，与用法错误重叠时守卫胜出（退出码 `1`）。** 理由：agent-ops §2.2 把"不连 NWM 数据库"列为硬约束，环境本身有缺陷时，最 fail-closed 的形态是在解释任何参数之前拒绝，代码路径也只有一条（放在解析后就要在三个子命令里各挂一次，或在解析后再补一个共用前置——多一处可漏）。**被接受的后果已明确记录**：`yd-producer --help` 在 `DATABASE_URL` 存在时同样以 `1` 退出而不打印帮助。这是刻意的——环境错了就先修环境，不给"帮助能出来说明装对了"的错觉。
 3. **`--config` 与 `--local` 均为必需参数，无内置默认。** 理由：`specs/cli-config/spec.md:30`「代码中 MUST NOT 内置任何现场默认值」直接禁止 `--local` 有默认路径；`--config` 虽是版本化文件、不受该条约束，但给它一个内置默认等于在代码里第二次写死仓库布局，且两个参数一必需一可选会让 cron 行与人工补跑行长得不一样（agent-ops §8.2 要求两者走同一入口）。KISS：两个都必需。
 4. **`load_config`/`load_local` 对非 `Path`/`str` 入参仍抛裸 `TypeError`，不改为 `ConfigError`。** 理由：CLI 边界现在恒传 `Path`（决策 1），该路径在产品内不可达；剩下的触发者只有程序内误用，裸 `TypeError` 正是 Python 对误用的正确回答。加一层类型规范化只会把编程错误伪装成配置错误。
+5. **#49 文档调用形态已完成**：`docs/compute-loop-design.md` §6 的 run synopsis 与 §10 cron 行均逐字使用 `yd-producer run --config <path> --local <path>`；不得写回裸 `yd-producer run`，也不得为缩短文档而发明配置默认路径。
 
 Non-goals:
-- **三入口的业务实现**：`prepare` 的 mapping 资产产出与变体组装、`init` 的 bootstrap、`run` 的控制器循环全部归后续 issue（组 8–14；`run` 的入口体承接者是 **14.1**「单源单轮 `run_once` 骨架打通」，不是 12.1——12.1 是被它调用的严格前沿纯函数）。本 issue 的三入口在守卫全部通过后走**分阶段未实现分支**：以退出码 `3` 退出并在 stderr 指名归属任务号。这是**显式记录的分阶段交付**，不是占位符——守卫、参数解析、退出码、薄外壳全部为真实实现且有测试；未实现的只有被本 issue 明确划出范围的业务体
+- **三入口的业务实现**：`prepare` 的 mapping 资产产出与变体组装、`init` 的 bootstrap、`run` 的控制器循环全部归后续 issue（组 8–14；`run_once` 骨架归 14.1，最终 `cli.run -> run_sources` 生产接线归 M2 收尾任务 **14.2**，不是 12.1——12.1 是被它调用的严格前沿纯函数）。本 #3 交付时三入口在守卫全部通过后走**分阶段未实现分支**：以退出码 `3` 退出并在 stderr 指名归属任务号。这是当时的显式分阶段交付；14.2 后续覆盖 `run` 分支，`prepare`/`init` 的既有实现与退出码不受影响
 - **`prepare` 不实际调用 mapping-builder**：`prepare` 只做守卫 + 解释器 fail-closed 预检（spec Scenario「解释器缺失即停」在此边界满足），预检通过后即走上一条的未实现分支。真正构造 builder 参数并调用属业务实现。spec Scenario「以精确解释器调用」的主语是薄外壳，由 seam 7 直接行使
 - **不校验 `nwm_mapping_builder_module` 是否可导入**：那需要活的 NWM 环境（agent-ops §7.2 的维护窗口约束），归 prepare 编排的归属 issue
 - **不做 `local.toml` 路径的绝对路径形态校验**：沿用 issue #2 的 Non-goal 与归属（`cron.lock_path` 归 #23，裁决在 #32）；本 issue 只解引用 `nwm.python` 与 `<yd_root>/states/`，对它们做的是存在性/类型/可执行性检查，不是形态校验
-- **不做值域校验**：沿用 issue #2 Non-goal 与 #32 的归属表
+- **本 #3 交付时不做值域校验**；#32 收尾裁决后，`config.py` 装载器认领 `cycle.hours ⊆ {0,12}`、`forecast_days > 0`、`checkpoint_hours ⊆ [0,24*forecast_days)`，其余值域仍沿用既有归属
 - **不实现 flock 互斥**：`run` 的单实例约束归 #23 task 12.3
 - **已知限制（不属本 issue，路由给 prepare 编排的归属 issue）**：在 pin `NWM@8ae9b8f2` 上 `workers/mapping_builder/cli.py` 的 argparse `main` 只做 `--package-path` 解析并输出 resolution JSON，尚不驱动完整 build（其 docstring 明写 SUB-5 未落地，「Programmatic callers invoke `build_direct_grid_variant` directly」）。本 issue 只测**调用形态**，不受影响；但要让 prepare 真产出 mapping 资产的那个 issue 必须自行确认调 `-m ...cli` 是否足够。已记入 #32
 
@@ -310,6 +317,8 @@ Minimal mergeable slice: 勘察清单（2.1）——纯文档产物独立合并�
 
 ### 组 2 剩余任务（2.2/2.3）的 issue #5 fixture
 
+**M2 收尾裁决（#42/#55/#122/#63/#102/#103/#104，覆盖本 change 内更早的 pin 等价措辞）**：`producer/src/yd_producer/store/safe_fs.py`、`store/object_store.py`、`canonical/converter.py`、`state/cfg_ic.py` 仍以 `NWM@8ae9b8f2` 为溯源和差异审计基线，但 yd MAY 在本仓修复该快照的缺陷，不再要求逐字、逐字节或 AST 等价。每一处偏离 MUST 先在 `nwm-snapshot-inventory.md` 对应目标路径行的「剥离点」列登记一句“问题 + 修法”；模块头或 PR 说明只能补充，不能替代该登记。这个裁决只解锁上述四个生产模块，不自动扩大任何既有 issue 的实现范围，也不解除其它快照文件和快照测试的等价约束。
+
 Fixture level: expanded（issue #5 分诊上调，理由见 `.workplans/5/triage.md`）
 Repair intensity: high（File IO/path safety + 新建共享 helper 根）
 
@@ -321,7 +330,7 @@ Change surface:
 - 新增 `producer/tests/test_snapshot_provenance.py`（任务 2.3）
 
 Must preserve:
-- pin `8ae9b8f2` 上被保留符号的语义逐字节等价（modulo 清单 §1 逐行枚举的剥离点）
+- pin `8ae9b8f2` 仍是溯源与差异审计基线；`object_path.py` 与快照测试继续遵守清单既有等价约束。`store/safe_fs.py`、`store/object_store.py`、`canonical/converter.py` 与 `state/cfg_ic.py` 不再要求逐字或 AST 等价：yd MAY 在本仓修复 pin 快照缺陷，但每一处偏离 MUST 在 `nwm-snapshot-inventory.md` 对应行的「剥离点」列登记一句“问题 + 修法”，不得只写在模块头、PR 或备注列
 - `producer/` 既有测试（config/geometry/smoke）全绿
 - `docs/products-contract.md:37`「`source` 固定小写 `gfs`/`ifs`」
 
@@ -335,7 +344,7 @@ Seams under test（design.md「Sketch seams under test」第 4 条「快照模�
 - 溯源检查的 seam 是仓库文件树本身（路径表 → 文件头字面量）
 
 Invariant Matrix
-Governing invariant: 每个快照文件（含测试）头部含字面量 `NWM@8ae9b8f2 <NWM 原路径>`，文件内零 DB/scheduler/registry/journal/reservation 面与零环境变量默认，且被保留符号与 pin 语义等价（只允许清单 §1 该行 `剥离点` 枚举的偏差）。
+Governing invariant: 每个快照文件（含测试）头部含字面量 `NWM@8ae9b8f2 <NWM 原路径>`，文件内零 DB/scheduler/registry/journal/reservation 面与零环境变量默认；pin 只作溯源与差异审计基线。四个允许分叉的生产模块（`safe_fs.py`、`object_store.py`、`converter.py`、`cfg_ic.py`）可修复快照缺陷，但每处偏离必须先在清单对应行「剥离点」登记问题与修法；其余快照仍只允许清单枚举的偏差。
 Source-of-truth identity/contract: 清单 §1 表的「目标路径 ↔ NWM 原路径 ↔ 剥离点」三元组；pin commit `8ae9b8f29c8b72c574e8cbd95f2994160bd42832`。
 Surfaces:
 - Producers: 七个快照源模块 + 四个快照测试文件（写入方即本 PR 的实现者）
@@ -390,7 +399,7 @@ Regression rows:
 - 每个新增快照文件（源与测试） -> 前 5 行内存在一条 `#` 注释行，其内容含 `NWM@8ae9b8f2 <该文件在清单里的原路径>`。**正反向必须共用同一个「什么算溯源头部」的谓词**：注释形式（规格「原路径注释」的字面要求）+ 行预算只作用于正向。守卫自身不得出现第二份口径——round 1（位置维度）与 round 2（形式维度）两次失守都源于正反向各有一套定义
 - `yd_producer`/`producer/tests` 内任一文件带上述谓词命中的溯源注释、却不在清单路径表内 -> 检查测试失败（反向守卫，无行预算，保证后续组落地必须登记）。反向侧刻意锚在注释行而非裸串：裸串会命中守卫文件自身拼出的 `PROVENANCE_MARKER` 常量，逼出第二份手工豁免名单
 - `store/`、`raw/` 全目录跑 Required evidence 里以 `禁区 grep：` 开头的那一条命令 -> 零命中。**本行刻意不复述词表**：先前这里另写了一份 6 词表（缺 `journal`、`reservation`），与 `禁区 grep：` 的 8 词表内容不一致，构成同一禁区面的两份互相矛盾的声明（round-4 修复轮报出）。词表的唯一真源是 `禁区 grep：` 那一行，测试侧由 `_declared_forbidden_surfaces()` 从该行解析、并断言全文恰有一处该锚点。
-- **pin 等价性（`剥离点` 为 `无` 或仅注释改写的四行）**：`producer/src/yd_producer/store/object_path.py`、`store/safe_fs.py`、`producer/tests/test_data_adapter_resolution.py`、`store/object_store.py`，各自 `diff` `git -C <NWM 本地 checkout> show 8ae9b8f29c8b72c574e8cbd95f2994160bd42832:<清单该行原路径>`，忽略新增的溯源头部与 import 路径改写（`packages.common.*`/`workers.data_adapters.*` → `yd_producer.*`）、object_store 行 `剥离点` 点名改写的那条注释，**以及一批纯换行重排（如 `_DIR_FLAGS`）**——该重排面是 round-4 实测补记的，先前的忽略清单漏了它。因此本行钉的是 **AST 全等**（`ast.dump(parse(pin)) == ast.dump(parse(本仓))`，round 4 对 `safe_fs.py` 与 `object_path.py` 实测为 `True`），**不是字节等价**；先前写作「字节等价」不准。抽取/改写式的七行（`:40` source_identity、`:41` manifest、`:42` cycle_hours、`:43` region、`:50` test_safe_fs、`:51` test_object_path、`:52` test_source_identity）不适用本行，其等价证据是实现者的逐文件剥离点符合性说明
+- **pin 差异审计**：`producer/src/yd_producer/store/object_path.py` 与 `producer/tests/test_data_adapter_resolution.py` 继续按既有规则证明 pin 等价；`store/safe_fs.py` 与 `store/object_store.py` 从本行移出等价闸，改为逐处审计其相对 pin 的差异是否都在清单对应行「剥离点」登记了“问题 + 修法”。四者仍运行 `diff` 对照 `git -C <NWM 本地 checkout> show 8ae9b8f29c8b72c574e8cbd95f2994160bd42832:<清单该行原路径>`；对前两者，忽略溯源头、import 重映射与纯格式重排后要求 AST 全等；对后两者，不要求 AST 全等，但任何未登记的语义差异均为契约违反。抽取/改写式的其余七行（`:40` source_identity、`:41` manifest、`:42` cycle_hours、`:43` region、`:50` test_safe_fs、`:51` test_object_path、`:52` test_source_identity）继续按各自行「剥离点」证明符合性
 - `normalize_source_id("IFS"/"ifs"/"Ifs")` -> `"ifs"`；`normalize_source_id("ERA5")` -> 抛错（ERA5 条目已删）
 - `ManifestEntry`/`DownloadManifest` 的 `as_dict` → `from_dict` roundtrip -> 字段等价
 - **`from_dict` 的拒绝面只覆盖「缺字段」与「两个强制转换字段」，不做类型校验**（探针实测，勿写成笼统的类型拒绝）：缺必需字段 -> 稳定 `KeyError`（`ManifestEntry` 缺 `remote_url`、`DownloadManifest` 缺 `source_id`），不返回半成品对象；`forecast_hour` 走 `int()`、`cycle_time` 走 `parse_cycle_time`，**畸形值的异常类型按实测分三种、不是笼统的 `ValueError`**：`forecast_hour`：`'abc'` -> `ValueError`，`None`/`[]`/`{}` -> `TypeError`，而 `3.7` **根本不被拒绝、静默截断为 `3`**；`cycle_time`：`'not-a-time'` -> `ValueError`，`None`/`123`/`[]` -> `AttributeError`。组 3/7 写 `except ValueError` 会漏掉 `TypeError`/`AttributeError` 两类并放过静默截断。**其余字段类型错一律不拒**——`from_dict({"remote_url": 123, "local_key": ["not","a","str"], "expected_size_bytes": "abc", ...})` 实测**正常返回**一个字段类型全错的 `ManifestEntry`。这是 pin 语义（`raw/manifest.py:192,222`），本 PR 不改；具名用例 `test_manifest.py:196,220` 探的正是那两个强制转换字段，勿把它们读成通用类型闸门。组 3/7 若需要类型校验须自建
@@ -406,7 +415,7 @@ Regression rows:
   - 超限读的**两个方向要分开记**：下界（溢出可检测，即必须多读出一个哨兵字节）由 `test_object_store.py::test_read_bytes_limited_refuses_beyond_the_byte_ceiling` 经 `LocalObjectStore.read_bytes_limited` 覆盖；上界（有界读本身，即绝不把整个文件读进内存）由本 PR 新写的 `test_safe_fs_refusals.py::test_read_bytes_limited_reads_at_most_one_sentinel_byte_past_the_ceiling` 直接钉 `read_bytes_limited_no_follow`。**原措辞把上界也算在 object_store 那条名下是假覆盖**（round 3 r3-cand-01）：把 `safe_fs.py` 的上限整段删掉、或放大一千倍，那条用例照样绿——它由 `object_store.py:220` 自己的事后 `len(content) > max_bytes` 检查满足，与内层是否有界无关
   - **非常规文件（FIFO/设备，`safe_fs.py` 的 `S_ISREG` 前后置校验）-> 本 PR 新写具名用例**
   - **写入面符号链接，两个函数语义不同，勿合并成一句拒绝声明**：`atomic_write_bytes_no_follow` 的符号链接叶与符号链接祖先 -> 拒绝，本 PR 新写具名用例；`rename_entry_no_follow` 的符号链接**祖先（父目录，源与目的两侧）** -> 拒绝（两侧父目录均 `O_DIRECTORY|O_NOFOLLOW` 打开并自 containment root 逐段走），本 PR 新写具名用例；`rename_entry_no_follow` 的符号链接**叶** -> **不拒绝，按搬移语义整体移动该链接本身**（pin docstring 原文：a symlink at `name` is MOVED as a link and never followed or inspected），本 PR 新写具名用例钉死这一搬移语义，不得写成拒绝断言
-  - 新用例禁止写进 `producer/tests/test_safe_fs.py`（该文件是逐字节快照，改它即破坏 pin 等价性行）
+  - 新用例禁止写进 `producer/tests/test_safe_fs.py`（该测试文件仍是 pin 快照，允许分叉的只是生产 `safe_fs.py`）；yd 专属缺陷回归继续落 `producer/tests/test_safe_fs_refusals.py`
 - 既有 `producer/tests/{test_config,test_geometry,test_smoke}.py` -> 保持全绿（未改动兄弟面）
 
 Boundary-surface checklist（high 强度）:
@@ -424,7 +433,7 @@ Risk packs considered (core):
 - Auth / permissions / secrets: not selected - 无凭据面；umask/mode 语义归 File IO 包
 - Concurrency / shared state / ordering: not selected - 本组交付的是纯数据结构与无状态文件操作函数，无并发与共享状态；flock 与 NFS 提交顺序归组 12/13
 - Resource limits / large input / discovery: selected - `read_bytes_limited_no_follow` 的字节上限语义随 safe_fs 快照，是后续组读取外部文件的唯一上限闸门
-- Legacy compatibility / examples: selected - 快照必须与 pin `8ae9b8f2` 语义等价（modulo 清单 §1 逐行枚举的剥离点），否则后续 5 组消费出静默偏差
+- Legacy compatibility / examples: selected - pin `8ae9b8f2` 是兼容性基线；允许分叉的四个生产模块可修缺陷，但必须逐处在清单「剥离点」登记问题与修法，其余快照仍按清单枚举保持等价，避免下游静默偏差
 - Error handling / rollback / partial outputs: selected - safe_fs 的稳定拒绝分型、`normalize_source_id` 未知源抛错、`from_dict` 畸形输入抛错、缺参 fail closed
 - Release / packaging / dependency compatibility: not selected - 七个模块全部纯 stdlib，本 PR 不新增依赖（D5：numpy/xarray/cfgrib 归组 6）；`uv sync --frozen` 无 drift 仍在证据里
 - Documentation / migration notes: not selected - 无对外文档变更；模块头溯源注释即迁移记录，其正确性由 2.3 检查测试机检
@@ -452,7 +461,7 @@ Non-goals:
 - raw 完整性判定与 `raw-manifest.json` 生成逻辑——归任务 3.1/3.2（本 PR 只交付数据结构）
 - `config.toml` 的 bbox / forcing 上限字段落地——清单 §4 风险 14 已显式交接任务 1.1；本 PR 只保证缺参 fail closed
 - 不为 `manifest.py` 保留的排程函数族新写测试——`test_data_adapter_resolution.py` 整文件快照（10 个用例）已覆盖，重写等于二次实现
-- 不改动 pin 上被保留符号的语义以"顺手改好"——语义等价是本 PR 的验收项；改进意见记为 follow-up issue
+- `object_path.py` 与快照测试仍不得顺手改 pin 语义；`safe_fs.py`、`object_store.py`、`converter.py`、`cfg_ic.py` 的确认缺陷允许在 yd 本仓修复，但实现 PR 必须先在清单对应行「剥离点」登记一句“问题 + 修法”，不得以未登记的顺手修改落码
 - **不把反向扫描面扩到 `producer/` 之外**（如仓库根、`viewer/`）——本 PR 的守卫只对快照落地面负责，跨面扫描属组 13 的仓库级检查；此边界经 round 1/2 三名 reviewer 复核接受，记录在此以免后续轮次重开庭（PR #40 偏离记录 F2）
 - **不认 docstring / 字符串形式的溯源标记**：正反两向共用注释谓词后，`"""NWM@8ae9b8f2 ..."""` 这类写法**不算**溯源头部，因而一个未登记、仅带 docstring 标记的散落文件不承担登记义务、也不被守卫接触。这是「单一谓词 + 反向必须保持注释锚」的必然推论——反向若放宽成裸串，守卫会命中自身拼出的 `PROVENANCE_MARKER` 常量，逼出一份手工豁免名单。该语义由具名用例 `test_forward_guard_rejects_docstring_form_markers` 钉死，非疏漏
 - **已知限度：完全失去竖线的表体行不可达**。§1 的游离行检查抓的是「含 `|` 却不以 `|` 起头」；一行若把**所有**竖线都丢掉就退化成散文，除非冻结一份路径名单否则无法机械发现。影响面不对称：该行若标 `本 issue 落地` 且文件在盘上带头部，反向守卫仍会因「未登记」报错；若标 `待落地` 则静默。不冻结名单是刻意取舍——名单正是本守卫要消灭的东西。留给组 13 的仓库级检查，或清单结构化（如 §1 转 YAML）时一并解决
@@ -518,8 +527,8 @@ raw 布局与文件名（NWM pin 事实转录，勘察清单 §3.1 桥）:
 - **目录段逐源非对称，MUST NOT 一律小写**（round 1 审核 cand-03，verifier CONFIRMED/FIX_NOW）：pin 的存储身份表 `_STORAGE_SOURCE_IDS = {"GFS": "gfs", "ERA5": "ERA5", "IFS": "IFS"}`（`NWM@8ae9b8f2 packages/common/source_identity.py:5-9`）刻意让 GFS 落**小写** `gfs`、IFS 落**大写** `IFS`，两个 adapter 的默认 `source_id` 与之一致且 IFS 的 `local_key` 逐字使用（`ifs_adapter.py:182`、`:622-624`），object store 侧不做任何大小写归一。故 yd 侧 MUST 以显式映射 `{"ifs": "IFS", "gfs": "gfs"}`（带 pin 溯源注释）把**入参 source**（同时也是 `config.raw` 的属性名，恒小写）翻译成**目录段**，二者 MUST NOT 硬绑同一字面量。本条与 yd 自己产物侧的小写 `source`（`docs/products-contract.md` §5）无关，勿混用。`nwm-snapshot-inventory.md` §3.1 已同步补入该事实行与勘误
 - `raw_root` 是否已指向对象存储的 `raw/` 前缀属现场值，归 `local.toml`（#29/#20），本 issue 不推断
 - 预期文件集 = `lead_hours × bundles`（tasks.md 组 1 已逐字钉死该公式），无变量维度：pin 上一个 forecast hour 只落**一个**物理 bundle 文件、内含该小时全部变量（`gfs_adapter.py:611-636` 的 `layout="per_forecast_hour"`）
-- `bundles` 元素是 `str.format` 文件名模式，占位符词表**恰好两个具名字段**：`{cycle_hour}`（int，cycle 的 UTC 小时）与 `{lead}`（int）；允许格式说明符，故 pin 的真实形态可表达为 `"gfs.t{cycle_hour:02d}z.pgrb2.0p25.f{lead:03d}.bundle.grib2"`（`gfs_adapter.py:1878-1880`）与 `"ifs.t{cycle_hour:02d}z.f{lead:03d}.bundle.grib2"`（`ifs_adapter.py:1688-1690`）。出现词表外的具名字段、位置字段（`{}`/`{0}`）或语法损坏的模式，一律 fail closed 并在错误中点名该模式与该字段——不得静默留下未替换的 `{...}` 去 stat 一个必然不存在的路径
-- **每个模式 MUST 含 `{lead}`，且渲染出的预期文件集 MUST 单射**（round 1 审核 cand-01，verifier CONFIRMED/FIX_NOW）：只做占位符白名单不足以守住「预期文件集 = `lead_hours × bundles`」——漏写 `{lead}` 的模式（如把 `.f{lead:03d}` 写丢）会让全部 lead 渲染成同一路径，`expected_files` 基数虚高而判定域只剩一个点，57 个 lead 里只要 1 个文件落盘即判整轮完整。这与本 fixture 拒空列表是同一病理的两扇门（一扇让预期集为空、一扇让它塌缩），故一并 fail closed：模式的顶层具名字段集合内没有 `lead` 即 `ConfigError`。注意 `string.Formatter().parse` 不暴露嵌套格式说明符内的字段，故 `"f{cycle_hour:0{lead}d}"` 这类只把 `lead` 写在 spec 里的模式会被拒——方向 fail-closed，属有意为之，须在代码注释写明。漏写 `{cycle_hour}` 无害（cycle 目录已隔离），不必拒。等价地，`expected_files` MUST 无重复项——这条同时覆盖「两个 bundle 模式渲染同名」与「`lead_hours` 含重复值」（cand-05 的错位触发门，见 Non-goals）
+- `bundles` 元素只允许由普通文字与简单具名字段组成，占位符词表**恰好两个名字**：`{cycle_hour}` 与 `{lead}`。rawscan 的公开 seam 仍接收整数，但渲染前分别规范化为两位、三位十进制字符串，因此生产形态写作 `"gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2"` 与 `"ifs.t{cycle_hour}z.f{lead}.bundle.grib2"`，仍产出 `t00`/`t12` 与 `f000`/`f003`。`_validate_pattern` 的模式词表门 MUST 在任何渲染/文件系统访问前拒绝：非空 `format_spec`（`{lead:03d}`）、任何 conversion（`{lead!r}`）、属性/下标或位置字段、词表外字段、语法损坏，以及嵌套或转义花括号（含 `{{`/`}}`）；一律抛 `ConfigError` 并以 `raw.<source>.bundles` 为 `path`，不得交给 `_render` 静默产出畸形文件名
+- **每个模式 MUST 含简单 `{lead}`，且渲染出的预期文件集 MUST 单射**（round 1 审核 cand-01，verifier CONFIRMED/FIX_NOW）：只做占位符白名单不足以守住「预期文件集 = `lead_hours × bundles`」——漏写 `{lead}` 的模式会让全部 lead 渲染成同一路径，57 个 lead 里只要 1 个文件落盘即判整轮完整。format spec / conversion / 嵌套花括号一律先由 #52 词表门拒绝，不能借内层字段满足 `{lead}` 必需门。漏写 `{cycle_hour}` 无害（cycle 目录已隔离），不必拒。`expected_files` MUST 无重复项——同时覆盖两个模式渲染同名与 `lead_hours` 重复
 - 渲染结果 MUST 是单个文件名：含路径分隔符或 `..` 段即 fail closed（`config.toml` 虽为版本化文件，但渲染路径逃出 `<raw_root>/<存储身份>/<cycle>/` 就使"只读 NWM 原件"的边界失效）
 
 GFS f000 特例（`RawSourceConfig.f000_special`）:
@@ -531,7 +540,7 @@ GFS f000 特例（`RawSourceConfig.f000_special`）:
 
 判定顺序（MUST 逐段短路，配置类与请求类失败一律发生在任何文件系统访问之前）:
 
-1. 配置取值域校验（归属见 tasks.md 组 1 Non-goals 的"不做值域校验"条，该条把这两项逐条路由到本任务 3.1）：`cycle.hours` 非空且 ⊆ `{0, 12}`；**`raw.ifs` 与 `raw.gfs` 两个源**的 `lead_hours`/`variables`/`bundles` 均非空。两个源都查而不是只查被请求的那个源——这一段不依赖 `source` 合法，故可排在词表校验之前，双重非法输入（词表外 `source` + 空列表）下的行为因此是确定的。违反即抛 `ConfigError` 且 `path` 为完整点分路径（如 `raw.gfs.bundles`）。空集必须拒绝的理由：预期文件集为空会让"所有预期文件存在才算完整"恒真，把缺口判成完整
+1. 配置取值域校验：`cycle.hours ⊆ {0, 12}` 现由 #32 上提到 `config.py` 装载边界；本 rawscan 入口仍保留同一守卫，以防程序内手构 `Config` 绕过装载器。`cycle.hours` 及 **`raw.ifs` 与 `raw.gfs` 两个源**的 `lead_hours`/`variables`/`bundles` 还必须非空（空集归本任务 3.1）。两个源都查而不是只查被请求的那个源——这一段不依赖 `source` 合法，故可排在词表校验之前，双重非法输入（词表外 `source` + 空列表）下的行为因此是确定的。违反即抛 `ConfigError` 且 `path` 为完整点分路径（如 `raw.gfs.bundles`）。空集必须拒绝的理由：预期文件集为空会让"所有预期文件存在才算完整"恒真，把缺口判成完整
 2. 请求校验：`source` ∈ `{"ifs", "gfs"}`（`path=None`）；`cycle` tz-aware、UTC、分/秒/微秒为 0（`path=None`）；`cycle.hour` ∈ `config.cycle.hours`（`path="cycle.hours"`）。违反即抛 `ConfigError`
 3. 模式校验与渲染（占位符词表、单文件名约束）
 4. 逐文件检查：对每个预期文件判「存在且为普通文件」（语义同 `Path.is_file()`：跟随 symlink 后仍须是普通文件），**且该检查 MUST 自行 stat 并显式分类，MUST NOT 直接依赖 `Path.is_file()`**（round 1 审核 cand-02 verifier CONFIRMED/FIX_NOW，取证方法经修复轮实测再修订）——`Path.is_file()` 吞掉哪些 errno **随 CPython 版本变**：3.12 只吞 ENOENT/ENOTDIR/EBADF/ELOOP 而 EACCES/EIO/ESTALE 上抛，3.13+ 起吞掉全部 `OSError`。生产 raw 根正是 NFS 上由 NWM 以另一 uid 写入、cycle 目录常缺 x 位的形态，依赖它会让同一个输入在 3.12 上以裸 `PermissionError` 逃出 `judge`（违反本 fixture「不完整不是异常」），在 3.13+ 上被静默记成「缺失」（`unreadable_files` 分支不可达）——两种都错，且 CI 钉 3.12、开发机可能更新，差异不会被本地测试暴露。故显式区分：`FileNotFoundError`/`NotADirectoryError` 归 `missing_files`，其余 `OSError` 与非普通文件之外的访问失败归 `unreadable_files`，收敛策略与 `open` 一致。再判可读（以 `os.access(..., os.R_OK)` 之外的实际 `open(..., "rb")` 读一个字节为准——`os.access` 在部分挂载/权限模型下与真实 `open` 不一致）。MUST NOT 以目录 mtime、末 lead 存在或任何动态推断替代逐文件检查（spec raw-scan 的 MUST NOT）
@@ -571,8 +580,9 @@ Required evidence（每条 input -> expected output；`cd producer && uv run pyt
 - **参数化：** `raw.<source>.lead_hours`/`variables`/`bundles` 各置空列表 -> 每份都抛 `ConfigError` 且 `path` 为对应完整点分路径（同上路由）
 - naive `datetime`（无 tzinfo）与非 UTC tzinfo -> 均抛 `ConfigError`
 - `source = "ecmwf"`（词表外）-> 抛 `ConfigError`
-- bundle 模式含词表外具名字段（`{member}`）、位置字段（`{}`）、语法损坏（`"a{lead"`）-> 各抛 `ConfigError`，消息含该模式与该字段名
-- bundle 模式渲染出路径分隔符或 `..`（`"../{lead:03d}.grib2"`、`"sub/{lead:03d}.grib2"`）-> 抛 `ConfigError`
+- bundle 模式含词表外具名字段（`{member}`）、位置字段（`{}`/`{0}`）、属性/下标（`{lead.real}`/`{lead[0]}`）、语法损坏（`"a{lead"`）-> 各抛 `ConfigError`，消息含该模式与字段，`path == "raw.<source>.bundles"`
+- #52 简单字段门：合法 `"gfs.t{cycle_hour}z.f{lead}.grib2"` 在 `(cycle_hour,lead)=(0,3)` 下逐字渲染为 `"gfs.t00z.f003.grib2"`；任一非空 format spec（`{lead:03d}`、`{lead:q}`）、conversion（`{lead!r}`/`{lead!s}`）、嵌套花括号（`{lead:{cycle_hour}}`、`{lead:{lead.real}}`）或转义花括号（`{{lead}}`/`}}`）均在 `_validate_pattern` 直接抛 `ConfigError`，文件系统与 `_render` 零调用
+- bundle 模式渲染出路径分隔符或 `..`（`"../{lead}.grib2"`、`"sub/{lead}.grib2"`）-> 抛 `ConfigError`
 - 预期路径存在但是**目录**而非文件 -> 计入 `missing_files`（`is_file()` 语义），不误判为完整
 - 预期文件存在但不可读（`chmod 0o000`）-> `complete is False` 且该文件在 `unreadable_files`、不在 `missing_files`；用例以 `os.geteuid() != 0` 为 skipif 条件（root 下 DAC 权限位不生效）
 - `<raw_root>/<source>/<YYYYMMDDHH>` 目录整体不存在（合法 00Z 请求）-> **不抛异常**，`complete is False` 且 `missing_files == expected_files`（主消费方 11.1 的 7 天扫描窗绝大多数请求正是打在不存在的 cycle 目录上；"不完整"不是错误）
@@ -602,7 +612,7 @@ Required evidence（round 1 审核后追加；上表的取证方法被变异体�
 - **非 datetime 的 `cycle`（round 3 r3-cand-03；与上方"非 PathLike `raw_root`"成对）**：`judge(root, "gfs", cycle, config)` 传 `date`/`str`/`int`/`None` -> 各抛 `ConfigError` 且 `path is None`（不得外泄裸 `AttributeError`）。理由：主消费方 3.2/11.1 传 `date` 而非 `datetime`、或从别处拿到字符串戳，是这条链上最常见的传参错；实测把该守卫变异成 `if False:` 时 87 例全绿，而变异体下 `date(2026,3,4)` 会在 `cycle.utcoffset()` 抛裸 `AttributeError`，直接违反 Invariant A
 - **词表门与 `_render` 异常漏斗 MUST 可分离（round 3 r3-cand-01）**：上方"bundle 模式含词表外具名字段/位置字段"那行的三个取值，仅断言"抛 `ConfigError` 且消息含字段名"时零判别力——删掉整个词表校验循环后它们仍全绿，因为落进 `_render` 的 `KeyError`/`IndexError` 兜底产出同 `path`、同含模式名与字段名的报文。用例 MUST 另断言 `excinfo.value.__cause__` 不是 `KeyError`/`IndexError`（词表门直接 `raise`、无 `__cause__`）**且**报文含 `_validate_pattern` 独有措辞。位置字段 `{}` 的 `field` 为空串，故守卫 MUST 写 `if field is not None:` 而非 `if field:`，否则该参数被静默跳过
 - **哨兵桩 MUST 对宽捕获探针有判别力（round 3 r3-cand-02）**：桩体抛 `AssertionError` 只杀得掉不吞异常与 `except OSError` 的探针；`except Exception:` / 裸 `except:` 探针全部存活（实测 `os.walk`/`os.stat`/`os.listdir` 四个宽捕获变异体均 87 全绿，而同形态的 `except OSError` 对照组变红 20–21 例）。正确形态：桩体先把被调原语名 append 进模块级列表再抛 `AssertionError`（保留纵深），并在拒绝路径 `monkeypatch.undo()` 之后、happy path `judge` 返回之后断言该列表为空。**MUST NOT** 改用 `BaseException` 子类——裸 `except:` 同样吞得掉。`os.access` 那条兄弟取证（cand-08）换用同一记录式桩即顺带闭合
-- **嵌套 format_spec 绕过词表门后的渲染失败（round 4 r4-cand-01）**：`string.Formatter().parse` 不暴露嵌套格式说明符内的字段（实现注释已载明），故 `gfs.f{lead:{member}}.grib2` 一类模式的内层字段对词表门不可见、`{lead}` 门放行，直到 `_render` 才由 `str.format` 抛出。四个内层形态 `{member}` / `{0}` / `{lead[0]}` / `{lead.nosuch}` 分别触发 `KeyError`/`IndexError`/`TypeError`/`AttributeError`，MUST 各有一条用例断言 `judge` 抛 `ConfigError` 且 `path == "raw.<源>.bundles"`。**MUST NOT 断言 `__cause__` 的异常类型**——日后若在 `_validate_pattern` 补 format_spec 门，该异常将由词表门直接 raise 而无 `__cause__`，钉 cause 会让用例二次重写。这四腿是 Invariant A 在该输入类上唯一的承重结构：把 `_render` 的 except 元组缩成 `(ValueError,)` 时 92 例全绿，而变异体下 `judge` 漏出裸 `KeyError`
+- **#52 覆盖 round-4 嵌套 format_spec 路由**：`_validate_pattern` 必须检查 `Formatter.parse` 返回的 `format_spec` 与 `conversion`，并在它们非空/非 `None` 时直接拒绝；还必须显式拒绝原文本中的嵌套或转义花括号。原四个内层失败形态与两个可成功渲染成畸形文件名的形态现在都在词表门前收敛为 `ConfigError(path="raw.<源>.bundles")`，不再依赖 `_render` 的 cause 类型。`_render` 的 `(ValueError, KeyError, IndexError, TypeError, AttributeError)` 漏斗仍原样保留为程序内绕过验证的纵深防御，但合法公共路径不靠它接受 format spec
 - **请求门判据 MUST 是 `config.cycle.hours` 而非常量域（round 4 r4-cand-02）**：`cycle.hours` 取 `{0, 12}` 真子集是设计内合法取值（运维用 `cycle.hours = [0]` 表达"本环境只跑 00Z"）。上方"请求 06Z cycle"那行用默认 `(0, 12)` 配置，06Z 在两个判据下同样被拒，对本条零判别力。MUST 另有一条用例：`cycle_hours=(0,)` + 12Z 请求 -> 抛 `ConfigError` 且 `path == "cycle.hours"`（实测判据换成 `CYCLE_HOURS_DOMAIN` 时 92 例全绿）
 - **12Z 的 happy path（round 4 r4-cand-03）**：全部产出 verdict 的用例都跑 00Z 时，把 cycle 小时带进路径的两道门（`{cycle_hour}` 的实参、cycle 目录戳）与常量 `0` 不可区分。MUST 有一条 12Z 完整用例，其预期清单以**字面量**构造（目录段逐字 `2026030412`、文件名逐字含 `t12z`），断言 `expected_files` 相等且 `complete is True`；MUST NOT 复用测试助手里的 cycle 戳常量。一条用例同时杀死两道门（实测两个变异体各 1 failed，此前均 92 全绿）
 - `cd producer && uv run pytest` -> 退出码 0
@@ -919,7 +929,7 @@ Change surface:
 - 快照清单 `nwm-snapshot-inventory.md:44` 的目标路径 `state/state_qc.py` 由 **#9** 补齐：本 issue 只落格式层子集到 `state/cfg_ic.py`，不建空的 `state_qc.py` 占位（避免死代码），该行的落地状态在本 PR 内标注为「部分（格式层）」
 
 Must preserve:
-- 移植函数的判定语义与 NWM pin 逐字一致（分段识别、lake preamble 处理、declared-vs-actual lake 行数校验）；偏离 MUST 在模块头注明
+- `cfg_ic.py` 以 NWM pin 的分段识别语义为兼容基线，但不再要求逐字等价；yd MAY 修复确认缺陷。每一处偏离 MUST 在快照清单对应行「剥离点」登记“问题 + 修法”，并在模块头注明，二者缺一不可
 - 本模块 MUST 保持 stdlib-only、零运行时 NWM import、零数据库/scheduler 依赖（agent-ops §2.2 / §7.2）；不依赖 #5 在途的 object-store 工作
 - 不新增依赖、`producer/uv.lock` 不变
 
@@ -1006,7 +1016,7 @@ Non-goals:
 Review focus:
 - `render` 是否真由逐字行还原——任何经 `float`/格式化字符串重建行文本的路径都是缺陷（会在脏输入上丢字节，而干净输入恒绿，看不出来）
 - roundtrip 断言是否具判别力：脏输入矩阵是否真覆盖 CRLF / 尾空格 / 空行 / 记法混合 / 无末尾换行五类，结构索引 oracle 是否用了两种 mesh 规模而非常量期望
-- 移植函数是否与 NWM pin 逐字一致、是否逐函数带溯源注释；有无引入运行时 NWM import 或数据库符号
+- 移植函数相对 NWM pin 的每处语义偏离是否都在快照清单「剥离点」登记“问题 + 修法”并在模块头注明；是否逐函数带溯源注释；有无引入运行时 NWM import 或数据库符号
 - `MAX_STATE_IC_BYTES` 是否在**读取前**生效（有界读），而非先读满再判断
 - 是否越界落地了 #9 的结构检查/重戳/负残差符号（含"顺手先放着"的死代码）
 
@@ -1319,7 +1329,7 @@ Domain packs (from active profile):
 ## 5. 执行器抽象：JobExecutor 协议与 fake
 
 - [x] 5.1 定义 `JobExecutor` 协议（submit/poll、job ID/partition/终态/起止时间语义）与进程内 fake（成功/失败/超时可编排），接口契约测试
-- [x] 5.2 实现 Slurm 生产执行器（`sbatch`/`sacct` 封装，参数全部装配自 `local.toml`、零内置默认）；本阶段不做行为测试（M4 oracle），本地判据 = 参数装配纯函数检查 + 协议一致性
+- [x] 5.2 实现 Slurm 生产执行器（`sbatch`/`sacct` 封装，资源参数全部装配自 `local.toml` 且零默认）；#69 后补客户端命令 timeout，默认只来自配置层的唯一常量 60；本地验证参数装配、协议一致性与 timeout 转发/异常边界，真实 Slurm 时延归 M4
 
 依赖：组 1（Slurm 字段结构）
 §13.1 归属：控制器（支撑）
@@ -1432,14 +1442,14 @@ Project profile: yd-viewer
 **模块归属裁决（先读这条，它决定文件落点）**：issue 正文写"Module / Scope: producer 包 `yd_producer.executor`（Slurm 实现）"，但 Slurm 生产实现 **MUST NOT 写进 `producer/src/yd_producer/executor.py`**。理由是硬的：#10 fixture 把"源码机检"钉成了验收项，`producer/tests/test_executor.py:518-520` 逐字断言 `executor.py` 文本中不出现 `partition`/`account`/`cpus`/`memory`/`walltime` 任一字面量；而本 issue 的验收标准"装配产物含全部五项资源参数"必然要求这些字段名出现在装配层——`sbatch` flag 无法从键名推导（`cpus`→`--cpus-per-task`、`memory`→`--mem`、`walltime`→`--time`）。把实现塞进 `executor.py` 只有两条出路：删掉那条守卫测试（oracle 完整性违规，Phase 8 硬闸拦截），或让装配拿不到字段名（做不出验收）。故本 issue 落**同包新模块** `producer/src/yd_producer/slurm.py`：`executor.py` 是**不透明协议层**，`slurm.py` 是 #10 fixture 所称"调用方按 `required_fields` 的键取值"里的那个**受权解释点**。issue 的 "PR Boundary: executor 模块扩展" 按包义解读（`yd_producer` 的执行器面扩展），不按单文件解读。
 
 Change surface:
-- 新增 `producer/src/yd_producer/slurm.py`：`SBATCH_FLAGS`、`build_sbatch_command`、`parse_sbatch_job_id`、`build_sacct_command`、`SACCT_ENV`、`parse_sacct_record`、`SLURM_STATE_MAP`、`SlurmJobExecutor`、`subprocess_runner`
+- 新增 `producer/src/yd_producer/slurm.py`：`SBATCH_FLAGS`、`build_sbatch_command`、`parse_sbatch_job_id`、`build_sacct_command`、`SACCT_ENV`、`parse_sacct_record`、`SLURM_STATE_MAP`、`SlurmJobExecutor`、`subprocess_runner`；按 #47 收尾裁决补独立失败退出码 provider（含 ExitCode 命令构造与解析），供 CLI 注入 `run_sources`
 - 新增 `producer/tests/test_slurm.py`
-- 不改动 `executor.py`、`config.py`、`cli.py`、`geometry.py`、`nwm.py`、`pyproject.toml`、`uv.lock`
+- 本 #11 交付时不改 `executor.py`、`config.py`、`cli.py`、`geometry.py`、`nwm.py`、`pyproject.toml`、`uv.lock`；#69 收尾裁决只追加 `config.py` 的 timeout 配置字段/默认、`slurm.py` 的真实 runner 时限、14.2 CLI 的生产绑定及对应测试，仍不改 `executor.py` 协议
 
 Must preserve:
 - `producer/src/yd_producer/executor.py` **零改动**，`producer/tests/test_executor.py` 全部用例继续通过——含 `:518-520` 的字面量守卫（本 issue 不放宽、不改写、不删除该守卫；它守的是协议层，不是本模块）
-- `yd_producer.config` / `cli` / `geometry` / `nwm` 行为不变，既有测试全绿
-- producer 依赖面不变：本 issue 只用 stdlib（`dataclasses`/`datetime`/`os`/`shlex`/`subprocess`/`typing`），`uv sync --frozen` 无 drift
+- `yd_producer.config` 除 #69 唯一 timeout 配置增量外，`cli` 除 14.2 生产绑定外，以及 `geometry` / `nwm` 行为不变，既有测试全绿
+- producer 依赖面不变：本 issue 只用 stdlib（`dataclasses`/`datetime`/`functools`/`os`/`shlex`/`subprocess`/`typing`），`uv sync --frozen` 无 drift
 
 Must add/change（逐条钉死，实现方消费不重议）:
 
@@ -1470,33 +1480,32 @@ Must add/change（逐条钉死，实现方消费不重议）:
 
 **D. `sacct` 命令与输出解析（纯函数）**
 
-- `build_sacct_command(job_id: str) -> tuple[str, ...]` MUST 为 `("sacct", "-j", job_id, "-X", "--noheader", "--parsable2", "--format=JobID,State,Start,End")`。**四列止步于此是本 fixture 的明示裁决，不是遗漏**——两项本可加的列各有归属，逐条见下：
-  - **不取 `ExitCode`**：`specs/run-controller/spec.md`「失败处理」MUST 要求合并日志含退出码，但 `JobRecord`（#10 已合并、frozen、全字段无默认）没有承载它的字段；加字段即改 `executor.py` 的公共 schema，与本 issue「`executor.py` 零改动」和 #10 既有测试直接冲突，属跨 issue 变更。故本 issue **不取该列**，理由**只**有两条、且都是本 issue 自身的边界：`JobRecord`（#10 已合并、frozen、全字段无默认）没有承载退出码的字段，加字段即改 `executor.py` 的公共 schema，与本 issue「`executor.py` 零改动」冲突；且本 fixture 已把 `build_sacct_command` 的 argv 逐元素钉死，改列即改那条 oracle。
-
-承载体的裁决 issue 是**已存在的 #47**「失败日志退出码的载体待裁决」（PR #39 已 DEFER 到此），**不另开新 issue**——本 fixture 早先写的"Phase 8 经 issue-scribe 落一条 tracked issue"是重复路由，已更正。**本 fixture MUST NOT 替 #47 作裁决**：#47 的方案 (b) 含两个并列支——「由作业自身的批处理封装写进它自己的日志（该日志由 #24 合并）」**或**「由 #11 另起一次 `sacct` 取得」——**两支在 #47 处均保持开放**。本 fixture 早先的措辞只复述了前一支并加了"不经 `sacct` 取退出码"，等于替 #47 关掉了后一支（round 2 审核 cand-09，verifier CONFIRMED/FIX_NOW），已删除。若 #47 最终选 `sacct` 支，届时按文档优先原则先修订本 fixture 钉死的 argv 再动码。在 #47 落定前，**#24 的日志合成 MUST NOT 假定退出码来自本模块**。
+- `build_sacct_command(job_id: str) -> tuple[str, ...]` MUST 为 `("sacct", "-j", job_id, "-X", "--noheader", "--parsable2", "--format=JobID,State,Start,End")`。**轮询通道四列止步于此**；它 MUST NOT 取 `ExitCode`，`JobRecord` 继续保持 #10 钉死的七字段。#47 选择独立失败收尾 provider：仅当同一 terminal `JobRecord.state` 为 `FAILED`/`TIMEOUT` 时，provider 对该 `job_id` 恰执行一次 `sacct -j <job_id> -n -P --format=ExitCode`，将输出规范化为非空退出码字符串并原样返回；调用方把该字符串作为 `FailureInputs.exit_code` 传给 `finalize_failed_job`。这不是轮询的第二个状态通道，不改变 `build_sacct_command`、`parse_sacct_record` 或 `JobRecord`；成功与非终态作业 MUST 零调用。
   - **不取 `Submit`**：`submitted_at` 由 `submit` 取一次本地时钟写定（#10 fixture 的打戳时机 MUST），而 `sacct` 在作业刚提交时可能尚无记录（见 Known limits），提交那一刻根本取不到 `Submit`；若改为 `poll` 时用 `Submit` 覆写，同一字段会在一次 run 内先后报出两个值——一个字段两个权威，比时钟偏斜更坏。故保留本地钟，偏斜风险按 Known limits 归 M4。`-X` **不可省**：缺它 `sacct` 会连作业步（`.batch`/`.extern`）一起吐，解析拿到多行且首行未必是分配本体。
-- `SACCT_ENV: Mapping[str, str]` MUST 至少含 `{"TZ": "UTC", "SLURM_TIME_FORMAT": "standard"}`。**并入语义钉死为叠加而非替换**：`SlurmJobExecutor` 在调用 runner 前构造 `{**os.environ, **SACCT_ENV}` 传入；MUST NOT 只传 `SACCT_ENV`——那会让子进程丢掉 `PATH` 与 Slurm 客户端环境，M4 现场每次 `poll` 都失败，正是这条钉死本要防的失败类。叠加发生在 executor 侧（可测），不在 `subprocess_runner` 侧（不测）。理由：`sacct` 默认吐集群本地时间且格式受该环境变量左右，而 `JobRecord.__post_init__` 对 naive 与非零偏移 `datetime` 一律 fail closed（`executor.py:_require_utc`）——不钉死时区就是把一个必然的 `ExecutorError` 留到 M4 现场触发。
+- `SACCT_ENV: Mapping[str, str]` MUST 至少含 `{"TZ": "UTC", "SLURM_TIME_FORMAT": "standard"}`。**并入语义钉死为叠加而非替换**：`SlurmJobExecutor` 在调用 runner 前构造 `{**os.environ, **SACCT_ENV}` 传入；MUST NOT 只传 `SACCT_ENV`——那会让子进程丢掉 `PATH` 与 Slurm 客户端环境，M4 现场每次 `poll` 都失败，正是这条钉死本要防的失败类。环境叠加发生在 executor/provider 侧；`subprocess_runner` 只透传给底层进程并负责 #69 的 timeout 参数。理由：`sacct` 默认吐集群本地时间且格式受该环境变量左右，而 `JobRecord.__post_init__` 对 naive 与非零偏移 `datetime` 一律 fail closed（`executor.py:_require_utc`）——不钉死时区就是把一个必然的 `ExecutorError` 留到 M4 现场触发。
 - `parse_sacct_record(stdout: str, job_id: str) -> tuple[JobState, datetime | None, datetime | None]`：
   - 非空行数 MUST 恰为 1（「非空行」判据同 §C：`strip()` 后非空）；为 0 或 >1 -> 抛 `ExecutorError(job_id=job_id)`（`-X` 下多行意味着出现了未预期的作业副本，静默取首行会让 `poll` 报告一个没被查询的实体）。该唯一行按 `|` 拆四列；列数不等于 4 -> 抛 `ExecutorError(job_id=job_id)`；
   - 首列 JobID 与查询 `job_id` 不相等 -> 抛 `ExecutorError(job_id=job_id)`（防串台）；
   - State 列先按空格截首词（`sacct` 的 `CANCELLED by 1234` 形态 MUST 归一为 `CANCELLED`），再查 `SLURM_STATE_MAP`；**未知状态串 -> 抛 `ExecutorError(job_id=job_id)`，MUST NOT 兜底映射为 `FAILED`**（兜底会把"没见过的调度器状态"伪装成"作业自身失败"，正是 #10 拆分 `TIMEOUT`/`FAILED` 要保住的那条运维判据）；
   - Start/End 列为 `Unknown` / `None` / 空 -> `None`；否则按 `%Y-%m-%dT%H:%M:%S` 解析并挂 `timezone.utc`；格式不合 -> 抛 `ExecutorError(job_id=job_id)`。
 - `SLURM_STATE_MAP: Mapping[str, JobState]` MUST 逐条为：`PENDING`/`REQUEUED`/`REQUEUE_HOLD`→`PENDING`（重排队是健康作业的中间态，落进「未知串必抛」会把它变成假故障）；`RUNNING`/`CONFIGURING`/`COMPLETING`/`RESIZING`/`SUSPENDED`→`RUNNING`；`COMPLETED`→`SUCCEEDED`；`TIMEOUT`→`TIMEOUT`（**MUST NOT** 折叠进 `FAILED`）；`FAILED`/`CANCELLED`/`NODE_FAIL`/`OUT_OF_MEMORY`/`BOOT_FAIL`/`DEADLINE`/`PREEMPTED`/`REVOKED`→`FAILED`。
+- 独立失败退出码 provider MUST 接受一个 terminal `JobRecord`，且只接受 `FAILED`/`TIMEOUT`；它恰调用一次 runner，argv 逐元素为 `("sacct", "-j", record.job_id, "-n", "-P", "--format=ExitCode")`。输出中去除纯空白行后必须恰有一行、恰有一个非空字段，返回该字段的 `strip()` 结果（例如 `"42:7"`）；空、多行、多字段或 runner 异常统一抛 `ExecutorError(job_id=record.job_id)`。provider MUST 使用与 Slurm executor 相同的 runner 与环境/超时政策，但不得修改或复用轮询记录；每次失败收尾只查询一次，不重试。
 
 **E. `SlurmJobExecutor`（协议一致性，注入式运行器）**
 
-- `SlurmJobExecutor(*, required_fields: Sequence[str], clock: Callable[[], datetime], runner: Callable[..., str])`，三者**均无默认值**。`runner(argv: Sequence[str], *, env: Mapping[str, str] | None) -> str` 返回子进程 stdout；模块另提供 `subprocess_runner` 作为真实实现。
-- 注入 runner **不是** design.md D3 所弃的 "subprocess mock"：D3 弃的是"用命令行 mock 替代 `JobExecutor` 协议 fake 去测控制器状态机"；此处 runner 是本模块自身的进程边界，注入它测的是 argv 装配与输出解析的**组装**，argv 形态由本 fixture 逐字钉死，不脆弱。真实 `sbatch`/`sacct` 行为仍归 M4。
-- `submit(spec) -> JobRecord`：`build_sbatch_command` → `runner` → `parse_sbatch_job_id` → 取一次 `clock()` 作 `submitted_at` → 返回 `JobRecord(state=PENDING, started_at=None, ended_at=None, resources=spec.resources)`；并在实例内按 `job_id` 记住该记录（`poll` 需要 `name`/`resources`/`submitted_at`，`sacct` 不提供）。runner 抛出的任何异常 MUST 转成 `ExecutorError`，MUST NOT 外泄 `OSError`/`CalledProcessError`。
-- `submit` 调用 runner 时 `env=None`（继承当前进程环境，无需时区钉死——`sbatch` 的输出只有 job id）；`poll` 调用 runner 时 `env={**os.environ, **SACCT_ENV}`。
+- `SlurmJobExecutor(*, required_fields: Sequence[str], clock: Callable[[], datetime], runner: Callable[..., str])`，三者**均无默认值**。内部 runner 合同保持 `runner(argv: Sequence[str], *, env: Mapping[str, str] | None) -> str`，返回子进程 stdout；模块另提供真实边界 `subprocess_runner(argv, *, env, command_timeout_seconds=_DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS)`。第三参 additive、keyword-only，默认精确为共享常量 60，保证既有二参数调用也不再无限等待。#69 不把 timeout 加到 `JobExecutor` 协议或 fake runner；生产组装不得依赖兼容默认，MUST 用 `functools.partial(subprocess_runner, command_timeout_seconds=local.slurm_command_timeout_seconds)` 创建一份符合内部合同的无状态 bounded runner，并把同一个 callable 同时注入两份独立 executor 与两个独立失败 ExitCode provider；executor 的实例内 job records 仍按源隔离。
+- 注入 runner **不是** design.md D3 所弃的 "subprocess mock"：D3 弃的是"用命令行 mock 替代 `JobExecutor` 协议 fake 去测控制器状态机"；此处 runner 是本模块自身的进程边界，注入它测的是 argv 装配与输出解析的**组装**，argv 形态由本 fixture 逐字钉死，不脆弱。真实 Slurm 响应时延分布归 M4，但 `subprocess_runner` 的 timeout 参数转发和异常行为由 M2 本地测试覆盖。
+- `submit(spec) -> JobRecord`：`build_sbatch_command` → `runner` → `parse_sbatch_job_id` → 取一次 `clock()` 作 `submitted_at` → 返回 `JobRecord(state=PENDING, started_at=None, ended_at=None, resources=spec.resources)`；并在实例内按 `job_id` 记住该记录（`poll` 需要 `name`/`resources`/`submitted_at`，`sacct` 不提供）。runner 抛出的任何异常 MUST 转成 `ExecutorError`，MUST NOT 外泄 `OSError`/`CalledProcessError`/`TimeoutExpired`。
+- `submit` 调用 runner 时 `env=None`（继承当前进程环境，无需时区钉死——`sbatch` 的输出只有 job id）；`poll` 调用 runner 时 `env={**os.environ, **SACCT_ENV}`。生产 bounded runner 的 `command_timeout_seconds` 已由 `partial` 绑定；因此 `sbatch`、轮询 `sacct` 与独立失败 ExitCode `sacct` 每次子进程调用都向 `subprocess.run(..., timeout=command_timeout_seconds)` 传同一正整数秒数。不得只限时其中一条路径，不得在 runner 内重试、sleep、cancel 或把它当作 Slurm job walltime/watchdog。
 - `poll(job_id) -> JobRecord`：本实例未提交过的 `job_id` -> 抛 `ExecutorError(job_id=job_id)`（与协议「未知 `job_id` 必抛」一致）；否则 `build_sacct_command` → `runner`（并入 `SACCT_ENV`）→ `parse_sacct_record` → 用解析出的 state/start/end 重建 `JobRecord`（`submitted_at`/`name`/`resources` 取自记住的提交记录），更新实例内记录并返回。记录不变式仍由 `JobRecord.__post_init__` 在构造点复检——本模块 MUST NOT 自行复制那套不变式（第二权威）。
 - 终态幂等：已达终态的 job 再 `poll` MUST 返回同一记录且 MUST NOT 再调 runner。
 - `isinstance(SlurmJobExecutor(...), JobExecutor)` MUST 为真，且 `submit`/`poll` 的 `inspect.signature` 与协议同名方法逐参数一致（承 #10 evidence 先例）。
 
 Seams under test:
-- `build_sbatch_command` / `parse_sbatch_job_id` / `build_sacct_command` / `parse_sacct_record`（纯函数，可逐值断言——issue 正文所称"参数装配纯函数检查"）
+- `build_sbatch_command` / `parse_sbatch_job_id` / `build_sacct_command` / `parse_sacct_record`（轮询纯函数，可逐值断言——issue 正文所称"参数装配纯函数检查"）
+- 独立失败退出码 provider 配记录型假 runner：terminal `JobRecord` → 精确 `sacct -j <job_id> -n -P --format=ExitCode` argv → 非空退出码字符串；不经 `poll`、不改 `JobRecord`
 - `SlurmJobExecutor.submit/poll` 配记录型假 runner + `StepClock`（"协议一致性"）
-- `subprocess_runner`：**不测**（真实进程边界，M4 oracle）
+- `subprocess_runner`：#11 原本只做签名存在性；#69 收尾后以 monkeypatch `subprocess.run` 本地验证 `timeout=` 精确转发与 `TimeoutExpired` 原样抛给 executor/provider 包装层。真实 Slurm 响应时延分布仍归 M4 oracle
 
 Risk packs considered (core):
 - Public API / CLI / script entry: selected - `SlurmJobExecutor` 是 `JobExecutor` 的生产实现，#26–#28 按协议消费；四个纯函数是本模块公开面
@@ -1505,8 +1514,8 @@ Risk packs considered (core):
 - Schema / columns / units / field names: selected - `sacct --format` 的四列顺序、`|` 分隔、状态串词表、时间格式即解析 schema，错配直接污染运行报告与 receipt
 - Auth / permissions / secrets: not selected - argv 里只有队列名/账户名/资源额度一类调度参数，无凭据；本模块不打印命令输出
 - Concurrency / shared state / ordering: selected - 实例内 job 记录表是共享可变状态；终态幂等与"未知 job_id 必抛"是其契约（真实并发归控制器 flock，本模块单线程）
-- Resource limits / large input / discovery: not selected - 无发现逻辑；`sacct` 输出为单作业单行（`-X`）
-- Legacy compatibility / examples: not selected - 全新模块，仓库内零既有消费者（控制器尚未落地）
+- Resource limits / large input / discovery: selected - `sacct` 输出仍为单作业单行（`-X`）；#69 为每次真实客户端子进程设置同一有限时限，防持锁永久阻塞，但不限制作业 walltime
+- Legacy compatibility / examples: selected - #11 交付时是全新模块；#69 对已导出的 `subprocess_runner` 只 additive 增加带 60 默认的 keyword-only 参数，既有 argv/env 调用保持可用
 - Error handling / rollback / partial outputs: selected - fail-closed 是核心验收项：键集不等、无 flag 字段、未知状态串、空/畸形 `sacct` 输出、runner 异常全部收敛到 `ExecutorError`，不返回半成品记录
 - Release / packaging / dependency compatibility: selected - 只用 stdlib，不得新增依赖，`uv sync --frozen` 无 drift
 - Documentation / migration notes: not selected - 无迁移；模块语义由本 fixture 钉死
@@ -1537,7 +1546,8 @@ Required evidence（每条 input -> expected output）:
 - `""`、`"   \n"`、`"abc"`、`";cluster0"` -> 各抛 `ExecutorError` 且 `exc.job_id is None`
 
 `sacct`（D）:
-- `build_sacct_command("12345")` -> 逐元素等于 `("sacct","-j","12345","-X","--noheader","--parsable2","--format=JobID,State,Start,End")`
+- `build_sacct_command("12345")` -> 逐元素等于 `("sacct","-j","12345","-X","--noheader","--parsable2","--format=JobID,State,Start,End")`，且不含 `ExitCode`
+- 独立失败退出码 provider 收到 `FAILED`/`TIMEOUT` 的 terminal record（job ID `12345`），runner 返回 `"42:7\n"` -> runner 恰调用一次，argv 逐元素等于 `("sacct","-j","12345","-n","-P","--format=ExitCode")`，返回值逐字为 `"42:7"`；成功/非终态 record 在 runner 零调用前被拒，空输出、多非空行、多字段与 runner 异常均抛 `ExecutorError` 且 `job_id == "12345"`
 - `SACCT_ENV["TZ"] == "UTC"` 且 `SACCT_ENV["SLURM_TIME_FORMAT"] == "standard"`
 - `"12345|COMPLETED|2026-08-28T00:00:00|2026-08-28T01:00:00"` -> `(SUCCEEDED, 2026-08-28T00:00:00+00:00, 2026-08-28T01:00:00+00:00)`，两个 `datetime` 断言 `tzinfo is not None and utcoffset() == timedelta(0)`
 - **参数化：** `SLURM_STATE_MAP` 的每个键各一行 -> 得到该键映射的 `JobState`；其中 `TIMEOUT` 行 -> `JobState.TIMEOUT`（**断言 `is not JobState.FAILED`**）
@@ -1559,7 +1569,9 @@ Required evidence（每条 input -> expected output）:
 - `poll("nosuch")`（本实例未提交过）-> 抛 `ExecutorError` 且 `exc.job_id == "nosuch"`，假 runner 调用次数为 0
 - **env 叠加（两条判别性断言，各挡一种错法）**：`monkeypatch.setenv("YD_SENTINEL", "1")` 与 `monkeypatch.setenv("TZ", "Asia/Shanghai")` 后 `poll` -> 假 runner 收到的 `env` **同时**含 `YD_SENTINEL=1`（挡 `env=SACCT_ENV` 的整体替换写法）与 `env["TZ"] == "UTC"`（挡 `{**SACCT_ENV, **os.environ}` 的顺序写反）；`submit` 收到的 `env is None`
 - 假 runner 抛 `OSError` / `subprocess.CalledProcessError` -> `submit` 与 `poll` 各抛 `ExecutorError`（原异常 MUST NOT 外泄；以 `pytest.raises(ExecutorError)` 断言），且 `str(exc)` **含原异常文本**（`sbatch` 的诊断信息走 stderr、runner 只回 stdout，转译若不带原文就只剩「非全数字」一类无信息消息）
-- `inspect.signature(subprocess_runner)` 与 `runner` 契约一致——首参为位置 argv、`env` 为 keyword-only——且模块可导入（该符号不测行为，但必须存在且签名对得上——否则它可以完全不存在而全绿）
+- #69 `subprocess_runner` 签名精确为 `(argv, *, env, command_timeout_seconds=_DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS)`：首参位置参数，后两项 keyword-only，`env` 无默认，timeout 默认对象精确等于 `yd_producer.config` 的内部常量 60。旧式只传 argv/env 与显式传 60 两者都让 monkeypatch 的 `subprocess.run` 收到 `timeout=60`；显式传 37 则精确收到 37，且既有 `check/capture_output/text/env` 参数不变。让该桩抛 `subprocess.TimeoutExpired` -> runner 原对象外传给包装层，不吞、不重试（调用计数恰一）。绑定 37 后 executor/provider 仍只以 `(argv, env=...)` 调用即可，记录桩确认内部不另传或覆盖 timeout；`inspect.signature(partial_runner)` 中该 keyword 的默认值为 37，不要求它从签名中消失
+- #69 生产绑定：以 `partial(subprocess_runner, command_timeout_seconds=local.slurm_command_timeout_seconds)` 构造一份 bounded runner；两份独立 `SlurmJobExecutor` 与两个独立 ExitCode provider 全部消费该同一个 callable。分别驱动 `sbatch` submit、普通 `sacct` poll、失败 `sacct ExitCode`，三次 `subprocess.run` 的 `timeout` 都精确为显式值；删任一路径的绑定、写死 60、为各路径另造 policy 或把 timeout 混入 resources/sbatch argv 的变异必红
+- #69 超时转译：`sbatch` bounded runner 超时 -> `ExecutorError(job_id=None)`；轮询或 ExitCode `sacct` 超时 -> `ExecutorError(job_id=<同一 job>)`；消息含命令名、`TimeoutExpired` 与秒数，`__cause__` 是原异常，零自动重试。非 timeout 的 OSError/CalledProcessError 既有行为不变
 - 假 runner 令 `sacct` 返回 `COMPLETED` 但 `Start` 早于 `submitted_at` -> 抛 `ExecutorError`（不变式由 `JobRecord.__post_init__` 拦下；证明本模块未绕过构造点校验）
 - `SlurmJobExecutor` 的 `required_fields`/`clock`/`runner` 三个参数均**不可省**（缺任一即 `TypeError`），且均为 keyword-only
 - 全部失败路径以 `pytest.raises(ExecutorError)` 表达，MUST NOT 用 `pytest.raises(Exception)`
@@ -1571,21 +1583,21 @@ Required evidence（每条 input -> expected output）:
 
 Non-goals:
 - 真实 `sbatch`/`sacct` 提交与查询行为、真实状态码在集群上的取值分布 —— M4 oracle（design.md D3、issue 正文 Out of Scope）
-- `subprocess_runner` 自身的**行为**测试（真实进程边界，M4 oracle）。其存在性与签名一致性仍有一条 evidence（见上），因为仓库没有类型检查闸，纯靠类型标注等于没有闸。
-- 控制器对本执行器的消费（前沿、双源并行、失败隔离、flock）—— 组 12–14，issue #22–#28
-- 作业取消 / watchdog —— compute-loop §10 明确不做
+- `subprocess_runner` 的真实 Slurm 响应时延分布与现场阈值调优仍归 M4；#69 只把 `timeout=` 的本地参数转发/异常边界纳入测试，不起真实 `sbatch`/`sacct`
+- 控制器对本执行器的前沿、双源并行、失败隔离与 flock 仍归组 12–14；#69 只补客户端超时后沿 #58 保留 work/停本源的既有异常路由
+- 作业取消 / watchdog —— compute-loop §10 明确不做；单次客户端 subprocess timeout 不等于作业 walltime 或 watchdog
 - `local.toml` 资源取值的语义校验（`walltime` 格式、`partition` 是否真实存在、`memory` 单位）—— 装载层只校验类型（#2 已裁决"不做值域校验"），真实取值的正确性归 M4 现场
 - **不钉以下三处 `strip()`，按 slack 处理**（round 3 的系统性归一化扫描共发现 6 个存活变异体，其余三处逐条裁决于此，使后续轮次不再重复发现同一批）：`_parse_sacct_time` 对时间列的 `raw.strip()`、JobID 串台比对的 `reported_id.strip()`、状态串截首词前的 `raw_state.strip()`。理由：三者都是 `--parsable2` 输出上不会出现的形态（该模式不产生列内 padding），且都不在 spec 或本 fixture 的任何 MUST 之下；它们是防御性余量，不是被钉死的属性。若日后现场证明 `sacct` 会吐 padding，按文档优先先修订本条再动码。
 - 跨进程的 job 记录持久化：`poll` 依赖实例内提交记录，故只支持"同一 run 进程内提交后轮询"。这正是 `specs/run-controller/spec.md`「并发与锁」的形态（单进程持 flock 覆盖提交→等待→发布全生命周期），非缺陷
-- `squeue` 回退：`sacct` 落库前的查询空窗按 fail closed 处理（见 Known limits），本 issue 不引入第二个查询通道
+- `squeue` 回退：`sacct` 落库前的查询空窗按 fail closed 处理（见 Known limits）；**轮询通道不取 `ExitCode`，退出码由失败收尾 provider 单独取一次**。该 provider 不参与状态轮询，不构成 `squeue` 回退或第二个轮询通道
 
 Known limits（每条在 PR 工作说明中复述，并按 Phase 8 规则路由）:
 - **`sacct` 落库延迟**：作业刚提交时 `sacct` 可能尚无记录，本模块按 fail closed 抛 `ExecutorError`。M2 无真实调度器，无法判定该窗口是否需要重试/回退 `squeue`；归 M4 现场验证。
 - **时钟偏斜**：`submitted_at` 取本地时钟、`started_at` 由 Slurm 报告，登录节点与计算节点时钟偏斜可能触发 `JobRecord` 的 `submitted_at <= started_at` 不变式而抛 `ExecutorError`。M2 不引入容差（容差是一个内置默认，正是本 issue 要消除的形态）；归 M4 现场验证。
-- **退出码不经本模块（承载体裁决仍在 #47，本 fixture 不预判）**：`specs/run-controller/spec.md`「失败处理」要求合并日志含退出码，本模块的 `sacct --format` 明示不取 `ExitCode`（理由见 §D，均为本 issue 自身边界）。承载体的裁决 issue 是已存在的 **#47**，不另开新件；其方案 (b) 的两个并列支（作业体自写日志由 #24 合并 / 由 #11 另起一次 `sacct`）**均未被本 fixture 关闭**。在 #47 落定前 **#24** 的日志合成 MUST NOT 假定退出码来自本模块。
+- **#47 已裁决为独立 `sacct ExitCode` provider**：轮询 `build_sacct_command` 仍不取 `ExitCode`；失败收尾 provider 对 terminal job 单独执行一次 `sacct -j <job_id> -n -P --format=ExitCode`，返回字符串作为 `FailureInputs.exit_code`。`JobRecord` 七字段不变，作业体自写退出码的备选不采用。真实站点输出形态仍须在 M4 oracle 复核，但生产 provider 的实现与 CLI 注入属于 M2 收尾任务。
 - **进程死亡窗口（孤儿作业）**：`poll` 只认本实例提交过的 `job_id`（fixture §E 的 MUST），故 run 进程在等待期被杀后，flock 随进程释放而 Slurm 作业仍在跑，下一个 tick 无从发现它——按「未提交残留清理重跑」删 work 并重新提交，会出现同源两个在途作业（违反 agent-ops §8.3），且孤儿作业继续往被删的目录写。**更正本 fixture 早先的措辞**：Non-goals 里「跨进程 job 记录持久化…正是「并发与锁」的形态，非缺陷」只对**进程存活**的正常路径成立；崩溃一支不被「并发与锁」覆盖。归属：崩溃恢复前置由 **#23/#28** 的 fixture 裁决（按 receipt 里的 job ID 作一次存活确认，或"见半成品 work 即停该源等人工"）。
 - **已提交但未登记窗口**：`submit` 先调 runner 再解析 job id，故 `sbatch` 退出 0、作业已排队、而 stdout 形态超出 §C 钉死的域时，`parse_sbatch_job_id` 抛错且 `self._records` 里什么都没有——后果与上一条同类。缓解：错误消息带原始行/原始 stdout，运维可人工定位。归属同上（**#23/#28**）。
-- **`poll` 抛错 ≠ 作业失败**：`ExecutorError` 只有 `job_id` 一个结构化属性，「`sacct` 尚未落库」与「解析失败」抛的是同一个无类别异常，控制器没有可机检的判别位。本 issue 不加判别位（那要么改 `executor.py` 的公共异常、要么在协议层外另立一套，均越界）；**#26** 的 fixture MUST 钉死「`poll` 抛出异常不得直接触发「失败处理」的 work 删除」。
+- **`poll` 抛错 ≠ 作业失败（#58 已核销，#69 复用）**：`ExecutorError` 只有 `job_id` 一个结构化属性，`sacct` 尚未落库、解析失败与客户端 subprocess timeout 都不证明作业终态。本 issue 不加判别位；controller 把 submit/poll timeout 分别保留为 `RunError(phase="submit"|"poll", __cause__=ExecutorError)`，终止本源 worker并保留 exact work，零 ExitCode provider/failure finalizer/collect/publish/DONE，兄弟源继续。不得把客户端 timeout 伪装成 `JobState.TIMEOUT` 或触发失败侧 work 删除。
 - **重排队语义未钉（M4 现场剧本）**：`REQUEUED`/`REQUEUE_HOLD` 被当作健康中间态，但三处相邻面都没有保证一次重排队能活下来——(i) `sacct -j <id> -X` 对重排队作业是否吐多行未经现场确认，多行会被「行数恰为 1」硬抛；(ii) `sbatch` 未给 `--open-mode`，重跑是截断还是追加取决于站点 `JobFileAppend`，截断会抹掉首次尝试的 stdout/stderr，与「失败处理」的"完整 stdout/stderr"相抵；(iii) `PREEMPTED`→`FAILED` 见下条。M4 剧本：提交 → `scontrol requeue <id>` → 跑本 fixture 钉死的 `build_sacct_command` argv，数行数并核对日志是否保留首次尝试。`--open-mode` 的归属由 **#24/#25** 的 fixture 裁决（加 flag 会改本 fixture 逐元素钉死的 argv，故不在本 issue 做）。
 - **`PREEMPTED` 被钉成终态**：`PREEMPTED`→`FAILED` 叠加「终态幂等、不再查 `sacct`」，意味着被抢占后重排队仍在跑的作业会被本模块永久报成失败，控制器据此删 work 目录。M2 无真实调度器无法判定该形态是否出现；归 compute-loop §10 / M4 现场验证（本模块不做取消、不做 watchdog 是 §10 明确不做的范围）。
 - **`sacct` 时间列与 `JobRecord` 不变式的对撞（双向）**：本 fixture 假定运行中作业 `End=Unknown`、终态作业两列都有值。若某版本对运行中作业给出预估 `End`，「非终态不得带 `ended_at`」硬抛；反向地，终态行若 `End=Unknown`，「终态必须带 `ended_at`」硬抛，`COMPLETED` 行若 `Start=Unknown`，「终态（非 FAILED/TIMEOUT）必须带 `started_at`」也硬抛（`executor.py:150-176`）。方向与 fail closed 一致（宁可报错不可乱报时间），但会让 `poll` 在该形态上不可用；归 M4 现场验证。
@@ -1594,8 +1606,9 @@ Known limits（每条在 PR 工作说明中复述，并按 Phase 8 规则路由�
 Review focus:
 - `executor.py` 是否真的零改动，`test_executor.py:518-520` 的字面量守卫是否原样保留（放宽/删除该守卫即 oracle 完整性违规）
 - 键集权威是否唯一：`slurm.py` 内是否出现任何"必需五项"的固定清单，或以 `SBATCH_FLAGS` 的键集充当必需性判据（两者皆为第二权威）
-- 是否存在任何隐式默认：资源参数的 fallback 取值、`required_fields`/`clock`/`runner` 的默认值、未知 `sacct` 状态串兜底为 `FAILED`、空 `sacct` 输出兜底为 `PENDING`
-- `TIMEOUT` 是否在任何路径上被折叠为 `FAILED`
+- 除 `subprocess_runner.command_timeout_seconds` 为兼容既有调用而引用配置层唯一默认 60 外，是否存在任何隐式默认：资源参数 fallback、`required_fields`/`clock`/`runner` 默认、未知 `sacct` 状态串兜底为 `FAILED`、空输出兜底为 `PENDING`
+- 生产是否只构造一份绑定 `local.slurm_command_timeout_seconds` 的 runner，并由两 executor/两 provider 共用；sbatch/普通 sacct/ExitCode sacct 是否每次都显式到达 `subprocess.run(timeout=...)`，而 timeout 未进入 resources/argv
+- 调度器 `JobState.TIMEOUT` 是否保持明确终态；客户端 `TimeoutExpired` 是否在任何路径被误折叠为该终态、触发失败删除、重试或取消
 - 时间是否一律 tz-aware UTC，且 `SACCT_ENV` 的时区钉死是否真的并入了子进程环境（只定义常量而不传入等于没做）
 - 记录不变式是否仍由 `JobRecord.__post_init__` 独家承担，本模块是否复制了一份（第二权威）
 - 失败路径是否全部收敛到 `ExecutorError` 且 `job_id` 属性可机检定位；runner 的原生异常是否被吞而未转译
@@ -1636,13 +1649,13 @@ Project profile: yd-viewer
 
 **核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
 
-1. **清单 §1 第 35/51/52 行的 `剥离点` 列是本任务的封闭规范，逐字执行、不得自行增删**。清单约定 3 明写「规范性动作只能写在 `剥离点` 列」，故：`剥离点` 点名的动作 MUST 全部执行；`剥离点` **未**点名的符号、分支、常量 MUST 原样保留，即便它在剥离后变成无调用者的死代码。实现者对任一条有异议时，MUST 作为偏离上报，MUST NOT 自行裁决。
+1. **清单 §1 第 35/51/52 行的 `剥离点` 列是差异账本**。清单约定 3 明写「规范性动作只能写在 `剥离点` 列」，故：已点名动作 MUST 全部执行；对快照测试与非 `converter.py` 文件，未点名内容仍按原规则保留。对 `canonical/converter.py`，M2 收尾 pin 分叉裁决允许 yd 在本仓修复确认缺陷，但实现前 MUST 先把每处偏离以“问题 + 修法”登记到第 35 行「剥离点」；未登记的语义编辑仍是违规。
 2. **落码方式 MUST 是 `git show` 基线复制 + 定点编辑，MUST NOT 手抄**。三个文件各自的基线命令写死：
    - `git -C <NWM> show 8ae9b8f2:workers/canonical_converter/converter.py > producer/src/yd_producer/canonical/converter.py`
    - `git -C <NWM> show 8ae9b8f2:tests/test_canonical_converter.py > producer/tests/test_canonical_converter.py`
    - `git -C <NWM> show 8ae9b8f2:packages/common/test_netcdf4.py > producer/tests/netcdf_fixture.py`（清单 §1 第 52 行的强制改名：原名会被 pytest 误收集）
 
-   `<NWM>` = 本机 `/Users/danker/Desktop/Hydro-SHUD/NWM`（pin `8ae9b8f2` 已实测可读）。基线之上**只允许四类编辑**，任何第五类编辑都是偏离。**yd 自撰的新用例 MUST NOT 写进这三个快照文件**（写进去就在 diff-vs-pin 里造出无法归类的差异段，把裁决 2 的机械收敛证据废掉）：它们落在未登记的新文件 `producer/tests/test_canonical_db_free.py`（yd 自撰，无溯源头，不进清单路径表）：
+   `<NWM>` = 本机 `/Users/danker/Desktop/Hydro-SHUD/NWM`（pin `8ae9b8f2` 已实测可读）。基线之上的既有四类编辑如下；`converter.py` 还允许按 M2 收尾 pin 分叉裁决增加**已在清单第 35 行「剥离点」登记“问题 + 修法”**的缺陷修复，未登记语义编辑仍是偏离。**yd 自撰的新用例 MUST NOT 写进三个快照测试/fixture 文件**；converter 专属回归继续落在未登记的新文件 `producer/tests/test_canonical_db_free.py`（yd 自撰，无溯源头，不进清单路径表）：
    (a) 清单 `剥离点` 点名的删除/改写；
    (b) import 重映射：`packages.common.object_store` → `yd_producer.store.object_store`、`packages.common.storage` → `yd_producer.store.object_path`、`packages.common.source_identity` → `yd_producer.raw.source_identity`、`packages.common.test_netcdf4` → `netcdf_fixture`、`workers.canonical_converter.converter` → `yd_producer.canonical.converter`（全集以实跑 `grep -n '^from \|^import \|importlib.import_module' ` 收敛，逐个报告）；
    (c) 溯源头部注释（裁决 3）；
@@ -1697,12 +1710,11 @@ Project profile: yd-viewer
     - **Non-goals 不构成豁免**：Non-goals 那条逐字是「数值正确性与**真实 NWM 数据**验证……归 M4」，它把**真实数据**验证推给 M4，同时把**合成 fixture 点名为 M2 的 oracle**。本裁决要求的正是合成 fixture 上的值断言，落在 M2 的 oracle 形态内。GFS e2e 早已这么做（`test_canonical_db_free.py:284-298`），IFS 侧不这么做没有理由。
     - **MUST**：在 `producer/tests/test_canonical_db_free.py` 既有 IFS e2e 内补三条值断言（f003 的 `prcp_rate_or_amount == 24.0`、`shortwave_down == 100.0`、`net_radiation == 50.0`，`pytest.approx`），数值取该文件 `:316-319` 自己已算好的那三个。**MUST NOT 写进快照文件**（裁决 2）。verifier 已实测：补上后 HEAD 绿，三条变异逐条判红（`[1080000.0]`/`[150.0]`/`[3.0]` vs 期望）。
     - **判别力口径**：`net_radiation` 不在 `IFS_REQUIRED_STANDARD_VARIABLES` 内、readiness 忽略它，故 `status` 断言对它**结构上无力**；只有值断言能钉住。
-16. **【round-2 新增裁决 · `grid_definition_uri` 的大小写裂口：登记为 Known limit，不改 pin 常量】** 三个 reviewer 独立汇聚、verifier CONFIRMED 的 P2（cand-r2-04）：`IFSCanonicalConverterConfig.grid_definition_uri`(`converter.py:206`) 是 pin 逐字常量 `"canonical/IFS/grid/ifs_0p25/grid.json"`，裁决 12 的入口归一够不着它，于是修法之后 IFS 产物与 catalog 落 `canonical/ifs/<cycle>/…` 而网格定义仍落 `canonical/IFS/grid/…`——修法之前整棵 IFS 树同为大写、自洽，故这处不一致**由本 PR 引入**。
-    - **裁定：不改常量。** 三条理由：(a) 写入点(`:1941`)、存在/签名守卫(`:1926`) 与每一处对外发出点(`:1429`/`:1747`/`:1866`/`:2524`/`:2577`) **共用同一个 config 字段**，故每一行 catalog 的 `grid_definition_uri` 指针都解析到真实存在的对象，**没有任何查找会断**（verifier 明确指出三份 reviewer 报告里有两份把影响说得比证据强）；(b) 该值 pin 逐字、`剥离点` 未点名，本 PR 的全部价值是忠实快照，为一处无功能后果的命名卫生再开一条第五类编辑，与裁决 1 的取向相反；(c) `canonical/` 树位于 `work/<source>/<cycle>/object-store/`，每轮用后即删，跨轮不可能积下两棵树。
-    - **MUST 登记**：Known limits 补一条，配 follow-up issue，条目 MUST 携带两条下游义务：组 8/组 13 对 canonical 前缀做枚举/保留/清理时 MUST 同时覆盖两种大小写；且 `store/object_path.py` 会把该网格键解析成一个幻影 source `IFS`。
-    - **MUST 钉住例外**：在 IFS e2e 的 catalog 行循环内加一条 `row["grid_definition_uri"] == "canonical/IFS/grid/ifs_0p25/grid.json"` 断言。这是字符串级断言，不依赖文件系统大小写敏感性（darwin 的 APFS 会把两棵树合并，本机**无法**用存在性判别），且当 follow-up 日后把常量改小写时它会自动变红。
-    - **MUST 订正两处 yd 自撰的过度声明**（均非 pin 文本，裁决 1 不庇护，verifier 判 FIX_NOW）：(a) `converter.py:1232`/`:2064` 插入注释里「归一后对象键……同用一个小写身份」对网格对象键为假，且其 §3.2 引用按裁决 12 的 round-2 勘误已被推翻；(b) 该 IFS 端到端用例的**用例名**与 docstring「全链只用一个小写身份」宣称了它并不检查的不变量。判为缺陷而非命名裕度的依据是裁决 13 自己的诊断——本文件已经有过一次「误导性 IFS oracle 盖住 P1」的病史。
-    - **【round-3 落实 · 用例名】** round-3 三个 reviewer 独立汇聚、verifier CONFIRMED/FIX_NOW：`809163f` 只订正了 docstring，用例名未改，于是用例名同时与自己的 docstring（「不宣称『全链一个小写身份』」）和自己的用例体（`:432` 蓄意断言大写网格键）相矛盾。**裁定：改名，不以修订裁决的方式把未执行的 MUST 读成已满足**——那样做正命中 Phase 8 的 oracle 完整性条款（规范修改只在追认真实契约变更时合法，绝不用来消音一次失败）。新名 `test_ifs_convert_manifest_is_ready_and_uses_lowercase_identity_except_grid_uri`，MUST 与本行引用同批落地。实现者当初拒绝单方面改名是**正确的**（tasks.md 归 orchestrator 独占，单方面改名会使 fixture 失同步）；本轮的缺陷在 orchestrator 的 round-3 简报把 MUST 写成了「optional」，不在实现者的执行。
+16. **【#104 M2 收尾覆盖 round-2 延期裁决 · `grid_definition_uri` 统一小写】** round-2 已确认的裂口仍成立：`IFSCanonicalConverterConfig.grid_definition_uri`(`converter.py:206`) 继承 pin 的 `"canonical/IFS/grid/ifs_0p25/grid.json"`，不受裁决 12 的 `source_id` 入口归一影响，因而与 IFS 产物/catalog 的 `canonical/ifs/<cycle>/…` 分叉。#104 现明确选择方案 A，覆盖当时「不改常量、登记 Known limit」的暂缓结论。
+    - **唯一目标值**：把该字段改为 `"canonical/ifs/grid/ifs_0p25/grid.json"`。写入点、存在/签名守卫和全部 catalog 发出点继续共用这一个 config 字段；不得另建 URI 常量、大小写 fallback 或迁移别名。
+    - **批准并登记快照偏离**：这是 `converter.py` 相对 pin 的语义偏离，已由 D2 分叉政策允许；在 `nwm-snapshot-inventory.md` 第 35 行 `剥离点` 以「问题 + 修法」登记后实施。理由是消除同一 canonical scratch 命名空间内的双大小写与下游永久兼容债，不援引只约束发布布局的 `products-contract.md` §3.2。
+    - **oracle 同步**：yd 自撰 IFS e2e 必须以字符串级断言钉死小写值，不能只用文件存在性（darwin 的 APFS 会掩蔽大小写错误）；用例名改为 `test_ifs_convert_manifest_is_ready_and_uses_lowercase_identity`，注释/docstring 不再声明 grid URI 例外。forcing 的 catalog 消费继续使用行内精确 URI，不自行改写大小写。
+    - **关闭旧债**：删除本 fixture 的双大小写 Known limit、组 8/组 13 双前缀枚举义务与 `object_path.py` 幻影 source `IFS` 处置；它们是旧大写键的后果，不是修复后的兼容要求。
 17. **【round-2 新增裁决 · 被丢弃的 pin oracle 必须登记】** verifier 确证 `8ae9b8f2:tests/test_ifs_canonical.py` 是一份 15 用例的文件，逐条覆盖 `convert_ifs_precipitation_with_metadata` / `convert_ifs_radiation_values` / `convert_ifs_shortwave_down_values`，并带 yd 侧完全缺失的值 oracle（`approx([24.0])`、`approx([50.0])`、`approx([66.6666667])`）、负降水三分支、GRIB 量化噪声、四条 shortwave 分支与 lineage 结构。它在本仓只出现一次——清单第 35 行 `CanonicalConverterConfig(` 调用点枚举里的一句「……均不快照」，那句回答的是「哪些构造点需要 kwarg 处理」，**不是**对覆盖后果的登记；fixture 的 Known limits 净覆盖损失至今只列了裁决 6 删掉的那一条。
     - **勘误（verifier 对 reviewer 的更正，照录）**：`compute_ifs_relative_humidity_values` **不**在该 pin 文件里被直接测试，其覆盖是经产物读回 `approx([0.525])` 与 lineage `method == "magnus_formula"` 间接给的。
     - **MUST**：Known limits 补一条净覆盖损失，点名该 pin 文件与 15 个用例，按 Phase 8 routing 配 follow-up issue，并写明裁决 15 的三条值断言只结清三处单位换算，**残量**（负降水小/显著/连续三分支 `:940-965`、shortwave 量化与告警 `:1053-1075`、Magnus RH、lineage 结构）留给 follow-up。
@@ -1754,7 +1766,7 @@ Selected risk packs（逐项给项目具体检查）:
 - **File IO / path safety / overwrite**: selected - 产物与 catalog 经 `LocalObjectStore.write_bytes_atomic` 落盘；键由 `source_id`/`cycle`/`variable`/`forecast_hour` 拼接，须经 `object_path.validate_object_path` 既有约束；重复转换的覆写语义按裁决 6 的**重写幂等**读法取证（`_existing_product_is_current` 在 DB-free 下不可达，MUST NOT 拿它当断言目标）
 - **Schema / columns / units / field names**: selected - catalog 的 16 个行字段与 4 个 payload 字段、`schema_version` 串、`VARIABLE_MAPPING`/`STANDARD_UNITS`/`CONVERSION_PARAMS` 的单位契约，是组 8 的下游 schema 真相
 - **Resource limits / large input / discovery**: selected - `_read_records` 逐 entry 打开数据集；`_configured_forecast_hours` 的 lead 全集；合成 fixture 规模须小到 CI 可跑
-- **Legacy compatibility / examples**: selected - 快照忠实度本身：`剥离点` 之外零改写，diff-vs-pin 必须只含四类允许编辑
+- **Legacy compatibility / examples**: selected - pin 是差异审计基线；快照测试仍只含既有四类允许编辑，`converter.py` 的额外缺陷修复必须逐处登记在清单「剥离点」，diff-vs-pin 不得出现未登记语义差异
 - **Error handling / rollback / partial outputs**: selected - `CanonicalConversionError` 是唯一的公开失败类型；缺变量/缺 lead/不可解析 raw/序列化失败四条路径各须有用例；catalog **自身**原子写（`write_bytes_atomic`），且转换失败时**不写** catalog。**MUST NOT 断言产物级回滚**：pin 逐份写产物、写完才写 catalog，失败时已写的产物对象留在 object-store，pin 无回滚——按裁决 1 这是继承行为，登记为已知非目标，不是本 issue 要补的缺口
 - **Release / packaging / dependency compatibility**: **selected** - 本 PR 引入 `netCDF4`，`uv sync --frozen` 与 CI producer job 是硬证据
 - **Documentation / migration notes**: selected - 清单 `落地状态` 翻面、§4 风险 7 结论回填、spec delta
@@ -1786,7 +1798,7 @@ Required evidence（输入 → 期望输出）:
 
 **红证明（red-proof）义务**：yd 自撰或改写的新断言（no-DB 运行期闸门、合成 GRIB e2e、溯源守卫扩面、裁决 6 改写出的三条取反/幂等断言）MUST 各给一条实跑过的红证据——把闸门/断言反过来、删掉溯源头、或让失败路径提前写一份 catalog，粘贴红输出。逐字移植的快照用例不承担红证明（它们在 pin 上已有历史），但 MUST 报告移植后首次运行的完整结果。
 
-**忠实度证明（本任务的判别力承重条）**：MUST 提交三份 `diff` 的机械收敛证据，即对每个快照文件跑 `diff <(git -C <NWM> show 8ae9b8f2:<pin路径>) <目标文件>`，并把每一段差异归入裁决 2 的四类允许编辑之一；无法归类的差异即偏离。另 MUST 重跑清单第 35 行自带的再生命令并报告命中数：
+**差异审计证明（本任务的判别力承重条）**：MUST 提交三份 `diff` 的机械收敛证据，即对每个快照文件跑 `diff <(git -C <NWM> show 8ae9b8f2:<pin路径>) <目标文件>`。快照测试/fixture 的每段差异须归入裁决 2 的四类既有编辑；`converter.py` 可额外归入清单第 35 行已登记的缺陷修复。任何无法对应到既有类别或“问题 + 修法”登记的语义差异即违规。另 MUST 重跑清单第 35 行自带的再生命令并报告命中数：
 - `grep -c 'repository' producer/src/yd_producer/canonical/converter.py` -> 0
 - `grep -nE 'os\.getenv|_float_env\(|_env_flag\(' producer/src/yd_producer/canonical/converter.py` -> 0 行
 - `grep -n 'from_env' producer/src/yd_producer/canonical/converter.py` -> 0 行
@@ -1795,7 +1807,7 @@ Required evidence（输入 → 期望输出）:
 - `grep -c '^def test_' producer/tests/test_canonical_db_free.py` -> yd 自撰用例数（no-DB 闸门 + 合成 GRIB e2e，单独报数）
 
 Invariant Matrix:
-- **Governing invariant**: 落进 `yd_producer/canonical/` 的每一个字节，要么与 pin `8ae9b8f2` 逐字对应，要么落在裁决 2 的四类允许编辑内；且该模块在任何执行路径上都不建立出站连接、不读环境变量、不 import NWM。
+- **Governing invariant**: 落进 `yd_producer/canonical/` 的每一处相对 pin 的语义差异，要么属于裁决 2 的既有编辑，要么在清单第 35 行「剥离点」以“问题 + 修法”登记；且该模块在任何执行路径上都不建立出站连接、不读环境变量、不 import NWM。
 - **Source-of-truth identity/contract**: pin commit `8ae9b8f2` + 清单 §1 第 35/51/52 行的 `剥离点`/`抽取`/`落地状态` 三列
 - **Producers**: `CanonicalConverter.convert_manifest` / `convert_manifest_uri`、`_serialize_product`、`_write_product_catalog`
 - **Validators/preflight**: `_missing_required_pairs`、`_ensure_grid_definition`、`_select_cfgrib_data_variable`、`required_standard_variables_for_source`
@@ -1828,12 +1840,11 @@ Known limits（须走 Phase 8 的 deferral routing：每条配 follow-up issue �
 - **继承的死代码**：裁决 5 登记的 3 处不可达分支 + 2 处 no-op（`_get_existing_product` 后半、`_existing_product_is_current`、`already_done` 状态支、`_upsert_product`、`_update_cycle_status`）与 6 处 ERA5 残面，按裁决 1 保留
 - **继承的矛盾**：`REQUIRED_STANDARD_VARIABLES_BY_SOURCE` 的 `"ERA5"` 键不可达（`normalize_source_id("ERA5")` 抛 `ValueError` 而非 `CanonicalConversionError`）
 - **无产物级回滚**：转换中途失败时已写的 canonical 产物对象留在 object-store（pin 行为，无回滚）
-- **【round-2 补登记】`canonical/` 网格键的大小写裂口**：裁决 12 的入口归一之后，IFS 产物与 catalog 落 `canonical/ifs/<cycle>/…`，而 `IFSCanonicalConverterConfig.grid_definition_uri`(`converter.py:206`) 是 pin 常量，网格定义仍落 `canonical/IFS/grid/ifs_0p25/grid.json`。按裁决 16 不改常量：写入点与全部读出点共用同一 config 字段，无查找会断；`canonical/` 树是每轮删的 work 内工件。**下游义务**：组 8/组 13 对 canonical 前缀做枚举、保留或清理时 MUST 同时覆盖两种大小写，且 `store/object_path.py` 会把该网格键解析成幻影 source `IFS`；darwin 的 APFS 大小写不敏感会把两棵树合并，本机测试**无法**用存在性判别这道裂口（IFS e2e 只做字符串级断言）。配 follow-up issue。
 - **【round-2 补登记】被丢弃的 pin oracle**：`8ae9b8f2:tests/test_ifs_canonical.py`（15 用例）覆盖 `convert_ifs_precipitation_with_metadata` / `convert_ifs_radiation_values` / `convert_ifs_shortwave_down_values` 并带值 oracle，本 PR 未快照它（清单第 35 行那句「均不快照」是构造点枚举的附带说明，不构成覆盖后果登记）。裁决 15 的三条值断言只结清三处单位换算；**残量**——负降水小/显著/连续三分支(`:940-965`)、shortwave 量化与告警(`:1053-1075`)、Magnus RH、lineage 结构——在 yd 侧零覆盖。配 follow-up issue。
-- **【round-1 补登记】读侧 symlink 不走 no-follow**：`converter.py` 由 `object_store.resolve_path()` 取裸 `Path` 交给 `xr.open_dataset`，而 `resolve_path`(object_store.py:314-326) 只做键归一 + `validate_object_path` + 字符串级容纳，**无 `O_NOFOLLOW`**；`LocalObjectStore` 的其它每一个消费者都走 `*_no_follow(..., containment_root=self.root)`。store 根内 `raw/<source>/<cycle>/<file>` 任一段的 symlink 会被 eccodes/netCDF4 跟随，读到容纳根之外的字节并据以产出 canonical 产物与 catalog。pin 逐字继承（pin `object_store.py:273-285` 的 `resolve_path` 与 yd 逐字符相同），故裁决 1 禁止在本 PR 修。
+- **【round-1 补登记】读侧 symlink 不走 no-follow**：`converter.py` 由 `object_store.resolve_path()` 取裸 `Path` 交给 `xr.open_dataset`，而 `resolve_path`(object_store.py:314-326) 只做键归一 + `validate_object_path` + 字符串级容纳，**无 `O_NOFOLLOW`**；`LocalObjectStore` 的其它每一个消费者都走 `*_no_follow(..., containment_root=self.root)`。store 根内 `raw/<source>/<cycle>/<file>` 任一段的 symlink 会被 eccodes/netCDF4 跟随，读到容纳根之外的字节并据以产出 canonical 产物与 catalog。该缺陷在 #13 当时因 pin 等价规则未修；M2 收尾分叉裁决现已解锁，后续 #103 实现前须先在清单 converter 行「剥离点」登记问题与修法。
   **两点必须写进 follow-up，否则会传播一条陈旧论据**：(a) 「object-store 树只由 `write_bytes_atomic`（no-follow）写入、symlink 须带外植入」对 `raw/` 子树**不成立**——`rawcopy.py:736-737` 把 object-store 根取作 `work_dir`，而 `raw/` 由 `rawcopy.py:893` 自己的 `mkdir` 建立，不经 store；(b) **issue #71 把自身严重性上限建立在「最终消费者经 `object_store.py:190,206,263` 的 `*_no_follow` 读取、故转换器 fail-closed」这一前提上，而本 PR 落地的转换器正是那个消费者且不走那三行**——#71 的 fail-closed 上限自本 PR 起不再成立。
 - **【round-1 补登记】对半可信输入无规模上界**：`load_manifest`(:1213-1216) 与 `grid_definition_uri` 读(:1922) 用无上限的 `read_bytes`，而 store 自带 `MAX_OBJECT_MANIFEST_BYTES = 16MiB`(object_store.py:24) 与 `read_bytes_limited`(:212)，本模块**从不使用**；raw 文件交给 cfgrib/netCDF4 前无 size/stat 检查（模块内 `grep MAX_` 零命中）；`:1502` 把整张格点物化成 Python float 元组，IFS 路径(:2082-2094) 一次持有一小时的全部八个原生变量。
-  **量级按实测写，不用全球网格的数字**：真实 raw 由 NWM 下载器按 `download_bbox = {east:145, north:64, south:8, west:63}` 裁剪，约 329x225 ≈ 74k 点 ≈ **2.4MB/变量、8 变量的 IFS 小时约 19MB**（不是全球 0.25° 的约 265MB）。输入域为**半可信**：自家 NWM 下载器写在共享 NFS 上，非对抗，但跨节点、在 yd 写控制之外、且从不做尺寸校验。三个面在 pin 上皆逐字，裁决 1 禁止在本 PR 修。
+  **量级按实测写，不用全球网格的数字**：真实 raw 由 NWM 下载器按 `download_bbox = {east:145, north:64, south:8, west:63}` 裁剪，约 329x225 ≈ 74k 点 ≈ **2.4MB/变量、8 变量的 IFS 小时约 19MB**（不是全球 0.25° 的约 265MB）。输入域为**半可信**：自家 NWM 下载器写在共享 NFS 上，非对抗，但跨节点、在 yd 写控制之外、且从不做尺寸校验。该缺陷在 #13 当时因 pin 等价规则未修；M2 收尾分叉裁决现已解锁，后续 #102 实现前须先在清单 converter 行「剥离点」登记问题与修法。
 
 Non-goals:
 - direct-grid forcing 生产、work 内临时 registry、SHUD 输入组装（组 8）
@@ -1879,7 +1890,7 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 - pin 的 canonical→SHUD 单位/派生语义：PRCP `mm/day`、TEMP `degC`、RH `0-1`、wind `sqrt(u²+v²)`、RN `W/m²`；Press 可保留 timeseries，但 SHUD station CSV 仍只有 `Time_Day/Precip/Temp/RH/Wind/RN`。
 - NWM pin 的 package manifest canonical JSON 字节与 checksum。`canonical_json.py` 的 `_json_bytes` 保持 `json.dumps(..., sort_keys=True, separators=(",", ":"), default=_json_default)` 的默认 `ensure_ascii=True`；`file_store.py` 自带的本地 `_json_bytes` 保持 `ensure_ascii=False`。两者对含 Unicode 的 payload 字节不等价，MUST NOT 合并；合并会改变 `forcing_domain_package.json` / handoff payload checksum。
 - direct-grid lineage 只保留 `payload["contract_grid_signature"] == contract.grid_signature`；随重算传参链删除的 `payload["grid_signature"]` 与 `payload["validated_grid_signature"]` 不得继续生成或断言。生产路径对 contract signature 的真实性校验由 yd 纯 grid-identity helper 承担，lineage 键只记录合同值、不冒充重算证据。
-- IFS grid-definition URI 的已知大小写裂口按 #104 现状消费；本 PR 不改 canonical producer，也不得仅按小写前缀枚举而漏掉 catalog 给出的精确 URI。
+- #104 把 canonical writer 的 IFS `grid_definition_uri` 唯一值冻结为 `canonical/ifs/grid/ifs_0p25/grid.json`；forcing 继续按 catalog 行内精确 URI 消费，不为该字段增加大小写改写、旧大写别名或双前缀枚举。
 - 所有现有 producer 测试、ruff、OpenSpec 与 stage-pipeline 锚保持绿色；不删/弱化任何既有 oracle。
 
 **Must add/change**：
@@ -1970,12 +1981,12 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 - canonical JSON focused tests -> `_json_default(object())` 抛 `TypeError`；naive/aware datetime 均归一成末尾 `Z`；`canonical_json._json_bytes` 与精确 `json.dumps` 字节相等；含 Unicode payload 下 canonical_json（ASCII escape）与 file_store（UTF-8）字节不等且各自 checksum 与独立字面 oracle 相等。
 - D4/config focused tests -> 缺 `object_store_root` 或 `object_store_prefix` 构造期 `TypeError`；显式构造的五个上限/`min_lead_hours` 逐字等于 fixture 数值；空 root 不回退；pin 两个保留构造点仅补两个路径 kwarg且 L4229 继续使用 `max_manifest_bytes=16`。
 - package schema focused tests -> 每份 station CSV 第 1 行为 `<row-count>\t6\t<start-date>\t<end-date>`，第 2 行逐字为 `Time_Day\tPrecip\tTemp\tRH\tWind\tRN`，第 3 行是首个数据行；`u/v=(3,4)` 与 `(6,8)` 的该行 Wind 字段分别为 `5` 与 `10`；lineage 恰保留 `contract_grid_signature` 合同值且不含两个被删重算键。
-- mutation matrix（scratch 必须按 project-profile 的 venv/pyc 纪律）：`weight=1.0→0.5`、cycle formatter 改回 `valid_times[0]`、跳过 source/grid-signature 比较、descriptor helper 回退裸 Path、JSON byte/depth/node guard 各删除一腿、合并两套 `_json_bytes`、恢复 config 空串回退、恢复被删 lineage 键 -> 每个变异体至少一条对应新用例转红；报告实际红用例，不预写计数。Round 1 repair 另须杀死：删除 production-cycle domain guard、恢复 multi-source membership、移除 object-key/NetCDF identity 任一比较、移除 descriptor byte cap、从 output-config identity 删除 `rn_shortwave_factor`、宽松 decode `.sp.att`、删除 station/timestep/row limit guard；12Z expected 与 IFS uppercase URI 必须由 stdlib/字面 fixture 提供，不得复用 production parser/path builder。Phase 6.2 depth retry 再须杀死：(a) 删除 producer post-repository singleton guard而 parser guard仍在；(b) 删除 row 的 `valid-cycle==lead` 独立比较而 NetCDF 与 row 仍一致；(c) 删除 exact canonical product-id derivation而 object key/NetCDF 与伪造 row 仍一致。
+- mutation matrix（scratch 必须按 project-profile 的 venv/pyc 纪律）：`weight=1.0→0.5`、cycle formatter 改回 `valid_times[0]`、跳过 source/grid-signature 比较、descriptor helper 回退裸 Path、JSON byte/depth/node guard 各删除一腿、合并两套 `_json_bytes`、恢复 config 空串回退、恢复被删 lineage 键 -> 每个变异体至少一条对应新用例转红；报告实际红用例，不预写计数。Round 1 repair 另须杀死：删除 production-cycle domain guard、恢复 multi-source membership、移除 object-key/NetCDF identity 任一比较、移除 descriptor byte cap、从 output-config identity 删除 `rn_shortwave_factor`、宽松 decode `.sp.att`、删除 station/timestep/row limit guard；12Z expected 与 IFS 小写 URI 必须由 stdlib/字面 fixture 提供，不得复用 production parser/path builder。Phase 6.2 depth retry 再须杀死：(a) 删除 producer post-repository singleton guard而 parser guard仍在；(b) 删除 row 的 `valid-cycle==lead` 独立比较而 NetCDF 与 row 仍一致；(c) 删除 exact canonical product-id derivation而 object key/NetCDF 与伪造 row 仍一致。
 - frozen final head 再跑 producer pytest + ruff + OpenSpec；若 `origin/master` 前进，按 profile 在 merge ref 上再跑同组。
 
 **Known limits / deferral routing**：
 - canonical converter 自身的 unbounded read 与 path-follow 分别由 #102/#103 跟踪；本 PR 只保证 forcing 新读面不复制缺陷，不修改 canonical 源码。
-- IFS grid-definition URI 大小写裂口由 #104 跟踪；本 PR 按 catalog 精确 URI 消费。
+- #104 已关闭 IFS grid-definition URI 大小写裂口；本 PR 按 catalog 中唯一小写 URI 消费，不保留旧大写别名。
 - file-backend handoff package 的完整 parser/receipt 覆盖按 inventory 风险 12 归 #15；本 PR 只钉 forcing package 本身与直接 JSON identity，不恢复 2777 行校验器。
 - 若三份 snapshot 文件触发 large-file exclude，Phase 8 由 issue-scribe 建立/去重规模债 follow-up；#100/#107 仅覆盖既有 rawcopy/canonical 文件，不能假称已覆盖本 PR 新文件。
 - 真实 IFS/GFS 数值与 node-22 运行属 M4；本 PR 只声明合成 fixture 下的结构、映射、时间和 IO 安全。
@@ -2444,7 +2455,7 @@ awk '/^## 1\./,/^## 2\./' openspec/changes/m2-producer-core/nwm-snapshot-invento
 - **`run_dir` 的祖先若含符号链接则整轮零捕获**（cand-03，CONFIRMED/DEFER）：见 §B 的调用方前置条件。归作业脚本接线侧，另落 tracked issue。fail closed —— `missing_hours()` 仍诚实，漏采会驱动 #17 补跑，同一个 `run_dir` 上再失败即「整轮失败、不写 DONE」，是响亮的控制器边界失败而非静默坏数据。
 - **重启后同 `run_dir` 会删掉已验证副本**（cand-04，CONFIRMED/DEFER #17）：一次性守卫只在**实例内**（`self._captured` 是内存态）。#17 落持久化半时 MUST 显式裁决 `run_dir` 能否跨 attempt 复用——要么禁止复用，要么构造时从 `state_checkpoints/` 回填 `_captured`。
 - **撕裂副本可能停在规范文件名上**（cand-08，PLAUSIBLE/DEFER #17）：`_discard` 的 unlink 失败、或作业在原子写与校验之间被 walltime 杀掉（这个窗口无条件且常规），都会把未验证字节留在 `state_checkpoints/<project>.fNNN.cfg.ic.update`。本模块 API 仍诚实（`captured` 为空）。#17 MUST NOT 把「该文件名存在」当作已验证捕获，只信 `captured` 记录与其 checksum。
-- **去掉预报时长过滤后，物理上不可能的小时会变成永久漏采**（cand-02，PLAUSIBLE/DEFER #17）：`Config` 不做值域校验（归 #32），`checkpoint_hours = [720]` 这类时/分混淆能穿过装载器与本模块构造器。#17 的 fixture MUST 为这类目标定义补跑行为。
+- **物理上不可能的小时必须双层拒绝**（cand-02，原 DEFER #17）：#32 现要求装载器拒绝 `checkpoint_hours` 越出 `[0, 24*forecast_days)`，因此 `[720]` 不能再穿过文件装载；`CheckpointTracker`/补跑入口仍保留自身守卫，防程序内手构 `Config` 或直接构造绕过装载器。
 - **`lines[0]` 与 `cfg_ic.parse` 的「首个非空行」对「header 行」的定义分歧**（cand-14，PLAUSIBLE/DEFER M4）：本实现与 pin `_read_cfg_ic_header_minute`(:3618) 逐字一致，且 §C 步骤 1 明文如此，两条现存锚点都支持当前行为。M4 首次真跑时 MUST 核对真实 `cfg.ic.update` 的**第一物理行**就是 header。
 - **不设产物 mode，权限随 umask**（cand-07，CONFIRMED/DISCARD）：命中本 fixture 自己的 rung-1 否定锚点「Auth / permissions：本模块不设 mode」，且 `store/object_store.py` 同形，属仓库级约定而非本 PR 回归。
 - **header 读把整份有界内容 decode + splitlines 只取首行**（cand-05，CONFIRMED/DISCARD）：64 MiB 上界下峰值约 4.7 倍线性放大。`cfg_ic.parse` 在捕获路径上做同样的事、同一个上界，属仓库既有模式；只修轮询侧是化妆。
@@ -2640,7 +2651,7 @@ def ensure_twelve_hour_checkpoint(
 
 - [x] 10.1 引入几何依赖（pyshp/pyproj/shapely）并 `uv lock`，构造带自定义 Albers `.prj` 的合成 shapefile 基线 fixture，实现 `.prj` 解析与重投影工具，CI 绿
 - [x] 10.2 实现 `rivers.geojson`（`reach_id`=DBF Index、数量一致）与 `boundary.geojson`（单元合并边界）生成，落点 `input/viewer/`
-- [x] 10.3 实现 prepare 编排：拒绝覆盖检查 → 薄外壳按源两次调用 builder（记录型假 builder 断言两次入参 source/grid 不同、输出分别落 `yd_gfs`/`yd_ifs`）→ 变体 reach 数等于 `reach_count` 校验 → 提交到 `input/models/` 与 `input/viewer/` → scratch 清理
+- [x] 10.3 实现 prepare 编排：拒绝覆盖检查 → 薄外壳按源两次调用 builder（记录型假 builder 断言两次入参 source/grid 不同、输出分别落 `yd_gfs`/`yd_ifs`）→ 每变体顶层 `*.cfg.ic` 普通文件基数恰为 1 且 reach 数等于 `reach_count` → 提交到 `input/models/` 与 `input/viewer/` → scratch 清理
 
 依赖：组 1（薄外壳、`reach_count`）
 §13.1 归属：prepare
@@ -2882,6 +2893,10 @@ Upstream suggested level: expanded（agree）
 Repair intensity: **high** —— 拒绝覆盖、目录级提交/回滚、scratch 删除三面同时落在写/删/发布语义上，属 `phase-flow` Phase 0.5 的 high 触发词全集（file IO / path safety、publish/delete/rollback、数据丢失）。fixture level 不因此上抬（`expanded` 已是本 change 的上限档），但 Invariant Matrix 与边界面清单为硬门禁
 Project profile: yd-viewer
 
+**#83 收尾裁决（遗留 staging 只拒绝、不回收）**：`prepare` 在运行根预检后、任何 scratch 写入、四终名探测、builder 调用或其它副作用之前，MUST 枚举 `YD_ROOT` 顶层，收集所有名字以 `prepare._STAGING_PREFIX` 开头的条目。命中目录、普通文件、symlink、断链或其它类型中的任一项即 `PrepareError`；错误按确定顺序列出全部匹配绝对路径并要求依 `docs/agent-ops.md` 人工清理。不得跟随 symlink，不得按 PID/mtime/类型推断陈旧，不得删除、改名、覆盖或自动认领；顶层枚举失败同样 fail closed。该选择与总不变量“任何既有条目不得删除”相容：旧 staging 就是既有条目，不进入本次 cleanup 账本；本次 token 创建的 staging 才按既有成功/失败路径清理。`init` 不获得该命名空间的删除权；正常操作顺序仍要求 `prepare` 成功且确认无匹配残留后再执行 `init`。
+
+**#97 收尾裁决（prepare 侧率定末态基数）**：每个 builder 产出的变体目录只枚举顶层，文件名匹配 `*.cfg.ic` 且类型为普通文件的候选必须恰有一份。零份或多份均在任何 `YD_ROOT` staging/终名提交之前抛 `PrepareError`，错误点名 source、目录、命中数与候选路径；不递归、不按项目名猜文件名。该定位谓词与 `init` 的率定末态定位共用同一实现，防止 prepare 成功提交一个必然被 init 拒绝且只能人工移除的变体。
+
 Change surface:
 - 新增 `producer/src/yd_producer/prepare.py`：`run_prepare` 编排、`VariantBuildRequest`、`PrepareError`、生产 builder 绑定、变体终名解析函数
 - 扩展 `producer/src/yd_producer/config.py`：新增必需字段 `nwm_canonical_grid_id`（表，含 `gfs`/`ifs` 两个 `str`），与既有 `nwm_mapping_builder_module` 同纪律——只校验存在性与类型
@@ -2897,7 +2912,7 @@ Must preserve:
 - `state/cfg_ic.parse` 的字节保真契约与异常类型不变（本 issue 只读 `river.row_count`）
 - `cli.py` 既有退出码约定：`2` argparse 用法错误、`1` 守卫/配置失败、`3` 分阶段未实现；`DATABASE_URL` 守卫仍是 `main()` 的第一件事、先于 `parse_args`；`--config`/`--local` 仍 `Path.resolve()` 后交装载器
 - `init`/`run` 两个子命令的参数集合不变（`--baseline` 只加在 `prepare`）
-- `config.py` 的 stdlib 中立性与"零内置默认"；新字段是**必需**字段，故 issue #2/#3/#30 遗留的全部 `Config` 构造点（测试 fixture、`cli_fixtures.py`）必须同步补齐并继续全绿
+- `config.py` 的 stdlib 中立性与当时的“零内置默认”；本 issue 新增的 canonical-grid 字段仍是**必需**字段，故 issue #2/#3/#30 遗留的全部 `Config` 构造点（测试 fixture、`cli_fixtures.py`）必须同步补齐并继续全绿。#69 后补的唯一 timeout=60 例外不改变该字段的必需性
 - CI 四个 job 全绿
 
 Must add/change:
@@ -2911,14 +2926,15 @@ Must add/change:
   - 字段形态是**消费上游契约、不重新协商**：`source_id` 与 `grid_id` 逐字对应 pin `NWM@8ae9b8f2 workers/mapping_builder/cli.py:601-602` 的 `build_direct_grid_variant` 同名关键字参数
   - `source_id` 取值走既有 `raw/source_identity.normalize_source_id` 的 `"gfs"`/`"ifs"`；`grid_id` 取自 `config.nwm_canonical_grid_id`
 - `prepare.run_prepare(*, local, config, baseline_root, builder=<生产绑定>) -> PrepareReport`，严格按序：
-  1. **拒绝覆盖**：四个终名（两变体目录 + 两 GeoJSON）任一 `lexists` 即 `PrepareError`，此时 MUST NOT 创建 scratch、MUST NOT 调 builder
-  2. 在 `local.scratch_root` 下建**本次运行专属**工作目录（名字含 pid + 随机 token，避免并发/重跑互相覆写）
-  3. 对 `("gfs","ifs")` 各建一个**此前不存在**的 `variant_root` 子目录，各调 `builder(request)` 一次
-  4. **产物校验**（逐变体）：`variant_root` 存在且为目录；率定末态 `cfg.ic` 可 `cfg_ic.parse`；`doc.river` 非 `None`（`Section | None` —— 缺 river 段 MUST 判失败，MUST NOT 当 0 条）；`doc.river.row_count == config.reach_count`；目录内无 `.tmp` 后缀或其它未预期残留条目
-  5. **搬运到 `YD_ROOT` 内 staging**：在 `YD_ROOT` 之内建本次专属 staging 位置，把校验通过的两棵变体树按**发布权限新建条目**的方式复制进去（MUST NOT `cp -a`/`copytree(copy2)` 把计算节点 uid/gid/mode 带进 NFS，agent-ops §10）
-  6. **GeoJSON 直接落 staging**：`geometry.write_viewer_geojson` 的 `out_dir` 取该 `YD_ROOT` 内 staging 位置，两份 GeoJSON **不经 scratch**（唯一落点，无第二处 staging）。staging 位置 MUST NOT 落在 `input/viewer/` 之内——products-contract §2 只允许该目录存在两个文件，把 staging 建在里面等于让 viewer 看见中间态
-  7. **提交**：四个终名逐个 rename 提交（`safe_fs.rename_entry_no_follow`），源为 staging 内条目——**同文件系统**；顺序钉死为「两变体 → rivers → boundary」
-  8. **清理**：无论成败，scratch 工作目录与 `YD_ROOT` 内 staging 位置一并删除；提交阶段失败时**同时**删除本次为提交而新建的父目录（仅限本次新建的），使 `YD_ROOT` 回到执行前的条目集合
+  1. **遗留 staging 守卫（#83）**：运行根预检后枚举 `YD_ROOT` 顶层，任一 `_STAGING_PREFIX*` 条目即列出全部路径并 `PrepareError`；枚举失败同样拒绝。此步只读，不自动回收，并且先于四终名探测
+  2. **拒绝覆盖**：四个终名（两变体目录 + 两 GeoJSON）任一 `lexists` 即 `PrepareError`，此时 MUST NOT 创建 scratch、MUST NOT 调 builder
+  3. 在 `local.scratch_root` 下建**本次运行专属**工作目录（名字含 pid + 随机 token，避免并发/重跑互相覆写）
+  4. 对 `("gfs","ifs")` 各建一个**此前不存在**的 `variant_root` 子目录，各调 `builder(request)` 一次
+  5. **产物校验**（逐变体）：`variant_root` 存在且为目录；只枚举其顶层，筛出文件名匹配 `*.cfg.ic` 且类型为普通文件的候选并要求基数恰为 1；零份/多份即 `PrepareError`，不递归或按项目名猜文件名；唯一率定末态可 `cfg_ic.parse`；`doc.river` 非 `None`（`Section | None` —— 缺 river 段 MUST 判失败，MUST NOT 当 0 条）；`doc.river.row_count == config.reach_count`；目录内无 `.tmp` 后缀或其它未预期残留条目
+  6. **搬运到 `YD_ROOT` 内 staging**：在 `YD_ROOT` 之内建本次专属 staging 位置，把校验通过的两棵变体树按**发布权限新建条目**的方式复制进去（MUST NOT `cp -a`/`copytree(copy2)` 把计算节点 uid/gid/mode 带进 NFS，agent-ops §10）
+  7. **GeoJSON 直接落 staging**：`geometry.write_viewer_geojson` 的 `out_dir` 取该 `YD_ROOT` 内 staging 位置，两份 GeoJSON **不经 scratch**（唯一落点，无第二处 staging）。staging 位置 MUST NOT 落在 `input/viewer/` 之内——products-contract §2 只允许该目录存在两个文件，把 staging 建在里面等于让 viewer 看见中间态
+  8. **提交**：四个终名逐个 rename 提交（`safe_fs.rename_entry_no_follow`），源为 staging 内条目——**同文件系统**；顺序钉死为「两变体 → rivers → boundary」
+  9. **清理**：无论成败，只清理本次 token 对应的 scratch 工作目录与 `YD_ROOT` staging；提交阶段失败时**同时**删除本次为提交而新建的父目录（仅限本次新建的），使 `YD_ROOT` 回到执行前的条目集合。步骤 1 发现的旧 staging 永不进入本次清理账本
 
   > **为什么不是"scratch 目录直接 rename 到 `YD_ROOT`"**（PR #50 路由过来的审计建议的字面形态）：生产上 `yd_root` 在 NFS（`/ghdc/data/yd`，agent-ops §4.1）而 `scratch_root` 在本地盘（`/scratch/.../yd-loop/`，agent-ops §4.2）——两棵真不同的树（`producer/tests/test_cli.py:220-222` 已就此立过约定），而 `safe_fs.rename_entry_no_follow` 明写 `EXDEV` 是硬错误、**刻意没有** fallback copy 路径（`store/safe_fs.py:630-631`）。直接 rename 会在本地测试（两根同在 `tmp_path`）全绿而在现场必然失败。本协议与控制器发布面的既有做法同构：agent-ops §8.4「DAT 复制到 NFS 临时文件并在 NFS 内 rename」
 - 异常与退出码（两级，**不得合并**）：`prepare.PrepareError` 是本模块公开异常**基类**，`cli.main` 捕获后走退出码 `1`（fail-closed 校验拒绝）；`prepare.BuilderUnavailableError(PrepareError)` 专表"生产 builder 绑定尚未可用"，`cli.main` 先于基类捕获它并走退出码 `3`（与既有"分阶段未实现"约定一致）。两者可区分是硬要求——把"配置/产物不合法"与"这条路还没通"报成同一个码，运维无从判断该改配置还是该等 M4。
@@ -2940,7 +2956,7 @@ Seams under test:
 - 合成率定末态 `cfg.ic` 复用既有 `producer/tests/cfg_ic_fixtures.py` 的原生分段生成器，**不在本 issue 手写第二套格式**——reach 数的期望值由生成器写入的 river 行数给定
 - 合成基线 GIS 复用 `producer/tests/geometry_fixtures.py`（10.1/10.2 已钉死的锚点纪律）；GeoJSON 内容正确性归 10.2 的既有用例，本 issue 只断言**落点、数量与提交/清理语义**
 - "无新写入"一律以**执行前后 `YD_ROOT` 全树快照（相对路径 + 文件字节）逐一比对**断言，不用"某个特定文件不存在"这种单点探测——单点探测对"写到别处去了"的实现恒真
-- 基线包内部布局与变体内率定末态的文件名是**本 fixture 定义的合成约定**，以 `prepare.py` 的共享常量/函数暴露给 11.1 消费；真实布局的核实归 M4（tasks.md 组 10 已记：真实外部基线模型包的读取与其现场路径属 M4）
+- 合成 builder 仍以 `prepare.VARIANT_CALIBRATED_STATE_NAME = "yd.cfg.ic"` 造样；该字面量只是 fixture 文件名，不替代 #97 的顶层 `*.cfg.ic` 基数判据。prepare 与 init 必须共用该定位谓词，至少保证第二份不同名的 `*.cfg.ic` 不能被固定名检查遮蔽；真实外部基线模型包的布局核实仍归 M4
 
 Required evidence（每条 input -> expected output）:
 - 干净 `YD_ROOT` + 合法合成基线 -> 退出成功；`YD_ROOT` **全树条目集合**等于「执行前 ∪ 恰好四个终名及其必要父目录」——即**无 staging 残留、无多余目录**（单点探测 `input/models/`、`input/viewer/` 各有几个条目对"staging 留在 `YD_ROOT` 顶层"恒真，故此处必须走全树）；`input/viewer/` 下**恰有** `rivers.geojson` 与 `boundary.geojson` 两个条目；`scratch_root` 下无任何残留条目
@@ -2954,9 +2970,11 @@ Required evidence（每条 input -> expected output）:
 - **守卫/写入同源判别性证据**：把 `variants.gfs` 改成非默认相对值（如 `models/alt_gfs`），预先在**该新路径**上放一个同名目录 -> 必须被拒绝（守卫跟着 config 走，而非钉死字面量 `input/models/yd_gfs`）；反向：字面量 `input/models/yd_gfs` 存在但 config 指向别处 -> 提交落在 config 指定处
 - 假 builder 产出的变体 river 段行数 ≠ `reach_count` -> `PrepareError` 点名该 source、期望值与实际值；`YD_ROOT` 全树快照与执行前一致；`scratch_root` 无残留
 - 假 builder 产出的率定末态 `cfg.ic` **无 river 段** -> `PrepareError`（消息区分于"数量不符"）；MUST NOT 判为 0 条；`YD_ROOT` 无新写入
+- **#97 顶层率定末态基数矩阵**：逐源让假 builder 在 `variant_root` 顶层产出 0 份或 2 份 `*.cfg.ic` 普通文件 -> 均在搬运到 `YD_ROOT` staging 前 `PrepareError`，消息点名 source、目录、命中数与候选路径，四个终名零提交、scratch 清理；定位 helper 的直接用例在顶层恰一份、嵌套子目录另有匹配文件时仍只返回顶层候选，证明不递归（整次 prepare 可由既有“未预期顶层条目”合同独立拒绝其它残留）。把基数闸退化为“只确认 `yd.cfg.ic` 存在而忽略第二份”、递归 glob、接受第一份或只判非空的变异分别必红
 - 假 builder 在 `variant_root` 内留下一个 `.tmp` 文件（其余合法）-> `PrepareError` 点名该残留条目；`input/models/` 下无任何变体目录
 - 假 builder 对 `ifs` 抛异常（`gfs` 已成功建好）-> `PrepareError`；`YD_ROOT` 全树快照与执行前一致（**`gfs` 变体不得被提交**）；`scratch_root` 无残留
 - **失败路径清理**：上述每一条失败用例都断言 `scratch_root` 下无本次工作目录
+- **#83 遗留 staging 守卫**：`YD_ROOT` 顶层同时预置多个名字以 `_STAGING_PREFIX` 开头的条目（至少覆盖普通目录、普通文件、指向目录/文件的 symlink 与断链；另放一个仅含相似子串但不以前缀开头的对照条目）-> `PrepareError` 按名称排序列出全部且仅列出匹配项的绝对路径，并含“人工清理”指令；builder、scratch 创建、四终名探测/提交均零调用，执行前后全树快照逐项相等。再用顶层枚举抛 `EACCES`/`EIO` 的记录型边界证明探测失败也拒绝，且不得先用 `exists()` 预检后失去同次枚举保证
 - 假 builder 产出的变体率定末态 `cfg.ic` **不可解析**（截断/非 UTF-8）-> `PrepareError`（`cfg_ic.parse` 的 `ValueError` MUST NOT 逃逸出 `prepare`）；`YD_ROOT` 全树快照与执行前一致
 - 假 builder 返回但**根本没建** `variant_root` -> `PrepareError` 点名该 source；`YD_ROOT` 无新写入；scratch 已清
 - `write_viewer_geojson` 抛 `GeometryError`（注入损坏的 domain 图层）-> `PrepareError`（`GeometryError` MUST NOT 逃逸）；`YD_ROOT` 全树逐字节不变（**两个变体已校验通过也不得提交**）；scratch 与 staging 均已清
@@ -2984,18 +3002,18 @@ Required evidence（每条 input -> expected output）:
 - CI 四个 job 绿
 
 Invariant Matrix:
-- Governing invariant: `prepare` 对 `YD_ROOT` 的效果 MUST 是**全有或全无**——要么四个终名（两变体 + 两 GeoJSON）全部由本次运行新建，要么 `YD_ROOT` 回到执行前的条目集合且**既有内容逐字节不变**（本次为提交新建的父目录与 staging 属本次条目，失败时 MUST 一并回滚）；任何既有条目 MUST NOT 被覆盖或删除；无论成败 scratch 工作目录与 staging MUST 被删除。唯一已接受的例外是四个终名 rename 之间的进程被杀窗口（见 Failure paths 行）
+- Governing invariant: `prepare` 对 `YD_ROOT` 的效果 MUST 是**全有或全无**——要么四个终名（两变体 + 两 GeoJSON）全部由本次运行新建，要么 `YD_ROOT` 回到执行前的条目集合且**既有内容逐字节不变**（本次为提交新建的父目录与 staging 属本次条目，失败时 MUST 一并回滚）；任何既有条目 MUST NOT 被覆盖或删除。#83 下，启动前已存在的 `_STAGING_PREFIX*` 也是受保护的既有条目：发现即拒绝并原样保留；只有本次 token 新建的 scratch 与 staging 才无论成败进入本次清理。唯一已接受的例外是进程被杀窗口：它可能留下本次 staging，下一次 `prepare` 必须将其作为既有残留拒绝并交人工处置；四个终名 rename 之间还可能留下部分提交（见 Failure paths 行）
 - Source-of-truth identity/contract: 变体终名由 `variant_targets(local, config)` 单点计算（`local.yd_root` + `config.variants.*`）；GeoJSON 终名由 products-contract §2 字面量给定；reach 身份由变体率定末态 `cfg.ic` 的 river 段行数对 `config.reach_count`
 - Producers: `prepare.run_prepare`、注入的 `builder`、`geometry.write_viewer_geojson`
-- Validators/preflight: 四终名 `lexists` 拒绝覆盖检查；`variants.*` 相对性校验；`cfg_ic.parse` + river 段存在性 + 行数校验；scratch 目录内容精确集合校验
+- Validators/preflight: #83 的 `YD_ROOT` 顶层 `_STAGING_PREFIX*` 只读枚举守卫；四终名 `lexists` 拒绝覆盖检查；`variants.*` 相对性校验；`cfg_ic.parse` + river 段存在性 + 行数校验；scratch 目录内容精确集合校验
 - Storage/cache/query: `YD_ROOT/input/models/{yd_gfs,yd_ifs}`、`YD_ROOT/input/viewer/{rivers,boundary}.geojson`、`scratch_root/<本次专属>`
 - Public routes/entrypoints: `yd-producer prepare --config --local --baseline`（`cli.main` seam 6）
 - Frontend/downstream consumers: viewer 读 `input/viewer/`（products-contract §2/§6）；`init`（11.1）读变体内同源率定末态；`run`（组 12–14）读变体
-- Failure paths/rollback/stale state: 拒绝覆盖在任何写入之前；builder 失败/校验失败一律不提交任何变体；提交阶段失败回滚本次新建的父目录与 staging；`finally` 清 scratch 与 staging；**已接受残留**：四个终名的 rename 逐个原子，但四者之间没有跨名事务，进程在其间被 SIGKILL（或 NFS `ESTALE`）会留下部分提交的 `YD_ROOT`——在无跨目录事务的 POSIX 文件系统上不可消解。提交顺序钉死为「两变体 → rivers → boundary」，这是 **best-effort 的排序偏好，不是对 viewer 的就绪保证**：`products-contract` §2/§6 没有为 `input/viewer/` 定义任何就绪标记（不同于 `output/` 的 `DONE`，§4），本 issue 也不发明一个。就绪标记的取舍与崩溃后的人工恢复程序路由为 follow-up issue（见 Non-goals）
+- Failure paths/rollback/stale state: 遗留 staging 守卫与拒绝覆盖都在任何写入之前；旧 `_STAGING_PREFIX*` 命中项只报告、不删除，本次 staging 才由成功/失败清理路径回收；builder 失败/校验失败一律不提交任何变体；提交阶段失败回滚本次新建的父目录与 staging。进程在本次 staging 生命周期内被 SIGKILL 可留下旧 staging，下一次调用按 #83 硬拒绝并指向 agent-ops 人工程序；程序不做 sweep。四个终名的 rename 逐个原子，但四者之间没有跨名事务，进程在其间被杀还会留下部分提交的 `YD_ROOT`——该恢复归 #78。提交顺序「两变体 → rivers → boundary」只是 best-effort 排序，不是 viewer 就绪保证
 - Evidence/audit/readiness: `producer/tests/test_prepare.py` 的全树快照比对用例组；`prepare_fixtures.py` 的记录型假 builder 调用记录
 - Regression rows:
   - 干净根 + 合法基线 -> 四个终名全部新建，scratch 清空，builder 恰 2 次且 source/grid 各异
-  - 四个终名任一预先存在 -> 拒绝，`YD_ROOT` 全树逐字节不变，builder 0 次
+  - `_STAGING_PREFIX*` 任一预先存在 -> 列出全部匹配路径并拒绝，既有条目原样保留、builder/scratch/终名探测均 0 次；四个终名任一预先存在 -> 拒绝，`YD_ROOT` 全树逐字节不变，builder 0 次
   - `ifs` builder 抛异常（`gfs` 已建好）-> `YD_ROOT` 全树逐字节不变（部分成功不得提交），scratch 清空
   - `variants.gfs` 为绝对路径 / 逃逸路径 -> 拒绝，两处均无写入
   - `variants.gfs == variants.ifs` -> 任何写入之前拒绝，builder 0 次
@@ -3008,7 +3026,7 @@ Boundary surfaces（high 强度必填）:
 - 公共入口：`cli.build_parser`/`cli.main`
 - 读面：基线包、变体内率定末态 `cfg.ic`
 - 写/删/覆盖面：`YD_ROOT/input/models/*`、`YD_ROOT/input/viewer/*`、`YD_ROOT` 内本次 staging、`scratch_root/<本次专属>`（删除面恰为后两者 + 提交失败时本次新建的父目录）
-- staging/发布/回滚面：scratch 工作目录（builder 产出）-> `YD_ROOT` 内本次专属 staging（按发布权限新建）-> 四个终名的同盘 rename 提交；回滚面含本次新建的父目录与 staging
+- staging/发布/回滚面：启动时只读枚举并拒绝任何旧 `_STAGING_PREFIX*`（不自动回收）→ scratch 工作目录（builder 产出）→ `YD_ROOT` 内本次专属 staging（按发布权限新建）→ 四个终名的同盘 rename 提交；回滚面只含本次新建的父目录与 staging
 - 生产者/消费者证据边界：viewer 的 `input/viewer/` 契约（products-contract §2/§6）；11.1 消费变体内率定末态
 - 陈旧态/幂等边界：重跑必须被拒绝覆盖挡住（prepare 不幂等、无 `--force`，compute-loop §6.1）
 - 未改动的下游消费者：`init`/`run` 入口、`controller`、`rawscan`
@@ -3068,7 +3086,9 @@ Upstream suggested level: compact（override：正面命中 `openspec/project-pr
 Repair intensity: high（首次写 NFS 发布根、部分产物即把系统**永久砖化**——「已有任一状态即拒绝」使一次半写死锁住所有后续 init；同时命中 profile 首位风险轴「断链即整链失效」的**链起点**。适用 `Invariant Matrix`）
 Project profile: yd-viewer
 
-**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #21 的验收标准依赖「从两个变体内各自同源率定末态复制首态」（`specs/init-bootstrap/spec.md`、compute-loop §6.2 第 4 步），但**率定末态在变体目录内的落点，全仓无任何文档、spec 或配置钉死**：compute-loop §6.1 只说变体「水文参数和率定状态来自同一基线」，`config.toml` 的 `variants.*` 只到变体目录一级，`nwm-snapshot-inventory.md:132` 的 `_project_name` 只决定 tracker 轮询的 `<project>.cfg.ic.update` 文件名、且该 manifest 在 init 期不存在。该 seam 由本 issue 自行补齐（裁决 2），按核心规则「needed-but-missing seam is a reported deviation」记录在此，并**约束尚未落地的 #20 / 任务 10.3**（prepare 提交变体时必须满足裁决 2 的形态）。
+**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #21 落地时，其验收标准依赖「从两个变体内各自同源率定末态复制首态」（`specs/init-bootstrap/spec.md`、compute-loop §6.2 第 4 步），但**当时**率定末态在变体目录内的落点尚无文档、spec 或配置钉死：compute-loop §6.1 只说变体「水文参数和率定状态来自同一基线」，`config.toml` 的 `variants.*` 只到变体目录一级，`nwm-snapshot-inventory.md:132` 的 `_project_name` 只决定 tracker 轮询的 `<project>.cfg.ic.update` 文件名、且该 manifest 在 init 期不存在。该 seam 由本 issue 裁决 2 先在 init 侧补齐；#97 M2 收尾现已把同一顶层 `*.cfg.ic` 基数谓词回填到 #20 / 任务 10.3 的 prepare 文档、spec、提交前校验与证据面，关闭写侧缺口。
+
+**#96 收尾裁决（修订本 fixture 的 symlink 例外）**：`states/<source>` 条目自身及其树内的任何 symlink 都视为已有状态条目，阶段 A MUST 以 `STATES_NOT_EMPTY` fail closed；不跟随目标，不按目标为普通文件、目录、断链或其它类型分流。该修订只给 symlink 单列：普通（非 symlink）空目录仍不触发守卫，`output/` 的 `DONE` 可见性也不在 #96 内扩大。由此撤销本 fixture 中“state symlink 可穿过阶段 A、到阶段 B 再作为外来阻塞物”的旧构造；阶段 B 同类证据改用普通空目录、FIFO 等非 symlink 载体。
 
 **核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
 
@@ -3101,9 +3121,9 @@ Project profile: yd-viewer
    - **阶段 B 的写入顺序钉死为 `rawscan.SOURCES` 的迭代序**（当前值 `("ifs", "gfs")`），MUST NOT 依赖 `dict`/`set` 的偶然序。理由：部分落盘的 `detail` 必须可预期，否则收尾报告在两次执行间不可复现。
    - **阶段 B 内失败的可观测后果 MUST 被钉死**：某个 source 写入失败时，其**前序已落盘**的 source 文件留在盘上（本函数 MUST NOT 回滚删除——删除面归 #23/#25，且 init 无权删它没确认过的东西），但 MUST 以非零退出码与明确理由报告，`detail` MUST 列出**全部前序已落盘 source 的路径**（而非硬编码某一个源）。这是**已接受的代价**而非缺陷：把它写成回滚会让 init 获得 `states/` 删除权，风险远大于收益。
    - **收尾话术 MUST 随 `written` 分支**（round 1 验证闸门 cand-08 CONFIRMED/FIX_NOW，实测：`chmod 0o500 states/` 使阶段 A 枚举全过、阶段 B 首个 `ensure_directory_no_follow` 抛 `EACCES`，得 `written == ()` 且 `states/` 事后为空，收尾却仍宣称「根已非全新，需人工清理」）：`written` **非空**时理由文本 MUST 指出「根已非全新，重跑 init 前需人工清理 `states/`」；`written` **为空且盘上零残留**时 MUST NOT 宣称需要清理，而 MUST 报「零写入，根仍是全新根」并把根因（被转述的 `SafeFilesystemError` / `OSError`）放在首位。判据 MUST 是「`written` 非空 **或** 存在可能半写的目标」而非单看 `written`：类二失败发生在**首个** source 时 `written` 为空，但盘上已有一份截断文件，照「只看 `written`」的字面读法会报「根仍是全新根」，而下一次 init 必然 `STATES_NOT_EMPTY`——两条话术直接矛盾。原裁决把该 MUST 写成无条件，是把一个 `written` 非空的语境套到了它从未设想的终态上。
-     - **「零写入」的量纲是「零普通文件落盘」，不是「文件系统逐字节不变」**（round 2 修复轮 STEP 0 不变量清扫的审计条目 13'，登记在案、刻意不改）：`ensure_directory_no_follow` 建出 `states/<source>/` 之后目标 `open` 才失败时，盘上会留下一个**空目录**。这不构成话术缺陷：本模块的「全新根」判据由裁决 8 定义为**只数普通文件**，空目录既不触发 `STATES_NOT_EMPTY`、也不妨碍下一次 `init` 的 `ensure_directory_no_follow` 空操作成功，故重跑仍能成功——与该话术承诺的运维后果一致。对应的回归行（零残留的 open 期失败）断言的正是「`states/` 树下零**普通文件**」而非空树。
+     - **「零写入」的量纲是「零普通文件落盘」，不是「文件系统逐字节不变」**（round 2 修复轮 STEP 0 不变量清扫的审计条目 13'，登记在案、刻意不改）：`ensure_directory_no_follow` 建出 `states/<source>/` 之后目标 `open` 才失败时，盘上会留下一个**空目录**。这不构成话术缺陷：本模块的「全新根」判据在 #96 修订后认任一普通文件或 symlink，但仍忽略普通（非 symlink）空目录；空目录既不触发 `STATES_NOT_EMPTY`、也不妨碍下一次 `init` 的 `ensure_directory_no_follow` 空操作成功，故重跑仍能成功——与该话术承诺的运维后果一致。对应的回归行（零残留的 open 期失败）断言的正是「`states/` 树下零**普通文件与 symlink**」而非空树。
    - **阶段 B 的失败构造分两类，MUST NOT 再写「唯一可达构造」**（round 1 验证闸门 cand-07 CONFIRMED/FIX_NOW，实测证伪）：
-     - **类一（`EEXIST`，用例的钉死构造）：目标路径预置为一个空目录**（`states/gfs/<T_gfs>.cfg.ic/`）。这是裁决 8 的守卫（只认**普通文件**）与 `_FILE_FLAGS` 的 `O_CREAT|O_EXCL`（对任何已存在的条目都得 `EEXIST`）之间的可达缝：预置**普通文件**会在阶段 A 就命中 `STATES_NOT_EMPTY`、永远走不到阶段 B，用它构造出的用例是假绿。该缝隙（非普通文件条目过得了 bootstrap 守卫、却挡得住写入）是**已知且刻意**的：把守卫扩到「任何条目」会让 `states/` 下一个 `.DS_Store` 目录永久砖化建链，方向与裁决 8 的「宁可要求人工确认」相反。
+     - **类一（`EEXIST`，用例的钉死构造）：目标路径预置为一个普通（非 symlink）空目录**（`states/gfs/<T_gfs>.cfg.ic/`）。这是 #96 修订后的守卫（认**普通文件或 symlink**，但不认普通空目录）与 `_FILE_FLAGS` 的 `O_CREAT|O_EXCL`（对任何已存在的条目都得 `EEXIST`）之间仍保留的可达缝：预置普通文件或任一 symlink 会在阶段 A 就命中 `STATES_NOT_EMPTY`、永远走不到阶段 B，用它们构造该用例是假绿。普通空目录过得了 bootstrap 守卫、却挡得住写入是**已知且刻意**的：把守卫继续扩到「任何条目」会让 `states/` 下一个 `.DS_Store` 目录永久砖化建链；#96 只撤销 symlink 例外，不撤销普通目录例外。
      - **类二（写循环中途的 I/O 失败）：目标路径不存在，`O_EXCL` 成功创建后 `os.write` 中途抛 `ENOSPC`/`EDQUOT`/`EIO`**（NFS 发布根上最现实的失败类）。`safe_fs.write_bytes_no_follow_exclusive` 的 `except OSError` 臂只 `_close_file_fd` 后转抛，**不 unlink**（与同模块 `atomic_write_bytes_no_follow` 的失败路径不对称），故盘上留下一份 **header 合法、body 截断**的普通文件。实测（`RLIMIT_FSIZE=4096` + 忽略 `SIGXFSZ`）：抛 `SafeFilesystemError … [Errno 27] File too large`，目标 `exists: True size: 4096`，首行是完整 header。因此 `init.py` MUST 在 `detail` 里点名 `{target}` **可能已被部分写入、重跑前须一并人工确认**——该文件既不在 `written` 里、也不算「前序已落盘」，运维照当前话术清理会漏掉它。
        **判据 MUST 是「盘上是否真的留下了条目」，MUST NOT 用 `SafeFilesystemError.kind` 当代理**（round 2 验证闸门 cand-R2-01/-02 CONFIRMED/FIX_NOW，实测证伪）：`kind == "io"` 与「inode 已被创建」不等价。`safe_fs.write_bytes_no_follow_exclusive` 的 `except OSError` 臂覆盖了整个写入体，**含 `os.open(..., O_CREAT|O_EXCL, ...)` 本身**；父目录分量走查（`_open_parent_dir`，在该 `try` 之外）另从自身站点抛出，`kind` 可为 `"io"` 或 `"unsafe"`。于是 open 期的 `EACCES`/`EROFS`/`ENOSPC`/`ESTALE`（**盘上零残留**）与真正的写中途 `ENOSPC` 拿到同一个 `kind`。实测（预置 `states/ifs/` 为 `0o500` 空目录，其余为全新有效根，非 root）：`refusal = write_failed`、`written == ()`、`states/` 下零普通文件，`detail` 却同时宣称「已被排他创建但写入中途失败，可能已被部分写入」与「根已非全新，重跑 init 前需人工清理 `states/`」——两句话都与盘上真实终态相反。
        故捕获写入腿的异常后 MUST 用 no-follow 的 `os.lstat(target)` **直接探测目标**：条目存在 -> `possibly_partial = True`；`FileNotFoundError` -> `False`（此时零残留话术是**精确**的，不是保守近似——`0o500` 构造里父目录仍带 `x`，实测 lstat 干净地拿到 `FileNotFoundError`）；`lstat` 自身失败 -> fail closed 到 `True` 但话术须 hedge。`FileExistsError` 仍走自己的分支且**先于**该臂捕获，故预置条目不会被误认成自己的半写产物。该修复完全落在 `init.py` 的 catch 之后，**不需要改 `store/safe_fs.py`**（Must preserve 面保持不动）。
@@ -3111,10 +3131,10 @@ Project profile: yd-viewer
      - **MUST NOT 用 monkeypatch 伪造写入失败**来替代类一构造——那会让「阶段 B 真的用了 `O_EXCL`」这条判据退化为永真式。该禁令只针对**伪造写入结果**；在 `ensure_directory_no_follow` 这个**另一个** seam 上做真实副作用（例如建目录时顺带植入一个真实的普通文件，让真实的 `O_EXCL` 自然失败）不在禁令内，且是裁决 5 的 `O_EXCL` 选择唯一的判别构造（见新增回归行）。
      - **不在本 issue 修的两条**（均落在 Must preserve 面，已路由）：`write_bytes_no_follow_exclusive` 的失败路径缺 unlink（`store/safe_fs.py`）；`controller._classify_state` 只读 header 行故接受截断状态（`controller.py`，#22 面）。
    - 以上分类 MUST 写进模块头，且模块头 MUST NOT 再出现「唯一可达构造」的说法。
-   - **裁决 5-bis：收尾三路的判据是「阻塞物是否为持久外来条目」**（round 4 R4-A CONFIRMED/P2/FIX_NOW，层位=fixture/spec 层，实现只是忠实执行了写错的谓词）：第二路（零写入，根仍是全新根）与第三路（点名外来条目）的分流 MUST NOT 由「哪条腿抛的异常」或「条目是否恰好落在终名 `target` 上」决定。外来条目的两种载体——占住终名 `target`（排他创建撞已存在条目）与占住父目录分量 `states/<source>`（symlink/FIFO/普通文件 -> `ensure_directory_no_follow` 抛 `NotADirectoryError`/`ELOOP`，见 `safe_fs.ensure_directory_no_follow`：它对每个 part 的 `os.open` 带自己的内联 `NotADirectoryError`/`ELOOP` 臂，各自被包成 `SafeFilesystemError`（兄弟站点 `_open_child_dir` 的错误文本逐字相同，但它只在 `FileNotFoundError -> mkdir` 后的重试路径上被调用，不是本载体实际触发的站点））——运维后果逐字节相同（重跑复现同一失败，必须先移除该条目），MUST 走同一路。实现侧：ensure 腿捕获后 MUST 用 no-follow 的 `os.lstat` **逐级盘上探测**——**自 `yd_root` 起走查写入路径的每一级分量**，返回第一个非目录分量（round 5 R5-G：`ensure_directory_no_follow` 逐 `part` 做 `O_DIRECTORY|O_NOFOLLOW` 的 open、可在任一分量失败，只探末分量比失败面窄一层；且 `os.lstat` 对中间分量**跟随** symlink，`states/` 自身被占住时对 `states/<source>` 的 lstat 会穿过去拿到 `FileNotFoundError` 或 `ENOTDIR`，两者都被误判成「无外来条目」。仅把 `ENOTDIR`/`ELOOP` 翻成 `True` 不够：symlink 载体上该翻译根本不触发，FIFO 载体上第三路会点名一个盘上并不存在的 `states/<source>`）（沿用本模块「MUST NOT 用 `SafeFilesystemError.kind` 当代理」的既定规则）——探到非目录条目 -> 第三路；`FileNotFoundError` 或探到真实目录（权限类，如 `states/` 置 `0o500`/`0o600` 使父目录 open 拿 `EACCES`）-> 仍走第二路，`chmod` 后直接重跑即可成功。**第三路话术插值的路径 MUST 是被占住的那个路径本身**：ensure 腿是 `target_dir`，排他创建腿是 `target`——直接复用 `target` 会让「点名该条目路径」的承诺在下一层再次为假。不新增第四条腿。
-   - **判据的措辞 MUST 在全部 prose 面上一致**（round 2 验证闸门 cand-R2-03 CONFIRMED/FIX_NOW）：`init.py` 模块头的失败分类段与收尾话术段、`docs/compute-loop-design.md` §6.2，MUST 全部写成上面的探测式判据。**（round 2 现状记录，已由后续修复关闭：两处当时都留着被本裁决废弃的「只看 `written`」读法，而按 `CLAUDE.md`「实现与文档冲突时以文档为准」会把维护者指引到 `if written:` 这个改动上——该变异当时全套静默通过，把 cand-08 的缺陷装回去。）**`specs/init-bootstrap/spec.md` 的两条 Scenario 曾被本裁决判为「已正确限定、不需要改」——**round 4（R4-A）证伪了这句**：那两条 Scenario 的 WHEN 把判据写成「失败发生在目标文件被创建之前」与「条目在**目标路径**上」，于是外来条目占住**父目录分量** `states/<source>`（symlink/FIFO/普通文件，ensure 腿拿 `NotADirectoryError`/`ELOOP`）时逐字满足零残留腿的 WHEN，却输出一条被实测证伪的运维指令。判据 MUST 改为「**阻塞物是否为持久外来条目**」，见下方裁决 5-bis。教训记在此处不删：fixture 对 spec 现状作出的「不需要改」这类断言与任何其他绑定断言同级，MUST 有机械核对，否则就是为一个错误谓词背书。
+   - **裁决 5-bis：收尾三路的判据是「阻塞物是否为持久外来条目」**（round 4 R4-A CONFIRMED/P2/FIX_NOW，层位=fixture/spec 层，实现只是忠实执行了写错的谓词；按 #96 修订 symlink 载体）：第二路（零写入，根仍是全新根）与第三路（点名外来条目）的分流 MUST NOT 由「哪条腿抛的异常」或「条目是否恰好落在终名 `target` 上」决定。阶段 A 未归为已有状态的外来条目有两种位置——普通空目录占住终名 `target`（排他创建撞已存在条目），或 FIFO 占住父目录分量 `states/<source>`（`ensure_directory_no_follow` 抛 `NotADirectoryError`）——运维后果逐字节相同（重跑复现同一失败，必须先移除该条目），MUST 走同一路。`states/<source>` 自身或其树内的 symlink 不再是本分支载体：#96 要求它们在阶段 A 直接判 `STATES_NOT_EMPTY`、零写入。实现侧：ensure 腿捕获后仍 MUST 用 no-follow 的 `os.lstat` **逐级盘上探测**——**自 `yd_root` 起走查写入路径的每一级分量**，返回第一个非目录分量（round 5 R5-G：`ensure_directory_no_follow` 逐 `part` 做 `O_DIRECTORY|O_NOFOLLOW` 的 open、可在任一分量失败，只探末分量比失败面窄一层；`states/` 自身的 symlink/FIFO 仍在 #96 的 `states/<source>` 范围之外，必须由该走查准确点名。仅把 `ENOTDIR`/`ELOOP` 翻成 `True` 不够：FIFO 载体上第三路会点名一个盘上并不存在的 `states/<source>`）（沿用本模块「MUST NOT 用 `SafeFilesystemError.kind` 当代理」的既定规则）——探到非目录条目 -> 第三路；`FileNotFoundError` 或探到真实目录（权限类，如 `states/` 置 `0o500`/`0o600` 使父目录 open 拿 `EACCES`）-> 仍走第二路，`chmod` 后直接重跑即可成功。**第三路话术插值的路径 MUST 是被占住的那个路径本身**：ensure 腿是探到的阻塞分量，排他创建腿是 `target`——直接复用 `target` 会让「点名该条目路径」的承诺在下一层再次为假。不新增第四条腿。
+   - **判据的措辞 MUST 在全部 prose 面上一致**（round 2 验证闸门 cand-R2-03 CONFIRMED/FIX_NOW）：`init.py` 模块头的失败分类段与收尾话术段、`docs/compute-loop-design.md` §6.2，MUST 全部写成上面的探测式判据。**（round 2 现状记录，已由后续修复关闭：两处当时都留着被本裁决废弃的「只看 `written`」读法，而按 `CLAUDE.md`「实现与文档冲突时以文档为准」会把维护者指引到 `if written:` 这个改动上——该变异当时全套静默通过，把 cand-08 的缺陷装回去。）**`specs/init-bootstrap/spec.md` 的两条 Scenario 曾被本裁决判为「已正确限定、不需要改」——**round 4（R4-A）证伪了这句**：那两条 Scenario 的 WHEN 把判据写成「失败发生在目标文件被创建之前」与「条目在**目标路径**上」，于是外来条目占住**父目录分量**时逐字满足零残留腿的 WHEN，却输出一条被实测证伪的运维指令。判据 MUST 改为「**阻塞物是否为持久外来条目**」，见下方裁决 5-bis；#96 后 symlink 更早在阶段 A 收敛，本段的阶段 B 证据只用普通空目录/FIFO。教训记在此处不删：fixture 对 spec 现状作出的「不需要改」这类断言与任何其他绑定断言同级，MUST 有机械核对，否则就是为一个错误谓词背书。
 6. **拒绝理由闭合词表**（`InitRefusal` 枚举，逐项可区分，MUST NOT 以异常逃逸）：round 3 起新增 `VARIANT_PATH_INVALID`（见裁决 2 的相对性闸门）。**词表的唯一真源是 `producer/src/yd_producer/init.py` 的 `InitRefusal` 枚举体本身**；条数只允许在紧贴枚举成员处陈述一次，`tasks.md`、`spec.md`、模块头、PR 正文等远端面 MUST 引用而 MUST NOT 复述条数——复述即制造第二真源，而本仓没有任何机制让两份真源保持一致（round 4 batch-3 裁决；同形先例见本文件禁区词表一行的「刻意不复述」处理）。词表的**闭合性**与**逐项可区分**仍是硬约束，不因删除条数而放宽。
-   - `STATES_NOT_EMPTY`：`states/` 树下存在任一普通文件
+   - `STATES_NOT_EMPTY`：`states/` 树下存在任一普通文件，或 `states/<source>` 自身 / 其树内存在任一 symlink（#96；不跟随、不区分目标类型）
    - `DONE_PRESENT`：`output/` 树下存在任一名为 `DONE` 的普通文件
    - `VARIANT_MISSING`：变体目录不存在 / 不是目录
    - `VARIANT_PATH_INVALID`：`config.variants.<source>` 是绝对路径或含 `..` 分量（裁决 2 的相对性闸门；`detail` 带 source 与原始取值）
@@ -3125,7 +3145,7 @@ Project profile: yd-viewer
    - `DISCOVERY_UNREADABLE`：任一文件系统探测失败（见下条）
    - `WRITE_FAILED`：阶段 B 失败（`detail` MUST 指明已落盘的 source 集合）
 7. **枚举/探测失败 MUST 与「不存在」分流，且 MUST NOT fail-open**（沿用 issue #22 裁决 9 的同一规则，本 issue 是同一风险面的写侧）：**只有** `FileNotFoundError` / `NotADirectoryError` 等价于「空集合」；其余任何 `OSError`（`EACCES`/`EPERM`/`EIO`/`ESTALE`/`ELOOP`…）MUST 判 `DISCOVERY_UNREADABLE` 并整体拒绝。**分层切分（镜像 #22 裁决 9）**：`DISCOVERY_UNREADABLE` 专指**集合无法枚举 / 条目无法判定**这一层；率定末态**本身**被定位成功后的读失败（含 mode 000 的 `EACCES`）由 `state.parse` 收敛为 `ValueError`，一律归 `CALIBRATION_STATE_UNREADABLE`。方向性理由与 #22 相反且更严：这里判空即**放行写入**，`states/` 因权限不可枚举时若按「空」处理，就会往一个可能已有状态的根上写首态——直接断链。适用于每一处探测：`states/` 与 `output/` 的树遍历、变体目录列举、率定末态的普通文件判定（MUST NOT 用裸 `Path.exists()`/`is_file()`——`pathlib` 只吞 `ENOENT/ENOTDIR/EBADF/ELOOP/EINVAL`，`EACCES`/`EIO` 会穿透）。
-8. **`DONE` 与状态的可见性判据取「宽」，与 #22 的前沿可见集**刻意不同**：#22 的前沿对不可解析条目判「不可见」是为了不让一次崩溃的发布永久砖化该源；本 issue 是**唯一的 bootstrap 闸门**，方向相反——`states/` 下**任一**普通文件（含不合命名规则的残留）都算「已有状态」而拒绝，`output/` 树下**任一**名为 `DONE` 的普通文件都算已有产物而拒绝。这张力已知且刻意：init 只在系统历史第一次执行，宁可要求人工确认，也不能在一个有残留的根上重新建链。该差异 MUST 写进模块头。
+8. **`DONE` 与状态的可见性判据取「宽」，与 #22 的前沿可见集**刻意不同**：#22 的前沿对不可解析条目判「不可见」是为了不让一次崩溃的发布永久砖化该源；本 issue 是**唯一的 bootstrap 闸门**，方向相反——`states/` 下任一普通文件（含不合命名规则的残留），以及 `states/<source>` 自身或其树内任一 symlink（#96，不跟随、不区分目标类型），都算「已有状态条目」而拒绝；普通（非 symlink）空目录仍不算。`output/` 树下仍只把任一名为 `DONE` 的普通文件算已有产物，#96 不扩大该侧规则。这张力已知且刻意：init 只在系统历史第一次执行，宁可要求人工确认，也不能在一个有残留的根上重新建链。该差异 MUST 写进模块头。
 9. **MUST NOT 运行 SHUD、MUST NOT 写任何 `DONE`、MUST NOT 触碰 `output/`**（spec 逐字）。这是可断言的负面证据：用例 MUST 断言 `output/` 树在 init 前后逐字节不变，且不存在任何 subprocess 调用面。
 10. **不做 QC / 不做负残差归零**：`state_qc.run_state_variable_qc` 与 `normalize_negative_residuals` 在 init 期**不调用**。理由：率定末态是 prepare 提交的、已被 #20 校验过的基线产物，init 只做「复制 + 重戳」（compute-loop §6.2 第 4 步逐字）；把 QC 塞进 init 会让一份合法基线因阈值判定被拒而无法建链，且 §8 的负残差归零逐字属**运行期**语义。记为显式 non-goal，不是缺口。
 11. **单源建链 / 事后补链入口 MUST NOT 提供**（compute-loop §6.2 逐字「不提供单源建链或事后补链入口」）：不加 `--source`、`--force`、`--from` 一类参数；`build_parser()` 的 `init` 子命令参数集不变。
@@ -3150,6 +3170,7 @@ Must add/change:
   - `InitReport`（frozen dataclass）：`written: tuple[Path, ...]`、`refusal: InitRefusal | None`、`detail: str`；`written` 非空与 `refusal` 非 `None` **可同时成立**（`WRITE_FAILED` 的部分落盘，裁决 5）——这是与 #22 的 `FrontierDecision` 「恰有一个」不同的地方，MUST 在 docstring 写明
   - `bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitReport`
   - 判定顺序固定：`states/`/`output/` 拒绝守卫 → 逐源定位并解析率定末态 → 逐源扫描窗定 T → 逐源重戳 → 集中落盘
+  - #96：发现原语 MUST 以 `lstat` 单列 symlink 身份；state 守卫遇 `states/<source>` 自身或其树内任一 symlink 立即判 `STATES_NOT_EMPTY`，不得调用 FOLLOW `stat`。该策略必须是 state 守卫的显式选择，MUST NOT 顺手改变同一 helper 的 `output/` DONE 或变体率定末态可见性
   - source 词表取 `rawscan.SOURCES`，MUST NOT 再定义一份
   - cycle 目录名格式取 `rawscan.CYCLE_DIR_FORMAT`，MUST NOT 再写一份 `"%Y%m%d%H"`
 - `cli.py`：`init()` 薄委托，拒绝时 `stderr` 打印 `refusal` 与 `detail`、返回 `EXIT_GUARD`；成功打印两条落盘路径、返回 `0`
@@ -3194,12 +3215,12 @@ Regression rows:
 - **零残留的 open 期失败 MUST 报全新根**（round 2 cand-R2-01 CONFIRMED/FIX_NOW，新谓词的正向钉死）：把 `states/ifs/` 预置为 `0o500` 的**空目录**、其余为全新有效根 -> 阶段 A 全过（守卫只数普通文件）、`ensure_directory_no_follow` 空操作成功、`O_EXCL` 的 `os.open` 拿 `EACCES` -> `WRITE_FAILED`；`detail` MUST 含「零写入，根仍是全新根」，MUST NOT 含「可能已被部分写入」或「需人工清理 `states/`」，且 MUST 断言 `states/` 树下零普通文件。本行必红于「用 `kind` 当代理」的实现——实测该实现在此构造下两句话都反着说。
 - **首位 source 的写中途失败 MUST 报需清理**（round 2 cand-R2-04 CONFIRMED/FIX_NOW，`or possibly_partial` 析取项唯一的判别构造）：`payloads={"ifs": 超限载荷, "gfs": 默认载荷}` 使**写入序首位**在 `RLIMIT_FSIZE=4096` 下中途失败 -> `written == ()` 但盘上留一份截断文件；`detail` MUST 同时含「可能已被部分写入」与「需人工清理 `states/`」，MUST NOT 含「零写入，根仍是全新根」，且 MUST 断言 `0 < 目标.st_size < len(载荷)`。本行必红：把判据削成 `if written:` 后全套静默全绿（实测），只有本行能杀。
 - **新谓词的反向钉死（lstat 自身失败 -> fail closed）**（round 2 cand-R2-07 CONFIRMED/FIX_NOW，防止单向缺口随修复平移）：`kind` 谓词被探测取代后，MUST 有一行让 catch 后的 `lstat(target)` 自身抛非 `FileNotFoundError` 的 `OSError`，断言落到 `possibly_partial=True` 的 **hedge 话术**（不得出现无条件的「已被排他创建」）。理由：旧谓词只在 `kind=="io"` 一个方向被钉住——实测把它松成 `isinstance(error, SafeFilesystemError)` 后该变异存活。
-- **`_entry_kind` 的 `os.stat` FOLLOW 臂 MUST fail closed**（round 2 cand-R2-05 CONFIRMED/FIX_NOW，裁决 7 的「stat 层 fail-closed」行此前只钉住了 `os.lstat` 臂）：`states/<source>/<T>.cfg.ic` 是指向 `vault/prior.cfg.ic` 的 symlink、`vault` 置 `0o000`（`lstat` 成功——它是 symlink 不是目录；`os.stat` 得 `EACCES`）-> `DISCOVERY_UNREADABLE`、`written == ()`、`states/` 逐字节不变。本行必红：把该臂的两条 except 收成 `except OSError: return (False, False)` 后该变异存活，且实测退化为 `refusal is None` 并**往一个已持有可达前态的根上写了两份首态**——正是裁决 7 禁止的断链。载体用 symlink 只是本地差分手段，`ESTALE`/`EIO` 在 NFS 发布根上无需任何 symlink 即可到达同一臂。兄弟面：`_locate_calibration_state` 同样经 `_entry_kind`，MUST 一并补一行同构用例。**与 round 1 cand-10（DEFER，已立案 #96）不冲突**：cand-10 是 symlink→**目录**、要求**改行为**且布局在输入域外；本行是 symlink→**普通文件**（模块 docstring 自己声明「守卫取宽」在契约内），只给一条**已存在且正确**的守卫补证据，实现零改动。
+- **#96：state symlink MUST 在 FOLLOW stat 之前 fail closed**（修订 round 2 cand-R2-05 的旧 oracle）：`states/<source>` 自身及其树内分别放置指向普通文件、目录、断链和其它类型的 symlink -> 全部在阶段 A 判 `STATES_NOT_EMPTY`、`written == ()`、两源零新增写入；实现 MUST 从 `lstat` 身份直接分类，MUST NOT 先 `stat` 跟随目标，也不得因目标不可访问而改判 `DISCOVERY_UNREADABLE`。另有一条反向钉死把同一位置换成普通（非 symlink）空目录 -> 不因 #96 守卫拒绝。`_locate_calibration_state` 的 FOLLOW stat 失败仍由原裁决 7 约束为 `DISCOVERY_UNREADABLE`，#96 不改变输入变体侧。判别变异体：恢复 `(False, False)` 的 symlink→目录/断链分类，或只认指向普通文件的 symlink -> 对应布局会静默进入后续阶段。
 - **`decide_frontier` 对 4-token 兼容 header 的接受**（round 2 rider-A，覆盖缺口）：`test_decide_frontier_accepts_the_state_init_writes` MUST 参数化到 `{默认载荷, 4-token 兼容载荷}` 两条。当前 4-token 只在写入侧被验，从未喂给 `decide_frontier`。无既有缺陷，纯补覆盖。
 - **[桶 C-1] ENSURE 腿的探针不可达 MUST 报全新根**（round 3 cand-R3-04 CONFIRMED/FIX_NOW，阶段 B 两段 `try` 拆分唯一未被钉住的腿）：`states/` 置 `0o600`（可读不可执行）、其余为合法全新根 -> `ensure_directory_no_follow` 在**父目录 open** 上拿 `EACCES`，`WRITE_FAILED`、`written == ()`、`detail` MUST 含「零写入，根仍是全新根」，MUST NOT 含「可能已被部分写入」或「需人工清理 `states/`」，且 MUST 断言 `states/` 树下零普通文件。**与既有两行的差异必须理解为构造差异而非重复**：既有 `0o500` 行（`r-x`）下探针仍拿得到 `x`、`states/ifs` 从未创建，故得干净的 `FileNotFoundError`，按构造即对本变异不敏感；既有 `0o600` 行植的是 `states/ifs/`（不是 `states/`），`ensure` 在既存目录上成功，只走**写**腿。判别变异体（M5）：把 `ensure_directory_no_follow` 并回 `write_bytes_no_follow_exclusive` 的同一个 `try` -> 本行必红（实测该变异当时存活）。darwin 暴露同既有 `0o600` 行，Linux 等价性属推理未执行。
 - **[桶 C-1] 零残留失败后 MUST 可直接重跑成功**（round 3 cand-R3-06 CONFIRMED/FIX_NOW，把代理量换成承诺本身）：在「零残留的 open 期失败」行末追加——恢复权限后**再次调用 `bootstrap`**，MUST 断言 `refusal is None` 且两个源的首态均落盘。理由：`detail` 里的「零写入，根仍是全新根」本身就是一条运维指令（「直接重跑」），而全仓此前**没有任何**用例在阶段 B 失败后重跑 `bootstrap`；既有断言 `all_files(states) == []` 只是该承诺的代理量，fixture 自己也承认这一点。判别变异体：任何让失败后残留阻塞重跑的实现（例如 (b) 腿不再清理/不再避免建目录、或把第三路话术错用到本腿）-> 本行必红。**同一断言对 `FileExistsError` 腿必然失败**（实测），故本行 MUST 只加在零残留腿上，且这正是它与桶 C-3 互为交叉验证的原因。
 - **[桶 C-2] 排他创建话术的正向钉死**（round 3 cand-R3-05 CONFIRMED/FIX_NOW，单向缺口的反向补齐）：在「写入中途 I/O 失败的收尾」行上追加 MUST——`detail` 含「已被排他创建但写入中途失败」这一**确定性**措辞，MUST NOT 含对冲措辞「残留无法探测…保守起见按可能已被部分写入处理」。理由：`EXCLUSIVE_CLAIM` 此前被断言**不出现**两次、断言出现**零次**，而裁决 5 与对冲腿行（本 Matrix 的「新谓词的反向钉死」）合起来使 EXCLUSIVE 与 HEDGE 构成**可判别对**；只钉一侧就是同一单向缺口的反方向。判别变异体（S1）：把 `_probe_partial_residue` 的成功臂改吐对冲文本 -> 本行必红（实测该变异当时存活，而同一臂改成 `return None` 会红两条，证明该臂为活代码、S1 的存活是 oracle 缺口而非死代码假象）。
-- **[桶 C-3] 外来条目第三路话术（两种载体）**（round 3 cand-R3-01 CONFIRMED，行 18 CORRECTION 的正向钉死）：两组构造，**均 MUST 覆盖**：(i) 终名腿——`states/ifs/<T_ifs>.cfg.ic` 预置为**空目录**（或悬垂 symlink，两载体实测同构）；(ii) **父目录腿**（round 4 R4-A）——`states/ifs` 预置为 symlink→目录 / FIFO / 悬垂 symlink（三种载体已由三位 reviewer 各自独立复现），使 `ensure_directory_no_follow` 抛 `NotADirectoryError`/`ELOOP`。其余为合法全新根 -> `WRITE_FAILED`、`written == ()`、`states/` 树下零普通文件；`detail` MUST 点名**被占住的那个路径本身**（终名腿是 `states/ifs/<T_ifs>.cfg.ic`，父目录腿是 `states/ifs`——插值 `target` 而非 `target_dir` 会让承诺在下一层再次为假）并要求重跑前先移除它，MUST NOT 含「零写入，根仍是全新根」、MUST NOT 含「可能已被部分写入」。并 MUST 断言：**补救后（移除该条目）重跑 `bootstrap` 得 `refusal is None` 且两份首态落盘**——这一半是本行与桶 C-1 重跑行的共同判据，也是行 18 原话术被证伪的直接证据（不移除条目时 run 2 与 run 1 逐字节相同）。判别变异体：把第三路合并回 (b) 腿（即恢复行 18 修订前的行为）-> 本行必红；**父目录腿另需一个独立变异体**：把 ensure 腿的 `blocked_by_foreign_entry` 固定为 `False`（即恢复 round-4 修复前的现状）-> 本行必红。
+- **[桶 C-3] 外来条目第三路话术（两个位置）**（round 3 cand-R3-01 CONFIRMED，行 18 CORRECTION 的正向钉死；按 #96 撤销 symlink 载体）：两组非 symlink 构造，**均 MUST 覆盖**：(i) 终名腿——`states/ifs/<T_ifs>.cfg.ic` 预置为普通空目录；(ii) **父目录腿**（round 4 R4-A）——`states/ifs` 预置为 FIFO，使 `ensure_directory_no_follow` 抛 `NotADirectoryError`。其余为合法全新根 -> `WRITE_FAILED`、`written == ()`、`states/` 树下零普通文件与 symlink；`detail` MUST 点名**被占住的那个路径本身**（终名腿是 `states/ifs/<T_ifs>.cfg.ic`，父目录腿是 `states/ifs`——插值 `target` 而非实际阻塞分量会让承诺在下一层再次为假）并要求重跑前先移除它，MUST NOT 含「零写入，根仍是全新根」、MUST NOT 含「可能已被部分写入」。并 MUST 断言：**补救后（移除该条目）重跑 `bootstrap` 得 `refusal is None` 且两份首态落盘**。symlink 不得复用为本行载体：它现在必须在阶段 A 判 `STATES_NOT_EMPTY`。判别变异体：把第三路合并回 (b) 腿 -> 本行必红；父目录腿另需一个独立变异体，把 ensure 腿的 `blocked_by_foreign_entry` 固定为 `False` -> 本行必红。
 - **[桶 C-4] `NO_COMPLETE_RAW_CYCLE` MUST 区分「缺数据」与「不可读」**（round 3 cand-R3-02 CONFIRMED/FIX_NOW）：把某源唯一完整 cycle 的 bundle 文件 `chmod 0o000`（`judge` 返回 `missing_files == 0`、`unreadable_files == 2`）-> 仍判 `NO_COMPLETE_RAW_CYCLE`、零写入（方向不变，fail closed），但 `detail` MUST 点名存在**不可读**的 raw 文件（带数目或路径），且 **MUST NOT** 出现「等待 raw 补齐后重跑 init」这一伪装话术。理由：`rawscan.ScanVerdict` 早已把 `missing_files` 与 `unreadable_files` 分开（见 `ScanVerdict` 的字段定义与 `_check` 的 docstring——后者点名生产 raw 根是由另一 uid 写入的 NFS 树），而 `_first_complete_cycle` 只取 `.complete` 丢弃了整个 verdict；本 PR 自己已在 `cycle.hours` 路径上禁止了同一伪装（`test_config_error_from_judge_propagates_untouched`，其 docstring 逐字写着「把配置错误伪装成缺数据，运维会永远重跑」），raw 权限故障是同一伪装的未守卫版本。判别变异体：把 detail 退回不区分的原话术 -> 本行必红。注：裁决 7 的适用面枚举**不含 raw 面**（其方向性理由是「判空即放行写入」，本处判空是拒绝），故本条是裁决 7 的精神而非字面，属新增约束。
 - **[桶 C-6] 未来 cycle 不夺首轮：本行无判别力，MUST 重构构造**（round 4 R4-D CONFIRMED/major/FIX_NOW，自桶 B 移入）：现有两个构造（`test_future_cycle_does_not_win_the_first_frontier` 与 `test_same_day_future_cycle_does_not_win_over_an_earlier_one`）的 complete 候选集都是**单元素**——前者因 `_candidate_cycles` 的日期网格 `span = (now.date() - start_date).days` 使 `NOW+12h` 从不进入候选集，后者因 `window_start <= cycle <= now` 把同日更晚 cycle 滤掉——两个排除机制都在**进入选取循环之前**生效，「不夺首轮」在剩余候选集上恒真，「升序取第一个」与「取窗内最晚」在单元素集上恒等。**MUST NOT 为本行补新声明**：两个排除机制的判别证据已分别由回归行 14 `test_future_cycle_is_not_a_candidate`（桶 A/cand-02）与 `test_same_day_future_cycle_is_excluded_by_the_now_comparison` 承担，补声明只会第四次复现 round-1 cand-02 的形状。修法是让本行**真正走到选取分支**：构造一个 complete 候选集含**两个及以上**元素的 raw 树（窗内两个都完整的 cycle），断言 T 取最早那个。判别变异体：把「升序取第一个 complete」改为「取窗内最晚 complete」-> 本行必红。并 MUST 在 Matrix 中写明本行覆盖哪几个用例（见本 Matrix 「未来 cycle 不夺首轮」一行，已按用例名列全）——原 Matrix 只写了一条构造，另一条长期无主。
 - **[桶 C-7] `WRITE_FAILED` 的「列出全部已落盘 source」MUST 由单元级测试钉死**（round 4 R4-E CONFIRMED/major/FIX_NOW，round-1 cand-04 的真正闭合）：`rawscan.SOURCES` 是 2 元组且写入循环内三条失败腿均 `return`，故失败时 `len(written) ∈ {0,1}`——「列出**全部**」这条契约（`InitRefusal.WRITE_FAILED` 成员上方的注释）在端到端层**结构性不可达**，全仓无任何用例钉死它，`SOURCES` 一旦扩到 3 源即静默丢源。修法：对纯函数 `_write_failed`（无 I/O）直调，传入**伪造的两元 `written`**，断言两条路径都出现在 `detail` 中。MUST NOT 把契约弱化为单数（与本 Matrix 行 18 逐字冲突），MUST NOT monkeypatch `SOURCES`（那会动 Must-preserve 面的 `rawscan`）。判别变异体：把 `landed = "、".join(str(path) for path in written) or "（无）"` 换成 `str(written[0]) if written else "（无）"` -> 本行必红（**round 5 实测该变异被本行杀掉，红集恰为本用例**；在本行存在之前它在端到端全套下存活）。
@@ -3285,7 +3306,7 @@ Review focus:
 
 - [x] 12.1 实现严格前沿纯函数：`DONE`/状态文件集合 → 每源待跑 T 或停止原因（全新链、D+12h、状态缺失、时间头不对应 T、raw 缺口、缺轮阻塞）
 - [x] 12.2 实现未提交残留识别与清理重跑判定（保留 T 状态、删更晚状态与半成品）
-- [x] 12.3 实现非阻塞 flock 封装（持有即跳过、覆盖全生命周期），进程内测试跳过语义
+- [x] 12.3 实现非阻塞 flock 封装（持有即跳过、覆盖全生命周期、本地盘长期哨兵与持锁 inode 一致性），进程内测试跳过语义与外部替换 fail-closed
 
 依赖：组 1、组 4（12.1 时间头校验读分段 header）
 §13.1 归属：控制器（前沿/flock 幂等/raw 缺口）
@@ -3301,6 +3322,8 @@ Project profile: yd-viewer
 
 **上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #22 的依赖只列 #2/#8，但验收标准里的「时间头不对应绝对 T 即停」需要 header 时间语义符号（`cfg_ic_header_minute_index` / `cfg_ic_header_shape`），而 `nwm-snapshot-inventory.md:44` 把它们归在 #9（任务 4.3）。缺失的 seam 本 issue 自行补齐（见下方裁决 1），并按核心规则「needed-but-missing seam is a reported deviation」记录在此。
 
+**#86 收尾裁决（修订根级缺席语义）**：共享 `output/` 根自身的 `ENOENT` / `ENOTDIR` 不再等价于空集合，而是根异常；每个受检 source 都 MUST 以既有 `DISCOVERY_UNREADABLE` 停止，不判全新链、不调用 raw 判定、不进入残留规划。只有 `output/` 根已确认为可枚举目录后，下层 cycle/source/`DONE` 路径的 `ENOENT` / `ENOTDIR` 才继续表示「该处不存在」。不得用 `exists()` 预检制造 check-to-enumerate 窗口；严格语义必须由枚举 `output/` 根的同一次调用施加。
+
 **核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
 
 1. **读侧 header 时间原语落地在本 issue，不注入 fake**。把 pin 的 `cfg_ic_header_minute_index`(`state_qc.py:609`)、`cfg_ic_header_minute_time`(`:629`)、`cfg_ic_header_shape`(`:664`)、`CfgIcHeaderShape`(`:650`) 与其闭包常量 `_VALID_CFG_IC_HEADER_TOKEN_COUNTS`(`:646`) 移植到**新文件** `producer/src/yd_producer/state/header_time.py`，`_as_float` **MUST 从 `state.cfg_ic` 导入**（pin 的 docstring 逐字声明这三个符号与 `_header_counts` 共享「最后一个数值 token 即 minute-time」规则，两份定义即双权威）。这是 `nwm-snapshot-inventory.md:44` 行的**第二次部分落地**（第一次是 #8 的格式层），该行的落地状态注记随本 PR 更新。#9 MUST 从 `header_time` 导入这五个符号，MUST NOT 再移植一份。
@@ -3310,12 +3333,12 @@ Project profile: yd-viewer
 3. **绝对时间判据钉死**：header shape 有效 → 取 minute token → **先过 `math.isfinite` 闸**（`_as_float` 逐字移植自 pin，`nan`/`inf`/`-inf` 都会被 `float()` 接受并计入数值 token，随后 `round()` 会抛 `ValueError`/`OverflowError`）→ `round(observed_minute) == round(T.timestamp() / 60)` 才算对应 T，否则停。非有限值一律 `HEADER_TIME_MISMATCH`，MUST NOT 以异常逃逸。四舍五入到整分钟是因为 header 的 minute token 是浮点文本（pin 写入侧是 `valid_time.timestamp()/60`，形如 `27000000.000000`）；cycle 间距 12h，±30s 容差不产生歧义。shape 无效（数值 token 数不是 3 或 4）一律停，MUST NOT 退化为「取最后一个数值 token」的宽松读法。
 4. **只读 header 行，MUST NOT 全量解析文件体**。结构检查（缺段、行数不符、数值区损坏）是任务 4.2 / #9 的面；本函数对 T 状态只做「存在、可读、header 时间对应 T」三判。读取 MUST 走**只读首行的有界读**：先用已取得的 `st_size` 判超界（`> MAX_STATE_IC_BYTES` 即 `STATE_UNREADABLE`），再分块读到首个非空行为止，累计读入 MUST NOT 超过 `MAX_STATE_IC_BYTES + 1` 字节。MUST NOT「先 `read(MAX+1)` 再 `decode` 再 `splitlines()`」——那样 64 MiB 上界会放大成数百 MiB 常驻（round 1 验证闸门 batch resource-limits cand-04 CONFIRMED/FIX_NOW：实测 63 MiB 短行文件 traced peak 297 MiB / `ru_maxrss` 537 MiB，16 MiB 纯换行文件 traced peak 168 MiB ≈ 10.5x），正好架空 `MAX_STATE_IC_BYTES` 自述的 OOM 保护意图。**候选行本身也 MUST 有界**（round 2 batch resource-and-coverage-2 cand-12 CONFIRMED/FIX_NOW）：字节预算只约束「读了多少」，不约束「首行有多长」——首个 `MAX+1` 字节里没有 `\n` 时（64 MiB 无换行文本，或截断/预分配出来的**全 NUL** 文件——NUL 是合法 UTF-8 且不是 `str.strip()` 的空白，整个文件成为一个巨大的 header 行），`pending`、`bytes(pending)`、`decode()`、`split()` 各自实体化一份文件大小的对象，实测端到端 traced peak 576 MiB / `ru_maxrss` 681 MiB。故新增规则：首个非空行累计超过 `MAX_HEADER_LINE_BYTES`（模块常量，取 64 KiB——原生 header 只有 3–4 个 token，两个数量级余量）仍未遇到 `\n` 时，MUST 立即判 `STATE_UNREADABLE` 并停止读取，MUST NOT 继续累积；跳过前导空行时已丢弃的空白不计入候选行长度。注意这条**改变了可观测行为**：全 NUL 的 64 MiB 状态由 `HEADER_TIME_MISMATCH` 变为 `STATE_UNREADABLE`——两者都停源，方向一致。状态文件的可读性判定 MUST **跟随** symlink（与 `state/cfg_ic.py` 的 `_read_bytes_limited` 调用点注释逐字保留的「刻意不走 no-follow 安全读」同一理由：macOS `/tmp` 本身是 symlink，测试树会被误拒）；只有目录、socket/FIFO、断链 symlink、不可读、非 UTF-8、超界归 `STATE_UNREADABLE`。no-follow 的越界拒绝属删除/发布面，归 #24/#25。
 5. **cycle 可见集判据（`states/` 与 `output/` 对称适用）**：条目名为 10 位数字**且**可被 `%Y%m%d%H` 解析（小时不限 00/12——形态与可解析性是唯一的门），`states/<source>/` 侧另需固定后缀 `.cfg.ic`。不满足者对前沿**不可见**，MUST NOT 因此报错停源，也 MUST NOT 抛 `ValueError`。两侧对称是必需的：`output/` 下同样会有 stray 文件、#25 保留窗口清理中断留下的半删目录与 `.DS_Store`。**可见集另加一道可表示性门**：解析出的 cycle MUST 满足 `cycle + 12h` 在 `datetime` 值域内，否则同样判为不可见——`9999123123` 是 10 位数字且 `%Y%m%d%H` 可解析，`datetime(9999,12,31,23) + 12h` 抛 `OverflowError`（round 1 batch error-classification cand-03 CONFIRMED/FIX_NOW，实测逃逸出 `decide_frontier`）。选可见性门而非新增停止原因，是为了保住闭合词表：这类条目在语义上就是「不是合法 cycle」。理由：`specs/run-controller/spec.md:75` 的发布把临时文件 rename 在 `states/<source>/` **目录内**完成，临时名的形态由 #24 定；若前沿对不可解析文件名 fail-closed，一次崩溃的发布会把该源**永久砖化**，与「无 `DONE` 残留必须可干净重跑」直接冲突。残留的**清理**归 #23。
-6. **全新链取最早状态文件名**（`spec.md` 的 MUST 逐字：「待跑 T 为 init 写入的最早状态文件名」）。compute-loop §10 另有一句「全新链只允许存在 init 写入的最早状态」，读作前沿侧的 fail-closed 会与 spec 的 MUST 冲突；本 fixture 按 spec 取最早，不把「无 DONE 却有多份状态」判为异常（那是 #23 残留面的判定）。该张力记录在此，路由至 #23 fixture，不在本 PR 处理。
+6. **全新链取最早状态文件名**（`spec.md` 的 MUST 逐字：「待跑 T 为 init 写入的最早状态文件名」）。该分支的前置是 `output/` 根已确认可枚举且该源 DONE 集合确为空；根异常已由 #86 在更早处停源。compute-loop §10 另有一句「全新链只允许存在 init 写入的最早状态」，读作前沿侧的 fail-closed 会与 spec 的 MUST 冲突；本 fixture 在合法定义域内按 spec 取最早，不把「无 DONE 却有多份状态」判为异常（那是 #23 残留面的判定）。该张力记录在此，路由至 #23 fixture。
 7. **前沿只由 DONE 集合推进**：存在比 T 更晚的状态文件时，待跑 T **仍是** D+12h，MUST NOT 因更晚状态而前进。这一条同时是「崩溃残留恢复」在前沿层的边界证据（清理动作归 #23）。
-9. **枚举/探测失败 MUST 与「不存在」分流，且 MUST NOT fail-open**（round 1 batch error-classification cand-01/cand-02 双 CONFIRMED/FIX_NOW，实测：`chmod 0o000 output/<最新 cycle>` 让前沿**倒退**到已 `DONE` 的 cycle 且仍判可跑；`chmod 0o000 states/<source>` 让 `PermissionError` 直接逃出 `decide_frontier`）。统一规则：
-   - **只有** `FileNotFoundError` / `NotADirectoryError`（路径确实不存在）才等价于「空集合」；
-   - 其余任何 `OSError`（`EACCES`/`EPERM`/`EIO`/`ESTALE`/`ELOOP`…）MUST 判为**无法确定**，停该源并返回新增的第六个停止原因 `DISCOVERY_UNREADABLE`（词表由 5 项扩为 6 项，本轮起为新的闭合词表）；
-   - 该规则适用于**每一处**文件系统探测：`output/` 与 `states/<source>/` 的列目录、`DONE` 的普通文件判定、状态文件的存在性/symlink 探测（MUST NOT 用裸 `Path.exists()`/`is_symlink()`——`pathlib` 只吞 `ENOENT/ENOTDIR/EBADF/ELOOP/EINVAL`，`EACCES`/`EIO` 会穿透）；
+9. **枚举/探测失败 MUST 与「不存在」分流，且 MUST NOT fail-open**（round 1 batch error-classification cand-01/cand-02 双 CONFIRMED/FIX_NOW；根级例外由 #86 修订）。统一规则：
+   - 对已确认存在的目录树内部，`FileNotFoundError` / `NotADirectoryError` 仍表示「该子路径不存在」；**唯一根级例外**是共享 `output/` 根自身：其 `ENOENT` / `ENOTDIR` 表示发布根异常，MUST 返回 `DISCOVERY_UNREADABLE`，不得等价为空 `DONE` 集合；`states/<source>/` 根缺失仍按 `NO_INITIAL_STATE`；
+   - 其余任何 `OSError`（`EACCES`/`EPERM`/`EIO`/`ESTALE`/`ELOOP`…）MUST 判为**无法确定**，停该源并返回既有停止原因 `DISCOVERY_UNREADABLE`；
+   - 该规则适用于每一处文件系统探测：`output/` 根枚举必须使用根严格模式，`states/<source>/` 列目录与下层 `DONE`/状态路径继续使用子路径缺席语义。MUST NOT 用裸 `Path.exists()`/`is_symlink()` 预检——除 errno 吞噬问题外，预检与枚举之间会重开根消失的 TOCTOU 窗口；
    - 状态文件**本身**不可读仍归 `STATE_UNREADABLE`（其 docstring 已含「权限拒绝」）；`DISCOVERY_UNREADABLE` 专指**集合无法枚举/条目无法判定**这一层；
    - fail-open 的方向性理由：`states/` 侧判空是 fail-closed（`NO_INITIAL_STATE`），`output/` 侧判空却让链看起来是全新链，把前沿**倒退**到已发布 cycle——products-contract §4.4「重复运行看到 `DONE` 时不覆盖正式产物」的发布侧守卫归 #24 尚未落地，本函数当前是唯一闸门。
 10. **注入的 `raw_complete` 的可接受输入域 MUST 写进 docstring**（round 1 batch integration-contract cand-06 CONFIRMED/FIX_NOW）：本函数返回的 T 可能带任意可解析的 cycle 小时（裁决 5 刻意如此），而生产实现 `rawscan.judge` 只对 `config.cycle.hours` 全域（实测 18Z 目标使其在任何文件系统访问之前抛 `ConfigError`，异常穿透 `decide_frontier`）。本 issue owed 的是**声明的前置条件**而非守卫；接线与守卫归 #26，并在组 14 记录该约束。
@@ -3373,7 +3396,7 @@ Domain packs (from active profile):
 - NWM 快照溯源与 DB-free 隔离: **selected** - 五个移植符号须带溯源头；断言零 NWM import、零 DB 符号
 
 Invariant Matrix
-Governing invariant: 每源的待跑 cycle 只由该源自己的 `DONE` 集合推进（无 DONE 取最早首态，否则 D+12h）；目标 T 的状态缺失/不可读/时间头非绝对 T 或 T 的 raw 未齐时一律停该源，MUST NOT 取更旧状态、跳轮、冷启动或互借另一源状态。
+Governing invariant: 共享 `output/` 根可枚举时，每源的待跑 cycle 只由该源自己的 `DONE` 集合推进（确定无 DONE 才取最早首态，否则 D+12h）；根缺失/非目录，或目标 T 的状态缺失/不可读/时间头非绝对 T、T 的 raw 未齐时一律停该源，MUST NOT 取更旧状态、跳轮、冷启动、互借另一源状态或进入残留清理。
 Source-of-truth identity/contract: `output/<YYYYMMDDHH>/<source>/DONE`（完成判据）与 `states/<source>/<YYYYMMDDHH>.cfg.ic` 的**文件名 cycle** 与**header 绝对分钟时间**必须同时对应同一个 T
 Surfaces:
 - Producers: none - 本 issue 零写入；`DONE`/状态的产出面归 #21（init）与 #24（发布）
@@ -3391,7 +3414,7 @@ Regression rows:
 - 另一源目录完全为空 / 停止 -> 本源结论不受影响（逐源独立，两源交叉断言）
 - `states/<source>/` 内有发布残留临时名（如 `.2026082612.cfg.ic.tmp` 与一个子目录） -> 不影响任何结论，不抛错
 - `output/` 存在但不可枚举（EACCES/EIO/ESTALE 类） -> `DISCOVERY_UNREADABLE`，**MUST NOT** 判为全新链或让前沿倒退到已 `DONE` 的 cycle
-- `output/` / `states/<source>/` 不存在 -> 仍分别是全新链 / `NO_INITIAL_STATE`（「不存在」与「不可读」严格分流）
+- `output/` 根缺失或为非目录（ENOENT/ENOTDIR）-> `DISCOVERY_UNREADABLE`，不得判全新链；`states/<source>/` 不存在 -> 仍为 `NO_INITIAL_STATE`（#86 的根级非对称）
 - 任一探测点遇到 `EACCES`/`EIO`/`OverflowError` -> 一律收敛为停止原因，MUST NOT 逃出 `decide_frontier`
 - 64 MiB 无换行（含全 NUL）的状态文件 -> `STATE_UNREADABLE`，常驻内存与 `MAX_HEADER_LINE_BYTES` 同量级
 - 一源的 `output/<cycle>/<source>/` 不可读、另一源正常 -> 前者 `DISCOVERY_UNREADABLE`、后者结论不受影响
@@ -3399,8 +3422,8 @@ Regression rows:
 - `output/<cycle>/<source>/DONE` 是目录或断链 symlink -> 该 cycle 不计入 DONE 集合，不抛错
 
 Required evidence（每条 input -> expected output）:
-- **全新链**：无任何 `DONE`，`states/ifs/` 只有 `2026082000.cfg.ic`（header 对应绝对 2026-08-20T00Z）、raw 齐 -> `cycle == 2026-08-20T00:00Z`，`stop_reason is None`（spec Scenario「全新链取首态文件名」）
-- **全新链多份状态**：无 `DONE`，状态有 `2026082000` 与 `2026082012` -> 取**最早** `2026082000`（裁决 6）
+- **全新链**：`output/` 是可枚举空目录，`states/ifs/` 只有 `2026082000.cfg.ic`（header 对应绝对 2026-08-20T00Z）、raw 齐 -> `cycle == 2026-08-20T00:00Z`，`stop_reason is None`（spec Scenario「全新链取首态文件名」）
+- **全新链多份状态**：`output/` 是可枚举空目录，状态有 `2026082000` 与 `2026082012` -> 取**最早** `2026082000`（裁决 6；#86 只修根异常，不把真正首轮多状态改成停源）
 - **无 DONE 且无任何合法状态文件**（空目录 / 目录不存在 / 只有非法名） -> `NO_INITIAL_STATE`，不抛异常
 - **前沿推进**：最新 `DONE` 为 `2026082600` -> T=`2026082612`（spec Scenario「前沿推进 D+12h」）
 - **最新 DONE 取最大而非最后写入**：`DONE` 集合为 `{2026082600, 2026082512, 2026082700}` 且 mtime 逆序 -> D=`2026082700`，T=`2026082712`（钉死「取最大 cycle」而非「取 mtime 最新」）
@@ -3434,7 +3457,7 @@ Required evidence（每条 input -> expected output）:
   - (g) 状态路径查找回退到兄弟源目录 -> 「不互借另一源」用例必须变红
   - (h) `DONE` 判定由 `is_file()` 改为 `exists()` -> 「DONE 是目录/断链 symlink」用例必须变红
 - **枚举失败不 fail-open**（裁决 9）：`output/` 整体不可枚举 -> `DISCOVERY_UNREADABLE`，`cycle is None`，**MUST NOT** 走全新链分支；`output/<最新 DONE cycle>/` 单个目录不可读（其余 cycle 正常）-> 同样 `DISCOVERY_UNREADABLE`，MUST NOT 退回更旧的 `DONE` 让前沿倒退；`states/<source>/` 不可枚举 -> `DISCOVERY_UNREADABLE` 而非 `NO_INITIAL_STATE`（三条均带非 root 跳过守卫）
-- **「不存在」仍是空集合**：`output/` 目录不存在、`states/<source>/` 目录不存在 -> 分别仍为全新链 / `NO_INITIAL_STATE`（钉死 errno 分流没有把「不存在」一起判成不可读）
+- **#86 根级 ENOENT/ENOTDIR fail closed**：参数化让共享 `output/` 根 (a) 不存在、(b) 是普通文件；即使 `states/<source>/` 有一份或多份合法状态，两者都 -> `DISCOVERY_UNREADABLE`、`cycle is None`，raw 判定零调用，整棵树递归快照不变。反向对照：`output/` 是可枚举空目录时才走全新链；`states/<source>/` 目录不存在仍 -> `NO_INITIAL_STATE`。另做竞态判别：不得靠 `exists()` 预检后再用宽松枚举，根在枚举调用处消失必须仍停源
 - **状态存在性探测不得让 `OSError` 穿透**（裁决 9）：`chmod 0o000 states/<source>`（父目录不可读，非 root）-> 返回停止原因并在 detail 指名，MUST NOT 抛 `PermissionError`。现有的「文件 `chmod 0o000`」用例对这条**没有判别力**（`stat()` 仍成功，失败落在已被 guard 的读取处）
 - **可表示性门**（裁决 5 增补）：`output/9999123123/<source>/DONE`（10 位、可解析、+12h 溢出）-> 该条目不可见，结论与不含它的树逐字段一致，MUST NOT 抛 `OverflowError`；`states/<source>/9999123123.cfg.ic` 同理
 - **首行有界读不放大内存**（裁决 4 增补）：构造接近上界但合法的状态文件（如 16 MiB 纯换行 + 末尾 header 行），在 `tracemalloc` 下断言 `_read_header_line` 的 traced peak 与文件大小同量级（不得达到其数倍）；恰好上界/超一字节的既有分类行为不变
@@ -3489,7 +3512,7 @@ Project profile: yd-viewer
    - **不含** scratch `work/<source>/<T>`（compute-loop §11.3 与 §12 把 work 的删除定为失败收尾与保留清理的动作，归 #26/#28/#13.x），不含 14 天保留窗清理（§12，归 13.3）。
    输入 T 取 `decide_frontier` 的结论 cycle；`FrontierDecision` 不可跑（带 `stop_reason`）时本源 MUST NOT 进入清理——`FrontierDecision` 在不可跑时不携带 cycle，调用方拿不到 T 就无从定义「更晚」。`RAW_INCOMPLETE` 因此被连带跳过，属已记录偏离（偏离记录第 5 条），不是本裁决的目的。
    **`source` 的输入域 MUST 在判定入口 fail closed**（round 1 A3 PLAUSIBLE/DEFER，因后果属数据丢失类而在本轮一并落地）：仅校验 `source == decision.source` 不够——空串会让 `output_root / cycle_id(T) / ""` 塌回 `output/<cycle>/`（`Path("/a/b") / ""` 就是 `/a/b`），删除粒度由本源子目录放大为整个 cycle 目录，连同另一源已带 `DONE` 的正式产物一起消失，且 `safe_fs` 帮不上忙（它看到的条目名是一个合法的 10 位 cycle id）。`source` MUST 非空；越界的 source 名 MUST 报错而不是构造路径。
-3. **全新链同样适用，且 T 仍取最早状态文件名**（结清 #22 裁决 6 路由的张力）：该源无任何 `DONE` 时 T = `states/<source>/` 里最早的合法状态，比它更晚的状态一律是残留。理由：init 只写一份首态（`spec.md`「全新链取首态文件名」），多出来的份只可能来自一次中断的首轮发布；按同一条规则删除后重跑 T，与「无 `DONE` 残留必须可干净重跑」一致。MUST NOT 把「无 `DONE` 却有多份状态」判为异常停源——那会让首轮崩溃永久砖化该源。
+3. **#86 撤回本裁决的无条件版本；全新链清理只在 `output/` 根可枚举时成立**：只有共享 `output/` 根已确认为可枚举目录、该源的 `DONE` 集合被可靠确定为空时，T 才取 `states/<source>/` 里最早的合法状态，比它更晚的状态才可判为首轮发布中断残留。此时「无 `DONE` 却有多份状态」仍不单独构成异常，保留既有首轮崩溃恢复。若 `output/` 根自身返回 `ENOENT` 或 `ENOTDIR`，它不是“无 DONE”，而是根异常：前沿 MUST 以 `DISCOVERY_UNREADABLE` 停本源，`plan_residue` 直调也 MUST 拒绝形成清单，所有状态与产物零删除。不得从状态数量猜测这两种树，也不采用隔离改名；最早的、可辨识的根枚举边界已经足够 fail closed。
 4. **`DONE` 的存在性是每个 `output/<cycle>/<source>/` 的删除前置**，MUST 逐源 stat `DONE` 这个普通文件，MUST NOT 以「目录非空」或「有 `yd.rivqdown.dat`」代替（products-contract §4：`DONE` 是唯一完成标志）。删除的粒度是 `output/<cycle>/<source>/`，**不是** `output/<cycle>/`：另一源可能在同一 cycle 目录下已有 `DONE`。父目录 `output/<T>/` 在删完本源子目录后 MUST 保留（是否删空目录归 13.3 的保留清理）。
    **`DONE(retained)` 存在时整个清单 MUST 为空，不只是半成品那一半**（round 1 chain-destruction 批 A1 CONFIRMED/FIX_NOW，实测）：该闸只在调用方**交来**一个 T 时可达（`decide_frontier` 自己产出的 T 永远不在 `done_cycles` 里），而交来 T 正是任务 13.2 的复用姿态；只挡半成品、不挡状态文件，会在「publish 已写 `states/<T+12>` 与 `DONE(T)`、其后某步失败」时把刚提交的下一环判为残留删掉，前沿随即永久停在 `STATE_MISSING`。这直接违反本 fixture 的 Must-preserve「清理前后对同一棵树调用 `decide_frontier`，T 不变」。故该判据 MUST 提到 `plan_residue` 一层，两类删除共用。
 5. **不可见条目永不删除**。`decide_frontier` 的 cycle 可见集判据（10 位数字且 `%Y%m%d%H` 可解析且 `cycle+12h` 不溢出；`states/` 侧另需 `.cfg.ic` 后缀）在本 issue **原样复用**，MUST 从 `controller` 导入而非重写一份。方向与 #22 裁决 5 相反但同源：那里「不可解析 ⇒ 不可见 ⇒ 不砖化该源」，这里「不可解析 ⇒ 无法判定是否比 T 晚 ⇒ 不删」。只删除能被正面识别为残留的路径，是本 issue 的 fail-closed 形态。
@@ -3504,21 +3527,24 @@ Project profile: yd-viewer
    - **窗口 1（进程死亡）**：孤儿作业 12345 的 `--chdir` 是 scratch `work/<source>/<T>`（`--chdir=work_dir` 的绑定在代码侧：`producer/src/yd_producer/slurm.py:133-140`，由 `tasks.md` 的 #11 fixture 与 `producer/tests/test_slurm.py` 逐元素钉住；compute-loop §3.3 / §10 步骤 6 只给出「work 是 scratch 下的一次性隔离单元」这一层，**不含** `--chdir` 字样——round 3 核验更正原引用），它写的全部路径都在 scratch 下。裁决 2 已把 work 排除出本 issue 的删除集合，故「下一 tick 删掉正在被写的 work 目录」这条后果在 12.2 上不可达。NFS 侧的 `output/` 与 `states/` 只由控制器进程写（`spec.md`「NFS 提交顺序与 DONE 语义」的六步全部是控制器动作），而控制器写入被 12.3 的锁覆盖，孤儿的是 Slurm 作业不是控制器。
    - **窗口 2（已提交但未登记）**：同上——没有任何 job ID 存在，但也没有任何 Slurm 作业会写 NFS 侧路径，故对 12.2 的删除集合同样不可达。
    - **仍然成立的危害与其落点**：一旦 #28 把 work 的删除接进重跑路径，两个窗口都恢复可达，且窗口 2 按 #59 的构造性不对称无法用 job ID 覆盖。因此 #59 的两条候选（(a) 存活确认 / (b) 见半成品即停等）与 `spec.md`「未提交残留清理重跑」是否需要 delta，**整体归 #28 裁决**，本 issue MUST NOT 替它选。本 issue 的义务是把边界写死在此并在 #59 上留证。
-10. **不接线 `run` CLI**。`cli.py:116` 的 `run` 仍是 `_unimplemented`，接线归任务 14.1（issue #26/#27）。12.3 交付的是一个可复用的上下文管理器 / 包装函数，MUST NOT 修改 `cli.py` 的子命令行为。
-11. **flock 语义钉死**：用 `fcntl.flock(fd, LOCK_EX | LOCK_NB)`，MUST NOT 用 `fcntl.lockf`；释放时 MUST NOT `unlink` 锁文件（删掉后另一实例会在新 inode 上建锁，两个持有者同时成立）；被包裹的可调用对象在跳过分支 MUST NOT 被调用；跳过是**成功**语义（与「跑过了」可区分的返回值，不是异常，不是非零退出）。`fcntl.flock` 的锁挂在 open file description 上，故同一进程内两次独立 `open()` 互相冲突——进程内用例因此是有效判别器。spec 的 Scenario 写的是「另一进程」，任务 12.3 写的是「进程内测试」：等价性由上一句给出，但 MUST 另加一条子进程用例正面覆盖 spec 的字面 WHEN。
+10. **本 #23 不接线 `run` CLI**。`cli.py:116` 的 `run` 在本 issue 交付时仍是 `_unimplemented`；最终接线归 M2 收尾任务 14.2。12.3 只交付可复用的上下文管理器 / 包装函数，MUST NOT 在本 issue 内修改 `cli.py` 的子命令行为。
+11. **flock 语义钉死**：用 `fcntl.flock(fd, LOCK_EX | LOCK_NB)`，MUST NOT 用 `fcntl.lockf`；释放时 MUST NOT `unlink` 锁文件（删掉后另一实例会在新 inode 上建锁，两个持有者同时成立）；被包裹的可调用对象在跳过分支 MUST NOT 被调用；跳过是**成功**语义（与「跑过了」可区分的返回值，不是异常，不是非零退出）。在本地文件系统这一部署前提下，`fcntl.flock` 的锁挂在 open file description 上，故同一进程内两次独立 `open()` 互相冲突——进程内用例因此是有效判别器。spec 的 Scenario 写的是「另一进程」，任务 12.3 写的是「进程内测试」：等价性由上一句给出，但 MUST 另加一条子进程用例正面覆盖 spec 的字面 WHEN。Linux NFS 会把 `flock` 仿真成整文件 byte-range lock，锁属主退化为进程；这不证明跨进程互斥必然失效，但会使本进程内判别前提不成立，故不能把 `cron.lock_path` 部署在 NFS。
     **进程内跳过用例的第一持有者 MUST 也经同一个封装取得锁，MUST NOT 由测试自己直接 `fcntl.flock`**（fixture 复核实测，darwin 24.6.0）：XNU 把 `flock` 与 `lockf` 并进同一条 lock list，测试自持 `flock` 时封装侧的 `lockf` 仍报 `EAGAIN`，于是 `flock → lockf` 变异体照样走跳过分支、用例保持绿而存活。两侧同经封装则该变异体使两把锁都变成同进程不冲突的 `lockf`，第二次进入会**真执行**，用例变红。这条不是风格：判别器的两端必须同时被变异，否则平台的锁合并语义会把变异体藏住。
 12. **零新增依赖**：`fcntl`、`os`、`pathlib` 全在 stdlib。本 issue MUST NOT 引入 `filelock` 之类的第三方包。
+13. **#85 M2 收尾裁决——本地盘长期哨兵 + 持锁 identity**：`cron.lock_path` MUST 位于 node-22 本地文件系统的专属 `run/` 目录，MUST NOT 位于 yd/NWM NFS、`scratch_root` 或其它网络/共享挂载。该判定由 M4 安装 cron 时读取实际挂载信息并写 receipt，M2 业务代码不猜路径前缀、hostname 或平台。锁文件及其目录是长期哨兵：runlock 只 unlock/close；本仓 retention/work/staging/residue 清理以及运维 `rm`、tmp sweeper 等外部主体都不得 unlink、rename、replace 文件或删除/替换目录。迁移只能先停 cron、确认无 controller 持锁/运行，再改现场配置并留 receipt。
+    runlock 每次成功 `flock` 后 MUST 以 `fstat(fd)` 冻结 `(st_dev, st_ino)`，并用 no-follow path stat 确认 `cron.lock_path` 是同一普通文件后才调用 action。首次 action 前失配只允许 unlock/close 旧 fd，从 open/flock 开始完整重取一次；重取遇竞争按既有成功跳过，第二次仍缺失、symlink/非普通、identity 不等或不可确定则 `RunLockError`，action 零调用，不创建 replacement、不删当前路径。action 返回或抛错后、unlock 前必须再做同一检查；失配不得重跑 action，正常 action 转 `RunLockError`，原 action 异常则保持同一对象/cause 并 `add_note` 附锁漂移证据。所有路径释放本调用的锁/fd。两处检查只能发现已经发生的替换；禁止外部删除长期哨兵仍是防止旧、新 inode 双持有者的必要不变量，fixture MUST NOT 把有限检查写成原子防护。
 
 Must-preserve behavior:
-- `decide_frontier` 与 `controller` 现有导出的行为逐字不变（本 issue 只新增符号）；`producer/tests/test_controller_frontier.py` 全套通过（本 PR 只改了其中一处 docstring 措辞 `_done_cycles`→`done_cycles`，无断言变更；`frontier_fixtures.snapshot_tree` 的快照元组增加 `st_mtime_ns` 维度，由零写入证据条目要求）
+- 除 #86 明确翻转的共享 `output/` 根级 `ENOENT`/`ENOTDIR` 外，`decide_frontier` 与 `controller` 现有导出行为保持不变；尤其 `output/` 可枚举但某个 cycle/source/`DONE` 子路径不存在时仍只表示该处无 `DONE`，`states/<source>/` 缺失仍是 `NO_INITIAL_STATE`。实现面限于 `controller.done_cycles` 的根严格枚举及 `residue.plan_residue` 对同一根前置条件的独立复核；不得扩成所有路径的 ENOENT 都停源
 - 「前沿只由 `DONE` 推进」——清理动作 MUST NOT 反过来影响 T 的计算：清理前后对同一棵树调用 `decide_frontier`，T 不变（清理后 T 仍是 T，正是「以 T 状态重新组装本轮」在发现层的可证形式）
 - `states/<source>/<T>.cfg.ic` 在任何路径上都不被删除
 - 已带 `DONE` 的 `output/<cycle>/<source>/` 及其 `yd.rivqdown.dat` 在任何路径上都不被删除
+- `cron.lock_path` 的文件在正常、跳过、action 异常与 identity 异常路径上都不被 runlock unlink/rename/replace；当前 pathname 若已是 replacement 同样原样保留
 - `store/safe_fs.py` 零改动（本 issue 是它的消费者，不是它的维护者）
 
 Seams under test:
 - 目录树 fixture（`tmp_path.resolve()` 下的合成 `YD_ROOT`），无注入式 fake——删除是真实文件系统动作，记录型 fake 会让「删对了没有」退化为永真式
-- 锁：封装自身持锁 + 同进程第二次进入同一封装（跳过语义；两端同经封装，见裁决 11 末段）+ 一个子进程持锁（spec 字面 WHEN）
+- 锁：本地 tmp 文件系统上的封装自身持锁 + 同进程第二次进入同一封装（跳过语义；两端同经封装，见裁决 11 末段）+ 一个子进程持锁（spec 字面 WHEN）；真实 node-22 挂载类型只由 M4 receipt 验收，不用 tmp fixture 冒充
 - 时间/cycle：直接构造文件名，不注入时钟
 
 Required evidence:
@@ -3544,13 +3570,20 @@ Required evidence:
 - **判定侧的 fail-closed 收敛**：`chmod 0o000` 掉 `states/<source>/` -> `plan_residue` 抛 `ResidueError`，MUST NOT 返回空清单（空清单会让残留留在树上被下一轮当成正常产物）
 - **锁的竞争/真错分流**：monkeypatch `fcntl.flock` 抛 `PermissionError(EACCES)` -> 异常向外传播，MUST NOT 变成 `acquired=False`，且被包裹的可调用对象零调用
 - **不可跑源不清理**：`FrontierDecision` 带 `stop_reason`（如 `STATE_MISSING`）时该源零删除
-- **全新链**：无任何 `DONE`、`states/` 有 `T`、`T+12` 两份 -> T 取最早、`T+12` 被删（裁决 3）
+- **全新链**：`output/` 是可枚举空目录、`states/` 有 `T`、`T+12` 两份 -> T 取最早、`T+12` 被删（#86 后裁决 3 的合法定义域）
+- **#86 根异常零清理**：参数化 `output/` 根不存在（ENOENT）与被普通文件占据（ENOTDIR），`states/` 同时放 `T`、`T+12`、`T+24` -> `decide_frontier` 为 `DISCOVERY_UNREADABLE`，`plan_residue` 直接调用也抛 `ResidueError` / 不返回清单，执行器零调用，所有状态逐字节不变；MUST NOT 取最早 T、MUST NOT 删除更晚状态。另以可枚举空 `output/` 的同构树作正对照，证明真正首轮崩溃恢复仍成立
 - **锁：持有即跳过**：同进程第一个 fd 持锁，第二次进入包装 -> 立即返回跳过结果、被包裹的可调用对象零调用、进程不阻塞（用例带超时）
 - **锁：子进程持有**（spec 字面 WHEN）：子进程持锁期间父进程进入包装 -> 同上
 - **锁：释放后可再取**：第一次正常退出后第二次进入 -> 真正执行；锁文件在释放后**仍存在**（不 unlink）
 - **锁：异常路径也释放**：被包裹的可调用对象抛异常 -> 异常向外传播且锁已释放（同棵树第二次进入能拿到锁）
 - **非绝对锁路径**：`"yd.lock"` 与 `"~/yd.lock"` 两种形态 -> 抛错且消息含 `cron.lock_path`；断言 cwd 下与 `Path.home()` 下**都没有**新建锁文件，且被包裹的可调用对象零调用（spec Scenario 逐字要求「不执行发现」；副作用先于闸门是本条要杀的形态）
-- 预登记变异体（(a)–(af) 共 32 条，此处刻意写全数；(t)–(aa) 由 round 1 核验门追加，(ab)–(af) 由 round 2 核验门追加），每条 MUST 被上列用例杀死（跑法见 `openspec/project-profile.md` 的 Mutation-testing hazards，用 `uv run python -m pytest`）：
+- **action 前首次 identity 失配只重取一次**：在第一次 flock 后、no-follow path stat 前把锁 pathname 外部 unlink 并放入不同 inode 的普通文件 -> 旧 fd unlock/close、action 零调用；第二次 open/flock/fstat/path-stat 稳定时 action 恰执行一次并正常返回，当前普通文件保留。记录 open/flock/unlock/close 次数，证明重取完整且上限为一次
+- **action 前持续 identity 失配 fail closed**：两次取得后都把 pathname 换成不同 inode；第二次抛指名 `cron.lock_path` 的 `RunLockError`，action 零调用，两份已打开 fd 均 unlock/close，当前 replacement 保留。另参数化第二次 path 为缺失、symlink、目录/FIFO 及 path stat I/O 不可确定，均不得返回 `acquired=False`、创建修补文件或泄漏 fd
+- **持锁 action 期间外部 unlink 的实序列**：action 内 unlink 锁 pathname 并创建不同 inode 普通 replacement 后正常返回 -> 退出 identity 闸抛 `RunLockError`，action 恰一次、不重跑，replacement 原样保留，旧 fd unlock/close。该用例必须断言 replacement `(st_dev, st_ino)` 与 action 前冻结值不同，不能只看路径存在
+- **action 异常与退出漂移并存**：action 先把 pathname 换 inode，再抛带 cause 与既有 note 的自定义异常 -> runlock 保持同一异常对象/cause/note，只追加一条点名 `cron.lock_path`、expected/actual identity 的 note 后原样抛出；不得用 `RunLockError` 替换原错误，replacement 保留，fd 释放
+- **入口类型判据与 no-follow**：稳定普通文件通过；在 action 前把 pathname 换成指向原 inode 或其它普通文件的 symlink也拒绝，证明不是跟随 `stat` 后只比 inode。`fstat(fd)` 自身或 no-follow path stat 的错误均按真错而非锁竞争处理
+- **M4 本地盘 receipt 合同**：文档/fixture 的结构断言必须证明 `cron.lock_path` 明文排除 yd/NWM NFS、`scratch_root` 与其它共享挂载，要求按实际 mount 证据验收；M2 单元测试不 monkeypatch/猜测 filesystem type，也不把 tmp_path 声称为 node-22 receipt
+- 预登记变异体（(a)–(am) 共 39 条；(ag)–(am) 为 #85 收尾裁决追加），每条 MUST 被上列用例杀死（跑法见 `openspec/project-profile.md` 的 Mutation-testing hazards，用 `uv run python -m pytest`）：
   (a) 「更晚」判据 `>` 改 `>=` -> 保留 T 用例变红；
   (b) 逐源过滤去掉（对 `states/` 全域比较）-> 逐源隔离用例变红；
   (c) `DONE` 存在性判据改为「目录非空」-> `DONE` 保护用例变红；
@@ -3583,6 +3616,13 @@ Required evidence:
   (ad) `safe_fs.remove_tree_allow_symlinks` 首行的 `_reject_unsafe_entry_name(name)` 删除（**变异只在 scratch 副本内做**，`store/safe_fs.py` 仓内零改动）-> `..` 条目名用例变红。这条登记的是**消费者侧依赖**：`..` 清单不会真删到 `output/` 是由该行独家承载的，而仓内此前无任何用例钉住它（round 2 实测：删掉该行后全套 1003 绿，且 `..` 清单会真的删掉另一源已提交的 `DONE` 产物）；
   (ae) `ResiduePlan.empty` 退化成 `return not self.state_files`（丢掉半成品那条臂）-> 半成品独臂清单用例变红（round 2 实测存活：既有断言用的树两臂要么同空、要么同非空；`empty` 是公开 API 且 13.2 只消费清单不执行，按它分支的调用方会静默跳过真实半成品）；
   (af) `execute_residue_plan` 的两个删除循环对调（先状态、后半成品）-> 执行序用例变红（round 2 实测存活。判别树：`states/<source>/<T+12>.cfg.ic` 是 symlink + 同时有半成品树；两种顺序都抛 `SafeFilesystemError`，但钉死的顺序在抛之前已把半成品删掉，对调后半成品每 tick 原地不动）
+  (ag) 去掉 action 前 `fstat(fd)` 与 no-follow path identity 核对 -> 首次/持续失配用例变红；
+  (ah) path 核对改用跟随 symlink 的 `os.stat` -> 指向原 inode 的 symlink 用例变红；
+  (ai) 首次失配后无限重试，或第二次失配再重取 -> 持续失配用例的 open/flock 次数上限变红；
+  (aj) 首次失配时复用旧 fd/不 unlock-close 就重试 -> 重取完整性与 fd 生命周期断言变红；
+  (ak) 去掉 action 后、unlock 前的 identity 核对 -> action 内 unlink/replacement 实序列用例变红；
+  (al) 退出 identity 失败覆盖 action 原异常 -> 同对象/cause/note 用例变红；
+  (am) identity/type/stat 错误吞成 `RunLockResult(acquired=False)` -> action 前持续失配与错误分流用例变红。
 - `cd producer && uv run pytest` -> 退出码 0
 - `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
 - `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
@@ -3596,7 +3636,7 @@ Non-goals:
 - scratch `work/<source>/<T>` 的删除与孤儿 Slurm 作业存活确认（裁决 9）：归 #28；#59 的两条候选取舍不在本 issue
 - 发布顺序、`DONE` 写入、`DONE` 成功后的旧状态清理（任务 13.1，issue #24）
 - 14 天保留窗清理与 `realpath` 圈定 yd 根（任务 13.3，issue #25）：本 issue 的 containment 用 `safe_fs` 的 `containment_root`，不实现保留窗
-- `run_once` 编排、把锁接进 `cli.py run`（任务 14.1）
+- `run_once` 编排归任务 14.1；把锁和双源生产依赖接进 `cli.py run` 归 M2 收尾任务 14.2
 - 状态读路径 stat->open 的 TOCTOU / FIFO 阻塞（issue #63）：本 issue 是该问题的**放大器**（卡死进程持锁 -> 后续 cycle 持续跳过），但加固的三处读路径均不在本 issue 的改动面；毗邻、已跟踪、刻意不动
 - `run_dir` 符号链接祖先致零捕获（issue #77）：面在 checkpoint-tracker 接线，本 issue 只在**测试树**上按同一机制用 `tmp_path.resolve()`（裁决 6 末条），不改 `safe_fs` 也不改 tracker
 - `cron.lock_path` 在 `config.py` 装载期的绝对性校验（裁决 8 明确不选）
@@ -3613,7 +3653,7 @@ Review focus:
 
 ## 13. run-controller（二）：发布、失败与清理
 
-- [x] 13.1 实现发布器：T+12 checkpoint 重戳到绝对 T+12（复用 4.3）→ DONE 前契约检查（v2、`forecast_days*24` 行、数据列数等于 `reach_count` 且等于变体 reach 数、T+12 可读、合并日志可用）→ DAT 原子 rename 为 `yd.rivqdown.dat` → 状态 rename → `DONE` 最后写 → 删旧状态只留两份 → 删本轮 work；正式文件不继承 scratch uid/gid/mode；记录型文件操作测试顺序与终名
+- [x] 13.1 实现发布器：T+12 checkpoint 重戳到绝对 T+12（复用 4.3）→ DONE 前契约检查（v2、`forecast_days*24` 行、数据列数等于 `reach_count` 且等于变体 reach 数、第 0 列逐行等于 `row_index * output_interval_minutes`、T+12 可读、合并日志可用）→ DAT 原子 rename 为 `yd.rivqdown.dat` → 状态 rename → `DONE` 最后写 → 删旧状态只留两份 → 删本轮 work；正式文件不继承 scratch uid/gid/mode；记录型文件操作测试顺序与终名
 - [x] 13.2 实现失败处理（合并日志、删 work、不推进；复用 12.2 判定，仅接入失败/重跑路径）
 - [x] 13.3 实现 14 天保留清理（`realpath` 圈定 yd 根、symlink 越界拒删）
 
@@ -3634,11 +3674,11 @@ Project profile: yd-viewer
 1. issue #24 的 `Depends on` 只列 #9 / #2，但验收标准里的「数据列数等于 `reach_count` 且等于**变体 reach 数**」需要一个「变体 reach 数」的来源符号，仓内不存在（`geometry.py:164` 逐字把「要素数是否符合业务预期」推给 prepare-variants，`src/` 全域无 `.riv` 解析）。缺失的 seam 本 issue **不自行补齐**，按裁决 1 收敛为调用方入参（`variant_reach_count: int`），并按核心规则「needed-but-missing seam is a reported deviation」记录在此；该入参的真实来源（prepare 侧变体 reach 计数）归 #20 / 14.1 接线。
 2. `tasks.md:169` 把 `forecast_days` 与 `reach_count` 的**正数约束**逐字路由到「#24 task 13.1，DONE 前行数/列数校验」。本 fixture 消费该路由并按裁决 4 落地（期望行数与期望列数 MUST > 0，否则 `PublishError`），使该路由不再是孤儿。
 3. `specs/run-controller/spec.md` 的「NFS 提交顺序与 DONE 语义」步骤 1 把重戳列在契约检查之前，issue 正文的箭头序同向；本 fixture 照此落地（裁决 2），并把「T+12 状态可按分段格式读取」这一检查明确定义为**对重戳后文档**的检查——否则该检查会放行一份重戳后才损坏的状态。
-4. `docs/products-contract.md` §5.2 要求数据区第 0 列逐值为 `0, 60, …, 10020`，但 spec 与 issue 的 DONE 前契约检查清单**都不含**该项。本 issue 按 spec 与 issue 正文的清单落地，不擅自加检查项（加了会让「检查清单」在两份文档间分叉）；该缺口按「out-of-scope findings: report, don't fix」记入下方 Known limits 并路由。
+4. `docs/products-contract.md` §5.2 要求数据区第 0 列逐值为 `0, 60, …, 10020`，但本 fixture 初次落地时 spec 与 DONE 前检查清单都未包含该项，故当时按边界路由 #109。**#109 M2 收尾裁决现已关闭该延期并认领实现**：检查清单增加第 `i` 行第 0 列 `== i * output_interval_minutes`，值从配置经 `PublishInputs` 显式传入，不能在发布器写死 60 或从行数反推。
 
 **核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
 
-1. **输入面全部由调用方交来，发布器零发现、零推导**。落 `producer/src/yd_producer/publish.py` 新模块（`yd_producer.publish`，issue 正文的 Module/Scope）。入参以一个 frozen dataclass `PublishInputs` 表达：`yd_root`、`source`、`cycle`（待跑 T）、`scratch_dat`（作业产出的 DAT）、`scratch_checkpoint`（tracker 捕获的 T+12 checkpoint，**未重戳**）、`merged_log`（本轮合并 stdout/stderr）、`work_dir`（本轮 scratch `work/<source>/<T>`）、`expected_rows`（= `config.forecast_days * 24`）、`reach_count`（= `config.reach_count`）、`variant_reach_count`。**MUST NOT** 在发布器里读 `config.toml`、扫 `states/`、猜 T、或从 DAT 自己的列编号表反推「变体 reach 数」（后者是循环论证：那张表就是被校验的对象，只能做**内部一致性**校验，见裁决 4）。理由：本模块要在 14.1 之前独立可测，且 issue 的 PR Boundary 就是「publish 模块与记录型文件操作测试」。
+1. **输入面全部由调用方交来，发布器零发现、零推导**。落 `producer/src/yd_producer/publish.py` 新模块（`yd_producer.publish`，issue 正文的 Module/Scope）。入参以一个 frozen dataclass `PublishInputs` 表达：`yd_root`、`source`、`cycle`（待跑 T）、`scratch_dat`（作业产出的 DAT）、`scratch_checkpoint`（tracker 捕获的 T+12 checkpoint，**未重戳**）、`merged_log`（本轮合并 stdout/stderr）、`work_dir`（本轮 scratch `work/<source>/<T>`）、`expected_rows`（= `config.forecast_days * 24`）、`reach_count`（= `config.reach_count`）、`variant_reach_count`，以及 #109 后补的 `output_interval_minutes`（生产值 = `config.output_interval_minutes`）。该字段追加在既有 `claim` 之后，additive 默认 60 只保持全部旧位置/关键字 `PublishInputs(...)` 构造兼容；controller 路径 MUST 显式传配置值，`_check_dat` 不得依赖兼容默认作为生产 authority。**MUST NOT** 在发布器里读 `config.toml`、扫 `states/`、猜 T、从行数反推间隔，或从 DAT 自己的列编号表反推「变体 reach 数」（后者是循环论证：那张表就是被校验的对象，只能做**内部一致性**校验，见裁决 4）。理由：本模块要在 14.1 之前独立可测，且 issue 的 PR Boundary 就是「publish 模块与记录型文件操作测试」。
    **`source` 与 `cycle` 的输入域 MUST 在入口 fail closed**（复用 #23 裁决 2 的同一条实测教训）：`source` 为空串、`.`、`..`、含 `/` 的任一形态 MUST 抛 `ValueError` 且零文件系统副作用——`output/<T>/""` 会塌回 `output/<T>/`，`..` 会把删除/写入面抬到另一源。
 2. **执行序逐字钉死，且「检查」与「提交」严格分离**。公开两个符号：`check_publish_contract(inputs) -> None`（**零写入**，只读 scratch 侧）与 `publish(inputs) -> PublishResult`（先调前者，再按序提交）。`publish` 的序列 MUST 逐字是：
    1. 读 `scratch_checkpoint` -> `state.parse` -> `restamp_to_absolute_time(doc, T+12h)` -> 渲染出**内存中的**重戳字节（**MUST NOT** 回写 scratch 原文件：原文件是失败路径要回收的证据）；
@@ -3657,6 +3697,7 @@ Project profile: yd-viewer
    - **DAT 为 v2**：v2 布局按 `rSHUD/R/readout.R:26-31` 与 `SHUD/src/classes/Model_Control.cpp:254-259` 双向核对得到，逐字是 `[0:1024)` 文本头 + `st`(float64) + `nc`(float64) + `nc` 个列编号(float64) + 数据区，数据区每行 `nc+1` 个 float64。v2 判据 MUST 是**文本头形状**：`[0:1024)` 必须是「可打印 ASCII 前缀 + 其后全 NUL」（SHUD 侧 `char header[1024] = {}` + `strcpy` 的必然形态），任一不满足 -> `PublishError` 指名「非 v2」。**MUST NOT** 用「文件够大」或「`nc` 恰好等于 `reach_count`」当 v2 判据：v1 布局（`nc` 在 offset 0）在 `nc == 3988` 时前 8 字节是 `3988.0` 的 little-endian 表示，两者都放行它。
    - **列数**：`nc` MUST 是有限、整数值、且 `== reach_count`；列编号表 MUST 完整存在（`DAT_FIXED_HEADER_BYTES + 8*nc <= size`），否则 `PublishError`。
    - **行数**：数据区字节数 MUST 恰好等于 `expected_rows * (nc + 1) * 8`。**残行一律拒绝**（`docs/products-contract.md` §5.1 逐字「不规定残行修复」；`readout.R:41` 对残行只 `message` 不报错，那份宽容不得进入 producer 的写 `DONE` 闸）。多一行、少一行、多半行三种形态都 -> `PublishError`。
+   - **#109 相对分钟列**：`output_interval_minutes` MUST 是 strict positive `int`，不满足即在任何文件 IO 前 `PublishError`。在上条大小等式成立后，以同一个 descriptor-bound DAT fd 对每个 `row_index in range(expected_rows)` 读取偏移 `table_end + row_index * (nc + 1) * 8` 处恰好一个 little-endian float64；短读、非有限值，或值不逐字等于 `row_index * output_interval_minutes`，均 `PublishError` 并点名行号、期望与实得。claim 路径用 `open_claimed_file`，standalone 路径用 `open_file_no_follow`，fd 在 `finally` 关闭；可用 `os.pread`，不得整读任一流量行/整个数据区，也不得复用测试 DAT writer 的生成算式作为 oracle。`_check_dat` 交回的 `expected_size` 语义不变。
    - **T+12 状态可读**：对**重戳后**字节（裁决 2 步骤 1 的产物）`state.parse` 成功，且 `state_ic_structure_complete(payload, expected_river_count=reach_count)` 判为完整——**MUST 传权威计数**（round 1 verifier 裁定，cand-04 CONFIRMED/FIX_NOW）：不传时 `state_qc._check_row_counts` 对每一类都 `if expected is None: continue`，唯一还生效的结构闸只剩「分段存在」，于是一份 river 段被截断的 checkpoint（tracker 在 SHUD 非原子改写 `cfg.ic.update` 期间捕获，正是 `state_qc.py:474-481` docstring 点名的形态）照样拿到 `DONE`，下一轮从中毒 IC 起跑且下游无人复检（`residue.plan_residue` 在 `DONE(T)` 存在时清单整体为空）。本条按治理不变量（「`DONE` 一旦存在，状态就已是**完整**的正式产物」）而非本裁决的原措辞裁定：`tasks.md:806`/`:840` 与 `state_qc.py:399` 两处独立锚点都**指名**把权威 `reach_count` 接进来是 #21 init / **#24 发布器**的领域，而本 fixture 的 Known limits 从未记录放弃这条路由——故原先的不传计数是**未记录的偏离**，不是被钉死的决定。计数取 `PublishInputs.reach_count`（`_check_positive_expectations` 已强制它等于 `variant_reach_count`，故 #20 变体计数的来源歧义在本调用点是 moot 的）；且 header 的绝对时间 MUST 对应 T+12——判据 MUST 与 `controller._classify_state` 逐字同构（`round(cfg_ic_header_minute_time(tokens)) == round((T+12).timestamp()/60)`），**MUST NOT** 接受相对分钟。这条是本 fixture 的治理不变量在发布侧的自闭合：写出去的那份状态，正是下一轮前沿闸门要读的那份。
    - **合并日志可用**：`merged_log` MUST 存在、是普通文件、非空（`st_size > 0`）。目录、FIFO、symlink、零字节四种形态都 -> `PublishError`。理由：失败时要回收的就是它，一份 0 字节日志等于没有。
    - 全部检查 MUST 在**第一处 NFS 写入之前**跑完，`check_publish_contract` 自身 MUST 零写入（递归快照证明）。
@@ -3676,21 +3717,21 @@ Project profile: yd-viewer
 9. **`DONE` 的 mode 需要一处 `safe_fs` 扩展，且是本 issue 唯一的共享 helper 改动**。`write_bytes_no_follow_exclusive` 当前以硬编码 `0o666` 打开、无 `fchmod`，落地位是 `0o666 & ~umask`——在 umask 0077 的现场会得到 0600 的 `DONE`，node-27 读不到，直接违反裁决 8 与 §10。故给它加一个 `mode: int | None = None` 关键字参数，语义**逐字镜像** `atomic_write_bytes_no_follow`（`os.open` 传 mode，随后 `fchmod` 以抵消 umask）；`None` 时行为与今日**逐字节相同**，既有调用方与 `test_safe_fs*.py` 零改动。MUST NOT 在 `publish.py` 里自己 `os.open(O_EXCL)` 绕开 `safe_fs`（会丢掉父目录的 `O_NOFOLLOW` 锚定与 `containment_root`），也 MUST NOT 改 `atomic_write_bytes_no_follow` 去支持 `O_EXCL`（它的语义是 replace，掺进 no-clobber 会让既有调用方的失败模式漂移）。
 10. **顺序可观测性的 seam 是 `safe_fs` 调用边界，用 monkeypatch 录制，零生产面**。spec Scenario「提交顺序可观测」要求「以可记录文件系统操作的发布器完成一轮成功发布」。落地方式：测试侧 monkeypatch `yd_producer.publish` 模块内绑定的 `safe_fs` 函数名，包一层记录器后转调真实实现（真实文件系统动作照常发生，录的是调用序与终名）。**MUST NOT** 为此在生产代码里加 recorder 参数、hook 列表或事件回调——那是把测试脚手架焊进发布路径。断言的是**终名序**：`yd.rivqdown.dat` 的 rename 早于 `<T+12>.cfg.ic` 的 rename，`DONE` 的创建晚于两者，旧状态 unlink 晚于 `DONE`，work 删除最末。
 11. **uid/gid 的可测边界**：非 root 身份下测试无法制造跨 uid/gid 的源文件，故「不继承 uid/gid」由**结构**满足（裁决 8 的「新建写入，禁 `copy2`/`copystat`/`link`」）并由一条源码机检钉住（`publish.py` 文本中不出现 `copy2`/`copystat`/`os.link`/`shutil`）；可断言的行为面是 **mode 不继承**：scratch DAT 与 checkpoint 置 0600 -> NFS 侧三份产物 mode 均为 0o644。另 MUST 在一个显式 `os.umask(0o077)` 的用例里重跑该断言——不设这条，`fchmod` 与「裸 `os.open(mode)`」两种写法在默认 umask 022 下不可分辨。
-12. **零新增依赖**：`struct`/`os`/`pathlib`/`datetime` 全在 stdlib，`numpy` **不引入**（列数/行数校验是整除与相等判定，读的是定长 float64 头部与文件大小，不需要把 168×3989 的数据区读进内存）。**有界读的 MUST 只约束契约检查阶段**（fixture 复核 P1：与裁决 8 的 `atomic_write_bytes_no_follow(content: bytes)` 曾表面冲突，此处划清）：`check_publish_contract` 读 DAT 时 MUST 只取 `[0, DAT_FIXED_HEADER_BYTES + 8*nc)` 这段头部（两趟：先以模块常量 `DAT_FIXED_HEADER_BYTES = 1040`（= 1024 文本头 + `st` + `nc` 两个 float64）读出 `nc`，再读列编号表），原语用 `read_bytes_limited_no_follow`，文件大小走 `stat_no_follow`，行数由 `st_size` 算术得出，MUST NOT 在检查阶段把数据区读进内存——`expected_rows` 是配置驱动的，检查阶段的无界读会把一处配置错误放大成 OOM，而检查的全部目的正是挡住这类输入。**步骤 3 的复制读全量字节是允许且必需的**（`safe_fs` 无 fd 流式写原语，`atomic_write_bytes_no_follow` 只收 `bytes`），其上界已由前置契约检查钉死的 `st_size == DAT_FIXED_HEADER_BYTES + 8*nc + expected_rows*(nc+1)*8` 约束——即「先证明大小合法，再整读」，顺序不得颠倒。**且整读之后 MUST 复核长度**（round 1 cand-08 PLAUSIBLE/FIX_NOW）：`_check_dat` MUST 把 `expected_size` 交回，`_publish_dat` MUST 断言 `len(payload) == expected_size` 后才写，否则 `DONE` 会封住一份**从未被校验过**的字节——校验读的是发布前那一刻的 `st_size`，整读是另一次独立的 open，两者之间 scratch 上若有滞留/重投的作业写入（裁决 6 自己把 scratch 树称作「按构造不可信」，且没有任何 spec 条款保证 scratch 静默），落地的就是一份带半行尾巴的 DAT。这条**不是**裁决 12 字面顺序的违反（顺序是遵守的），被违反的是本模块自己写下的那句「整读的上界已由 `_check_dat` 钉死的 `st_size` 等式约束」前提。零额外 IO。
+12. **零新增依赖**：`struct`/`os`/`pathlib`/`datetime` 全在 stdlib，`numpy` **不引入**（列数/行数校验是整除与相等判定，读的是定长 float64 头部与文件大小，不需要把 168×3989 的数据区读进内存）。**有界读的 MUST 只约束契约检查阶段**（fixture 复核 P1：与裁决 8 的 `atomic_write_bytes_no_follow(content: bytes)` 曾表面冲突，此处划清）：`check_publish_contract` 读 DAT 时 MUST 先只取 `[0, DAT_FIXED_HEADER_BYTES + 8*nc)` 这段头部（两趟：先以模块常量 `DAT_FIXED_HEADER_BYTES = 1040`（= 1024 文本头 + `st` + `nc` 两个 float64）读出 `nc`，再读列编号表），文件大小走 `stat_no_follow`、行数由 `st_size` 算术得出；#109 只额外允许在同一个 descriptor-bound fd 上按偏移读取每行第 0 列恰 8 字节；分钟数据区的累计读取量恰为 `expected_rows * 8`，既有两趟头部/列编号表读取不变。MUST NOT 在检查阶段读取任一流量值、整行或整块数据区——`expected_rows`/`reach_count` 是配置驱动的，无界读会把一处配置错误放大成 OOM，而检查的全部目的正是挡住这类输入。**步骤 3 的复制读全量字节是允许且必需的**（`safe_fs` 无 fd 流式写原语，`atomic_write_bytes_no_follow` 只收 `bytes`），其上界已由前置契约检查钉死的 `st_size == DAT_FIXED_HEADER_BYTES + 8*nc + expected_rows*(nc+1)*8` 约束——即「先证明大小合法，再整读」，顺序不得颠倒。**且整读之后 MUST 复核长度**（round 1 cand-08 PLAUSIBLE/FIX_NOW）：`_check_dat` MUST 把 `expected_size` 交回，`_publish_dat` MUST 断言 `len(payload) == expected_size` 后才写，否则 `DONE` 会封住一份**从未被校验过**的字节——校验读的是发布前那一刻的 `st_size`，整读是另一次独立的 open，两者之间 scratch 上若有滞留/重投的作业写入（裁决 6 自己把 scratch 树称作「按构造不可信」，且没有任何 spec 条款保证 scratch 静默），落地的就是一份带半行尾巴的 DAT。这条**不是**裁决 12 字面顺序的违反（顺序是遵守的），被违反的是本模块自己写下的那句「整读的上界已由 `_check_dat` 钉死的 `st_size` 等式约束」前提。该长度比较本身零额外 IO。
 14. **scratch 侧只有一条 symlink 策略，且 `work_root` 与 `work_dir` MUST 一起 resolve**（round 1 cand-05 与 cand-06 双双 CONFIRMED/FIX_NOW；两者是**相反极性**的同一处失配，必须一并收口）。当前状态是三种策略并存：NFS 根入口 resolve 一次；scratch DAT / 日志 / work 严格 no-follow（`containment_root=None` 时 `safe_fs._anchor_for` 从 `/` 起把**每一个**祖先分量过 `O_NOFOLLOW`，故 scratch 路径上任何一节 symlink 都致命——实测 `/scratch -> /mnt/scratch` 这类布局下每轮 pre-`DONE` 失败，而只有 work 一条腿走 symlink 时更糟：`DONE`/DAT/状态全部正常落地，随后步骤 7 抛 `PublishCleanupError`，于是**每一个成功轮**都以清理错误收尾并留下无人回收的孤儿 work）；而 checkpoint 经 `state.parse(Path)` 走 `cfg_ic.py:504-513` 的裸 `open()`，**跟随** symlink——实测把 `scratch_checkpoint` 换成指向 scratch 树外的 symlink，那份外来文件会被重戳后发布成正式的 `{T+12}.cfg.ic`，而同样构造在 `scratch_dat` 上被拒。
     落地要求：(a) checkpoint MUST 改为 no-follow 有界读后再解析（`parse(read_bytes_limited_no_follow(checkpoint, max_bytes=MAX_STATE_IC_BYTES))`，`parse` 的 `bytes` 分支保留尺寸闸）——它是唯一会变成正式 NFS 产物的 scratch 输入，却是唯一没有 no-follow 保护的读；(b) scratch 侧路径的策略（入口 resolve，还是要求调用方交已 resolve 的路径）MUST 二选一并写进模块头与 `PublishInputs` 的字段 docstring，参照姊妹模块 `residue.py:69-76,227` 的既有写法；(c) 若选入口 resolve，`work_root` 与 `work_dir` MUST **一起** resolve——`safe_fs._relative_parts_under_root`（`:944-960`）是纯词法 `relative_to`，只 resolve 其中一个会让 containment 判定当场断裂，制造出一个每轮必现的新 `PublishCleanupError`。`cfg_ic.py:305-310` 那条「刻意宽容」注释不构成反驳：它讲的是快照层可信 staged 文件与 symlink **祖先**目录（macOS `/tmp`），没有覆盖一个逃出 scratch 树的 symlink **叶子**。
-15. **不接线 `run` CLI、不碰 `controller.py` / `residue.py`**。本 issue 交付一个纯被调用的发布器；`cli.py` 的 `run` 仍是 `_unimplemented`（接线归 14.1）。
+15. **本 #24 初次交付不接线 `run` CLI、不碰 `controller.py` / `residue.py`**。本 issue 当时交付一个纯被调用的发布器；`cli.py` 的 `run` 在本 issue 交付时仍是 `_unimplemented`，最终接线归 M2 收尾任务 14.2。#109 后补只允许 `_controller_run.py` 在既有 `PublishInputs` 构造点显式传 `config.output_interval_minutes`，不改变 controller 状态机、公开签名、发布顺序或错误极性。
 
 Invariant Matrix
 Governing invariant: `DONE(T)` 一旦存在，`output/<T>/<source>/yd.rivqdown.dat` 与 `states/<source>/<T+12>.cfg.ic` 就已是完整、合约达标、node-27 可读的正式产物，且 `states/<source>/<T>.cfg.ic` 与 `<T+12>.cfg.ic` 两份俱在——即「`DONE` 之前无正式承诺，`DONE` 之后无删除本轮所需状态」。
-Source-of-truth identity/contract: `output/<T>/<source>/DONE` 这一空普通文件（`products-contract.md` §4：唯一完成判据），及其守护的二元组「v2 DAT（`expected_rows` 行 × `reach_count` 列）+ 时间头对应绝对 T+12 的 `cfg.ic`」。
+Source-of-truth identity/contract: `output/<T>/<source>/DONE` 这一空普通文件（`products-contract.md` §4：唯一完成判据），及其守护的二元组「v2 DAT（`expected_rows` 行 × `reach_count` 列，且第 `i` 行相对分钟为 `i * output_interval_minutes`）+ 时间头对应绝对 T+12 的 `cfg.ic`」。
 Surfaces:
 - Producers: `publish.publish` 的步骤 3/4/5（`atomic_write_bytes_no_follow` × 2、`write_bytes_no_follow_exclusive` × 1）
-- Validators/preflight: `publish.check_publish_contract`（v2/行/列/状态可读/日志可用/`DONE` 不存在/期望值正数）
+- Validators/preflight: `publish.check_publish_contract`（v2/行/列/逐行相对分钟/状态可读/日志可用/`DONE` 不存在/期望值正数）
 - Storage/cache/query: `output/<T>/<source>/`、`states/<source>/`（NFS 侧）；`work/<source>/<T>`（scratch 侧）
 - Public routes/entrypoints: `yd_producer.publish` 的 `PublishInputs` / `PublishResult` / `check_publish_contract` / `publish` / `PublishError` / `PublishCleanupError`；`cli.py` **不在本 issue 内**（14.1）
 - Frontend/downstream consumers: 下一轮 `controller.decide_frontier`（读 `DONE` 与 `states/<source>/<T+12>.cfg.ic` 的绝对时间头）；`residue.plan_residue`（以「无 `DONE`」判半成品）；viewer（只枚举带 `DONE` 的 source 目录）
-- Failure paths/rollback/stale state: 契约检查失败（零 NFS 变更，`PublishError`）；步骤 3–5 中途失败（pre-`DONE`：留无 `DONE` 半成品，`PublishError`，交 12.2 判定清理后整轮重跑）；**步骤 6/7 失败（post-`DONE`：本轮已完成，`PublishCleanupError`，MUST NOT 触发 13.2/12.2 的失败侧回收）。残留归属逐条点名（fixture 复核 round 2 更正）：未删净的**旧状态**由**下一轮发布的步骤 6** 收（裁决 5 的「严格早于 T'」自然覆盖它），**不是** 12.2——`residue.plan_residue` 在 `DONE(T)` 存在时清单整体为空（`residue.py:227-237`）且 `_later_state_files` 只取严格晚于 T 的状态（`:272-286`）；孤儿 `work/<source>/<T>` **当前无归属**，见 Known limits**；`DONE` 已存在（拒绝且零变更，`PublishError`）
+- Failure paths/rollback/stale state: 契约检查失败（零 NFS 变更，`PublishError`）；步骤 3–5 中途失败（pre-`DONE`：留无 `DONE` 半成品，`PublishError`，交 12.2 判定清理后整轮重跑）；**步骤 6/7 失败（post-`DONE`：本轮已完成，`PublishCleanupError`，MUST NOT 触发 13.2/12.2 的失败侧回收）。残留归属逐条点名：未删净的旧状态由下一轮发布步骤 6 收；`residue.plan_residue` 在 `DONE(T)` 存在时仍保持 NFS 清单整体为空；post-`DONE` 孤儿 `work/<source>/<T>` 由 #108 的下一次 `run_sources` 启动 hygiene identity-bound 删除并记入报告；`DONE` 已存在时重复调用 publisher仍拒绝且零变更
 - Evidence/audit/readiness: `merged_log` 的可用性检查；`PublishResult` 交回的终名路径集合（供 14.1 写运行报告）
 Error-domain invariant（round 1 pattern escalation 追加）: `check_publish_contract` 与 `publish` 的公共边界上，**每一个**逃出的异常 MUST 恰好是 `PublishError`（本轮未完成）或 `PublishCleanupError`（本轮已完成）；且「已完成」的判据是 **`DONE` 在盘上存在**，不是「`_create_done` 返回了」。根因是一条可复用的错误假设：本模块曾假定 `safe_fs` 把一切失败都包成 `SafeFilesystemError`，而实际上 `open_file_no_follow` 对非 `ELOOP` 的 `OSError` 与 `FileNotFoundError` 是**裸抛**（`safe_fs.py:340-341,349-355`），`stat_no_follow` 对 symlink 抛 `SafeFilesystemError`，`controller.DiscoveryUnreadableError` 根本不是 `OSError` 的子类。该不变量在 round 1 于四个独立点同时失守（cand-01 `_create_done`、cand-03 两处检查期有界读、cand-10 `merged_log` symlink 臂、cand-09 步骤 6 的 `DiscoveryUnreadableError` 臂），故按 high 强度触发 pattern escalation，修复 MUST 是跨切面收口而非逐行打补丁。
 **round 2 该类复发，追加一条极性 MUST（cand-01 CONFIRMED/FIX_NOW）**：「`DONE` 在盘上存在」这一判据的**复探原语 MUST 是裸 `os.lstat(done_path)`——成功即 `True`，任何 `OSError` 即 `False`**，与姊妹模块 `controller.done_cycles`（`controller.py:308-317`）、`residue._half_product_dirs`（`residue.py:302-309`）同一高度。根因与 round 1 是**同一条**可复用错误假设的反面：round 1 假定「`safe_fs` 把一切失败都包成 `SafeFilesystemError`」，round 2 的复探则假定「抛出 `SafeFilesystemError` 就意味着条目存在」——同样是假的。`stat_no_follow` 把 EACCES/EIO/ESTALE 一律包成 `SafeFilesystemError(kind="io")`（`safe_fs.py:369-397`），`_open_child_dir` 把父链上的一切非 `FileNotFoundError` 失败包成 `SafeFilesystemError`（`:795-811`），于是 `except SafeFilesystemError: return True` 把「测不出来」翻译成「本轮已完成」，而 `except OSError: return False` 那条臂实际是死代码。verifier 实测：`chmod 0o000` 于 `output/<T>/<source>/` 且 `DONE` 不存在 -> 复探返回 `True` -> 公共边界抛 `PublishCleanupError`（本轮已完成）。**按 `kind` 分支（`unsafe` -> True，`io` -> False）已被实测证伪**：父级被换成普通文件时 `kind` 是默认的 `unsafe`，而 `DONE` 按构造不可能存在，仍得到错误的 `True`。裸 `lstat` 同时保住 docstring 要求的「任何条目（含 symlink、目录）都算在盘」。该缺陷的下游后果按 verifier 实测**止于误报**而非丢轮：`decide_frontier` 只认 `DONE`（`controller.py:200-217`，两条分支都回到 T，且已 rename 的 `<T+12>` 进的是 `min` 不是 `max`），`plan_residue` 照常把半成品与更晚状态判入清单，下一轮干净重跑——故定级 P2 而非 P1。
@@ -3700,7 +3741,7 @@ Regression rows:
 - `DONE` 未在盘 + 任一步失败 -> `PublishError`，`work_dir` 仍在；**「`YD_ROOT` 递归快照不变」这一子句只对契约检查阶段的失败成立**（round 2 cand-04b CONFIRMED/FIX_NOW）：步骤 4 失败时 DAT 已 rename 且按裁决 3 **刻意保留**（见下方步骤 4 那行），此时快照必然已变。原措辞把上一行只适用于检查阶段的子句泛化到「任一步失败」，照字面实现会去补一段回滚——正是裁决 3 明令禁止、变异体 (v) 专门要杀的东西
 - 合法一轮（scratch DAT 168×3988、checkpoint header 相对 720 分钟、非空日志）-> 五个终名按序落地，`DONE` 最后，`states/` 只剩 T 与 T+12，`work/<source>/<T>` 不存在，三份 NFS 文件 mode 0o644
 - 发布后对同一棵树调用 `controller.decide_frontier` -> 返回 T+12 且无 `stop_reason`（治理不变量的端到端判别器：写出去的状态正是下一轮读的那份）
-- 行数少一行 / 多半行 / `nc != reach_count` / v1 布局 / 日志 0 字节 / `merged_log` 是目录 -> 各自 `PublishError`，且 `output/<T>/<source>/` 与 `states/<source>/` 递归快照与调用前逐项相等（`DONE` 不存在、DAT 不存在、`work` 仍在）
+- 行数少一行 / 多半行 / `nc != reach_count` / 第 0 列任一行不等于 `row_index * output_interval_minutes` / v1 布局 / 日志 0 字节 / `merged_log` 是目录 -> 各自 `PublishError`，且 `output/<T>/<source>/` 与 `states/<source>/` 递归快照与调用前逐项相等（`DONE` 不存在、DAT 不存在、`work` 仍在）
 - `DONE(T)` 已存在 -> `PublishError`，既有 `DONE` 与 `yd.rivqdown.dat` 字节不变
 - 步骤 4 失败（`states/<source>/<T+12>.cfg.ic` 位置预置为 symlink）-> 抛错，DAT 已 rename 且**保留**，`DONE` 不存在，`work` 仍在；随后 `residue.plan_residue` 把该半成品判入清单（与 12.2 的接缝对得上）
 - 未改动的姊妹消费者：`controller.decide_frontier` 与 `residue.plan_residue` 全套既有用例逐字通过；`store/safe_fs.py` 既有调用方（`mode=None` 默认路径）行为逐字节不变
@@ -3708,7 +3749,7 @@ Regression rows:
 Boundary-surface checklist（high 强度必需）:
 - 共享 helper 根：`store/safe_fs.py` —— **有改动**，仅 `write_bytes_no_follow_exclusive` 新增可选 `mode`（裁决 9）；`state/*`、`controller.py`、`residue.py` —— 零改动，只作为消费者导入
 - 公共入口：`yd_producer.publish` 六个符号（`PublishInputs`、`PublishResult`、`check_publish_contract`、`publish`、`PublishError`、`PublishCleanupError`）；`cli.py` 不动
-- 读面：scratch DAT（有界读头部）、scratch checkpoint（`state.parse`）、`merged_log`（只 stat）、NFS `DONE` 前置探测
+- 读面：scratch DAT（有界读头部 + 同一 descriptor 上每行第 0 列一个 float64）、scratch checkpoint（`state.parse`）、`merged_log`（只 stat）、NFS `DONE` 前置探测
 - 写/删/覆盖面：`output/<T>/<source>/{.tmp, yd.rivqdown.dat, DONE}`、`states/<source>/{.tmp, <T+12>.cfg.ic}`、旧状态 unlink、`work/<source>/<T>` 整树；`output/`、`output/<T>/`、`output/<T>/<source>/` **三级**目录的创建与 mode 放宽（裁决 8）
 - staging/publish/rollback 面：同目录临时文件 + 原子 rename；无回滚（裁决 3）
 - producer/consumer 证据边界：`DONE` ↔ `decide_frontier` / `plan_residue` / viewer
@@ -3724,7 +3765,7 @@ Must-preserve behavior:
 
 Seams under test:
 - 目录树 fixture（`tmp_path.resolve()` 下的合成 `YD_ROOT` + 独立 scratch 根；`resolve()` 的理由同 #23 裁决 6 末条：macOS `/var -> /private/var` 会让 `containment_root` 的逐分量 `O_NOFOLLOW` 锚定失败）
-- 合成 v2 DAT 构造器（`producer/tests/` 新增 fixture helper：给定 `nc`/`rows`/header 文本产出字节；v1 与残行两种反例由同一构造器的参数产出）
+- 合成 v2 DAT 构造器（`producer/tests/` 新增 fixture helper：给定 `nc`/`rows`/header 文本产出字节；v1 与残行两种反例由同一构造器的参数产出）；#109 的错误分钟 oracle 从合法 bytes 出发按独立固定偏移做 `struct.pack` 手术，不复用构造器的分钟生成表达式
 - checkpoint `cfg.ic` 复用 `producer/tests/cfg_ic_fixtures.py` 既有构造器，不新造第二份
 - 顺序录制：monkeypatch `publish` 模块内的 `safe_fs` 绑定名（裁决 10），无注入式生产参数
 - 时间/cycle：直接构造 `datetime`，不注入时钟
@@ -3732,15 +3773,15 @@ Seams under test:
 Risk packs considered (core):
 - Public API / CLI / script entry: selected —— 新增 `yd_producer.publish` 公共面；`cli.py` 不动
 - File IO / path safety / overwrite: selected —— 本 issue 的主面（原子 rename、`O_EXCL`、symlink 拒绝、containment、整树删除）
-- Schema / columns / units / field names: selected —— v2 DAT 布局与列数/行数即 schema 判定
+- Schema / columns / units / field names: selected —— v2 DAT 布局、列数/行数与第 0 列相对分钟单位/序列即 schema 判定
 - Auth / permissions / secrets: selected —— 发布权限位与「不继承 scratch uid/gid/mode」
 - Error handling / rollback / partial outputs: selected —— fail-closed 检查与「不回滚、留半成品」的恢复模型
 - Concurrency / shared state / ordering: selected —— 提交顺序是 spec 的核心 Requirement；`DONE` 检查到创建的竞态
 - Resource limits / large input / discovery: selected —— DAT 有界读（裁决 12）
-- Legacy compatibility / examples: not selected —— `products-contract.md` §5.1 逐字「不要求兼容 v1」；v1 只作为**被拒绝**的反例出现
-- Config / project setup: not selected —— 发布器不读 `config.toml`（裁决 1），配置校验归 #2/#32
+- Legacy compatibility / examples: selected —— `products-contract.md` §5.1 仍不要求兼容 v1；#109 对既有 `PublishInputs(...)` 构造以尾部默认 60 保持兼容，但生产必须显式传配置值
+- Config / project setup: selected —— 发布器仍不自行读 `config.toml`；#109 只增加 `Config.output_interval_minutes -> PublishInputs.output_interval_minutes` 的 controller 投影
 - Release / packaging / dependency compatibility: not selected —— 零新增依赖（裁决 12）
-- Documentation / migration notes: not selected —— 无对外文档契约变化（spec 既有 Requirement 已覆盖本 issue 全部七类 Scenario，故本 issue **无 spec delta**）
+- Documentation / migration notes: selected —— #109 同批更新 run-controller spec 与 compute-loop 的 DONE 前分钟列合同
 
 Required evidence（每条一个用例，`producer/tests/test_publish.py`）:
 - **顺序可观测**（spec Scenario 逐字）：一轮成功发布 -> 录得的终名序为 `yd.rivqdown.dat` rename < `<T+12>.cfg.ic` rename < `DONE` 创建 < 旧状态 unlink < `work` 删除；每对相邻关系各自断言（合成一条「序列相等」断言会在只错一处时给不出定位）
@@ -3752,6 +3793,8 @@ Required evidence（每条一个用例，`producer/tests/test_publish.py`）:
 - **v2 判据有判别力**：v1 布局（无 1024 文本头，`nc` 在 offset 0，且 `nc == reach_count`）-> `PublishError` 指名非 v2。这条是变异体 (c) 的唯一判别器
 - **文本头形状**：`[0:1024)` 含 NUL 之后又出现非 NUL 字节 -> 拒；含非可打印字节 -> 拒；全 NUL（空 header）-> 接受（SHUD 的 `char header[1024] = {}` 允许空描述）
 - **期望值正数闸**（消费偏离 2）：`expected_rows = 0`、`reach_count = 0`、`variant_reach_count = 0` 三条参数化 -> 各自 `PublishError`；`expected_rows = 0` 那条 MUST 用一个数据区为空的 DAT 构造，否则它会被行数判据顺带挡住而失去判别力
+- **#109 分钟列值级矩阵**：从合法 DAT bytes 出发，以独立字节偏移手术（不调用/复制 `build_dat_bytes` 的分钟生成表达式）分别把首行/中间行/末行第 0 列改为期望值 + 60、`NaN`/`inf`，另做整列 + 60 -> 每例均在任何 NFS 写入前 `PublishError`，消息点名精确 0-based row、期望与实得，递归快照不变且 work 保留；合法 `0,60,…,10020` 通过。再以小型 standalone DAT 和显式 `output_interval_minutes=37` 验证 `0,37,74,…` 通过、同 bytes 配兼容默认 60 失败，证明 checker 读字段而非写死 60；`output_interval_minutes` 的 bool/float/string/0/负数在任何 DAT open 前拒绝。controller 构造记录器断言其逐字传入 `config.output_interval_minutes`
+- **#109 有界/身份读取**：记录 `open_claimed_file`/`open_file_no_follow`、`os.pread` 与 close，合法 `N` 行在既有头部读取之外只读取每行第 0 列一个 float64，分钟数据区累计字节恰为 `N*8`，零流量值读取；claim 与 standalone 两腿各覆盖一次。把偏移步长 `(nc+1)*8` 改为 `nc*8`、漏 `table_end`、只查首末、整读数据区、忘关 fd 的变异分别必红
 - **状态不可读不写 DONE**：重戳后文档缺一个分段（`state_ic_structure_complete` 判不完整）-> `PublishError`，零 NFS 变更；header 形状非法（2 token）-> `restamp_to_absolute_time` 的 `ValueError` MUST 收敛为 `PublishError` 而不是穿透
 - **日志可用五形态**：`merged_log` 不存在 / 是目录 / 是 FIFO / **是 symlink（断链与指向真实非空文件各一）** / 0 字节 -> 各自 `PublishError`，零 NFS 变更。symlink 那条是 round 1 的 cand-10（CONFIRMED/FIX_NOW）：裁决 4 逐字写了四形态含 symlink，本行原先把 symlink 悄悄换成了「不存在」，测试跟着弱的这行走，于是 `stat_no_follow` 抛 `SafeFilesystemError` 的那条臂**一次都没被执行过**（目录与 FIFO 的 lstat 是成功的，失败发生在其后的 `S_ISREG`）。裁决是更高的 oracle 层级，本行按裁决订正
 - **零 NFS 变更是逐项快照**：上述每一条失败用例共用一个断言 helper——对 `YD_ROOT` 整棵做递归快照（路径、类型、大小、mode、mtime）并逐项相等，且 `work_dir` 仍存在。**MUST NOT** 以「`DONE` 不存在」单条断言代替（那放行「DAT 已 rename 但没写 DONE」这种真实缺陷）
@@ -3848,7 +3891,7 @@ Required evidence（每条一个用例，`producer/tests/test_publish.py`）:
   (as) `nc` 的有限/整数判据删除 -> `NaN` 与 `8.5` 用例变红（round 1 cand-12，本轮补登记）；
   (at) `_normalize_cycle` 改为 `replace(tzinfo=UTC)`（丢弃 offset 而非换算）-> aware 非 UTC 用例变红（round 1 cand-11，本轮补登记）；
   (au) 步骤 3 的临时文件不 rename 而是留下 -> `output/<T>/<source>/` 精确内容用例变红（round 1 cand-14，本轮补登记）；
-  (af) 契约检查阶段的 `read_bytes_limited_no_follow` 换成 `read_bytes_no_follow`（整读）-> 需一条「检查阶段峰值内存与头部同量级」的 `tracemalloc` 断言（构造一个 `st_size` 巨大但头部合法的 DAT），照 #22 的既有做法登记；该断言 MUST 用从 `publish` 导入的 `DAT_FIXED_HEADER_BYTES` 推出期望量级（`DAT_FIXED_HEADER_BYTES + 8*nc`），不得写死 1040 或 5.4 MB 这类字面量
+  (af) 契约检查阶段的有界头部/分钟偏移读换成 `read_bytes_no_follow`（整读）-> 需一条「检查阶段峰值内存与头部加分钟列同量级」的 `tracemalloc` 断言（构造一个总 `st_size` 很大但头部/分钟列合法的 DAT），照 #22 的既有做法登记；该断言 MUST 用从 `publish` 导入的 `DAT_FIXED_HEADER_BYTES`、`nc` 与 `expected_rows` 推出期望量级（列编号表末尾 + `8 * expected_rows`），不得写死 1040 或 5.4 MB 这类字面量
 
 Verification（本 issue 合并前逐条跑）:
 - `cd producer && uv run pytest` -> 退出码 0
@@ -3857,11 +3900,10 @@ Verification（本 issue 合并前逐条跑）:
 - `openspec validate m2-producer-core --strict --no-interactive` -> 退出码 0
 
 Known limits（合并时按此验收）:
-- **跨 source 在共享 `output/<T>/` 层级上的放宽竞态**（round 5 cand-06 PLAUSIBLE/DEFER/P3）：`_prepare_output_dir` 先 stat 定「自建层级」、再 mkdir、再 fchmod，无锁。并发发布者落进他人的 `mkdir`→`fchmod` 窗口即把该层级误判为已存在，抛一次 `DONE` 前的 `PublishError`。响亮、零 NFS 损伤、下一 tick 自愈；仅当 14.3 双源并行后可达。tracked issue：**#106**，其中钉死约束：无条件 `fchmod` 是被禁的变异体 `(ai)`（round 1 cand-02 P1），修法不得重提。
-- `docs/products-contract.md` §5.2 的「数据区第 0 列逐值为 `0, 60, …, 10020`」不在 spec 与 issue 的 DONE 前检查清单内（偏离 4），本 issue 不实现；一份分钟列错乱但行列数正确的 DAT 仍会被写 `DONE`。按「out-of-scope findings: report, don't fix」路由为独立 issue：**#109**（Phase 8 deferral routing 已出链接）。
+- **跨 source 在共享 `output/<T>/` 层级上的放宽竞态**（round 5 cand-06 PLAUSIBLE/DEFER/P3）：`_prepare_output_dir` 先 stat 定「自建层级」、再 mkdir、再 fchmod，无锁。并发发布者落进他人的 `mkdir`→`fchmod` 窗口即把该层级误判为已存在，抛一次 `DONE` 前的 `PublishError`。响亮、零 NFS 损伤、下一 tick 自愈；仅当 14.4（原 14.3）双源并行后可达。tracked issue：**#106**，其中钉死约束：无条件 `fchmod` 是被禁的变异体 `(ai)`（round 1 cand-02 P1），修法不得重提。
 - 「不继承 uid/gid」只有结构证明与源码机检，无跨 uid 行为断言（裁决 11）；真实 NFS 上的 uid/gid 落点归 M4 现场验证。
 - 裁决 8 的目录放宽只解决 umask 造成的收紧；`safe_fs.py:124-131` 点名的另一条路径——父目录带 default POSIX ACL 时 mode 实参会 clamp 掉继承的 ACL mask——本模块不处理（`fchmod` 到 0o755 同样不恢复被 clamp 的 `#effective` 位）。现场若采用 ACL 而非共享组 setgid，属部署侧配置，归 M4 现场验证与 `docs/agent-ops.md` §10 的部署约定。
-- `PublishCleanupError`（`DONE` 之后的清理失败）遗留的孤儿 `work/<source>/<T>` **当前无回收归属**（fixture 复核 round 2）：`residue.plan_residue` 的清单在 `DONE(T)` 存在时整体为空且全程不碰 scratch，13.3 的面是 `output` 的 14 天保留窗，两者都收不到它。它未达到 `docs/compute-loop-design.md` §12 的「ownership token 匹配时收尾删除」目标，但补一处 scratch 侧的历史孤儿扫描属 13.2/14.1 的收尾面，本 issue 不越界实现。按「out-of-scope findings: report, don't fix」路由为独立 issue：**#108**（Phase 8 deferral routing 已出链接）。#108 另记录了同一缺口的第二个入口：步骤 5 与 6/7 之间进程被硬杀会留下同样的孤儿且**零异常**，故「14.1 捕获 `PublishCleanupError` 重试」单独收不了口。
+- `PublishCleanupError`（`DONE` 之后的清理失败）与步骤 5 后硬杀会遗留孤儿 `work/<source>/<T>`；本 #24 当时按边界不越界修复并路由 #108。#108 收尾裁决现已关闭归属：不改 publisher，也不扩 `residue.plan_residue` 或 13.3 retention；下一次 `run_sources` 在每源 preflight 后、首次前沿前，以普通文件 `DONE(T)` 为完成证明，identity-bound 删除同 cycle exact work，并把 source/cycle/path 记入该源首个报告。无 `DONE(T)` 的 work 仍按 #59/#58 保留停源。
 - **`work_dir` 的形状未被校验**（round 1 cand-07 CONFIRMED/**DEFER**，路由到 14.1）：`_remove_work` 只校 containment，不校 `work_dir` 是否真的等于 `work_root / source / cycle_id(cycle)`。实测传 `work_dir = work_root / SOURCE`（少一节、单个干净分量、确在 `work_root` 内）时 `publish()` **返回成功**，整棵按源 work 树被删——含另一 cycle 的 work，即 `test_publish.py:271` 明确断言必须存活的那个目录；且发生在 `DONE` 之后，重跑救不回来。DEFER 的依据是 fixture 把这层校验分给了调用方（裁决 1 只 fail-close `source`/`cycle`，裁决 6 只钉「containment 不得反推」）且 `cli.py run` 仍是 `_unimplemented`、无生产暴露面。该 DEFER **以路由成立为条件**：必须在 14.1 落一条入口守卫 `work_dir == work_root / source / cycle_id(cycle)`（落在 `PublishInputs.__post_init__` 亦可），并配一条「传少一节路径 -> 姊妹 cycle 的 work 存活」的回归用例。tracked issue：**#94**。
 - spec Scenario「状态只保留两份」的字面 WHEN 是「连续发布两轮成功」，本 issue 无 `run_once`，以「预置三份历史状态 + 一轮发布」这一等价树形式验收；两轮连跑的端到端形式归 14.1。
 - **`reach_count` 与真实 `cfg.ic` river 段行数的恒等式由测试构造断言，未经真实数据验证**（round 2 cand-05 PLAUSIBLE/**DEFER**，本行即该 DEFER 的成立条件）：裁决 4 的 `expected_river_count=reach_count` 把一条无任何仓内文件明说的恒等式变成了硬闸，而 `test_publish.py` 全套由单个 `REACH_COUNT` 常量同时喂 `build_dat_bytes(nc=...)` 与 `build_cfg_ic(river_count=...)`，对真实分叉零判别力（套件里没有任何一份真实 yd `cfg.ic`）。失败方向是**对的**：若真实 `cfg.ic` 的 river 段行数不等于 3988，结果是每轮 pre-`DONE` 响亮 `PublishError`、零 NFS 损伤、该源永久停在原地重试，而不是 round 1 那种静默中毒。故本 issue 不补代码；该恒等式的真实数据验证归 M4 现场验证与 14.1 的配置接线（与本节 uid/gid、ACL 两条同一路由）。
@@ -3869,7 +3911,7 @@ Known limits（合并时按此验收）:
 Non-goals:
 - 失败处理（合并日志生成、失败侧删 work、不推进）：任务 13.2，issue 待定
 - 14 天保留窗清理与字面 `realpath` 圈定 yd 根：任务 13.3，issue #25
-- `run_once` 编排、把发布器接进 `cli.py run`、运行报告：任务 14.1
+- `run_once` 编排与运行报告：任务 14.1；把完整双源控制器接进 `cli.py run`：M2 收尾任务 14.2
 - checkpoint 的**捕获**（tracker）：issue #16；本 issue 只消费一个已捕获的路径
 - 变体 reach 数的真实来源（prepare 侧计数）：#20 / 14.1 接线（偏离 1）
 - `residue.plan_residue` / `decide_frontier` / `state/**` 的任何改动
@@ -3898,7 +3940,7 @@ Minimal mergeable slice: issue #25 的 13.2 + 13.3（接受上游 `merged-tasks`
 
 1. `specs/run-controller/spec.md` 要求失败日志含退出码，但 `JobRecord` 七字段没有载体，载体裁决仍在 #47。本 issue 不改 frozen executor schema，也不假装能从 `JobState` 反推退出码；失败收尾 seam 把非空 `exit_code: str` 作为显式输入。#26/后继接线如何从 Slurm 取得该值仍归 #47，当前函数本身可独立完整测试。
 2. 任务 13.2 的「复用 12.2 判定」解释为：本模块 MUST NOT 重写残留集合或另立恢复协议；真正的「发现 → 执行 residue plan → 重组装」活接线仍归 #28 的崩溃恢复端到端。本 issue 不加一层只转调 `plan_residue` 的空壳，也不改 `residue.py`。
-3. `PublishCleanupError`/硬杀留下的 post-`DONE` 孤儿 work 已独立路由 #108；它需要按 `DONE(T)` 扫描历史 work，和本 issue 的“当前失败作业精确 work”不是同一集合。本 issue 不偷偷扩 13.3 到 scratch 历史扫描。
+3. `PublishCleanupError`/硬杀留下的 post-`DONE` 孤儿 work 与本 issue 的“当前失败作业精确 work”不是同一集合；本 issue 不扩 13.3。#108 收尾裁决把历史扫描归 `run_sources` 启动 hygiene：按普通文件 `DONE(T)` 删除 exact work，仍与本失败 finalizer 分离。
 
 **核心设计裁决**：
 
@@ -3917,11 +3959,11 @@ Minimal mergeable slice: issue #25 的 13.2 + 13.3（接受上游 `merged-tasks`
    **时间锚同样是删除身份，不能只做字段间自洽**（round 1 `data-integrity` cand-01，独立 verifier 实测）：当 `latest_done` 非空时，构造点与执行点 MUST 用上述 cleanup-owned no-follow discovery 重新读取该 source 当前普通文件 `DONE` 集合并校验其最新值 `D_current`；集合为空，或 `latest_done > D_current`，均在任何删除前 `CleanupError(phase="validate", path=None)`。只拒绝“未来/伪造锚”，不要求相等：`latest_done < D_current` 的旧 plan cutoff 更早、删除集是当前合法删除集的严格子集，MUST 允许保守重放。discovery 的 `SafeFilesystemError`/`OSError`/兼容边界注入的 `DiscoveryUnreadableError` 必须保留为 `__cause__` 并收敛为 validate；构造点和执行期重绑都要有独立 oracle。验证裁决的反例为：真实 D=`2026082600`、受保护对象 `2026081300`，手工锚 D+2d 会把 cutoff 推到 `2026081400` 并删除该对象；Phase 6.2 复发现为 `output/2026082800` 指向根内伪造目录时，同样会把 cutoff 推到 `2026081400`。两种形态都必须在构造或执行首删前拒绝。
 7. 当前 `D_current` 的 `output`、cycle、source 与 `DONE` 四个分量在同一次 fd-bound walk 中逐一 no-follow 类型校验：前三者只能是真目录，`DONE` 只能是普通文件；每次向下一层都相对已打开父 fd，不能先用 `Path.iterdir`/`os.stat`/`realpath` 得出候选后再只 `lstat` 末端。指向根内或根外的 symlink 一律因分量类型拒绝；真正缺失的 source/`DONE` 仍是不完成。planner 上的发现/锚点失败归 `CleanupError(phase="retention-plan", path=<可指名的不安全或不可读分量>)`，公开 plan 构造与 execute 重绑上的同类失败归 `CleanupError(phase="validate", path=None)`；底层异常只作为 cause。每个拟删目标在计划期全部完成以下预检，任一失败则**整个计划报错且零删除**：存在性可确定、output 目标是真目录/log 目标是普通文件、`realpath(strict=True)` 位于 `Path(yd_root).resolve()` 之内且不等于根本身。symlink 指向根外必须指名目标并拒绝；symlink 指向根内也因类型不符拒绝，不把正式 lane 的异常形态当正常旧数据。
 8. `execute_retention_plan` 在第一处删除前对**全部仍存在目标**重复第 7 条 realpath/类型预检，并通过 `safe_fs` 的可复用只读 fd-walk 对每棵正式 output 目标树完成一次 no-follow 内容预扫；这是抵御“计划后、执行前换成 symlink”以及“静态树内 symlink 到删除途中才发现”的 point-of-use 闸。预扫 MUST 从 containment root 逐分量 `O_NOFOLLOW` 打开，只 `stat/list`、零 unlink/rmdir；任一树内 symlink 或不安全分量必须在**整批第一处删除之前**拒绝，故静态不安全树的全树字节/类型快照、其它计划目标、链接与根外目标均存活（round 1 `data-integrity` cand-02：现有 `rmtree_no_follow` 会按 `os.listdir` 顺序先删普通兄弟、遇 link 才拒绝，违反 fixture 的“该树存活”）。完整预检之后，output 正式树仍用 `rmtree_no_follow` 作为预扫后 race 的最终 no-follow 防线，失败日志用 `unlink_no_follow`，均带 `containment_root=plan.yd_root` 与 `missing_ok=True`。顺序为 output 后 logs；**只对预检完成后发生的 IO 错误或竞态拒绝**允许部分完成，静态安全拒绝不在此 carve-out 内；旧 plan 重放与重新计划都必须幂等。
-9. 保留器不删除 `output/<cycle>/` 空父目录，不扫 scratch work，不清 states，不引入 wall-clock/配置默认值；这些都不是本 issue 两条 Scenario 的对象。固定 14 天来自现有产品契约，不新增配置旋钮。
+9. 保留器不删除 `output/<cycle>/` 空父目录，不扫 scratch work，不清 states，不引入 wall-clock/配置默认值；这些都不是本 issue 两条 Scenario 的对象。固定 14 天来自现有产品契约，不新增配置旋钮。**#43 M2 收尾裁决覆盖本块此前“固定 14 天/不新增配置旋钮”的取值归属：上列 `14 days` 仅是测试配置值，保留窗口天数 MUST 来自配置，`object_path.DEFAULT_RETENTION_WINDOW_DAYS` 不是取值来源。** **#85 另把 node-22 本地 `cron.lock_path` 及其专属 `run/` 目录列为所有 retention/work/staging/residue 清理的显式禁区：现场路径必须位于这些清理根外；cleanup 不取得、迁移或重建锁，删除候选中的 symlink 也不得被跟随到该哨兵。**
 10. 零新增依赖；仅 stdlib + 现有 `executor/controller/store.safe_fs`。不得用 `shutil.rmtree`、裸 `Path.unlink`、跟随 symlink 的 `Path.open/read_bytes`，不得在本模块复制 `safe_fs` 的递归删除实现。
 
 Invariant Matrix
-Governing invariant: 失败收尾只能把“同一 source/T 的完整失败证据”提交后删除“同一 source/T 的精确 work”，而保留清理只能删除由该 source 最新 `DONE` 锚定、严格落在 14 天窗口外且在已解析 `YD_ROOT` 内的对象；两条路径都不得推进/破坏状态链或越到兄弟源/根外。
+Governing invariant: 失败收尾只能把“同一 source/T 的完整失败证据”提交后删除“同一 source/T 的精确 work”，而保留清理只能删除由该 source 最新 `DONE` 锚定、严格落在 14 天窗口外且在已解析 `YD_ROOT` 内的对象；两条路径都不得推进/破坏状态链或越到兄弟源/根外，并始终不得触碰 node-22 本地 `cron.lock_path` 或其专属 `run/` 目录。
 Source-of-truth identity/contract: `(source, cycle T)` + terminal `JobRecord.job_id` 标识失败轮；cleanup-owned、从 resolved YD_ROOT fd-bound 逐分量 no-follow 发现的每源最新普通文件 `output/<D>/<source>/DONE` 标识保留窗口锚点；`Path(yd_root).resolve()` / `Path(work_root).resolve()` 标识各自容纳根。
 Surfaces:
 - Producers: `finalize_failed_job` 产出 `logs/<source>/<T>.log`；`plan_retention` 产出不可变删除清单
@@ -3936,6 +3978,7 @@ Regression rows:
 - 当前锚点的 `output`/cycle/source/`DONE` 任一分量是不安全形态，或计划后被换成该形态 -> planner/constructor/execute 在首删前按各自错误域拒绝，整批目标与外部对象存活
 - 日志目标/输入或 retention 候选是根外 symlink，或计划后被换成根外 symlink -> 在任何相关删除前稳定拒绝，链接与根外目标存活
 - D-14d / 兄弟 source / 非法名字 / 无最新 DONE -> 完整保留；D-14d-12h 本源 output 与对应失败日志 -> 删除
+- `cron.lock_path` 与其专属 `run/` 目录位于 node-22 本地、全部删除根之外；在 `YD_ROOT`/scratch 的清理候选内放置指向该锁或目录的 symlink -> failure、retention、residue、startup hygiene 与 staging cleanup 都只拒绝或删除链接自身，绝不跟随，哨兵 identity/字节与目录树快照不变；结构检查另证明没有清理 API 直接消费 `cron.lock_path`
 
 Boundary-surface checklist:
 - 共享 helper 根：消费 `store/safe_fs.py` 的 fd/no-follow 原语与只读树预扫；只允许为 cleanup-owned discovery 补一个最小可复用 read-only helper，不能改写既有删除语义
@@ -3989,6 +4032,7 @@ Required evidence（真实 tmp 目录树；期望 cycle/路径由构造期独立
 - TOCTOU：先得到含两个目标的合法 plan，再把排序靠后的目标换成根外 symlink -> `execute_retention_plan` 在第一删前拒绝，排序靠前目标仍在；证明二次**全量**预检而非边删边查
 - 正式 output 目录内部同时放至少三份普通文件、一个**位于嵌套子目录内**且指向根外的 symlink 与一个排序在 link 后的普通文件 -> 执行期全批只读 no-follow 预扫在首删前拒绝，`snapshot_tree` 证明该树所有条目逐项存活，链接/根外目标/其它计划目标同样存活；随后 `rmtree_no_follow` 只承担预扫后 race 防线。独立 safe_fs 用例还须直接钉住只读预扫对嵌套纯目录树通过、对 nested-descendant symlink 零变更拒绝；把 `_verify_tree_no_symlinks_fd` 的递归调用替成 no-op 时，helper 与 cleanup whole-plan 两个新 killer 都必须变红。unexpected regular-file/FIFO lane -> 稳定错误、不阻塞读取
 - `YD_ROOT` 经 `link -> real` 到达 -> 合法计划/执行成功且 `plan.yd_root` 是实路径；同一 plan 重放和重新计划均 no-op
+- **#85 锁哨兵禁区的结构与行为双证据**：结构上枚举 failure/retention/residue/startup-hygiene/prepare-staging 的每个删除 producer，证明删除目标只能由各自精确 lane 派生且没有 `cron.lock_path`/其父 `run/` consumer；行为上把带可识别字节/inode 的锁文件置于本地清理根外，并从各清理候选放入指向锁文件或 `run/` 的 symlink，逐条运行公开 plan/execute/finalizer，断言仅链接自身按既有策略被拒绝或删除，目标锁文件和目录 identity/字节/条目集合不变。不得为测试把合法 lock 配到 `YD_ROOT`/scratch 内，也不得放宽生产路径合同
 - 公共错误域矩阵：非法 FailureInputs/RetentionPlan -> `CleanupError(phase='validate')`；日志输入/目标异常 -> `phase='log'`；日志已提交但 work 删除失败 -> `phase='work'` 且日志存活；DONE/候选枚举或计划期 realpath/type 异常 -> `phase='retention-plan'`；二次预检/删除期异常 -> `phase='retention-execute'`。每条断言异常类型、`phase`、涉事时 `path`，并断言底层 `ValueError`/`DiscoveryUnreadableError`/`SafeFilesystemError`/`OSError` 不穿透
 - Batched red proof：新测试对 pre-change source 一次运行必须红（模块不存在即可），随后恢复实现全绿；不得遗留 `red-proof` stash
 
@@ -4001,7 +4045,7 @@ Verification:
 
 Known limits / routed deferrals:
 - #47：退出码如何由 Slurm/主循环取得；本 issue 只消费显式非空 `exit_code`
-- #108：post-`DONE` 历史孤儿 work 扫描，不属于当前失败 job 的精确 work 删除
+- #108：post-`DONE` 历史孤儿 work 已裁决归 `run_sources` 启动 hygiene，不属于本函数对当前失败 job 的精确 work 删除
 - #94：发布器自身 `work_dir` 形状守卫；本 issue 的 FailureInputs 独立守住自己的删除入口，不代修 `PublishInputs`
 - #112：Phase 6.2 核实的既存 `ResiduePlan` 手工清单身份缺口（可夹带兄弟 source 删除目标）；`residue.py` 不在本 issue 改动面，已由 issue-scribe 独立建档
 
@@ -4022,13 +4066,14 @@ Review focus:
 ## 14. run-controller（三）：主循环集成
 
 - [x] 14.1 单源单轮 `run_once` 骨架打通：发现 → 组装 → 提交 fake → 发布 → work 清理；job ID/partition/终态/起止时间进运行报告；`local.toml` 缺 Slurm 字段即停
-- [x] 14.2 多轮追赶与缺口停等：raw 一次补齐 T/T+12h/T+24h 时序推进、每源在途提交计数 ≤1、缺轮停在缺口（§13.1：同源顺序/raw 缺口）
-- [x] 14.3 双源并行、单源失败隔离与崩溃恢复端到端：IFS 失败 GFS 继续、失败日志与 work 清理、无 DONE 残留下次重跑（§13.1：双源并行/单源失败/无 DONE 崩溃恢复）
+- [ ] 14.2 `yd-producer run` 接线：`cli.run` 调用 `controller.run_sources`，注入 Slurm executor、生产 attempt driver、poll wait 与独立 `sacct ExitCode` provider；退出码 0/2/3
+- [x] 14.3 多轮追赶与缺口停等：raw 一次补齐 T/T+12h/T+24h 时序推进、每源在途提交计数 ≤1、缺轮停在缺口（原任务 14.2；§13.1：同源顺序/raw 缺口）
+- [x] 14.4 双源并行、单源失败隔离与崩溃恢复端到端：IFS 失败 GFS 继续、失败日志与 work 清理、无 DONE 残留下次重跑（原任务 14.3；§13.1：双源并行/单源失败/无 DONE 崩溃恢复）
 
-依赖：组 5、组 8、组 9、组 12、组 13
+依赖：组 5、组 8、组 9、组 12、组 13；14.2 是后补的 M2 收尾接线，按实现依赖位于 14.4 之后
 §13.1 归属：控制器/发布（逐 task 标注场景）
 Suggested fixture level: expanded - 多轮端到端目录树与可编排 fake executor
-Minimal mergeable slice: 单源单轮骨架（14.1）——一条端到端路径独立合并保绿，追赶与双源为后继
+Minimal mergeable slice: 单源单轮骨架（14.1）——一条端到端路径独立合并保绿；追赶（14.3）、双源（14.4）与生产 CLI 接线（14.2，最后实施）为后继
 
 **14.1 接线约束（由 issue #22 / PR #62 round 1 验证闸门传下，batch integration-contract cand-06 CONFIRMED）**：`controller.decide_frontier` 返回的待跑 T 可能带**任意可解析的 cycle 小时**（issue #22 fixture 裁决 5 刻意如此：对不可解析文件名 fail-closed 会让一次崩溃的发布永久砖化该源），而 `rawscan.judge` 只对 `config.cycle.hours` 全域——实测一个 stray 的 `states/<source>/2026081918.cfg.ic` 会让 18Z 目标进入 `judge`，在任何文件系统访问之前抛 `ConfigError` 并**穿透** `decide_frontier`，把「停一个源」放大成「整个 tick 崩」。14.1 选择方案 (a)：接线前限制目标小时；越域 T 收敛为本源 `RAW_INCOMPLETE` 停止报告，且在 residue/raw/work/driver/submit 之前停止。`decide_frontier` 的公开签名与异常契约不改。
 
@@ -4038,17 +4083,17 @@ Fixture level: expanded
 Upstream suggested level: expanded（agree：共享 controller 公共入口、Slurm 生命周期、NFS residue/publish、状态链/T+12/DONE 与删除面均为 mandatory expanded）
 Repair intensity: high（单次错绑即可把另一个 source/cycle 的状态或 work 发布/删除；`DONE` 之后清理失败还具有“已完成但未清净”的独立语义，适用 Invariant Matrix 与 boundary-surface checklist）
 Project profile: yd-viewer
-Minimal mergeable slice: 任务 14.1 单源单轮；不吸收 14.2 多轮追赶或 14.3 双源/失败恢复
+Minimal mergeable slice: 任务 14.1 单源单轮；不吸收 14.3 多轮追赶、14.4 双源/失败恢复或 14.2 生产 CLI 接线
 
 **Docs-first 偏离与上游缺口（本 fixture 的裁决优先于旧 sketch）**：
 
 1. design 旧草图 `run_once(cfg, executor)` 输入不足：`Config` 没有 #15 `WorkIdentity` 的 model/basin/project 五项，`JobExecutor` 又只返回调度状态、不产 DAT/log/checkpoint。14.1 新增显式 `AttemptDriver`，不从 variant basename/`yd.binding` 猜 identity，也不让文件名自证 checkpoint authority。
 2. forcing 与 SHUD 重任务按 `docs/agent-ops.md` §8.3 必须在 Slurm 计算节点内执行。故 `driver.prepare` 只声明 identity/worker argv/预期 DAT 路径；`RunDirectory`、同一 job-local tracker authority、DAT 与 log 只可在 executor 首次到达 `SUCCEEDED` 的 attempt 内生成，并由 `driver.collect` 交接。不得在 submit 前先跑 forcing/SHUD 或预埋终态产物。
-3. M2 尚无计算节点 worker CLI，也无跨 Slurm 进程携带 tracker 内存 authority 的原子 receipt。生产 `cli.py run` 本 issue保持 staged-unimplemented/fail-closed；M2 以注入 driver + 包住真实 `FakeJobExecutor` 的 terminal hook 验证本地骨架。真实 worker argv/receipt/CLI 绑定与 node-22 行为归 M4；不得用目录扫描或无 checksum manifest 伪装成生产接线。
+3. #26 交付时尚无计算节点 worker CLI，也无跨 Slurm 进程携带 tracker authority 的原子 receipt，因此 `cli.py run` 在本 issue 保持 staged-unimplemented/fail-closed；本 issue 只以注入 driver + 包住真实 `FakeJobExecutor` 的 terminal hook 验证本地骨架。M2 收尾任务 14.2 现已认领真实 worker argv/原子 receipt/CLI 绑定；node-22 真行为仍归 M4 验证。任何实现都不得用目录扫描或无 checksum manifest 伪装生产接线。
 4. `rawcopy.stage_raw` 把其 `work_dir` 参数当 `LocalObjectStore` 根，而 #15 把真正 object-store 根固定为 `<attempt-work>/object-store`。14.1 因此传后者：raw/manifest/canonical/forcing/models 共根。已同步修订 compute-loop §3.3/§7.2 与 raw-scan spec 的整体布局；`stage_raw` standalone API/测试仍写“给定 staging root 下的 `raw/`”，不改其行为。
 5. #23 记录的顺序偏离在本 issue关闭：controller 先得到不含 raw 的合法 T，合法 00/12 T 先执行 residue plan/execute，再判 raw；raw 未齐时 residue 已清。任意越域小时在 residue 之前停止，避免 `ConfigError` 放大与非法前沿删除。
-6. #94 在本 PR 同批闭合，守卫落危险边界 `PublishInputs.__post_init__`：resolved `work_dir` 必须逐字等于 resolved `work_root/source/T`，不是只做 containment。#108 的 post-`DONE` 历史孤儿 sweeper不吸收；本轮若 `PublishCleanupError`，报告已完成/待清理，不触发失败回收。
-7. #47 的退出码载体尚未裁决，故 FAILED/TIMEOUT 日志/work 回收不在 14.1；由 #28 串 `finalize_failed_job`。14.1 只需对非成功终态返回 `JOB_FAILED` job report，零 collect/零 publish，保留 work 供后继失败 owner处理，不虚构 exit code。
+6. #94 在本 PR 同批闭合，守卫落危险边界 `PublishInputs.__post_init__`：resolved `work_dir` 必须逐字等于 resolved `work_root/source/T`，不是只做 containment。本 14.1 不吸收 #108：本轮若 `PublishCleanupError`，报告已完成/待清理，不触发失败回收；#108 只在下一次 `run_sources` 启动 hygiene 处理历史 work。
+7. #47 现已裁决为独立 `sacct ExitCode` provider，但 FAILED/TIMEOUT 日志/work 回收仍不在 14.1；由 #28 / M2 CLI 收尾接线注入 provider 并串 `finalize_failed_job`。14.1 只需对非成功终态返回 `JOB_FAILED` job report，零 collect/零 publish，保留 work 供失败 owner 处理，不虚构 exit code。
 
 **公开面（逐字冻结）**：
 
@@ -4079,8 +4124,8 @@ Minimal mergeable slice: 任务 14.1 单源单轮；不吸收 14.2 多轮追赶�
 7. submit record 只作身份/初态基线，不计作一次 `poll`。首次 `executor.poll(job_id)` 立即执行；若该次或后续 `poll` 返回非终态，才调用且恰调用一次 `poll_wait()`，随后发起下一次 `poll`。因此 terminal 首次 poll 时 wait=0，否则 wait 调用数恰等于非终态 poll 结果数；不得在 submit 与首次 poll 之间等待。controller 不内置 sleep、间隔、次数上限、watchdog、取消或 timeout。每条 poll record 必须保持 job_id/name/resources/submitted_at，started_at 一旦出现不得改变/消失，状态只允许 PENDING→PENDING/RUNNING/terminal、RUNNING→RUNNING/terminal；违反即 `RunError(phase="poll")`。M2 fake必须确定性终止；真实等待/取消归M4。
 8. terminal FAILED/TIMEOUT：不调用 collect/publish，返回 JOB_FAILED + 完整 JobRunReport；work按偏离7保留。terminal SUCCEEDED：collect恰一次；products job_id/DAT/log必须逐字匹配 terminal/prepared/JobSpec，RunDirectory identity/path与 tracker run_dir/project/targets必须绑定同一 work/identity。DAT/log/canonical checkpoint都必须在 submit前不存在、终态后才成为 no-follow普通文件。
 9. controller 以 `ensure_twelve_hour_checkpoint` 对同一 tracker/RunDirectory做 point-of-use authority校验，传一个“若被调用即抛错”的 recovery runner；因此 job-local捕获/补跑必须已经闭合，controller绝不在登录侧补跑。结果必须逐字是 `tracker.captured[12]` 的同一对象/path/checksum。
-10. `PublishInputs` 取 exact yd_root/source/T、prepared DAT、captured path、JobSpec log、exact work/work_root、`expected_rows=config.forecast_days*24`、`reach_count=config.reach_count`、独立 variant count。普通返回 -> SUCCEEDED且work不存在；`PublishCleanupError` -> SUCCEEDED_CLEANUP_PENDING、DONE在盘、不得触发失败回收；`PublishError`/其它普通异常 -> `RunError(phase="publish")`，不伪报 job失败。
-11. `run_once` 本身不取得/释放 flock；它是一轮可组合动作，14.2 必须在同一锁内循环多轮。调用方用既有 `run_with_lock` 覆盖整个 tick。14.1端到端测试必须在同一 wrapper内运行，并在job/publish窗口尝试第二次同锁进入，证明其被跳过且零发现。
+10. `PublishInputs` 取 exact yd_root/source/T、prepared DAT、captured path、JobSpec log、exact work/work_root、`expected_rows=config.forecast_days*24`、`reach_count=config.reach_count`、独立 variant count，并按 #109 显式取 `output_interval_minutes=config.output_interval_minutes`。普通返回 -> SUCCEEDED且work不存在；`PublishCleanupError` -> SUCCEEDED_CLEANUP_PENDING、DONE在盘、不得触发失败回收；`PublishError`/其它普通异常 -> `RunError(phase="publish")`，不伪报 job失败。
+11. `run_once` 本身不取得/释放 flock；它是一轮可组合动作，14.3 在同一源内循环多轮，14.4 组合双源；最终由 14.2 的 CLI 接线用既有 `run_with_lock` 覆盖整个 `run_sources` tick。14.1端到端测试必须在同一 wrapper内运行，并在job/publish窗口尝试第二次同锁进入，证明其被跳过且零发现。
 
 **M2 fake 端到端 oracle（不是生产 receipt）**：
 
@@ -4185,16 +4230,16 @@ Minimal mergeable slice: 任务 14.1 单源单轮；不吸收 14.2 多轮追赶�
 **Known limits / routed deferrals**：
 
 - #47/#28：FAILED/TIMEOUT退出码、失败日志与work回收；14.1只报告，不伪造。
-- #108：post-DONE硬杀/历史孤儿work sweeper；当前PublishCleanupError报告明确完成待清理。
-- #106：14.3双源共享output层级竞态；单源14.1不可达。
-- #109：DAT分钟列内容闸；publisher既有已路由债，本issue不改。
+- #108：post-DONE 硬杀/历史孤儿 work 由下一次 `run_sources` 启动 hygiene 清理；当前 `PublishCleanupError` 仍明确报告完成待清理，不在同一轮失败回收。
+- #106：14.4双源共享output层级竞态；单源14.1不可达。
+- #109 已关闭“继续延期”的裁决：后续实现必须补 publisher 的 DAT 分钟列内容闸；14.1 构造 `PublishInputs` 时显式传 `output_interval_minutes=config.output_interval_minutes`，不得让兼容默认代替生产接线。
 - #77：tracker run_dir符号链接祖先；controller使用resolved scratch根且products重验，但不改tracker构造合同。
-- M4：真实worker command/receipt、SHUD argv/header物理形态、Slurm wait/cancel、node-22/NFS/权限与数值oracle；CLI在此之前保持fail closed。
+- M2 收尾任务 14.2：生产 worker command/原子 receipt/CLI 绑定、Slurm poll wait 与 #69 客户端 command-timeout policy；M4：SHUD argv/header 的现场形态、真实 Slurm 响应时延/cancel、node-22/NFS/权限与数值 oracle。14.2 落地前 CLI 保持 fail closed。
 
 **Non-goals**：
 
 - 多轮追赶/缺口循环（#27）；双源并发、失败隔离、失败日志、崩溃重跑（#28）。
-- 真实Slurm worker、CLI run绑定、cron安装、自动watchdog/cancel/timeout（M4）。
+- 真实 Slurm worker、CLI run 绑定、cron 安装与自动 job watchdog/cancel（M4）；#69 的单次客户端 subprocess timeout 由 M2 收尾实现，不属于本 14.1 controller 循环。
 - NWM数据库/scheduler/registry服务、运行时NWM import、IDW/ERA5 production。
 - 新checkpoint manifest/outcome、磁盘扫描恢复authority、第二次Slurm提交。
 - 修改canonical数学、forcing数值、SHUD真实执行或viewer。
@@ -4208,13 +4253,13 @@ Minimal mergeable slice: 任务 14.1 单源单轮；不吸收 14.2 多轮追赶�
 - PublishCleanupError是否仍是已完成，#94是否在危险边界守住exact work；有没有越界吸收#28/#108。
 - mutation/red/merge-ref证据是否真实执行，合成canonical是否被如实限定为M2接线oracle而非node-22真数据。
 
-### Issue #27 fixture（任务 14.2：单源多轮追赶与缺口停等）
+### Issue #27 fixture（任务 14.3：单源多轮追赶与缺口停等；原编号 14.2）
 
 Fixture level: expanded
 Upstream suggested level: expanded（agree：共享 controller 状态循环、逐轮 Slurm 顺序、NFS `DONE`/状态链与 raw 时间前沿均命中 mandatory expanded）
 Repair intensity: high（循环重复行使 14.1 的 publish/delete 状态机；错误终止或错误推进会跳过 cycle、重复提交或在 cleanup 未闭合时继续）
 Project profile: yd-viewer
-Minimal mergeable slice: 只交付任务 14.2；14.1 已由 #26 落地，不吸收 14.3 双源并发/失败收尾/崩溃恢复
+Minimal mergeable slice: 只交付任务 14.3（原 14.2）；14.1 已由 #26 落地，不吸收 14.4 双源并发/失败收尾/崩溃恢复或 14.2 生产 CLI 接线
 
 **公开面与组合裁决（逐字冻结）**：
 
@@ -4232,8 +4277,8 @@ Minimal mergeable slice: 只交付任务 14.2；14.1 已由 #26 落地，不吸�
 
 - `run_once`、`RunReport`/`RunOutcome`、`AttemptDriver`、`FakeJobExecutor`、`run_with_lock` 的签名和 14.1 行为逐字不改。
 - 每轮 source/T/work/job/checkpoint/DONE 绑定仍完全由 `run_once` 负责；外层循环不读写 NFS、不构造 JobSpec、不接触 tracker authority。
-- `STOPPED` 初始缺口零提交；FAILED/TIMEOUT 失败 work 与日志归 #28；post-DONE cleanup pending 与历史孤儿归 #108。
-- CLI 继续 staged-unimplemented/fail-closed；真实 worker receipt、node-22/cron 绑定归 M4。
+- `STOPPED` 初始缺口零提交；FAILED/TIMEOUT 失败 work 与日志归 #28；post-DONE cleanup pending 本轮保持完成语义，历史孤儿按 #108 在下一次 `run_sources` 启动时清理。
+- CLI 在本 #27 范围内继续 staged-unimplemented/fail-closed；生产 worker receipt 与 CLI 绑定由 M2 收尾任务 14.2 承接，node-22 真验证/cron 安装归 M4。
 - `controller.py` 仍不超过 1000 行；若公共转发文件无空间，循环实现可放既有私有 `_controller_run.py`，不得新建第二个公共 controller 模块或 large-file exclude。
 
 **Seams under test**：
@@ -4316,9 +4361,9 @@ Minimal mergeable slice: 只交付任务 14.2；14.1 已由 #26 落地，不吸�
 **Known limits / routed deferrals**：
 
 - #28：双源并行、FAILED/TIMEOUT 日志与 work 清理、单源失败隔离、崩溃残留重跑。
-- #108：post-DONE cleanup pending / 硬杀留下的历史孤儿 scratch work sweeper。
-- #106：14.3 双源共享 `output/<T>/` 层级竞态；单源串行本 issue 不可达。
-- M4：CLI run/cron、真实 worker receipt、真实 Slurm/node-22/NFS/数值 oracle。
+- #108：post-DONE cleanup pending / 硬杀留下的历史孤儿 scratch work 由 `run_sources` 启动 hygiene 处理；本 #27 公共单源循环保持不变。
+- #106：14.4 双源共享 `output/<T>/` 层级竞态；单源串行本 issue 不可达。
+- M2 收尾任务 14.2：CLI run、生产 worker receipt 与 wait/provider 接线；M4：cron 安装、真实 Slurm/node-22/NFS/数值 oracle。
 
 **Non-goals**：
 
@@ -4332,15 +4377,15 @@ Minimal mergeable slice: 只交付任务 14.2；14.1 已由 #26 落地，不吸�
 - 是否只对 SUCCEEDED 继续，STOPPED/JOB_FAILED/cleanup-pending/异常是否精确终止且不 busy-loop。
 - 同一 source 是否始终串行、整段是否由调用方一个 flock 覆盖，而非每轮重取锁。
 - 多轮测试是否走真实 14.1 合成链并独立断言提交/DONE/报告顺序，还是只 mock 内部模块自证。
-- 是否越界吸收 #28/#108/M4，或削弱 14.1 既有 oracle/签名。
+- 是否越界吸收 #28/M4，或把 #108 错塞进公开 `catch_up_source` 而削弱 14.1/14.3 既有 oracle/签名。
 
-### Issue #28 fixture（任务 14.3：双源独立追赶、失败隔离与崩溃恢复）
+### Issue #28 fixture（任务 14.4：双源独立追赶、失败隔离与崩溃恢复；原编号 14.3）
 
 Fixture level: expanded
 Upstream suggested level: expanded（agree：双源线程、逐源多轮状态机、NFS publish、失败日志与 scratch 删除均命中 mandatory expanded）
 Repair intensity: high（同时触及并发共享状态、Slurm 终态证据、跨轮前沿、NFS 发布顺序和危险删除；适用 Invariant Matrix 与 boundary-surface checklist）
 Project profile: yd-viewer
-Minimal mergeable slice: 只交付任务 14.3；14.1 与 14.2 已合并，本 issue 消费其单轮状态机和“仅成功继续”规则，不重写 `catch_up_source`
+Minimal mergeable slice: 只交付任务 14.4（原 14.3）；14.1 与 14.3 已合并，本 issue 消费其单轮状态机和“仅成功继续”规则，不重写 `catch_up_source`；14.2 生产 CLI 接线在本任务之后实施
 
 **Risk triage**：
 
@@ -4354,24 +4399,25 @@ Minimal mergeable slice: 只交付任务 14.3；14.1 与 14.2 已合并，本 is
 
 1. **消费 #27，不复制 #27**。`run_sources` 的两个 worker 各自采用 `catch_up_source` 已冻结的“仅 `SUCCEEDED` 继续、每轮重新发现前沿”规则；但 #27 的公开函数不能接收 failure provider/publish lock，且结构测试钉死其实现，所以 #28 在 `_controller_sources.py` 内保留极薄循环，逐轮调用带组合选项的私有 `_controller_run.run_once`。公开 `catch_up_source` 的签名、AST 形状与行为不改。
 2. **#59 选择 fail-closed 候选 (b)**。跨 tick 看到精确 `work/<source>/<T>` 任何形态，MUST 返回 `UNVERIFIED_WORK_RESIDUE`、保留证据、零 raw/driver/submit；不得删、续用、扫描 checkpoint 或猜“无在途”。运维确认无在途并移走 work 后，下一 tick 才重跑。NFS `output/states` 残留仍先按 #23 清理。
-3. **#47 选择带外显式 provider，不改 `JobRecord` 七字段**。公开双源入口接收每源 `failure_exit_codes[source](terminal_record) -> str`；只在该源 `FAILED/TIMEOUT` 后调用一次，返回值必须为 nonblank `str` 并原样交 `FailureInputs.exit_code`。生产 Slurm/receipt 适配仍归 M4。
+3. **#47 选择独立 `sacct ExitCode` provider，不改 `JobRecord` 七字段**。公开双源入口接收每源 `failure_exit_codes[source](terminal_record) -> str`；只在该源 `FAILED/TIMEOUT` 后调用一次，生产 provider 对同一 job ID 恰执行 `sacct -j <job_id> -n -P --format=ExitCode`，返回 nonblank 退出码字符串并原样交 `FailureInputs.exit_code`。provider 是 `run_sources` 的 MUST 注入项；轮询通道仍不取 `ExitCode`。真实 Slurm 输出的现场复核归 M4，provider 实现与注入不再推给 M4。
 4. **#106 在组合层串行 publish**。每个 `run_sources` 私建一把锁，只串行完整 `publish.publish`；raw/prepare/submit/poll/collect/失败 cleanup 仍可跨源并行。不得恢复无条件 `fchmod`；跨进程并发继续由外层同一 `runlock` 排除。
-5. **#108 不吸收**。本 issue 只清当前实例明确失败的精确 work；已有 `DONE(T)` 的 post-DONE 历史孤儿 work 扫描仍由 #108 跟踪。
-6. **Round 1 verified ownership closure**。cand-01（final guard 后 foreign exact root）、cand-02（terminal/log commit 后 pathname/root replacement）、cand-03（rawcopy rollback 删除 sibling 创建的 shared ancestor）均为 `CONFIRMED/P1/FIX_NOW`，且共享一条可复用不变量：**只有 staging 前由本 attempt 排他创建并持续 identity-bound 的 exact work 才可写、读、发布或删除；观察时不存在、pathname 形状正确或事后 realpath 相等都不构成 ownership**。按 high-risk pattern escalation 处理，不做三处独立 check 补丁。
-7. **Round 1 其它 verified findings**。cand-04（异类 mapping key 的 `sorted(keys)` 泄漏 `TypeError`）为 `CONFIRMED/P2/FIX_NOW`，随 P1 fix pass 一并修；cand-05（后续轮 FAILED/TIMEOUT/finalizer partial 身份证据）与 cand-06（mapping mutation 后 provider 未被激活）均为 `CONFIRMED/P1/FIX_NOW`。cand-07 要求持久化 35 行 mutation stdout，被 verifier 判 `PLAUSIBLE/DISCARD`：Required evidence 20 要求行为性 kill 与 0 survived/unrun，不发明未冻结的逐项输出格式。
+5. **#108 收尾裁决：`run_sources` 启动 hygiene**。本轮 `PublishCleanupError` 仍只报告已完成/待清理，不在同一轮触发失败回收；下一次 `run_sources` 在四 mapping 预检后，让每个 worker 先完成本源既有 preflight，再于首次 frontier 前按 cycle 排序处理 `work/<source>/<T>`。只有同源 `output/<T>/<source>/DONE` 是普通文件时，才删除 exact work；真实目录 exact work 必须删除：通过 no-follow 父 fd 冻结并在打开根与最终 `rmdir` 前复核 `(st_dev, st_ino)`，containment root 为 resolved scratch `work_root`，树内 symlink 只 unlink 不跟随。exact 路径为文件/FIFO/symlink/断链等非目录时，因它不是有效 work 树且现有原语没有 identity-conditional unlink，必须保留并报 cleanup error，不得按 pathname 盲删。无 `DONE(T)` 的 work 继续按 #59/#58 `UNVERIFIED_WORK_RESIDUE` 保留停源。成功删除路径按 source/cycle 排序写入该源首个 `RunReport.detail`；若首个报告前抛出其它 `RunError`，在保留原异常对象的前提下以 `__notes__` 携带同一清单，`RunSourcesError`/CLI 必须渲染。清理自身失败的 `RunError` 正文列出此前已删项与失败路径，已删除项不回滚。`RunReport` 八字段、`RunSourcesReport` 两字段与 outcome/phase 词表不扩。
+6. **#69 客户端 Slurm 命令 timeout 复用 #58 的保守极性**。`sbatch`、轮询 `sacct` 与失败 ExitCode `sacct` 都必须由生产 CLI 绑定同一 `LocalConfig.slurm_command_timeout_seconds` 的 bounded runner；客户端 `TimeoutExpired` 转 `ExecutorError` 后，submit/poll 路径分别保留为对应 phase 的 `RunError`，保留 exact work、停止本源、兄弟继续。只有调度器明确 terminal `FAILED/TIMEOUT` 才可调用 provider/finalizer；客户端 timeout 不得伪造成 `JobState.TIMEOUT`、失败日志、work 删除、重试或 cancel。
+7. **Round 1 verified ownership closure**。cand-01（final guard 后 foreign exact root）、cand-02（terminal/log commit 后 pathname/root replacement）、cand-03（rawcopy rollback 删除 sibling 创建的 shared ancestor）均为 `CONFIRMED/P1/FIX_NOW`，且共享一条可复用不变量：**只有 staging 前由本 attempt 排他创建并持续 identity-bound 的 exact work 才可写、读、发布或删除；观察时不存在、pathname 形状正确或事后 realpath 相等都不构成 ownership**。按 high-risk pattern escalation 处理，不做三处独立 check 补丁。
+8. **Round 1 其它 verified findings**。cand-04（异类 mapping key 的 `sorted(keys)` 泄漏 `TypeError`）为 `CONFIRMED/P2/FIX_NOW`，随 P1 fix pass 一并修；cand-05（后续轮 FAILED/TIMEOUT/finalizer partial 身份证据）与 cand-06（mapping mutation 后 provider 未被激活）均为 `CONFIRMED/P1/FIX_NOW`。cand-07 要求持久化 35 行 mutation stdout，被 verifier 判 `PLAUSIBLE/DISCARD`：Required evidence 20 要求行为性 kill 与 0 survived/unrun，不发明未冻结的逐项输出格式。
 
 **Round 1 Pattern escalation / Invariant Surface Inventory**：
 
-- Failure classes: `concurrency` + `path-safety`（同一 exact-work ownership 根不变量）。
+- Failure classes: `concurrency` + `path-safety`（同一 exact-work ownership 根不变量）+ `resource-bounds`（#69 客户端命令必须有界，且 timeout 不得升级成危险删除 authority）。
 - Shared helper roots: 新私有 `yd_producer._work_claim` 负责排他 claim/token/current-identity；`rawcopy._ensure_dir/_Written.rollback`；`store.safe_fs.directory_identity_no_follow/remove_tree_allow_symlinks` 的 identity-conditional 删除能力。
-- Public entrypoints: `run_sources`、直接六参数 `run_once`、#27 `catch_up_source` 都经同一私有单轮状态机取得 claim；公开签名不改。standalone `stage_raw`、`PublishInputs/publish`、`FailureInputs/finalize_failed_job` 既有调用保持兼容，claim 只允许末尾默认 `None` 的 additive 输入，controller 路径必须传非空。
+- Public entrypoints: `run_sources`、直接六参数 `run_once`、#27 `catch_up_source` 都经同一私有单轮状态机取得 claim；公开签名不改。standalone `stage_raw`、`PublishInputs/publish`、`FailureInputs/finalize_failed_job` 既有调用保持兼容，claim 仍是默认 `None` 的 additive 输入，controller 路径必须传非空；#109 可在既有 claim 后追加兼容默认字段。
 - Read surfaces: raw staging 目标、terminal DAT/job.log/checkpoint、failure log source、publish scratch contract；每个 controller-owned read 阶段先重验同一 token，不从重绑 pathname 重新授权。
 - Write/delete/overwrite surfaces: shared `work/`/source parents 的 no-follow 无 rollback 创建；exact root 排他 mkdir；raw rollback 仅 claim 内；failure `_delete_work`；publish `_remove_work`；tree-delete primitive 的 named-root/opened-fd/final-rmdir identity 比较。
 - Staging/publish/rollback surfaces: claim 在 `stage_raw` 首写前完成；shared ancestors 不进 `_Written`；publish lock 仍只包完整 NFS publish，不能扩成 raw/collect/cleanup/staging 全局锁；DONE 前后错误域不改。
-- Producer/consumer evidence boundaries: claim `(work_root,work_dir,st_dev,st_ino)` → JobSpec/terminal → provider/FailureInputs 或 products/PublishInputs；identity drift 必须保留 replacement，不能生成“已删除本 work”的假报告。
-- Stale/idempotency boundaries: claim 前竞争者先占 -> raw error/零 submit；DONE 前漂移 -> 无 DONE 的 RunError；failure log 后漂移 -> cleanup RunError + log/replacement 保留；DONE 后漂移 -> cleanup-pending + DONE/replacement 保留；下 tick 仍由 unknown-work 人工闸处理。
-- Unchanged downstream consumers: standalone rawcopy/cleanup/publish tests、direct run_once failure-work-preserving behavior、catch_up AST、viewer DONE consumer、#108 sweeper与M4 receipt。
-- Intentionally out of scope: 自动 cancel/query 孤儿 Slurm、持久 receipt、已有 DONE 的历史 work sweep、任意同 inode 内非协作 writer 的内容级防篡改；前两者归 M4/#59 运行面，历史 sweep 归 #108。本修复只保证 atomic mkdir winner 与后续 named-root identity 不被替换。
+- Producer/consumer evidence boundaries: claim `(work_root,work_dir,st_dev,st_ino)` → JobSpec/terminal → provider/FailureInputs 或 products/PublishInputs；identity drift 必须保留 replacement，不能生成“已删除本 work”的假报告。只有 terminal `JobRecord` 可授权失败 finalizer；`ExecutorError`/`TimeoutExpired` 不能。
+- Stale/idempotency boundaries: claim 前竞争者先占 -> raw error/零 submit；客户端 submit/poll timeout -> phase error + work 保留 + 零重试；DONE 前漂移 -> 无 DONE 的 RunError；failure log 后漂移 -> cleanup RunError + log/replacement 保留；DONE 后漂移 -> cleanup-pending + DONE/replacement 保留；下一次 `run_sources` 的 #108 hygiene 只在 DONE 普通文件仍在时重新冻结 exact entry identity 后删除，无 DONE 则仍由 unknown-work 人工闸处理。
+- Unchanged downstream consumers: standalone rawcopy/cleanup/publish tests、direct run_once failure-work-preserving behavior、catch_up AST、viewer DONE consumer 与 M4 receipt；#108 不再是下游 sweeper，而是本 fixture 内部的每源 startup hygiene。
+- Intentionally out of scope: 自动 cancel/query 孤儿 Slurm、持久 receipt、任意同 inode 内非协作 writer 的内容级防篡改；前两者归 M4/#59 运行面。已有普通文件 DONE 的历史 work 清理由 #108 在本 fixture 的启动阶段认领，但不修改本轮 attempt 的 claim/publish 语义。
 - File-layout constraint: `safe_fs.py` 998 行、`cleanup.py` 997 行；MUST NOT 新增 large-file exclude。新增 `_work_claim.py` 与拆分后的新测试各≤1000；现有模块若需 additive 接线，须抽取/精简而不是突破 guard。不得把 public API 搬进新模块。
 
 **Round 1 ownership regression matrix**：
@@ -4389,60 +4435,64 @@ Minimal mergeable slice: 只交付任务 14.3；14.1 与 14.2 已合并，本 is
 
 - `StopReason` 新增且只新增 `UNVERIFIED_WORK_RESIDUE = "unverified_work_residue"`；`RunPhase` 新增且只新增 `"cleanup"`。
 - frozen + kw-only `RunSourcesReport(ifs: tuple[RunReport, ...], gfs: tuple[RunReport, ...])`。正常返回时两 tuple 均至少一项、顺序等于本源调用顺序、非末项全为 `SUCCEEDED`、末项是首次非 `SUCCEEDED`；字段与每项 `source` 精确对应。
-- `RunSourcesError(RuntimeError)` 只聚合线程内 `RunError`。只读快照 `reports: Mapping[str, tuple[RunReport, ...]]` 精确含 `{ifs,gfs}`，tuple 可空；`errors: Mapping[str, RunError]` 为非空 source 子集。同一 source 可同时拥有异常前 partial reports 与最终 error；消息按 `ifs,gfs` 固定顺序，不能沿用单轮版键集互斥模型。
+- `RunSourcesError(RuntimeError)` 只聚合线程内 `RunError`。只读快照 `reports: Mapping[str, tuple[RunReport, ...]]` 精确含 `{ifs,gfs}`，tuple 可空；`errors: Mapping[str, RunError]` 为非空 source 子集。同一 source 可同时拥有异常前 partial reports 与最终 error；其单份人读消息按 `ifs,gfs` 固定顺序渲染每个底层错误及其 `__notes__`，每项恰一次，不能沿用单轮版键集互斥模型。
 - `run_sources(*, config: Config, local: LocalConfig, executors: Mapping[str, JobExecutor], drivers: Mapping[str, AttemptDriver], poll_waits: Mapping[str, Callable[[], None]], failure_exit_codes: Mapping[str, Callable[[JobRecord], str]]) -> RunSourcesReport`；全部 keyword-only、无默认值。
 - 四 mapping 在起线程前完整快照，键集都必须恰为 `{ifs,gfs}`；两源 executor 各异、driver 各异；executor/driver 满足既有 runtime protocol，wait/provider callable。违反抛 `ValueError`，零 discovery/work/submit。
 - `controller.__all__` 在已合并 #27 列表上只增加 `RunSourcesError`、`RunSourcesReport`、`run_sources`；`run_once` 六参数、`catch_up_source` 七参数、`RunReport` 八字段与 `JobRecord` 七字段不改。
 
 **固定并发、循环、失败与恢复语义**：
 
-1. `ThreadPoolExecutor(max_workers=2, thread_name_prefix="yd-source")` 为 IFS/GFS 各启动一个 worker。每个 worker 同步循环：调用私有 `run_once`、append report、只在 `outcome is SUCCEEDED` 时继续；STOPPED/JOB_FAILED/SUCCEEDED_CLEANUP_PENDING 立即作为末项返回 tuple。
-2. 每轮重新从已落盘 `DONE`/state 发现前沿；不得外层 `T += 12h`、预扫更晚 raw、冻结调用开始时 horizon 或先批量 submit 后等待。同源上一轮完全返回后才开始下一轮，因此在途≤1；两源首轮必须可同时在途，后续追赶长度独立。
-3. 两个 worker 共享的唯一可变对象是本次调用私建的 publish lock；executor/driver 按源隔离，mapping 快照只读。每源始终使用自己的 poll wait/provider，不能串源。
-4. 组合层等待两个 future 都结束，再按固定 `ifs,gfs` 顺序汇总。一个源 STOPPED/JOB_FAILED/RunError 不取消、截断或限制另一源继续追赶；一个源异常前已 append 的成功报告必须进入聚合错误。
-5. 私有 `_controller_run.run_once` 接受组合层选项，公开 `run_once` 仍传“无 provider/无 publish lock”：FAILED/TIMEOUT 继续返回 JOB_FAILED 并保留 work。`run_sources` 路径用同 terminal record 调 provider；provider 非法或 finalizer 失败变为同 source/cycle/job 的 `RunError(phase="cleanup")`。
-6. 明确失败路径把同一 `JobSpec`、terminal `JobRecord` 与 provider 原值交 `cleanup.FailureInputs`；先原子提交唯一日志，后删 exact work，最后返回 JOB_FAILED。零 collect/publish/DONE，状态链不动；该源终止，兄弟可继续多轮。
-7. 合法 T 的 NFS residue plan/execute 后、rawscan 前，以 `lstat` 判精确 work；目录/文件/symlink/断链 symlink均 STOPPED，其他 `OSError` 为 residue `RunError`。raw 齐全后可保留一次可读的 preexisting guard，但所有权只由随后 no-follow 父 fd 上的排他 exact-root claim 建立；early/final check 都不能替代 claim。
-8. publish lock 只包完整 `publish.publish`。一源 failure cleanup 被阻塞时，兄弟可发布并进入后续轮；两源都成功时 publish 不重叠，预置 `output/` 的 mode 逐位不变。
-9. `BaseException` 不由 `run_once` 包装。组合器对 `RunError` 提供上述证据聚合；对 `BaseException` 不降格、不重试，并仍依赖 executor context 等待已经启动的兄弟 worker 收束，不能显式 cancel。
+1. 四份 mapping 必须先完成全局快照/校验；失败时零 worker、零 #108 hygiene。随后 `ThreadPoolExecutor(max_workers=2, thread_name_prefix="yd-source")` 为 IFS/GFS 各启动一个 worker；一源启动失败不得取消兄弟。
+2. 每个 worker 先调用与 `run_once` 同源的本源纯 preflight，再恰执行一次 #108 startup hygiene，之后才进入同步循环。hygiene 必须先确认共享 `output/` 根可枚举；无法确认时零删除，ENOENT/ENOTDIR 按 #86 留给首次 `run_once` 返回 `DISCOVERY_UNREADABLE`。根确认后，`safe_fs.list_directory_no_follow` 只枚举 resolved `work_root/<source>` 的直接子项（缺失视为空）；只把 `controller.parse_cycle_id` 接受且 hour 属于配置 cycle 的名字作为候选，非法名字原样保留且不得构造 NFS 路径。不得用墙钟、mtime、最新 DONE 或状态前沿缩小候选集。
+3. 候选按 cycle 升序处理，以既有 `safe_fs.stat_no_follow(..., containment_root=resolved YD_ROOT)` 验证同源 `output/<T>/<source>/DONE` 恰为普通文件，不改变 shared helper 合同。DONE 缺失或探测确认叶子/父链为 symlink、目录、FIFO 等不安全或非普通形态均不构成 authority；`SafeFilesystemError.kind` 为 `io`、`identity_changed`、`indeterminate` 等无法确定状态时成为 cleanup error，不能降成无 DONE。对普通文件 `DONE(T)` 与真实目录 exact work 的交集，先用 `directory_identity_no_follow` 冻结 identity，再用 `remove_tree_allow_symlinks(containment_root=resolved work_root, expected_root_identity=identity)` 删除。非目录 exact entry、identity 漂移与 discovery/delete 无法确定均保留并成为本源 `RunError(phase="cleanup")`；此前已删项不回滚。无有效 `DONE(T)` 的所有候选都先保留，不能遮住其它 DONE-backed 删除；完整扫描后以最早 cycle 复用 `STOPPED/UNVERIFIED_WORK_RESIDUE` 作为本源首报告，零 frontier/raw/driver/submit。
+4. hygiene 的有序删除清单以稳定 `startup cleanup:` 前缀加入本源首个 `RunReport.detail`，每项含 source、cycle 与绝对 exact path；首报告既可以是上述 unknown-work STOPPED，也可以来自首次 `run_once`。若首个报告前出现其它 `RunError`，对原对象 `add_note`，不得包装换对象；启动清理自身失败的错误正文列出此前已删项和失败路径。`RunSourcesError` 的单份人读消息必须按 `ifs,gfs` 渲染每个底层错误及其 notes、每项恰一次；CLI 将该完整消息输出一次且无 traceback，但其 reports/errors 快照和公共字段不扩。
+5. 每个 worker 同步循环：调用私有 `run_once`、append report、只在 `outcome is SUCCEEDED` 时继续；STOPPED/JOB_FAILED/SUCCEEDED_CLEANUP_PENDING 立即作为末项返回 tuple。每轮重新从已落盘 `DONE`/state 发现前沿；不得外层 `T += 12h`、预扫更晚 raw、冻结调用开始时 horizon 或先批量 submit 后等待。同源上一轮完全返回后才开始下一轮，因此在途≤1；两源首轮必须可同时在途，后续追赶长度独立。
+6. 两个 worker 共享的唯一可变对象是本次调用私建的 publish lock；executor/driver 按源隔离，mapping 快照只读。每源始终使用自己的 poll wait/provider，不能串源。
+7. 组合层等待两个 future 都结束，再按固定 `ifs,gfs` 顺序汇总。一个源 STOPPED/JOB_FAILED/RunError 不取消、截断或限制另一源继续追赶；一个源异常前已 append 的成功报告必须进入聚合错误。
+8. 私有 `_controller_run.run_once` 接受组合层选项，公开 `run_once` 仍传“无 provider/无 publish lock”：FAILED/TIMEOUT 继续返回 JOB_FAILED 并保留 work。`run_sources` 路径用同 terminal record 调 provider；provider 非法或 finalizer 失败变为同 source/cycle/job 的 `RunError(phase="cleanup")`。明确失败路径先原子提交唯一日志，后删 exact work，最后返回 JOB_FAILED。
+9. 合法 T 的 NFS residue plan/execute 后、rawscan 前，以 `lstat` 判精确 work；目录/文件/symlink/断链 symlink 均 STOPPED，其他 `OSError` 为 residue `RunError`。raw 齐全后可保留一次可读的 preexisting guard，但所有权只由随后 no-follow 父 fd 上的排他 exact-root claim 建立；early/final check 都不能替代 claim。
+10. publish lock 只包完整 `publish.publish`。一源 failure cleanup 被阻塞时，兄弟可发布并进入后续轮；两源都成功时 publish 不重叠，预置 `output/` 的 mode 逐位不变。`BaseException` 不由 `run_once` 包装；组合器不降格、不重试，也不能显式 cancel 已启动兄弟 future。
 
 **Must preserve / unchanged siblings**：
 
-- #26 的单轮状态机和 #27 的公开追赶函数、AttemptDriver/RunReport/JobRunReport、executor/fake/slurm、residue/runlock 公开签名不改；StopReason/RunPhase 与 controller exports 不再扩。`rawcopy.stage_raw`、`PublishInputs`、`FailureInputs`、`remove_tree_allow_symlinks` 只允许末尾默认 `None` 的 additive claim/expected-identity 参数，既有不传调用的行为不改。
-- CLI `run` 继续 staged-unimplemented；不新增生产 worker、跨进程 receipt、`squeue`/`sacct` 第二查询、cancel/watchdog、cron 或 node-22 操作。
+- #26 的单轮状态机和 #27 的公开追赶函数、AttemptDriver/RunReport/JobRunReport、`JobExecutor`/fake/`SlurmJobExecutor`、residue/runlock 公开签名不改；#69 只允许已导出 `subprocess_runner` 增加带共享默认 60 的 additive keyword-only `command_timeout_seconds`。StopReason/RunPhase 与 controller exports 不再扩。`rawcopy.stage_raw`、`PublishInputs`、`FailureInputs`、`remove_tree_allow_symlinks` 的 claim/expected-identity 增量仍为默认 `None` 且既有不传调用行为不改；#109 另只允许 `PublishInputs` 在既有 `claim` 后追加默认 60 的 `output_interval_minutes` 兼容字段，生产 controller 必须显式传配置值。
+- CLI `run` 的生产接线由新增 M2 收尾任务承担；本 #28 实现不新增生产 worker、跨进程 receipt、`squeue` 回退、cancel/watchdog、cron 或 node-22 操作。允许且只允许 #47 裁决的失败收尾 `sacct ExitCode` 单次查询；它不进入轮询通道，但与 sbatch/普通 sacct 一样消费 #69/14.2 的 bounded runner。
 - publisher 七步序、DONE 后二分、预置 mode/setgid 不改；失败日志字节格式与“日志先于 work 删除”不改；新增 identity drift 只改变原本会误删 replacement 的未定义/不安全路径。
 - 每个新/修改非豁免文件≤1000行；允许既有私有 `_controller_sources.py` 承载双源组合与新私有 `_work_claim.py` 承载 ownership；公共 API 只从 `controller` 导出，不增 large-file exclude。
 
 **Invariant Matrix**：
 
-- Governing invariant: 一个双源 tick 可让 IFS/GFS 独立 job 同时在途，但每源逐轮串行；每条 `(T,work,job,driver,exit-code,log,publish)` 证据链不串源，未知 work 不删，known failure 只删 exact work，NFS publish 同时至多一个。
-- Source-of-truth identity/contract: mapping key source；DONE/state 定 T；controller JobSpec；terminal JobRecord；同源 provider；FailureInputs exact work；publish input source/T/work。
-- Producers: 两个 worker 各自逐轮产 raw/work/job；failure finalizer 写本源日志；publisher 写本源 DAT/state/DONE；组合器只产 ordered tuples/aggregate error。
-- Validators/preflight: mapping 精确键集/实例隔离；每轮 run_once 全链；work early lstat + staging point-of-use guard；provider nonblank；FailureInputs；publish lock。
-- Storage/cache/query: 每源独立 executor/driver/tracker/work；共享 YD_ROOT 与单次 publish lock；外层不缓存 T/raw horizon/registry/receipt。
-- Public routes/entrypoints: `run_sources`、`RunSourcesReport/Error`；既有 `run_once`、`catch_up_source` 不变；CLI 不绑定。
-- Frontend/downstream consumers: viewer 仍只信 DONE；M4 提供真实 exit-code/worker receipt；#108 扫 post-DONE 孤儿 work。
-- Failure paths/rollback/stale state: current terminal failure 自动收尾后停本源；unknown work 停本源；异常保留 partial；短源结束不截断长源；publish 仍区分 pre/post-DONE。
-- Evidence/audit/readiness: 首轮 barrier、per-source submission/inflight ledger、ordered reports、失败日志 bytes、tree snapshot、publish overlap/mode、red+mutation+full CI。
+- Governing invariant: 一个双源 tick 可让 IFS/GFS 独立 job 同时在途，但每源逐轮串行；每条 `(T,work,job,driver,exit-code,log,publish)` 证据链不串源。普通文件 `DONE(T)` 授权启动阶段 identity-bound 删除同源 exact 历史 work；无 DONE 的 unknown work 不删；known current failure 只删本 attempt exact work；NFS publish 同时至多一个。
+- Source-of-truth identity/contract: mapping key source；合法 cycle 名 + 同源 no-follow 普通文件 DONE 是历史 work 删除授权；DONE/state 定当前 T；controller JobSpec；terminal JobRecord；同源 provider；FailureInputs exact work；publish input source/T/work。
+- Producers: 每源 startup hygiene 产有序删除审计；两个 worker 各自逐轮产 raw/work/job；failure finalizer 写本源日志；publisher 写本源 DAT/state/DONE；组合器产 ordered tuples/aggregate error并传播清理 notes。
+- Validators/preflight: 四 mapping 全局校验；每源纯 preflight；work-root 候选名合法性与 DONE no-follow regular-file 判定；历史目录 containment/identity；每轮 run_once 全链；work early lstat + staging point-of-use guard；provider nonblank；FailureInputs；publish lock。
+- Storage/cache/query: 每源独立 executor/driver/tracker/work；共享 YD_ROOT 与单次 publish lock；hygiene 扫完整本源 work cycle 候选，不按墙钟/mtime/frontier 截断；外层不缓存 T/raw horizon/registry/receipt。
+- Public routes/entrypoints: `run_sources`、`RunSourcesReport/Error`；既有 `run_once`、`catch_up_source` 不变；CLI 14.2 只消费报告/聚合错误并渲染 notes。
+- Frontend/downstream consumers: viewer 仍只信 DONE；M4 提供真实 exit-code/worker receipt；#108 hygiene 消费 DONE 只作为历史 exact-work 删除授权，不修改或删除 viewer/NFS 产物。
+- Failure paths/rollback/stale state: mapping 或本源 preflight 失败时 cleanup 零删除；历史目录清理失败保留失败路径且不回滚此前删除；无 DONE 的 work 停本源；current terminal failure 自动收尾后停本源；客户端 submit/poll timeout 保留 work/不做 failure cleanup；异常保留 partial；短源结束不截断长源；publish 仍区分 pre/post-DONE。
+- Evidence/audit/readiness: startup 删除顺序和 tree snapshots、首报告 detail/原错误 notes/cleanup 错误正文、三条 subprocess timeout ledger、首轮 barrier、per-source submission/inflight ledger、ordered reports、失败日志 bytes、publish overlap/mode、red+mutation+full CI。
 - Regression rows:
   - IFS 首轮 FAILED + GFS T/T+12/T+24 SUCCEEDED 后 T+36 缺口 -> IFS 一报告；GFS 四报告、三 DONE；全局首轮 inflight=2。
   - IFS 一轮后缺口 + GFS 三轮后缺口 -> tuple 长度与 cycles 各自独立；短源结束不影响长源。
   - 一源第二轮 cleanup 阻塞 + 兄弟有后续轮 -> 兄弟 publish 与下一轮推进先完成；解除后失败日志/work 闭合。
   - 一源成功两轮后第三轮 RunError + 兄弟正常追赶 -> error source 的两个 partial reports 与 error 同时保留，兄弟完整序列保留。
+  - 一源 sbatch/sacct 客户端 timeout + 兄弟正常追赶 -> submit/poll phase error 与 work/partial reports 保留，零 provider/finalizer/DONE，兄弟完整序列；不与 terminal `JobState.TIMEOUT` 的 JOB_FAILED/删除路径混同。
   - 两源同 cycle SUCCEEDED -> publish overlap=1、两 DONE、预置 `output/` mode 不变。
+  - 普通文件 DONE 对应多个历史目录（含越界内部 symlink）-> 首次 frontier 前按 cycle identity-bound 删除、外部目标/NFS 不变、清单进入首报告；其中一个 identity 漂移 -> replacement 保留、本源 cleanup error、此前删除列入正文且兄弟继续。
+  - 无 DONE 的历史 work 各形态 -> startup hygiene 零删除，轮到精确前沿时仍停源；非法 cycle 名和非普通文件 DONE 永不授权删除。
   - 无 work 的 NFS 崩溃残留 -> 精确清理重组；同场景加 work -> 停源不读不删不提交；point-of-use 插入 marker -> raw phase error、marker 保留。
-  - 既有 catch_up_source AST/public contract 与单源 run_once/cleanup/publish/executor tests 全绿。
+  - 既有 `residue.plan_residue` 在 `DONE(T)` 存在时仍产空 NFS 清单；catch_up_source AST/public contract 与单源 run_once/cleanup/publish/executor tests 全绿。
 
 **Boundary-surface checklist**：
 
-- Shared helper roots: controller/_controller_run + 私有 `_controller_sources`/`_work_claim`；消费 rawcopy/cleanup/publish，并给 shared safe_fs tree-delete 做 additive expected-identity 收紧；不调用公开 catch_up_source 绕过组合参数。
-- Public entrypoints: run_sources 新面；run_once/catch_up/report/driver 既有面保持；rawcopy/cleanup/publish/safe_fs 仅末尾默认参数扩展，旧调用兼容。
-- Read surfaces: 每轮两源 frontier/raw/variant/job products；unknown work 只 lstat、不读内容。
-- Write/delete/overwrite: 每轮 work/NFS 正式产物、本源失败日志；known failure 删除 exact work；unknown work 零删除。
-- Staging/publish/rollback: 同源逐轮、跨源 job 并行、publish 串行；failure cleanup 不拿 publish lock；DONE 前后语义不变。
-- Producer/consumer evidence: source mapping→JobSpec→terminal→provider→FailureInputs/log，或 products→publish→ordered RunReport tuple。
-- Stale/idempotency: unknown work 人工闸；已清 failure work 下 tick 干净重跑；每轮重新发现，缺口/新到 raw 不由调用开始快照掩盖。
-- Unchanged downstream consumers: CLI、viewer、M4、#108 与所有单源 tests。
+- Shared helper roots: controller/_controller_run + 私有 `_controller_sources`/`_work_claim`；#108 只在 `_controller_sources` 组合既有 safe_fs 的 no-follow list/stat、directory identity 与 expected-identity tree delete，不改变 shared helper 公共合同，也不扩 `residue`/retention/publisher；不调用公开 catch_up_source 绕过组合参数。
+- Public entrypoints: run_sources 新面；run_once/catch_up/report/driver 既有面保持；rawcopy/cleanup/publish/safe_fs 仅末尾默认参数扩展，旧调用兼容；不新增 cleanup 公共入口或 report 字段。
+- Read surfaces: 启动时枚举 resolved `work_root/<source>` 的直接子项，非法 cycle 名忽略且不构造 `output` 路径；合法候选逐个 no-follow 检查同源 `output/<T>/<source>/DONE` 的条目身份。每轮读取两源 frontier/raw/variant/job products；无 DONE work 只判存在、不读内容。
+- Write/delete/overwrite: startup hygiene 只删除有普通文件 DONE 的同源真实 exact 历史目录，树内 symlink 只 unlink link；不写 NFS。每轮另写 work/NFS 正式产物/本源失败日志；known current failure 删除本 attempt exact work；无 DONE、非目录 exact entry、非法 cycle 与 identity replacement 均零删除。
+- Staging/publish/rollback: startup hygiene 在本源 preflight 后、首次 frontier 前恰一次；同源逐轮、跨源 job 并行、publish 串行；failure cleanup 不拿 publish lock；DONE 前后语义不变。
+- Producer/consumer evidence: 历史删除链为 `(source, legal T, regular DONE, exact-work identity)→detail/note`；明确 terminal 运行链为 `source mapping→JobSpec→terminal→provider→FailureInputs/log`，成功链为 `products→publish→ordered RunReport tuple`；客户端 timeout 链只到 `ExecutorError→RunError`，不进入前两条。
+- Stale/idempotency: 有 DONE 的历史目录删净后同 tick 不再作为 work；无 DONE 的 unknown work留给人工闸；客户端 timeout 后 work 留给同一人工闸且不自动重试；identity 漂移不删 replacement；已清 failure work 下 tick 干净重跑；每轮重新发现，缺口/新到 raw 不由调用开始快照掩盖。
+- Unchanged downstream consumers: viewer、M4 与所有单源 tests；CLI 仅增加 #108 审计 notes 的渲染，#108 只扩私有 `run_sources` 启动阶段，不改公共消费 schema。
 
 **Risk packs considered（core）**：
 
@@ -4473,7 +4523,7 @@ Minimal mergeable slice: 只交付任务 14.3；14.1 与 14.2 已合并，本 is
 4. 不同追赶长度：IFS 一成功后缺口，GFS 三成功后缺口 -> cycles/outcomes/tuple lengths 精确，IFS worker 结束后 GFS 仍提交并完成后两轮。
 5. cleanup/publish/后续轮时序：IFS terminal failure 后在真实 finalizer 日志/删除前用事件阻塞；GFS 的首轮 publish/DONE、第二轮 submit/publish/DONE 与最终缺口报告在解除前完成；不能 sleep 猜时间。
 6. 退出码 owner：provider 只被本源 terminal `JobRecord` 调一次，非默认 `42:7` 原样入日志；成功源所有轮 provider 零调用；按 state 猜或串 provider 必红。
-7. FAILED/TIMEOUT 两腿及 provider 抛错/None/空白、日志提交失败、work 删除失败 -> cleanup RunError 绑定 source/cycle/job；该源此前成功 reports 保留，兄弟完整追赶；日志失败保 work，work 删除失败保日志。
+7. 调度器 terminal `FAILED`/`TIMEOUT` 两腿及 provider 抛错/None/空白、日志提交失败、work 删除失败 -> 明确终态才进 failure finalizer；cleanup RunError 绑定 source/cycle/job，该源此前成功 reports 保留，兄弟完整追赶；日志失败保 work，work 删除失败保日志。
 8. partial aggregate：IFS T/T+12 成功、T+24 注入 RunError，GFS 完整追赶 -> `reports[ifs]` 精确两个成功报告、`errors[ifs]` 原对象、`reports[gfs]` 完整序列；同源同时在 reports/errors，原 dict 回改不影响快照，消息固定 source 顺序。
 9. 双失败/不同失败轮：两份本源日志和 exact work 删除；job/exit code/cycle 不串线；两个末项 JOB_FAILED 各在其有序 tuple 尾部。
 10. unknown work 四态（dir/file/symlink/断链）× raw 完整/不完整 -> 都在 raw 前 STOPPED/UNVERIFIED_WORK_RESIDUE，work 逐字不变、raw/driver/submit 零调用，兄弟继续多轮；lstat EACCES/EIO -> residue RunError。
@@ -4498,11 +4548,27 @@ Minimal mergeable slice: 只交付任务 14.3；14.1 与 14.2 已合并，本 is
 29. Phase 2 clean raw retry：claim-aware `stage_raw` 在第 k 个副本失败并完整 rollback -> 原 raw RunError 保留，exact claimed root 最终不存在，source/shared祖先与兄弟work仍在；同一 `run_sources` 下一调用不得因本进程空根返回 UNVERIFIED_WORK_RESIDUE。若在 root 清理前塞入foreign entry或替换inode -> 不递归删除，entry保留，原error带cleanup失败证据。跳过exact-root释放、无条件递归删除、删除shared parent三类变异分别必红。
 30. Phase 2 fd lifecycle：对 `_work_claim` 的 root open、descendant walk、O_EXCL/read、mkdir/unlink/rmdir 注入每个有fd在手的 `OSError` 与 `KeyboardInterrupt` seam -> 本调用打开的fd全部恰一次close，原异常/ClaimLostError按合同传播；成功返回的file fd未被helper提前关且caller close后归零。删除任一finally/exception close、双close与吞BaseException变异必红。
 31. Phase 6.2 post-claim admission closure：raw bundles 先让 `judge` 判 complete，再分别构造缺/坏 source manifest、judge 可接受但 stage 拒绝的 source symlink、raw/work 物理 containment `ConfigError`、fallback 普通异常与 admission `KeyboardInterrupt` -> controller 成功取得 claim 后每条零写入出口都只释放 identity-matched empty exact root，source/shared 祖先与兄弟work保留，原 error kind/cause/notes 或 BaseException 逐项不改；GFS 继续完整追赶，修复输入后的下一 tick IFS 必须越过 raw 并 submit，不能返回 UNVERIFIED_WORK_RESIDUE。release 前塞 foreign child/替换 inode -> entry 与 identity 保留、原 raw error带 cleanup note。另对 `claim_exact_work` 的 mkdir 后 open/fstat 失败断言无返回 token、fail closed 留证且不凭 pathname 盲删。至少杀死：只在 write rollback release、只处理 RawStagingError/manifest、吞或改写 BaseException、丢 cause/note、递归删 foreign、删 shared parent、把 pre-token pathname当 claim 七类变异；0 survived/0 unrun。
+32. #108 全局门：四 mapping 任一校验失败，预置两源普通文件 DONE 与历史 work -> `ValueError`，两棵 work、NFS 与全部 discovery/delete 计数零变；不能先建线程或先跑 hygiene 再校验完 mapping。
+33. #108 本源门与隔离：IFS `_preflight` 因路径/Slurm 配置失败，GFS 有一个 DONE-backed 历史目录且可正常追赶 -> IFS hygiene/delete 零调用且原 preflight `RunError` 保留，GFS 历史目录先删、报告留痕并追赶到自身结局；不得让一源 preflight 取消兄弟。
+34. #108 全集与顺序：同源 work 直接子项含三个乱序合法 cycle，其中两个有 no-follow 普通文件 DONE、目录内含指向 scratch 外哨兵的 symlink，另一个无 DONE -> 两个 DONE-backed 目录都在首次 frontier/raw 前按 cycle 删除，外部目标、`output/`、`states/` 逐字不变；最早 unknown 候选随后成为 `STOPPED/UNVERIFIED_WORK_RESIDUE` 首报告，已删清单以 `startup cleanup:` 前缀按序进入 detail。先见 unknown 就早返或只扫 latest/frontier 的变异必红。
+35. #108 无 DONE 极性：无有效 DONE 的 exact work 分别为真实目录、普通文件、FIFO、symlink 与断链 symlink，且另有一个更晚 raw 完整前沿 -> 所有 entry bytes/type/identity 不变，返回最早 cycle 的 `STOPPED/UNVERIFIED_WORK_RESIDUE`，零 frontier/raw/driver/submit；不得读取 work 内容、猜 mtime 或扫描 checkpoint。
+36. #108 DONE authority：DONE 缺失，或 `stat_no_follow` 确认 DONE/任一父链为目录、FIFO、symlink（即使指向普通文件）或断链等不安全/非普通形态 -> 均不授权删除对应 work，外部 symlink 目标不变，完整扫描后按 unknown-work STOP；普通文件 DONE 正控制才删除真实目录。探测返回 `kind=io/identity_changed/indeterminate`（含 EACCES/EIO/ESTALE 等不可确定状态）-> cleanup error并零该路径删除，不得 follow symlink、吞错或误降为无 DONE。
+37. #108 非目录删除边界：普通文件 DONE 对应的 exact work 分别为普通文件、FIFO、symlink/断链 -> entry 与目标保留，本源 `RunError(phase="cleanup")` 指名 source/cycle/绝对失败路径；不调用 pathname-only unlink，不新增无 identity 条件的 shared 删除原语。
+38. #108 output 根特例：`output/` 根分别 ENOENT/ENOTDIR，work 下同时预置 DONE-looking 历史目录 -> 两源均按 #86 首报告 `STOPPED/DISCOVERY_UNREADABLE`，hygiene、NFS residue 与 delete 零调用，所有 work/state bytes 不变；不得把根异常变成空 DONE 集或 cleanup error。
+39. #108 identity/containment：冻结历史 exact 目录 identity 后、tree open 或最终 rmdir 前把 pathname 换成 replacement inode；另测树内 symlink 指向 work_root 外 -> replacement/外部目标/NFS 保留，本源 cleanup error；删除原目录 identity 比较、只入口比较、错用 YD_ROOT containment 或 follow 内部 symlink 的变异分别必红。
+40. #108 运行错误审计：先成功删除两个 DONE-backed 目录，再让首次 `run_once` 抛带既有 cause/note 的 `RunError` -> `RunSourcesError.errors[source] is 原对象`，原 cause/note 不丢，只追加一条按 cycle 含两项 source/cycle/绝对 path 的 startup-cleanup note；兄弟完整运行，reports/errors 公共 shape 不变。
+41. #108 清理错误审计：先成功删除一个目录、第二个在删除中 identity 漂移或 I/O 失败 -> cleanup `RunError` 正文按序同时含已删项和失败 source/cycle/绝对路径，已删目录不回滚，失败 replacement 保留；未处理的后续候选不删除，兄弟继续到自身结局。
+42. #108 CLI 审计：构造双源 `RunSourcesError`，底层错误各带互异 notes，其中一条是 startup 清单且不在 `str(error)` 中 -> `str(RunSourcesError)` 与 stderr 都按 ifs/gfs 含每个底层错误和每条 note 恰一次、无 traceback，退出码仍为 3；CLI 可把该完整聚合消息打印一次，不得再逐项重复。删除 `add_note`、恢复不含底层 notes 的旧聚合摘要、重复打印 note 或 unordered set 遍历的变异必红。
+43. #108 名字边界：work/source 顶层混入名字为非 ASCII 数字、错误长度、不存在日期、不可 `+12h`、合法日期但 hour 不在 `config.cycle.hours` 的目录与文件 -> 这些非法名字均原样保留且不构造/探测对应 `output` 路径，不进入 unknown stop 候选；任意形态的合法 cycle 名仍完整进入候选分类。work/source 根不存在是空候选；不可枚举的非缺失根成为 cleanup error。
+44. #108 幂等与单次执行：第一次 tick 删除全部 DONE-backed 历史目录并记录一次；第二次相同 tick fixture 已无候选，不重复清单/删除。某源连续成功多轮时 startup hygiene 也只在 worker 开头执行一次，不在每轮重扫；运行期间新产生的本 attempt work 仍只归 publisher/failure cleanup。
+45. #108 NFS 极性回归：直接调用既有 `residue.plan_residue`，`DONE(T)` 普通文件存在时状态/产物 NFS 清单仍整体为空；startup hygiene 只删 scratch exact work，retention/publisher 七步序与 DONE 后 cleanup-pending 二分逐项不变。
+46. #108 mutation closure：在 profile 规定的唯一 scratch 副本中至少杀死“mapping/preflight 前删除”“沿 output 目录反向构造任意 work 删除”“只处理 frontier/latest”“unknown 遮蔽后续 DONE-backed 候选”“follow DONE symlink”“无 DONE 也删”“非目录 pathname unlink”“不传 expected identity/错 containment”“identity 漂移删 replacement”“树内 symlink 跟随”“detail 丢 source/cycle/path或顺序”“RunError 换对象/notes 不到 CLI”“hygiene 每轮重跑”“误扩 residue NFS 清单”十四类，0 survived/0 unrun。
+47. #69 客户端 timeout 极性：分别在 IFS 首轮/later-round 的 submit、普通 poll 与 terminal 后 ExitCode provider 注入 cause 为 `subprocess.TimeoutExpired` 的 `ExecutorError`，GFS 继续多轮 -> IFS 分别保留原 cause 的 `RunError(phase="submit", job_id=None)` / `RunError(phase="poll", job_id=<known>)` / `RunError(phase="cleanup", job_id=<known>)`；exact work、scratch job log（已存在时）和此前 reports 保留，submit/poll 两腿 ExitCode provider 与 `finalize_failed_job` 零调用，ExitCode 腿 provider 恰进入一次但 `finalize_failed_job`/正式失败日志提交/删除零调用，collect/publish/DONE 均为零；GFS 完整追赶。该“停本源”通过 error 聚合完成，不新增 STOPPED report/StopReason。把客户端 timeout 映成 `JobState.TIMEOUT`、JOB_FAILED、猜退出码、失败日志/work 删除、重试或取消的变异必红。
 
 **测试布局**：
 
-- `producer/src/yd_producer/_controller_sources.py`：私有固定双源 worker、逐源薄循环与聚合；无 `__all__`、不形成第二公共入口。
-- `producer/src/yd_producer/_work_claim.py`：私有 exact-work 排他 claim、frozen identity token 与 point-of-use/current-root validation；不导出公共 API，不持有 source loop/publish/failure业务逻辑。
+- `producer/src/yd_producer/_controller_sources.py`：私有固定双源 worker、逐源 startup hygiene、逐源薄循环与聚合；组合既有 `controller._preflight/parse_cycle_id` 和 safe_fs no-follow list/stat/directory-identity/tree-delete 原语，无 `__all__`、不形成第二公共入口。#108 不放进公开 `catch_up_source`，也不扩 `residue.py`、13.3 retention、publisher、`cleanup.py` 或 shared safe_fs 的公共合同。
+- `producer/src/yd_producer/_work_claim.py`：私有 current-attempt exact-work 排他 claim、frozen identity token 与 point-of-use/current-root validation；不伪造历史 receipt，不导出公共 API，不持有 source loop/publish/failure/startup-hygiene 业务逻辑。
 - `_controller_run.py`：只保留 claim 接线、private failure-finalizer/publish-guard 选项与 #27 既有 catch-up；公开 wrappers 不变，文件≤1000行。
 - `store/safe_fs.py`：tree delete 只做最小 additive expected-root identity 参数或将实现抽到私有 support；既有默认行为与 public callers 不变，最终≤1000行且不增 exclude。
 - `cleanup.py`/`publish.py`：dataclass 末尾 additive optional claim + controller 路径 mandatory wiring；standalone 默认路径兼容，文件各≤1000行，不增 exclude。
@@ -4514,17 +4580,17 @@ Minimal mergeable slice: 只交付任务 14.3；14.1 与 14.2 已合并，本 is
 - 新增不超过1000行的 ownership focused tests，分别覆盖 private claim/safe_fs identity delete、failure cleanup drift、publish drift与 shared-ancestor rollback；不把所有回归塞入既有大文件。
 - 复用 `test_controller_catch_up.py` 作为不可修改的 #27 compatibility oracle；不得通过改弱其 AST 断言让 #28 通过。
 
-**Known limits / routed deferrals**：
+**已关闭裁决 / routed deferrals**：
 
-- #108：post-DONE 硬杀/cleanup-pending 留下的历史 scratch work sweeper。
-- #127：Darwin `/dev/fd/FD_NUMBER` descriptor alias 瞬时不可用；测试只串行 synthetic heavy terminal hook，不为生产 controller 增加 forcing/collect 全局锁。
-- M4：真实 worker/receipt、Slurm 退出码 provider、跨进程活作业查询与人工操作 receipt、CLI/cron、node-22/NFS 真运行。
+- 已关闭裁决 #108：post-DONE 硬杀/cleanup-pending 留下的历史 scratch work 由本任务每源 startup hygiene 处理；它不是已知限制或后续 owner。
+- Routed deferral #127：Darwin `/dev/fd/FD_NUMBER` descriptor alias 瞬时不可用；测试只串行 synthetic heavy terminal hook，不为生产 controller 增加 forcing/collect 全局锁。
+- M4：真实 worker/receipt、`sacct ExitCode` 输出的现场复核、跨进程活作业查询与人工操作 receipt、cron、node-22/NFS 真运行；Slurm 退出码 provider 本身及 CLI 注入由 M2 收尾任务实现。
 
 **Non-goals**：
 
 - 重写或扩参 #27 `catch_up_source`、修改 `JobRecord` schema、Slurm executor、publish 权限算法、cleanup 日志格式或 residue NFS 删除集合；shared safe_fs 只做 expected-root identity 的 additive tree-delete 收紧，不进行其它重构。
 - 自动删除 unknown work、自动 cancel 孤儿 job、持久 job registry/status.json/retry count/backoff/watchdog、任意追赶轮数 cap。
-- 真实 CLI/cron、NWM database/scheduler、viewer、SHUD 数值 oracle；不把 Darwin 测试隔离提升为生产全局锁。
+- 本 #28 不实现 CLI/cron；CLI/worker 接线归 M2 收尾任务 14.2，cron 安装归 M4。NWM database/scheduler、viewer、SHUD 数值 oracle仍不在本 issue；不把 Darwin 测试隔离提升为生产全局锁。
 
 **Review focus**：
 
@@ -4533,4 +4599,39 @@ Minimal mergeable slice: 只交付任务 14.3；14.1 与 14.2 已合并，本 is
 - aggregate error 是否同时保留异常 source 的 partial tuple 与兄弟完整 tuple；是否误套单轮 reports/errors 互斥合同。
 - FAILED/TIMEOUT 是否用同 terminal provider并严格日志先、删 work 后、再返回；cleanup 阻塞是否不拿 publish lock。
 - unknown work 是否 raw 前 fail closed 且 staging 前 point-of-use guard 仍无条件执行；publish lock 是否仅覆盖完整 publish且保留 mode。
-- 是否改坏 #27 AST/public seam、越界吸收 #108/M4/#127，或弱化 red/mutation/full/merge-ref oracle。
+- #108 是否只在 mapping 校验与本源 preflight 后、首次 frontier 前执行一次；是否完整区分普通文件 DONE/无有效 DONE、目录/非目录、identity 稳定/漂移，并把删除审计送到首报告或原错误 notes/CLI；有没有错接到本轮 publish/failure、公开 catch_up、NFS residue/retention。
+- 是否改坏 #27 AST/public seam、越界吸收 M4/#127，或弱化 red/mutation/full/merge-ref oracle。
+
+### M2 收尾 fixture（任务 14.2：`yd-producer run` 接线；冲突来源 PR #129 / #28）
+
+Fixture level: expanded（CLI 入口、生产 Slurm、跨进程 worker/receipt、双源控制器、锁与退出码均是公共/状态边界）
+Repair intensity: high
+Project profile: yd-viewer
+依赖：14.1、14.3、14.4、#47；编号 14.2 是用户指定的收尾编号，不表示它先于已完成的 14.3/14.4 实施
+
+**裁决与范围**：
+
+1. `cli.run(local, config)` MUST 不再调用 `_unimplemented`，而是在 `run_with_lock(lock_path=local.cron.lock_path, action=...)` 的同一次持锁生命周期内恰调用一次 `controller.run_sources`。锁必须覆盖双源发现、全部追赶轮、Slurm 等待、失败收尾、发布与清理；锁已被占用时沿用既有成功跳过语义，零 controller/driver/executor 调用。
+2. `run` MUST 为固定键集 `{ifs,gfs}` 构造四份 mapping 并注入 `run_sources`：两份互不相同的 `SlurmJobExecutor`、两份互不相同且满足 `AttemptDriver` 的生产 driver、两个生产 poll-wait callable、两个 #47 独立 `sacct ExitCode` provider。不得把测试 `FakeJobExecutor`、terminal hook、fixture driver 或 no-op wait 作为生产默认。
+3. `SlurmJobExecutor` 的资源键集与值来自 `config.slurm.required_fields` / `local.slurm`，后者不含 #69 策略键。生产入口用 `partial(subprocess_runner, command_timeout_seconds=local.slurm_command_timeout_seconds)` 恰构造一份无状态 bounded runner，并把同一 callable 注入两份 executor 与两个 ExitCode provider；因此 `sbatch`、普通 `sacct` 和 #47 失败查询都显式使用同一时限。provider 仍逐源独立且只执行钉死的一次 `sacct -j <job_id> -n -P --format=ExitCode`；轮询与退出码查询不得合并，`JobRecord` 七字段不变。
+4. PR #129 留给 M4 的生产 `AttemptDriver`/worker/receipt 现在由本任务认领，不能只接一个不存在的对象。最小实现 MUST 是既有 `AttemptDriver` 协议的生产适配器：`prepare` 只生成 identity、精确 worker argv 与 work 内 DAT 终名；重 canonical/forcing/assemble/SHUD/tracker/recovery 在 Slurm job 内执行；`collect` 只读取该 job 原子提交、checksum/identity 绑定的 work-local receipt，并据此交回既有 `AttemptProducts`。receipt 必须绑定 source/cycle/work/job ID、`WorkIdentity`、`RunDirectory`、DAT、merged log 与已验证 T+12 checkpoint；不得扫描规范文件名、改写私有 `_captured`、在登录节点补跑 SHUD，或用测试 terminal hook 伪装生产 worker。若现有 tracker 公共面不足以导入 receipt authority，本任务只可在 tracker owner 中增加一个窄的、验证后构造入口，并保持现有捕获/补跑语义；不得让 driver 绕过 `ensure_twelve_hour_checkpoint` 的 point-of-use 重验。
+5. poll wait MUST 是会实际等待的生产 callable，不能 busy-loop；等待策略固定为版本化常量 `POLL_INTERVAL_SECONDS = 10`，生产 callable 每次调用恰执行 `time.sleep(POLL_INTERVAL_SECONDS)`。这是调度查询节律而非现场资源值，不新增 TOML 字段。它只控制两次非终态 `sacct` 轮询之间的等待，不是作业 watchdog、总超时、重试或取消。
+6. `run` 的退出码逐字为：`0` = 锁竞争成功跳过，或控制器返回且两源全部报告均为 `SUCCEEDED`；`3` = 任一报告为 `STOPPED` 或 `JOB_FAILED`。`SUCCEEDED_CLEANUP_PENDING`、`RunSourcesError` 及其它运行期 controller/executor/driver/provider 错误也不是“全部成功”，统一返回 `3` 并向 stderr 输出可定位信息，不打印 traceback。`RunSourcesError` 的单份人读文本必须按 `ifs,gfs` 固定顺序包含每个底层 `RunError` 及其每条 `__notes__`，每项恰一次；CLI 把该完整文本输出一次，不得沿用不含 notes 的旧聚合摘要或另行重复打印而丢失/复制 #108 startup-cleanup 清单。参数解析错误及 `run` 的 `ConfigError`/配置装配错误返回 `2`；`prepare`/`init` 既有退出码不因本任务改变。当前 `run_sources` 的实时追赶合同正常会以首次非 `SUCCEEDED` 末项结束，因此 raw 缺口的 `STOPPED` 按本裁决确实返回 `3`；入口不得把“追到当前 raw 尽头”静默改算成 `0`，也不得为制造 `0` 增加追赶 cap。
+7. `build_parser()` 仍且只暴露三个子命令，`run --config/--local` 参数形态不变；不新增公开 `worker` 子命令。若生产 worker 需要入口，只能是包内私有 module/console target，且 argv 由 production driver 精确构造，不通过 shell 拼接。
+8. 这条裁决解决 `docs/design.md`「CLI 未实现前禁止手工拼生产流程」与 PR #129 把 CLI/worker/receipt 推给 M4 的冲突：代码接线属于 M2；M4 只负责 node-22 真实 Slurm/NFS/SHUD receipt、现场值与 cron 安装，不再负责补写 CLI 业务体。
+
+**Required evidence（input → expected）**：
+
+- 生产工厂记录器 + 齐备 config/local（显式非默认 timeout=37）-> `run_sources` 恰调用一次，四份 mapping 键集均为 `{ifs,gfs}`；两 executor/driver 实例不同，资源来自 `local.slurm` 且不含 timeout，wait/provider 为 production callable；整个调用发生在同一 `run_with_lock` action 内。捕获工厂参数证明一份 `partial(subprocess_runner, command_timeout_seconds=37)` 的同一对象被两 executor/两 provider消费；逐条驱动后 sbatch/两类 sacct 的底层 `timeout` 全为 37。
+- 锁已被另一实例持有 -> 退出 `0`，`run_sources`、bounded runner、四类工厂与任何 subprocess/discovery/文件写入均零调用；锁释放后同一入口可真正执行。
+- 参数化报告矩阵：两源全 `SUCCEEDED` -> `0`；任一 `STOPPED`、任一 `JOB_FAILED`、任一 `SUCCEEDED_CLEANUP_PENDING` -> `3`；`RunSourcesError`/driver/provider/ExecutorError -> `3` 且 stderr 指名 source/phase/job（可用字段存在时），无 traceback。聚合错误的两源底层 `RunError` 各带互异 note、其中一条含不在正文里的 #108 startup source/cycle/path 清单 -> `str(RunSourcesError)` 按 `ifs,gfs` 含每个错误和每条 note 恰一次，stderr 对整份文本也恰一次；恢复不含 notes 的旧摘要、漏 note、CLI 二次逐项导致重复或集合无序遍历的变异必红。
+- 缺/坏 `--config`、`--local`、生产装配字段，或 `command_timeout_seconds` 为 bool/float/string/非正整数 -> `2`，在锁、bounded runner、driver、executor、controller 之前失败；省略 timeout 则绑定 60。`prepare`/`init` 的既有退出码用例逐项不变。
+- 生产 driver 的端到端合成子进程 fixture（不是 terminal hook）-> worker 在独立进程写原子 receipt，`collect` 逐项重验 source/cycle/work/job/identity/checksum 后构造 `AttemptProducts`；篡改任一 receipt 字段、路径越 work、checkpoint checksum 或 job ID -> `RunError`/driver error，零 `DONE`。
+- 源码/结构守卫：`cli.run` 不含 `_unimplemented`；生产默认 import 不含 `FakeJobExecutor` 或 tests fixture；timeout 数字字面量 60 只在 `yd_producer.config._DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS` 出现，`slurm.py` 引用该内部常量、CLI 只读配置字段，`config.__all__` 不扩；parser 子命令集合仍恰为三项；`controller.run_sources`、`run_once`、`catch_up_source` 与 `JobRecord` 公共签名不改。
+- `cd producer && uv run pytest -q`、ruff/format、frozen sync 与 `openspec validate m2-producer-core --strict --no-interactive` 全绿。
+
+**Non-goals**：
+
+- 不在 M2 伪造 node-22 真运行 receipt、Slurm/SHUD 数值 oracle、cron 安装或现场路径/资源值；这些仍归 M4。
+- 不新增自动 `scancel`、watchdog、失败重试/退避、持久跨 tick job registry 或任意追赶轮数 cap。
+- 不改 viewer、NWM 服务或 `JobRecord` schema；不恢复数据库/scheduler 依赖。

@@ -40,7 +40,7 @@ yd 内部冲突顺序：
 
 - NWM downloader 在 node-27 将 raw GRIB 写入共享 NFS；node-22 yd 控制器只读该 NFS，并把本轮所需文件临时复制到 yd scratch；
 - `yd-producer prepare` 一次性调用 NWM mapping-builder；
-- canonical、direct-grid forcing、state 和前端的最小代码按来源 commit 快照进本仓，之后独立维护；
+- canonical、direct-grid forcing、state 和前端的最小代码按来源 commit 快照进本仓，之后独立维护；其中 `safe_fs.py`、`object_store.py`、`converter.py`、`cfg_ic.py` 可在 yd 本仓修复缺陷，但每处相对 pin 的偏离须先在 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md` 对应行「剥离点」登记“问题 + 修法”，不要求逐字等价；
 - node-27 复用现有域名和有效天地图配置，但 yd 使用独立容器、端口和 `/yd/` location。
 
 ### 2.2 禁止的关系
@@ -180,12 +180,14 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 实现完成后，所有操作只走本仓 CLI：
 
 - `prepare --baseline <基线模型包路径>`：一次性从外部基线包生成 `yd_gfs`、`yd_ifs` 与两个 GeoJSON；基线包路径只在本次调用传入，不入 `config.toml`/`local.toml`（compute-loop §6.1）；
-- `init`：只在全新根建立首态；已有任一状态或 `DONE` 时必须拒绝；
-- `run`：日常循环，不自动 bootstrap。
+- `init`：只在全新根建立首态；已有任一普通状态文件、`states/<source>` 自身或其树内有任一 symlink、或已有 `DONE` 时必须拒绝；symlink 不跟随且不区分目标类型；
+- `run`：日常循环，不自动 bootstrap；`output/` 根缺失或不是目录时必须停源，不能当作全新链，也不能触发状态/产物残留清理；M2 必须先把它接到 `controller.run_sources`，逐源注入生产 Slurm executor、attempt driver、10 秒 poll wait 与独立失败退出码 provider，M4 只做真实 node-22 验证和 cron 安装。
 
 在 CLI 尚未实现和通过本地测试前，禁止用手工 shell 拼出“等价生产流程”并声明完成。
 
 `prepare` 和 `init` 都改变长期状态，必须有当前任务明确授权和现场 receipt；不得由 cron 自动调用。
+
+`prepare` 启动时若发现 `YD_ROOT` 顶层有名字以代码常量 `prepare._STAGING_PREFIX` 开头的条目，必须列出全部精确路径并拒绝；程序不得按 PID、mtime 或条目类型猜测它已陈旧，也不得自动删除。人工处置顺序固定为：先确认没有活动的 `yd-producer prepare` 进程或对应现场操作；再逐项 `lstat` 并核对 CLI 报出的每个精确路径仍是待处理条目；记录路径、类型与处置 receipt；最后只清理这些已核对的精确条目，再重新运行 `prepare`。禁止通配符删除、`find -delete` 或在未确认无活动实例时清理。`init` 不认领也不清理该命名空间；正常顺序仍是 `prepare` 成功并确认无 staging 残留后才执行 `init`。
 
 ### 8.2 cron 与 flock
 
@@ -193,6 +195,11 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 - 使用非阻塞 `flock -n`，已有实例时本 tick 跳过；
 - 锁覆盖发现、Slurm 提交、等待、NFS 发布和清理的完整生命周期；
 - 手工 `run` 使用同一把锁，不能绕开；
+- `cron.lock_path` 必须位于 node-22 本地文件系统的专属 `run/` 目录，不得位于 yd/NWM NFS 或其它网络、共享挂载。部署时必须按该路径的实际挂载信息确认并写入 receipt，不能按路径前缀或 hostname 猜测；Linux 在 NFS 上会把 `flock` 仿真为整文件 byte-range lock，本项目依赖的 per-open-file-description 判别前提在那里不成立；
+- 锁文件是长期哨兵。producer 释放时只 unlock/close；retention、work、staging 等任何清理以及运维命令、tmp sweeper 等外部主体都不得 unlink、rename、replace `cron.lock_path`，也不得删除或替换其专属 `run/` 目录。迁移该路径前必须先停 cron，确认无 controller 持锁或运行，再更新现场配置并记录 receipt；
+- `runlock` 在 `flock` 成功后必须以 `fstat(lock_fd)` 冻结 `(st_dev, st_ino)`，并在调用 controller 前、controller 返回或抛错后但 unlock 前，分别以 no-follow path stat 确认 `cron.lock_path` 仍是同一普通文件。首次取锁后的检查不一致时只允许释放旧 fd 并重取一次；再次不一致、路径缺失、symlink、类型异常或持锁期间 identity 漂移都必须响亮失败，不能修补、重建或静默报告成功。controller 自身异常与 identity 漂移同时发生时保留原异常并附加锁漂移证据；任何路径都仍须 unlock/close；
+- 上述 identity 检查用于在入口和退出边界发现违反生命周期约束的替换，不宣称能阻止两个检查点之间的不合作外部 unlink；禁止外部删除长期哨兵才是防止新 inode 上出现第二持有者的必要前提；
+- 每次 run 在本源首次前沿发现前完整扫描 `work/<source>/` 顶层合法 00/12 cycle：先确认 `output/` 根可枚举，只对同源 `DONE(T)` 经 no-follow 判为普通文件的真实目录 exact work 做 identity-bound 删除，并把 source/cycle/绝对 path 写进本轮报告；无有效 DONE 的候选全部保留，扫完后以最早 cycle 停源待人工确认，不能遮住其它可回收目录；
 - 不同时启动第二个前台 controller；
 - cron 最终分钟点由现场配置决定，未定前不写死。
 
@@ -201,10 +208,11 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 - forcing 与 SHUD 重任务都在 Slurm 作业内执行，不在登录节点直接计算；
 - 同源最多一个 job，IFS/GFS 最多各一个；
 - 只通过 yd CLI 提交，避免手拼 `sbatch` 参数；
-- 观察可用 `squeue`/`sacct`，但不能修改 NWM job；
+- 普通轮询用 `sacct` 读取 job ID/state/start/end，不取 `ExitCode`；仅在同一 yd job 已终态 `FAILED`/`TIMEOUT` 后，由失败收尾 provider 单独执行一次 `sacct -j <job_id> -n -P --format=ExitCode`，所得字符串进入失败日志；
 - 取消必须使用本次 yd receipt 中的精确 job ID；禁止 `scancel -u`、名称通配或模糊匹配；
-- 不为未观察到的卡死编写 watchdog；walltime 属 Slurm 配置，异常由日志和人工操作处理；
-- Slurm partition/account/CPU/内存/walltime 只放 `local.toml`。
+- 不为未观察到的作业卡死编写 watchdog；walltime 属 Slurm 作业配置，异常由日志和人工操作处理；
+- 每次 `sbatch`、轮询 `sacct` 与失败 ExitCode `sacct` 客户端命令必须使用 `[slurm].command_timeout_seconds`（缺席默认 60 秒）的同一时限；这不是 job walltime/watchdog。命令 timeout 后保留 work、停本源且不自动重试/删 work，兄弟源继续；`sbatch` 可能已被服务端接收，运维须按保留证据排查，下一 tick 的无 DONE work 闸会阻止重复提交；
+- Slurm partition/account/CPU/内存/walltime 与客户端 command timeout 只放 `local.toml`；timeout 从 JobSpec 资源映射剥离。
 
 ### 8.4 发布
 

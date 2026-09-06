@@ -127,7 +127,9 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 - T+12 checkpoint tracker 与漏采补跑；
 - 上述能力的最小测试。
 
-每个快照模块记录 NWM 来源 commit。不得复制或运行时依赖：
+每个快照模块记录 NWM 来源 commit。pin 只作为溯源与差异审计基线，不把缺陷永久冻结：yd 允许在本仓修复 `store/safe_fs.py`、`store/object_store.py`、`canonical/converter.py` 与 `state/cfg_ic.py` 的快照缺陷，不要求逐字或 AST 等价；每一处偏离必须先在 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md` 对应行的「剥离点」列登记一句“问题 + 修法”。其它快照文件与测试仍按清单既有约束维护。
+
+不得复制或运行时依赖：
 
 - PostgreSQL repository、迁移和数据库模型；
 - scheduler/orchestrator、候选、reservation、file journal；
@@ -150,14 +152,17 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 - `checkpoint_hours=[12]`；
 - Slurm 资源配置字段结构。
 
+装载器在读取上述规则时必须先校验三条值域：`cycle.hours ⊆ {0,12}`、`forecast_days > 0`、`checkpoint_hours ⊆ [0, 24 * forecast_days)`；失败以对应点分路径的 `ConfigError` 拒绝。其它取值域仍由各自业务边界负责，不在此扩张装载器职责。
+
 不入库的 `local.toml` 只保存现场值：
 
 - `yd_root`；
 - `scratch_root`；
 - NWM raw 根和 NWM checkout/解释器（仅 prepare）；
 - SHUD 二进制；
-- Slurm partition、account、CPU、内存和 walltime；
-- cron lock 与日志位置。
+- Slurm partition、account、CPU、内存和 walltime；装载后以 `MappingProxyType` 只读资源映射暴露，调用方不得改写；
+- `[slurm].command_timeout_seconds`：每次 `sbatch`/`sacct` 客户端子进程的正整数秒时限，缺席时版本化默认 60；它从资源映射剥离，不是作业 walltime；
+- cron lock 与日志位置；其中 lock 必须是 node-22 本地文件系统上的专属长期哨兵路径，不能放在任何 NFS 挂载或清理根内。
 
 项目不维护动态 registry。复制来的 file backend 如要求 NWM 结构的 registry/model manifest，控制器根据 TOML 在本轮 work 内临时生成，用完随 work 删除。
 
@@ -172,21 +177,24 @@ yd-producer prepare --baseline <基线模型包路径>
 yd-producer init
   只在系统历史上第一次建立两条状态链
 
-yd-producer run
+yd-producer run --config <path> --local <path>
   日常发现、追赶、提交、发布和清理
 ```
+
+`run` 的生产接线属于 M2：入口在同一 `cron.lock_path` 锁内调用 `controller.run_sources`，逐源注入 Slurm executor、生产 attempt driver、固定 10 秒实际等待的 poll policy 与独立 `sacct ExitCode` provider。生产 driver 通过原子、checksum/identity 绑定的 work-local receipt 在 Slurm job 与登录节点之间交接同一 source/cycle/work/job 的 DAT、日志、RunDirectory 与 T+12 checkpoint authority；不得用测试 fake、terminal hook 或目录扫描替代。退出码为：全部报告成功或锁竞争跳过 `0`，任一源 `STOPPED`/`JOB_FAILED`（以及 cleanup pending/运行期错误）`3`，参数或配置错误 `2`。M4 只做真实 node-22 receipt 与 cron 安装，不补写 CLI 业务体。
 
 ### 6.1 `prepare`
 
 输入是外部受控、Git ignored 的 yd 基线模型包，其路径经 `prepare --baseline` 在调用时传入，**不进入 `config.toml` 也不进入 `local.toml`**：`prepare` 是一次性、需当前任务明确授权的人工操作（agent-ops §8.1），把只被它消费一次的路径做成常驻必需字段，等于要求 `init`/`run` 也填一个它们从不读的现场值。流程：
 
-1. 检查本次将要写的**全部四个终名**——两个变体目录（路径取自 `config.toml` 的 `variants.gfs`/`variants.ifs`，相对 `yd_root`）与两份 viewer GeoJSON `input/viewer/rivers.geojson`、`input/viewer/boundary.geojson`——均不存在；任一存在即拒绝，不提供覆盖参数。被检查的路径与提交时实际写入的路径必须同源计算；
-2. 在 scratch 中通过薄外壳调用 NWM mapping-builder；
-3. 按 GFS、IFS 各自 canonical grid 生成两份 binding、重写后的 `sp.att` 和 forcing station 索引；
-4. 生成完整运行变体 `yd_gfs`、`yd_ifs`；两者水文参数和率定状态来自同一基线，但网格 binding 不共用；
-5. 从基线 GIS 生成 EPSG:4326 的 `rivers.geojson` 与 `boundary.geojson`；
-6. 把校验通过的产物搬运到 `YD_ROOT` 之内的本次专属 staging 位置（按发布权限新建条目，不把计算节点的 uid/gid/mode 带进 NFS），再逐个 rename 到四个终名——rename 的源与终名必须同一文件系统，故不能直接把 scratch 目录 rename 过去（scratch 在计算节点本地盘、`YD_ROOT` 在 NFS）；
-7. 删除 scratch 中间物与该 staging 位置（无论成败）。
+1. 运行根预检后先枚举 `YD_ROOT` 顶层：若存在任一名字以 `prepare._STAGING_PREFIX` 开头的条目，按排序列出全部路径并拒绝；不跟随、不按类型/PID/mtime分流，不自动删除或回收；
+2. 检查本次将要写的**全部四个终名**——两个变体目录（路径取自 `config.toml` 的 `variants.gfs`/`variants.ifs`，相对 `yd_root`）与两份 viewer GeoJSON `input/viewer/rivers.geojson`、`input/viewer/boundary.geojson`——均不存在；任一存在即拒绝，不提供覆盖参数。被检查的路径与提交时实际写入的路径必须同源计算；
+3. 在 scratch 中通过薄外壳调用 NWM mapping-builder；
+4. 按 GFS、IFS 各自 canonical grid 生成两份 binding、重写后的 `sp.att` 和 forcing station 索引；
+5. 生成完整运行变体 `yd_gfs`、`yd_ifs`；两者水文参数和率定状态来自同一基线，但网格 binding 不共用。提交前逐个只枚举变体顶层并要求恰有一份 `*.cfg.ic` 普通文件；零份或多于一份均以 `PrepareError` 拒绝，四个终名一个也不提交，不递归搜索或按项目名猜文件名；
+6. 从基线 GIS 生成 EPSG:4326 的 `rivers.geojson` 与 `boundary.geojson`；
+7. 把校验通过的产物搬运到 `YD_ROOT` 之内的本次专属 staging 位置（按发布权限新建条目，不把计算节点的 uid/gid/mode 带进 NFS），再逐个 rename 到四个终名——rename 的源与终名必须同一文件系统，故不能直接把 scratch 目录 rename 过去（scratch 在计算节点本地盘、`YD_ROOT` 在 NFS）；
+8. 删除 scratch 中间物与该 staging 位置（无论成败）。
 
 运行根只保留两个运行变体，不长期保留基线包。基线模型包的现场路径和归档方式由实施方管理，不进入 Git；`--baseline` 是必需参数，代码不内置任何默认路径。本项目不额外维护人工填写的模型包总 checksum。
 
@@ -196,7 +204,7 @@ yd-producer run
 
 `init` 是唯一 bootstrap 入口：
 
-1. 若 `states` 下已有任一状态，或 `output` 下已有任一 `DONE`，直接拒绝；
+1. 若 `states` 下已有任一普通文件、`states/<source>` 自身或其树内有任一 symlink，或 `output` 下已有任一 `DONE`，直接拒绝；symlink 不跟随且不按目标类型分流；
 2. 以执行时刻往前 7 天为扫描窗；
 3. 对每个 source 找到窗内最早的完整 00Z/12Z raw cycle；
 4. 从两个变体内的同源率定末态复制首态，重戳到各自首轮 T；
@@ -205,9 +213,11 @@ yd-producer run
 
 任一 source 在扫描窗内没有完整 cycle 时，`init` 整体拒绝且不写任何状态。拒绝理由必须区分「raw 缺文件」与「raw 文件存在但不可读」——生产 raw 根是 NFS 上由 NWM 以另一 uid 写入的目录树，权限失败会让 `judge` 判该 cycle 不完整，此时提示「等待 raw 补齐后重跑」是把权限故障伪装成缺数据，运维会对着已在盘上的数据永远重跑；存在不可读文件时必须点明这一点。仅在确为缺文件时才提示等待 raw 补齐后重跑 `init`。不提供单源建链或事后补链入口——`init` 只在系统历史上第一次执行。
 
+`states/<source>/` 下的 symlink 是已有状态条目，而不是可忽略的目录形态：无论它指向普通文件、目录、断链或其它类型，`init` 都必须在阶段 A fail closed，不跟随目标，并保持两源零新增写入。`states/<source>` 自身为 symlink 时同样处理。该规则只给 symlink 单列；普通（非 symlink）空目录仍可通过守卫，`output/` 侧仍只按 `DONE` 判定，不借本条扩大。
+
 率定末态在变体内的定位判据：变体目录（`config.toml` 的 `variants.<source>`，相对 `YD_ROOT`）**顶层**恰好一个 `.cfg.ic` 普通文件即该源率定末态；「相对 `YD_ROOT`」是一道必须由 `init` 自己强制的闸门而非描述——取值为绝对路径或含 `..` 分量时 `init` 整体拒绝且不写任何状态，不得拼接后读取（否则链起点取自 `YD_ROOT` 之外）；该闸门与 `prepare` 侧的同名判据必须是同一份实现；命中数不为 1、目录不存在或不可枚举时 `init` 整体拒绝且不写任何状态。不按项目名猜文件名（项目名与变体目录名的等同关系无权威来源，猜错的失败模式与「prepare 未跑」不可区分），不递归搜索（运行期 `cfg.ic.update` 等衍生物会污染候选集）。该判据同时约束 `prepare` 的提交形态：变体顶层必须且只能带一份率定末态。
 
-`init` 的判定与落盘严格两阶段：所有拒绝守卫、率定末态解析与两源首轮 T 的确定全部完成之前不发生任何写入；写入阶段以 `O_EXCL` 落终名，拒绝覆盖已存在文件。写入阶段中途失败时 `init` 不回滚——已落盘的首态保留在盘上（`init` 不持有 `states/` 的删除权），但必须以非零退出码报告**全部**已落盘的 source。收尾话术随终态分支，判据是「`written` 非空**或**盘上真的留下了半写目标」，不是单看 `written`。写入失败分两类：其一，目标被排他创建后 `os.write` 中途因 I/O 或配额失败，盘上留下 header 合法、body 截断的文件——该目标既不算已落盘、也不会被删除，`init` 必须单独点名它可能已被部分写入、重跑前须一并人工确认；其二，失败发生在目标被创建之前（首个目录创建即被权限拒绝、`O_EXCL` 的 `open` 本身被拒、父目录分量走查失败等），盘上零残留。**这两类不可由 `SafeFilesystemError.kind` 区分**——`kind == "io"` 同时覆盖 open 期失败与写中途失败，故 `init` 必须在捕获异常后用 no-follow 的 `lstat` 直接探测目标：条目存在则按第一类点名可能半写；`FileNotFoundError` 则按零残留处理；探测本身失败则 fail closed 到「可能半写」但话术须留有余地。收尾话术因此是**三路**而非两路：有 source 落盘或探测到半写目标时提示「根已非全新，重跑前需人工清理 `states/`」；零落盘、零残留且**写入路径上不存在持久外来条目**时报「零写入，根仍是全新根」并把根因放在首位，不得宣称需要清理；零落盘、零残留但**写入路径上被一个持久外来条目挡住**时，必须点名该条目的**实际路径**并要求重跑前先确认并移除它——此时既不能说「根仍是全新根」（重跑必然以同样理由再次失败），也不能说「可能已被部分写入」（该条目不是本次写入产生）。**第二路与第三路的判据是「阻塞物是否为持久外来条目」，不是「哪条腿抛的异常」、也不是「条目是否恰好落在终名 target 上」**：外来条目既可能占住终名 target（`O_EXCL` 撞 `EEXIST`），也可能占住其**父目录分量**（`states/<source>` 是 symlink、FIFO 或普通文件，使目录创建拿到 `NotADirectoryError`/`ELOOP`）——两种载体的运维后果完全相同（重跑逐字节复现同一失败，必须先移除该条目），故 MUST 走同一路话术，且话术点名的 MUST 是被占住的那个路径本身而非终名 target。与之相对，权限类失败（如 `states/` 置 `0o500`/`0o600` 使父目录 open 拿 `EACCES`）盘上没有外来条目，`chmod` 后直接重跑即可成功，仍走第二路。
+`init` 的判定与落盘严格两阶段：所有拒绝守卫、率定末态解析与两源首轮 T 的确定全部完成之前不发生任何写入；写入阶段以 `O_EXCL` 落终名，拒绝覆盖已存在文件。写入阶段中途失败时 `init` 不回滚——已落盘的首态保留在盘上（`init` 不持有 `states/` 的删除权），但必须以非零退出码报告**全部**已落盘的 source。收尾话术随终态分支，判据是「`written` 非空**或**盘上真的留下了半写目标」，不是单看 `written`。写入失败分两类：其一，目标被排他创建后 `os.write` 中途因 I/O 或配额失败，盘上留下 header 合法、body 截断的文件——该目标既不算已落盘、也不会被删除，`init` 必须单独点名它可能已被部分写入、重跑前须一并人工确认；其二，失败发生在目标被创建之前（首个目录创建即被权限拒绝、`O_EXCL` 的 `open` 本身被拒、父目录分量走查失败等），盘上零残留。**这两类不可由 `SafeFilesystemError.kind` 区分**——`kind == "io"` 同时覆盖 open 期失败与写中途失败，故 `init` 必须在捕获异常后用 no-follow 的 `lstat` 直接探测目标：条目存在则按第一类点名可能半写；`FileNotFoundError` 则按零残留处理；探测本身失败则 fail closed 到「可能半写」但话术须留有余地。收尾话术因此是**三路**而非两路：有 source 落盘或探测到半写目标时提示「根已非全新，重跑前需人工清理 `states/`」；零落盘、零残留且**写入路径上不存在持久外来条目**时报「零写入，根仍是全新根」并把根因放在首位，不得宣称需要清理；零落盘、零残留但**写入路径上被一个持久外来条目挡住**时，必须点名该条目的**实际路径**并要求重跑前先确认并移除它——此时既不能说「根仍是全新根」（重跑必然以同样理由再次失败），也不能说「可能已被部分写入」（该条目不是本次写入产生）。**第二路与第三路的判据是「阻塞物是否为持久外来条目」，不是「哪条腿抛的异常」、也不是「条目是否恰好落在终名 target 上」**：阶段 A 未归为已有状态的外来条目既可能占住终名 target（普通空目录使 `O_EXCL` 撞 `EEXIST`），也可能占住其**父目录分量**（FIFO 使目录创建失败）——两种载体的运维后果完全相同（重跑逐字节复现同一失败，必须先移除该条目），故 MUST 走同一路话术，且话术点名的 MUST 是被占住的那个路径本身而非终名 target。symlink 不再进入这条阶段 B 分流，因为 `states/<source>` 自身及其树内的任一 symlink 已由阶段 A 拒绝。与之相对，权限类失败（如 `states/` 置 `0o500`/`0o600` 使父目录 open 拿 `EACCES`）盘上没有外来条目，`chmod` 后直接重跑即可成功，仍走第二路。
 
 两源首轮可因 raw 到达情况不同而不同；从首轮开始各自演进。率定末态约对应 2025-01，直接重戳到首轮意味着初期存在状态收敛偏差；这是已接受的首启代价，不把它伪装成 degraded，也不在 viewer 展示内部状态。
 
@@ -221,7 +231,7 @@ yd-producer run
 
 - 仅接受 00Z、12Z；
 - 预报 lead 覆盖 0–168h；
-- IFS/GFS 各自的变量、bundle 名和 f000 特例；
+- IFS/GFS 各自的变量、bundle 名和 f000 特例；bundle 模式只允许普通文字与简单 `{cycle_hour}` / `{lead}` 字段，渲染器负责补成两位/三位；format spec、conversion、属性/下标与嵌套/转义花括号一律按配置错误拒绝；
 - 所有预期文件存在且可读才视为完整。
 
 不靠目录稳定时间、末 lead 文件或动态推断判断完整。
@@ -242,7 +252,7 @@ yd-producer run
   → 7 天 SHUD
 ```
 
-canonical、forcing 和临时 manifest 都是本轮工件，不写 NFS，也不跨轮复用。direct-grid forcing 将 canonical 格点直接作为 SHUD forcing 站点，binding 权重为 1；不走旧的 105 站 IDW。
+canonical、forcing 和临时 manifest 都是本轮工件，不写 NFS，也不跨轮复用。IFS 网格定义在该临时 object-store 中的唯一键为 `canonical/ifs/grid/ifs_0p25/grid.json`；catalog 行逐字引用该小写键，不保留 `canonical/IFS/` 别名或大小写 fallback。direct-grid forcing 将 canonical 格点直接作为 SHUD forcing 站点，binding 权重为 1；不走旧的 105 站 IDW。
 
 IFS/GFS forcing 原生 3 小时并不限制水文输出为 3 小时：SHUD 求解按自身步长推进，forcing 在相邻时刻间保持当前值，`DT_QR_DOWN=60` 独立输出逐小时平均流量。
 
@@ -316,30 +326,36 @@ tracker 不按 pathname 删除任何 canonical checkpoint，包括本调用 O_EX
 
 ## 10. 控制器、Slurm 与积压
 
-cron 每小时调用 `yd-producer run` 的非阻塞 `flock` 包装：
+cron 每小时调用 `yd-producer run --config <path> --local <path>` 的非阻塞 `flock` 包装：
 
 - 前一实例仍持锁时，本 tick 直接跳过，不排队；
 - 锁覆盖发现、提交、等待、发布和清理的完整生命周期；
-- 手工补跑也必须走同一个锁入口，不能绕过互斥。
+- 手工补跑也必须走同一个锁入口，不能绕过互斥；
+- `cron.lock_path` 必须位于 node-22 本地文件系统的专属 `run/` 目录，不得位于 yd/NWM NFS 或其它网络、共享挂载；M4 安装 cron 前按实际挂载确认并记录 receipt，代码不按路径前缀或 hostname 猜文件系统类型；
+- 锁文件与专属 `run/` 目录是长期哨兵，producer 只 unlock/close，任何 retention/work/staging 清理、运维命令或系统 tmp sweeper 都不得 unlink、rename、replace 或删除；
+- `runlock` 在成功 `flock` 后以 `fstat(lock_fd)` 冻结 `(st_dev, st_ino)`，调用 controller 前和其返回或抛错后但 unlock 前，都以 no-follow path stat 确认路径仍是同一普通文件。首次检查失配只释放旧 fd 并重取一次；再次失配、路径缺失、symlink、类型异常或运行期 identity 漂移均 fail closed，任何路径仍 unlock/close。若 action 自身与退出检查同时失败，保留原异常并附加锁漂移证据；
+- identity 边界检查只能发现已发生的路径替换，不能阻止两个检查点之间的不合作 unlink；防止新 inode 上出现第二持有者仍以“外部永不删除或替换哨兵”为必要部署不变量。Linux NFS 对 `flock` 的整文件 byte-range-lock 仿真也不提供本项目依赖的 per-open-file-description 测试前提，因此不能把锁文件放在 NFS。
 
-一次 run 先为每个 source 确定严格前沿：
+一次 run 在四份双源依赖映射全局校验通过后，由每个 source worker 先完成本源配置/路径 preflight，再在本源首次前沿发现之前做一次 scratch hygiene。它先确认共享 `output/` 根可枚举，再按 cycle 扫描 `work/<source>/` 顶层全部合法 00/12 候选；非法名字保留且不映射成 NFS 路径。只有同源 `output/<T>/<source>/DONE` 经 no-follow 判为普通文件时，才删除对应的真实目录 exact work；`DONE(T)` 已证明这棵 work 树不再是运行 authority。删除前必须 no-follow 冻结目录 `(st_dev, st_ino)`，并以 scratch `work_root` 为 containment root 在打开和最终 `rmdir` 前复核同一 identity；树内 symlink 只删链接、不跟随。所有无有效 `DONE(T)` 的候选先保留，不能遮住其它可删目录；完整扫描后以最早一个复用 `UNVERIFIED_WORK_RESIDUE` 停源。普通文件 DONE 对应的 exact 路径若是非目录、identity 漂移或无法确定也保留并响亮失败——非目录不是有效 work 树，且现有原语没有 identity-conditional unlink，不能按 pathname 盲删。成功删除的 source/cycle/绝对 path 以 `startup cleanup:` 前缀记入该源本轮首个 `RunReport.detail`；若首个报告前抛出其它 `RunError`，在保留原异常对象、cause 和既有 notes 的前提下追加到其 `__notes__`，聚合错误与 CLI 必须按源渲染每项。清理自身失败的错误正文列出此前已删项与失败路径；已完成删除不回滚。公开 report 字段不扩展，`residue.plan_residue` 的 NFS DONE 极性不改。
 
-1. 若该源没有任何 `DONE`，全新链只允许存在 init 写入的最早状态，该文件名就是待跑 T；
-2. 否则取该源最新 `DONE` cycle D，待跑 T 固定为 D+12h；
+随后为每个 source 确定严格前沿：
+
+1. 先确认共享 `output/` 根是可枚举目录；根缺失（`ENOENT`）或被非目录占据（`ENOTDIR`）都是根异常，停止本源，不判全新链、不做残留清理；
+2. 在根可枚举的前提下，若该源被确定为没有任何 `DONE`，全新链只允许存在 init 写入的最早状态，该文件名就是待跑 T；否则取该源最新 `DONE` cycle D，待跑 T 固定为 D+12h；
 3. 必须存在 `states/<source>/<T>.cfg.ic`，否则停止该源；
 4. 若无 `DONE(T)` 却存在比 T 更晚的状态或 T 目录半成品，它们是上次发布中断的 NFS 未提交残留：保留 T 状态，删除这些 NFS 残留；
-5. 若此时 `work/<source>/<T>` 仍存在，控制器不得删除或复用：它无法区分已死亡进程留下的目录与仍由孤儿 Slurm 作业写入的目录，也无法用 job ID 覆盖“已提交但 ID 未解析”的窗口；停止该源并保留证据，待运维确认无在途作业并移走该 work 后，下次 tick 才重跑 T；
+5. 若此时无 `DONE(T)` 且 `work/<source>/<T>` 仍存在，控制器不得删除或复用：它无法区分已死亡进程留下的目录与仍由孤儿 Slurm 作业写入的目录，也无法用 job ID 覆盖“已提交但 ID 未解析”的窗口；停止该源并保留证据，待运维确认无在途作业并移走该 work 后，下次 tick 才重跑 T；
 6. 扫描 T 的 raw；未完整则该源暂不提交；
 7. staging 前通过 no-follow 父目录排他认领 `work/<source>/<T>`，并把该目录的设备号/inode 身份作为本 attempt 的 ownership token；竞争者先创建任何形态时零 staging、零提交且保留对方条目；
 8. 为每源最多组装一个 work 并提交一个 Slurm 作业；raw staging、作业产物读取、失败收尾与成功发布都必须重验同一个 ownership token，不能从后来可能重绑的 pathname 重新推导所有权；
 9. IFS/GFS 作业可并行，控制器等待两者；同一 tick 的 NFS publish 串行，避免两源同时创建/放宽共享 `output/<T>/` 层级；共享 scratch 祖先不进任一 source 的 staging rollback 账本；
 10. 成功源发布后以前沿规则立即推进到下一个 cycle，直到追到最新完整 raw；
-11. 某源作业明确返回 `FAILED`/`TIMEOUT` 后，控制器以该 job 的显式退出码先提交唯一失败日志、再只删除 ownership token 仍匹配的精确 work；本次停止该源，另一源继续追赶；
+11. 某源作业明确返回 `FAILED`/`TIMEOUT` 后，独立失败收尾 provider 对同一 job ID 恰执行一次 `sacct -j <job_id> -n -P --format=ExitCode`；轮询通道不取 `ExitCode`，`JobRecord` 七字段不变。控制器把所得字符串作为 `FailureInputs.exit_code`，先提交唯一失败日志、再只删除 ownership token 仍匹配的精确 work；本次停止该源，另一源继续追赶；
 12. 下次 cron 对已完成失败收尾的 cycle 从干净 work 重试一次。
 
 raw 一次补齐多轮时按时序全补；中间永久缺轮时停在缺口，运维人员补齐原始资料后自动继续。不自动跳过 cycle。
 
-Slurm 的 partition/account/资源/walltime 来自 `local.toml`。不为尚未出现的卡死增加 CLI watchdog；人工取消时只能按本次 receipt 记录的 yd job ID 操作，不得模糊匹配或取消 NWM 作业。
+Slurm 的 partition/account/资源/walltime 来自 `local.toml`。同一表的 `command_timeout_seconds` 只限制每次 `sbatch`、轮询 `sacct` 和失败 ExitCode `sacct` 客户端子进程，缺席时版本化默认 60 秒；它不限制 Slurm 作业运行时长，也不重试或取消作业。客户端 timeout 转为 `ExecutorError`：controller 保留 exact work、停止本源，兄弟源继续；不得伪造 `JobState.TIMEOUT`、执行失败 finalizer 或自动重提，因为 `sbatch` 服务端可能已经接收。下一 tick 看到无 `DONE` 的 work 仍按人工闸停源。不为尚未出现的作业卡死增加 CLI watchdog；人工取消时只能按本次 receipt 记录的 yd job ID 操作，不得模糊匹配或取消 NWM 作业。
 
 ## 11. 发布、崩溃恢复与幂等
 
@@ -347,7 +363,7 @@ Slurm 的 partition/account/资源/walltime 来自 `local.toml`。不为尚未�
 
 作业退出成功后，控制器确认本轮至少具备：
 
-- v2 `yd.rivqdown.dat`，168 行、3988 个河段；
+- v2 `yd.rivqdown.dat`，168 行、3988 个河段，且第 `i` 行（从 0 起）的数据区第 0 列逐值等于 `i * output_interval_minutes`（生产配置为 60，即 `0, 60, …, 10020`）；
 - T+12 原生 `cfg.ic`；
 - 本轮合并 stdout/stderr 可供失败时回收。
 
@@ -365,7 +381,7 @@ Slurm 的 partition/account/资源/walltime 来自 `local.toml`。不为尚未�
 6. `DONE` 成功后才删除比 T 更旧的状态；最终保留 T 与 T+12；
 7. 删除 scratch work。
 
-多个文件无法同时原子提交，因此用“旧状态保留 + DONE 最后写”恢复：若步骤 1–4 间宕机且无 `DONE`，下次删除该 source/cycle 的 NFS 半成品；精确 scratch work 不存在时仍用 T 状态整轮重跑。若同一 work 仍存在则先停源保留证据，运维确认没有在途孤儿 Slurm 作业并移走 work 后再重跑；不得把旧 work 文件当作恢复 authority。不得先写 `DONE` 再提交状态。
+多个文件无法同时原子提交，因此用“旧状态保留 + DONE 最后写”恢复：若步骤 1–4 间宕机且无 `DONE`，下次删除该 source/cycle 的 NFS 半成品；精确 scratch work 不存在时仍用 T 状态整轮重跑。若同一 work 仍存在则先停源保留证据，运维确认没有在途孤儿 Slurm 作业并移走 work 后再重跑；不得把旧 work 文件当作恢复 authority。反之，若步骤 5 之后、步骤 6/7 之前宕机，下一次 run 的启动 hygiene 以 `DONE(T)` 为完成证明，identity-bound 删除精确历史 work，并把动作记入报告。不得先写 `DONE` 再提交状态。
 
 scratch work 的删除还受本 attempt 的 ownership token 约束：删除前当前 `work/<source>/<T>` 必须仍是 staging 前排他认领的同一设备号/inode。`DONE` 前发现 identity 漂移时不得写 `DONE`，当前条目保留并响亮失败；`DONE` 后发现漂移时本轮仍按已完成上报，但标记 cleanup pending 并保留 replacement。pathname 相同、父根一起重绑或事后 `realpath` 重新匹配都不能替代原 identity。
 
@@ -373,7 +389,7 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 
 - 不写 `DONE`；
 - 不推进状态链；
-- 从显式 job 退出码提供者取得同一 job 的退出码，不从终态枚举猜测；
+- 由 MUST 注入的失败收尾 provider 对同一 job ID 恰执行一次 `sacct -j <job_id> -n -P --format=ExitCode`，所得非空字符串作为 `FailureInputs.exit_code`；轮询通道不取 `ExitCode`，不从终态枚举猜测，`JobRecord` 七字段不变；
 - 把完整 stdout/stderr、命令、开始/结束时间和退出码合成一份 `logs/<source>/<T>.log`；
 - 日志提交成功后，只在 ownership token 仍匹配时删除整个精确 scratch work；若日志已提交但 work identity 已漂移，保留日志与当前 work，报告 cleanup error，不把 replacement 当成本 attempt 删除；
 - 下次 cron 干净重跑。进程崩溃留下、无法证明没有孤儿作业的 work 不走此自动删除路径，而是停源待人工确认。
@@ -387,11 +403,12 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 | `output/<T>/<source>/{yd.rivqdown.dat,DONE}` | 保留最新成功 cycle 往前 14 天 |
 | `states/<source>/*.cfg.ic` | 每源保留下一待跑状态及其前一份 |
 | `logs/<source>/<T>.log` | 仅失败轮；与 output 的 14 天窗口一起清理 |
-| scratch `work/<source>/<T>` | ownership token 始终匹配时在成功或失败收尾后删除；identity 漂移则保留当前 entry 并响亮报告 |
+| scratch `work/<source>/<T>` | 本 attempt 的 token 匹配时在成功或失败收尾删除；post-`DONE` 历史孤儿由下一次 run 启动 hygiene 重新冻结并复核 identity 后删除、记入报告；无 `DONE` 或 identity 漂移则保留并响亮报告 |
 | NWM NFS raw 原件 | yd 永不清理 |
 | scratch raw 副本/canonical/forcing/raw-manifest | 本轮临时工件，随 work 删除 |
+| node-22 本地 `cron.lock_path` 及其专属 `run/` 目录 | 长期互斥哨兵，所有 producer/retention/work/staging 清理与外部清理均不得 unlink、rename、replace 或删除 |
 
-清理只允许作用于经 `realpath` 确认位于 yd 自己根目录下的对象；不得跟随路径进入 NWM raw 根。
+清理只允许作用于经 `realpath` 确认位于 yd 自己根目录下的对象；不得跟随路径进入 NWM raw 根。`cron.lock_path` 及其专属本地 `run/` 目录必须位于这些清理根之外，也是显式禁区；任何删除候选中的 symlink 都不得被跟随到该哨兵。
 
 ## 13. 验证计划
 

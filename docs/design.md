@@ -298,7 +298,7 @@ node-22 producer 的以下本地可验证代码：
 - `cfg.ic` 原生分段解析、重戳、负残差处理与结构检查（同 §8）；
 - T+12 tracker 与 12 小时漏采补跑（同 §9）；
 - IFS/GFS raw 完整性扫描与临时 manifest（同 §7）；
-- 控制器：前沿推进、flock、Slurm 提交封装、NFS 提交顺序与崩溃恢复、保留与清理（同 §10–12）。
+- 控制器：前沿推进、flock、Slurm 提交封装、NFS 提交顺序与崩溃恢复、保留与清理，以及 `yd-producer run` 对 `controller.run_sources` 的生产接线（逐源 Slurm executor、attempt driver、poll wait、独立 `sacct ExitCode` provider；同 §10–12）。
 
 阶段门禁：本地测试全绿（[compute-loop-design.md](compute-loop-design.md) §13.1）。其中 direct-grid、forcing、SHUD、T+12、Slurm 按 agent-ops §11.1 的最终 oracle 在 M4 的 node-22 真运行；M2 通过不构成对这些能力的验证。
 
@@ -334,7 +334,7 @@ oracle：node-27 live receipt（agent-ops §11.3）。
 
 ### 依赖与边界
 
-- M4 依赖 M2：CLI 未实现并通过本地测试前，禁止手工拼出等价生产流程（agent-ops §8.1）；
+- M4 依赖 M2：`yd-producer run` 的生产业务体（含 worker/receipt 适配）必须已实现并通过本地测试；此前禁止手工拼出等价生产流程（agent-ops §8.1）。M4 只负责真实 node-22 验证与 cron 安装，不接管 CLI 实现；
 - M5 依赖 M3、M4，顺序遵循 agent-ops §12 标准发布顺序，每步留 receipt；
 - 本期 M1–M5 固定同一套基线模型、SHUD 二进制和河网；升级须走干净 staging 根（[compute-loop-design.md](compute-loop-design.md) §6.1、[products-contract.md](products-contract.md) §9）；
 - 客户交付包和客户侧 producer 迁移不属于本期 M1–M5。
