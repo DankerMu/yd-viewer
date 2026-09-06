@@ -2827,7 +2827,7 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 
 - [x] 9.1 快照并适配 `cfg.ic.update` 轮询捕获（命中 720 分钟复制 + 分段格式校验；产物保持相对时间头），以模拟覆写序列测试正常/漏采/副本损坏三态
 - [x] 9.2 快照并适配漏采补跑（同一 Slurm 作业内、同初态同 forcing、END=0.5、末态采纳；注入假 SHUD 调用测试；补跑失败传导整轮失败；控制器提交计数不变）
-- [ ] 9.3 为 #132 的当前同一 attempt 跨进程 receipt 增加 tracker-owned `import_verified_checkpoint`：完整重验 canonical 后才恢复内存 authority，旧 work/旧 receipt/目录扫描仍禁止（issue #136）
+- [x] 9.3 为 #132 的当前同一 attempt 跨进程 receipt 增加 tracker-owned `import_verified_checkpoint`：完整重验 canonical 后才恢复内存 authority，旧 work/旧 receipt/目录扫描仍禁止（issue #136）
 
 依赖：组 2（勘察清单定原路径）、组 4（分段校验）、组 8（运行目录形态）
 §13.1 归属：tracker
