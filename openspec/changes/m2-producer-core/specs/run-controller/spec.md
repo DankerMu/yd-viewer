@@ -5,11 +5,15 @@
 ## ADDED Requirements
 
 ### Requirement: 严格前沿确定待跑 cycle
-每次 run MUST 为每个 source 独立确定严格前沿：该源无任何 `DONE` 时，待跑 T 为 init 写入的最早状态文件名；否则取最新 `DONE` cycle D，T 固定为 D+12h。`states/<source>/<T>.cfg.ic` 缺失、不可读或时间头不对应绝对 T 时 MUST 停止该源；MUST NOT 取更旧状态、跨轮重戳、冷启动或互借另一源状态。
+每次 run MUST 为每个 source 独立确定严格前沿：只有共享 `output/` 根已确认为可枚举目录、且该源的 `DONE` 集合被确定为空时，才是全新链，待跑 T 为 init 写入的最早状态文件名；否则取最新 `DONE` cycle D，T 固定为 D+12h。`output/` 根遇 `ENOENT` 或 `ENOTDIR` 是根异常，MUST 以 `DISCOVERY_UNREADABLE` 停止本源，MUST NOT 当作空 `DONE` 集合或全新链。`states/<source>/<T>.cfg.ic` 缺失、不可读或时间头不对应绝对 T 时同样 MUST 停止该源；MUST NOT 取更旧状态、跨轮重戳、冷启动或互借另一源状态。
 
 #### Scenario: 全新链取首态文件名
-- **WHEN** 某源无 `DONE` 且只有 init 首态 `2026082000.cfg.ic`
+- **WHEN** `output/` 是可枚举目录，某源被确定为无 `DONE`，且只有 init 首态 `2026082000.cfg.ic`
 - **THEN** 该源待跑 T=2026082000
+
+#### Scenario: output 根缺失或不是目录即停本源
+- **WHEN** `output/` 根缺失（`ENOENT`）或被普通文件等非目录条目占据（`ENOTDIR`）
+- **THEN** 该源以 `DISCOVERY_UNREADABLE` 停止，不判全新链，不检查 raw，不提交作业；组合层仍逐源生成报告，另一源独立执行同一根检查（共享根异常时也会停止）
 
 #### Scenario: 前沿推进 D+12h
 - **WHEN** 某源最新 `DONE` 为 2026082600
@@ -24,11 +28,15 @@
 - **THEN** 该源本次停止，不提交作业，另一源不受影响
 
 ### Requirement: 未提交残留清理与可证安全重跑
-无 `DONE(T)` 却存在比 T 更晚的状态文件或 T 的 source 目录半成品时，MUST 判为上次发布中断的 NFS 残留并保留 T 状态。控制器 MAY 在删除这些 NFS 残留后重跑 T，但只有精确 `work/<source>/<T>` 不存在时才可自动重跑。若该 work 仍存在，控制器 MUST 停止本源、保留 work 并报告需人工确认，MUST NOT 假定同源无在途孤儿 Slurm 作业，也 MUST NOT 删除、复用或从该 work 恢复；运维确认无在途作业并移走 work 后，下一次 run 才可从 T 状态干净重跑。当前进程已取得同一 job 的明确 `FAILED`/`TIMEOUT` 终态不属于未知孤儿窗口：它 MUST 先完成失败日志提交与精确 work 删除，再返回失败结论。
+在 `output/` 根已确认为可枚举目录、前沿 T 可可靠确定的前提下，无 `DONE(T)` 却存在比 T 更晚的状态文件或 T 的 source 目录半成品时，MUST 判为上次发布中断的 NFS 残留并保留 T 状态。控制器 MAY 在删除这些 NFS 残留后重跑 T，但只有精确 `work/<source>/<T>` 不存在时才可自动重跑。若 `output/` 根缺失或不是目录，控制器 MUST 在残留规划之前停止本源，MUST NOT 生成或执行任何残留清单；不得以更早状态重建 T。若该 work 仍存在，控制器 MUST 停止本源、保留 work 并报告需人工确认，MUST NOT 假定同源无在途孤儿 Slurm 作业，也 MUST NOT 删除、复用或从该 work 恢复；运维确认无在途作业并移走 work 后，下一次 run 才可从 T 状态干净重跑。当前进程已取得同一 job 的明确 `FAILED`/`TIMEOUT` 终态不属于未知孤儿窗口：它 MUST 先完成失败日志提交与精确 work 删除，再返回失败结论。
 
 #### Scenario: 无 scratch work 的崩溃残留恢复
-- **WHEN** 模拟根中存在 T+12 状态与只含 DAT 无 `DONE` 的 T 目录，且精确 `work/<source>/<T>` 不存在
+- **WHEN** `output/` 根可枚举，模拟根中存在 T+12 状态与只含 DAT 无 `DONE` 的 T 目录，且精确 `work/<source>/<T>` 不存在
 - **THEN** run 删除该 T+12 状态与半成品目录，以 T 状态重新组装本轮
+
+#### Scenario: output 根异常时零残留清理
+- **WHEN** `states/<source>/` 有一份或多份合法状态，但 `output/` 根缺失或不是目录
+- **THEN** run 以 `DISCOVERY_UNREADABLE` 停止本源，所有状态、产物与 work 逐字节不变，残留判定与删除零调用
 
 #### Scenario: 未验证 work 阻断自动重跑
 - **WHEN** 无 `DONE(T)` 且精确 `work/<source>/<T>` 仍存在，无论其中是否含 job 日志或产物

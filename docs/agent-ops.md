@@ -181,7 +181,7 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 
 - `prepare --baseline <基线模型包路径>`：一次性从外部基线包生成 `yd_gfs`、`yd_ifs` 与两个 GeoJSON；基线包路径只在本次调用传入，不入 `config.toml`/`local.toml`（compute-loop §6.1）；
 - `init`：只在全新根建立首态；已有任一普通状态文件、`states/<source>` 自身或其树内有任一 symlink、或已有 `DONE` 时必须拒绝；symlink 不跟随且不区分目标类型；
-- `run`：日常循环，不自动 bootstrap；M2 必须先把它接到 `controller.run_sources`，逐源注入生产 Slurm executor、attempt driver、10 秒 poll wait 与独立失败退出码 provider，M4 只做真实 node-22 验证和 cron 安装。
+- `run`：日常循环，不自动 bootstrap；`output/` 根缺失或不是目录时必须停源，不能当作全新链，也不能触发状态/产物残留清理；M2 必须先把它接到 `controller.run_sources`，逐源注入生产 Slurm executor、attempt driver、10 秒 poll wait 与独立失败退出码 provider，M4 只做真实 node-22 验证和 cron 安装。
 
 在 CLI 尚未实现和通过本地测试前，禁止用手工 shell 拼出“等价生产流程”并声明完成。
 
