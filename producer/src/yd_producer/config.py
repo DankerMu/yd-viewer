@@ -22,6 +22,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 __all__ = [
@@ -181,7 +182,7 @@ class LocalConfig:
     scratch_root: str
     shud_binary: str
     nwm: NwmLocal
-    slurm: dict[str, str | int]
+    slurm: Mapping[str, str | int]
     cron: CronLocal
 
 
@@ -445,7 +446,7 @@ def _build_cron(table: Mapping[str, Any]) -> CronLocal:
 
 def _build_local_slurm(
     table: Mapping[str, Any], required_fields: tuple[str, ...]
-) -> dict[str, str | int]:
+) -> Mapping[str, str | int]:
     """按 `config.toml` 声明的字段名校验现场 `[slurm]`，键集必须完全相等。"""
     missing = sorted(set(required_fields) - set(table))
     extra = sorted(set(table) - set(required_fields))
@@ -472,7 +473,7 @@ def _build_local_slurm(
                 path,
             )
         values[name] = value
-    return values
+    return MappingProxyType(dict(values))
 
 
 def _build_local(data: Mapping[str, Any], config: Config) -> LocalConfig:
