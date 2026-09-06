@@ -776,3 +776,28 @@ free-slot rotation 的正反证均为零。
 
 复议条件未触发：不存在综合轮、rotated catch、verifier candidate 或已关闭 finding 重报。共享
 `m2-producer-core` 仍服务 #135、#136、#137 与 #132，本次继续不 archive。
+
+---
+
+## 第 23 次复议（issue #32 / PR #148 合并后，2026-09-06）
+
+审计数字：33 行（32 merged、1 terminal），26 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #148 只有 Round 1：四席覆盖六个 canonical lens，候选 finding 为 0，
+独立 Phase 7 Gap Sweep 同样 clean。它不满足 `rounds >= 2`，所以没有进入 rotation attribution，也没有
+改变多轮样本数或 core/rotated 数字。
+
+high 桶现在有 11 个 merged PR、累计 `gate_net_catch=49`。本次零 catch 不满足 keep/cut 的“整个桶总捕获
+为零”前提，也不支持缩减 high-tier 初审。#148 在综合审核前已用测试先行、动态 1 天边界、装配/错误优先级
+矩阵、结构审计与 5 个判别变异闭合三条 loader 域；四席随后独立确认 owner altitude、异常路径、下游兼容与
+oracle 独立性。一次完整证据链后的 clean 是正常收敛，不是 reviewer 无价值的证据。
+
+本 PR 没有 free-slot rotation 的机会：Round 1 零 candidate，无 Phase 6 或后续综合轮。把本次各 lens 的 seated
+次数增加而 catches 不变解释成“轮换零收益”，会再次把初审席位与修复后轮换混为一谈。它只能说明本次
+high-tier 初审与独立终审均 clean，不能估计新 lens 在后轮换入时的边际收益。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；
+不以单轮 clean 缩减 high-tier Round 1，也不把它纳入 rotation 的正反证。累计 rotated 捕获仍显著，且证据
+不足时默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：不存在后续综合轮、rotated catch 或已关闭 finding 重报。共享 `m2-producer-core` 仍承载
+#72、#48、#46 及其它后继任务，本次继续不 archive。
