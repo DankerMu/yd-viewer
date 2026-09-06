@@ -203,7 +203,8 @@ Dependency satisfied:
 Change surface:
 - 新增版本化 `producer/config.toml`
 - 修改 `producer/tests/test_config.py`，用 `load_config` 装载仓库实际文件并逐字段对拍
-- `producer/src/yd_producer/config.py`、rawscan 行为与 `local.toml` 均不改
+- 只更新 `producer/tests/test_rawscan.py` 与 `producer/tests/test_rawcopy.py` 的模块说明：保留“本模块用例仍使用内联合成值、不以生产实例反向生成 oracle”，删除会被本 issue 直接证伪的“仓库刻意不提供版本化 `config.toml`”旧状态；两个文件的测试体、import 与 fixture 值必须零 diff
+- `producer/src/yd_producer/config.py`、rawscan/rawcopy 产品行为与 `local.toml` 均不改
 
 Governing invariant:
 - 版本化生产实例必须逐字段等于文档与 NWM pin 的业务事实；装载器返回值、磁盘 TOML 与 rawscan f000 词表三者不得漂移。
@@ -252,6 +253,7 @@ Invariant Matrix:
 
 Required evidence:
 - `git ls-files --error-unmatch producer/config.toml` 成功，`git check-ignore producer/config.toml` 不命中
+- 仓库中不再有“刻意不提供版本化 `config.toml`”的当前状态断言；`test_rawscan.py` / `test_rawcopy.py` 的模块说明改为“本模块仍刻意使用内联合成值，生产实例由 `test_config.py` 独立验证”，且这两个文件除模块 docstring 外零 diff
 - 实际文件经 `load_config` 装载，返回值逐字段等于上方完整账本，不只抽查“关键字段”
 - 实际 GFS/IFS bundle 分别经 `render_bundle_filename` 在 00Z/f000 与 12Z/f168 渲染为 pin 的字面终名（`gfs.t00z.pgrb2.0p25.f000.bundle.grib2`、`gfs.t12z.pgrb2.0p25.f168.bundle.grib2`、`ifs.t00z.f000.bundle.grib2`、`ifs.t12z.f168.bundle.grib2`）
 - `GFS_F000_UNAVAILABLE_VARIABLES <= set(config.raw.gfs.variables)`
