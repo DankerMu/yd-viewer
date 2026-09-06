@@ -827,3 +827,31 @@ high 桶现在有 12 个 merged PR、累计 `gate_net_catch=49`。本次产品 r
 
 复议条件未触发：不存在后续综合轮、rotated catch 或已关闭 finding 重报。共享 `m2-producer-core` 仍承载
 #48、#46 及其它后继任务，本次继续不 archive。
+
+---
+
+## 第 25 次复议（issue #135 / PR #151 合并后，2026-09-06）
+
+审计数字：35 行（34 merged、1 terminal），27 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #151 有两个综合轮，但 Round 2 不是 finding 修复后的 free-slot rotation：
+Round 1 与首次 Phase 7 在旧 head 上均 clean，随后 #72/PR #150 合入并改动同一 `config.py`、
+`test_config.py` 与共享 fixture，pre-merge hard gate 要求在新 base 上重新验证。Round 2 因此只用
+`invariant-state` 与 `test-evidence+spec-compliance` pinned core 对当前合并树复核，零 candidate、零 catch；
+它增加一个多轮样本，但不改变 core/rotated 捕获数。
+
+high 桶现在有 13 个 merged PR、累计 `gate_net_catch=49`。本次零 catch 不满足“整个桶总捕获为零”的
+cut 前提，也不支持缩减 high-tier Round 1。实现进入综合审核前已经由严格配置矩阵、兼容构造测试和
+calibrated mutation corpus 封住主要缺口；真正有价值的过程信号是 base/tip 门禁：旧 review 与 CI 全绿时，
+同面上游仍可能改变 merge result，故必须拒绝 stale SHA 并重跑语义并集、Phase 2、mutation 与 review。
+
+本样本没有 rotated-in lens，不能拿后轮零 catch 评价 rotation 的收益。累计 rotated 捕获仍为 96，接近 core
+的 125；既有样本继续证明，在 major/repeat 信号出现时保留一个互补 free slot 能补 pinned core 的盲区。
+一次由 base drift 强制的 pinned-core 复核不构成反证。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；
+不以本次零 finding 缩减 high-tier Round 1，也不把 base-drift reconciliation 冒充一次 rotation。证据不足时
+默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：Round 2 无 rotated seat、无 catch、无已关闭 finding 重报；两轮均无 candidate，故不存在
+verifier disposition 或 residual deferral。共享 `m2-producer-core` 仍服务 #136、#137 与 #132，本次继续不
+archive。
