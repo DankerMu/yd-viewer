@@ -7,6 +7,16 @@
 ### Requirement: 基于显式规则的完整性判定
 扫描器 MUST 按 `config.toml` 固化的 source 规则判定一个 source/cycle 的 raw 是否完整：仅接受 00Z/12Z、预报 lead 覆盖 0–168h、IFS/GFS 各自变量与 bundle 文件模式、GFS f000 特例；所有预期文件存在且可读才判完整。MUST NOT 以目录稳定时间、末 lead 文件存在或其它动态推断替代逐文件检查。
 
+bundle 文件模式只允许普通文字与简单 `{cycle_hour}` / `{lead}` 字段；渲染器分别提供两位与三位补零字符串。任何非空 format spec（如 `{lead:03d}`）、conversion（如 `{lead!r}`）、属性/下标/位置/词表外字段，或嵌套/转义花括号 MUST 在 rawscan 模式词表门以 `ConfigError(path="raw.<source>.bundles")` 拒绝，且发生在渲染和文件系统访问之前。
+
+#### Scenario: 简单 bundle 字段补零渲染
+- **WHEN** 模式为 `gfs.t{cycle_hour}z.f{lead}.grib2`，cycle hour 为 0、lead 为 3
+- **THEN** 文件名逐字为 `gfs.t00z.f003.grib2`
+
+#### Scenario: bundle 高级格式一律拒绝
+- **WHEN** 模式含 format spec、conversion 或嵌套/转义花括号
+- **THEN** rawscan 在渲染与文件系统访问前抛 `ConfigError`，`path` 指向该 source 的 `bundles`
+
 #### Scenario: 全部预期文件存在
 - **WHEN** 目录 fixture 含某 source/cycle 的全部预期 raw 文件
 - **THEN** 判定完整并返回预期文件清单

@@ -227,7 +227,7 @@ yd-producer run --config <path> --local <path>
 
 - 仅接受 00Z、12Z；
 - 预报 lead 覆盖 0–168h；
-- IFS/GFS 各自的变量、bundle 名和 f000 特例；
+- IFS/GFS 各自的变量、bundle 名和 f000 特例；bundle 模式只允许普通文字与简单 `{cycle_hour}` / `{lead}` 字段，渲染器负责补成两位/三位；format spec、conversion、属性/下标与嵌套/转义花括号一律按配置错误拒绝；
 - 所有预期文件存在且可读才视为完整。
 
 不靠目录稳定时间、末 lead 文件或动态推断判断完整。
