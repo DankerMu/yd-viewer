@@ -2888,6 +2888,8 @@ Upstream suggested level: expanded（agree）
 Repair intensity: **high** —— 拒绝覆盖、目录级提交/回滚、scratch 删除三面同时落在写/删/发布语义上，属 `phase-flow` Phase 0.5 的 high 触发词全集（file IO / path safety、publish/delete/rollback、数据丢失）。fixture level 不因此上抬（`expanded` 已是本 change 的上限档），但 Invariant Matrix 与边界面清单为硬门禁
 Project profile: yd-viewer
 
+**#83 收尾裁决（遗留 staging 只拒绝、不回收）**：`prepare` 在运行根预检后、任何 scratch 写入、四终名探测、builder 调用或其它副作用之前，MUST 枚举 `YD_ROOT` 顶层，收集所有名字以 `prepare._STAGING_PREFIX` 开头的条目。命中目录、普通文件、symlink、断链或其它类型中的任一项即 `PrepareError`；错误按确定顺序列出全部匹配绝对路径并要求依 `docs/agent-ops.md` 人工清理。不得跟随 symlink，不得按 PID/mtime/类型推断陈旧，不得删除、改名、覆盖或自动认领；顶层枚举失败同样 fail closed。该选择与总不变量“任何既有条目不得删除”相容：旧 staging 就是既有条目，不进入本次 cleanup 账本；本次 token 创建的 staging 才按既有成功/失败路径清理。`init` 不获得该命名空间的删除权；正常操作顺序仍要求 `prepare` 成功且确认无匹配残留后再执行 `init`。
+
 Change surface:
 - 新增 `producer/src/yd_producer/prepare.py`：`run_prepare` 编排、`VariantBuildRequest`、`PrepareError`、生产 builder 绑定、变体终名解析函数
 - 扩展 `producer/src/yd_producer/config.py`：新增必需字段 `nwm_canonical_grid_id`（表，含 `gfs`/`ifs` 两个 `str`），与既有 `nwm_mapping_builder_module` 同纪律——只校验存在性与类型
@@ -2917,14 +2919,15 @@ Must add/change:
   - 字段形态是**消费上游契约、不重新协商**：`source_id` 与 `grid_id` 逐字对应 pin `NWM@8ae9b8f2 workers/mapping_builder/cli.py:601-602` 的 `build_direct_grid_variant` 同名关键字参数
   - `source_id` 取值走既有 `raw/source_identity.normalize_source_id` 的 `"gfs"`/`"ifs"`；`grid_id` 取自 `config.nwm_canonical_grid_id`
 - `prepare.run_prepare(*, local, config, baseline_root, builder=<生产绑定>) -> PrepareReport`，严格按序：
-  1. **拒绝覆盖**：四个终名（两变体目录 + 两 GeoJSON）任一 `lexists` 即 `PrepareError`，此时 MUST NOT 创建 scratch、MUST NOT 调 builder
-  2. 在 `local.scratch_root` 下建**本次运行专属**工作目录（名字含 pid + 随机 token，避免并发/重跑互相覆写）
-  3. 对 `("gfs","ifs")` 各建一个**此前不存在**的 `variant_root` 子目录，各调 `builder(request)` 一次
-  4. **产物校验**（逐变体）：`variant_root` 存在且为目录；率定末态 `cfg.ic` 可 `cfg_ic.parse`；`doc.river` 非 `None`（`Section | None` —— 缺 river 段 MUST 判失败，MUST NOT 当 0 条）；`doc.river.row_count == config.reach_count`；目录内无 `.tmp` 后缀或其它未预期残留条目
-  5. **搬运到 `YD_ROOT` 内 staging**：在 `YD_ROOT` 之内建本次专属 staging 位置，把校验通过的两棵变体树按**发布权限新建条目**的方式复制进去（MUST NOT `cp -a`/`copytree(copy2)` 把计算节点 uid/gid/mode 带进 NFS，agent-ops §10）
-  6. **GeoJSON 直接落 staging**：`geometry.write_viewer_geojson` 的 `out_dir` 取该 `YD_ROOT` 内 staging 位置，两份 GeoJSON **不经 scratch**（唯一落点，无第二处 staging）。staging 位置 MUST NOT 落在 `input/viewer/` 之内——products-contract §2 只允许该目录存在两个文件，把 staging 建在里面等于让 viewer 看见中间态
-  7. **提交**：四个终名逐个 rename 提交（`safe_fs.rename_entry_no_follow`），源为 staging 内条目——**同文件系统**；顺序钉死为「两变体 → rivers → boundary」
-  8. **清理**：无论成败，scratch 工作目录与 `YD_ROOT` 内 staging 位置一并删除；提交阶段失败时**同时**删除本次为提交而新建的父目录（仅限本次新建的），使 `YD_ROOT` 回到执行前的条目集合
+  1. **遗留 staging 守卫（#83）**：运行根预检后枚举 `YD_ROOT` 顶层，任一 `_STAGING_PREFIX*` 条目即列出全部路径并 `PrepareError`；枚举失败同样拒绝。此步只读，不自动回收，并且先于四终名探测
+  2. **拒绝覆盖**：四个终名（两变体目录 + 两 GeoJSON）任一 `lexists` 即 `PrepareError`，此时 MUST NOT 创建 scratch、MUST NOT 调 builder
+  3. 在 `local.scratch_root` 下建**本次运行专属**工作目录（名字含 pid + 随机 token，避免并发/重跑互相覆写）
+  4. 对 `("gfs","ifs")` 各建一个**此前不存在**的 `variant_root` 子目录，各调 `builder(request)` 一次
+  5. **产物校验**（逐变体）：`variant_root` 存在且为目录；率定末态 `cfg.ic` 可 `cfg_ic.parse`；`doc.river` 非 `None`（`Section | None` —— 缺 river 段 MUST 判失败，MUST NOT 当 0 条）；`doc.river.row_count == config.reach_count`；目录内无 `.tmp` 后缀或其它未预期残留条目
+  6. **搬运到 `YD_ROOT` 内 staging**：在 `YD_ROOT` 之内建本次专属 staging 位置，把校验通过的两棵变体树按**发布权限新建条目**的方式复制进去（MUST NOT `cp -a`/`copytree(copy2)` 把计算节点 uid/gid/mode 带进 NFS，agent-ops §10）
+  7. **GeoJSON 直接落 staging**：`geometry.write_viewer_geojson` 的 `out_dir` 取该 `YD_ROOT` 内 staging 位置，两份 GeoJSON **不经 scratch**（唯一落点，无第二处 staging）。staging 位置 MUST NOT 落在 `input/viewer/` 之内——products-contract §2 只允许该目录存在两个文件，把 staging 建在里面等于让 viewer 看见中间态
+  8. **提交**：四个终名逐个 rename 提交（`safe_fs.rename_entry_no_follow`），源为 staging 内条目——**同文件系统**；顺序钉死为「两变体 → rivers → boundary」
+  9. **清理**：无论成败，只清理本次 token 对应的 scratch 工作目录与 `YD_ROOT` staging；提交阶段失败时**同时**删除本次为提交而新建的父目录（仅限本次新建的），使 `YD_ROOT` 回到执行前的条目集合。步骤 1 发现的旧 staging 永不进入本次清理账本
 
   > **为什么不是"scratch 目录直接 rename 到 `YD_ROOT`"**（PR #50 路由过来的审计建议的字面形态）：生产上 `yd_root` 在 NFS（`/ghdc/data/yd`，agent-ops §4.1）而 `scratch_root` 在本地盘（`/scratch/.../yd-loop/`，agent-ops §4.2）——两棵真不同的树（`producer/tests/test_cli.py:220-222` 已就此立过约定），而 `safe_fs.rename_entry_no_follow` 明写 `EXDEV` 是硬错误、**刻意没有** fallback copy 路径（`store/safe_fs.py:630-631`）。直接 rename 会在本地测试（两根同在 `tmp_path`）全绿而在现场必然失败。本协议与控制器发布面的既有做法同构：agent-ops §8.4「DAT 复制到 NFS 临时文件并在 NFS 内 rename」
 - 异常与退出码（两级，**不得合并**）：`prepare.PrepareError` 是本模块公开异常**基类**，`cli.main` 捕获后走退出码 `1`（fail-closed 校验拒绝）；`prepare.BuilderUnavailableError(PrepareError)` 专表"生产 builder 绑定尚未可用"，`cli.main` 先于基类捕获它并走退出码 `3`（与既有"分阶段未实现"约定一致）。两者可区分是硬要求——把"配置/产物不合法"与"这条路还没通"报成同一个码，运维无从判断该改配置还是该等 M4。
@@ -2963,6 +2966,7 @@ Required evidence（每条 input -> expected output）:
 - 假 builder 在 `variant_root` 内留下一个 `.tmp` 文件（其余合法）-> `PrepareError` 点名该残留条目；`input/models/` 下无任何变体目录
 - 假 builder 对 `ifs` 抛异常（`gfs` 已成功建好）-> `PrepareError`；`YD_ROOT` 全树快照与执行前一致（**`gfs` 变体不得被提交**）；`scratch_root` 无残留
 - **失败路径清理**：上述每一条失败用例都断言 `scratch_root` 下无本次工作目录
+- **#83 遗留 staging 守卫**：`YD_ROOT` 顶层同时预置多个名字以 `_STAGING_PREFIX` 开头的条目（至少覆盖普通目录、普通文件、指向目录/文件的 symlink 与断链；另放一个仅含相似子串但不以前缀开头的对照条目）-> `PrepareError` 按名称排序列出全部且仅列出匹配项的绝对路径，并含“人工清理”指令；builder、scratch 创建、四终名探测/提交均零调用，执行前后全树快照逐项相等。再用顶层枚举抛 `EACCES`/`EIO` 的记录型边界证明探测失败也拒绝，且不得先用 `exists()` 预检后失去同次枚举保证
 - 假 builder 产出的变体率定末态 `cfg.ic` **不可解析**（截断/非 UTF-8）-> `PrepareError`（`cfg_ic.parse` 的 `ValueError` MUST NOT 逃逸出 `prepare`）；`YD_ROOT` 全树快照与执行前一致
 - 假 builder 返回但**根本没建** `variant_root` -> `PrepareError` 点名该 source；`YD_ROOT` 无新写入；scratch 已清
 - `write_viewer_geojson` 抛 `GeometryError`（注入损坏的 domain 图层）-> `PrepareError`（`GeometryError` MUST NOT 逃逸）；`YD_ROOT` 全树逐字节不变（**两个变体已校验通过也不得提交**）；scratch 与 staging 均已清
@@ -2990,18 +2994,18 @@ Required evidence（每条 input -> expected output）:
 - CI 四个 job 绿
 
 Invariant Matrix:
-- Governing invariant: `prepare` 对 `YD_ROOT` 的效果 MUST 是**全有或全无**——要么四个终名（两变体 + 两 GeoJSON）全部由本次运行新建，要么 `YD_ROOT` 回到执行前的条目集合且**既有内容逐字节不变**（本次为提交新建的父目录与 staging 属本次条目，失败时 MUST 一并回滚）；任何既有条目 MUST NOT 被覆盖或删除；无论成败 scratch 工作目录与 staging MUST 被删除。唯一已接受的例外是四个终名 rename 之间的进程被杀窗口（见 Failure paths 行）
+- Governing invariant: `prepare` 对 `YD_ROOT` 的效果 MUST 是**全有或全无**——要么四个终名（两变体 + 两 GeoJSON）全部由本次运行新建，要么 `YD_ROOT` 回到执行前的条目集合且**既有内容逐字节不变**（本次为提交新建的父目录与 staging 属本次条目，失败时 MUST 一并回滚）；任何既有条目 MUST NOT 被覆盖或删除。#83 下，启动前已存在的 `_STAGING_PREFIX*` 也是受保护的既有条目：发现即拒绝并原样保留；只有本次 token 新建的 scratch 与 staging 才无论成败进入本次清理。唯一已接受的例外是进程被杀窗口：它可能留下本次 staging，下一次 `prepare` 必须将其作为既有残留拒绝并交人工处置；四个终名 rename 之间还可能留下部分提交（见 Failure paths 行）
 - Source-of-truth identity/contract: 变体终名由 `variant_targets(local, config)` 单点计算（`local.yd_root` + `config.variants.*`）；GeoJSON 终名由 products-contract §2 字面量给定；reach 身份由变体率定末态 `cfg.ic` 的 river 段行数对 `config.reach_count`
 - Producers: `prepare.run_prepare`、注入的 `builder`、`geometry.write_viewer_geojson`
-- Validators/preflight: 四终名 `lexists` 拒绝覆盖检查；`variants.*` 相对性校验；`cfg_ic.parse` + river 段存在性 + 行数校验；scratch 目录内容精确集合校验
+- Validators/preflight: #83 的 `YD_ROOT` 顶层 `_STAGING_PREFIX*` 只读枚举守卫；四终名 `lexists` 拒绝覆盖检查；`variants.*` 相对性校验；`cfg_ic.parse` + river 段存在性 + 行数校验；scratch 目录内容精确集合校验
 - Storage/cache/query: `YD_ROOT/input/models/{yd_gfs,yd_ifs}`、`YD_ROOT/input/viewer/{rivers,boundary}.geojson`、`scratch_root/<本次专属>`
 - Public routes/entrypoints: `yd-producer prepare --config --local --baseline`（`cli.main` seam 6）
 - Frontend/downstream consumers: viewer 读 `input/viewer/`（products-contract §2/§6）；`init`（11.1）读变体内同源率定末态；`run`（组 12–14）读变体
-- Failure paths/rollback/stale state: 拒绝覆盖在任何写入之前；builder 失败/校验失败一律不提交任何变体；提交阶段失败回滚本次新建的父目录与 staging；`finally` 清 scratch 与 staging；**已接受残留**：四个终名的 rename 逐个原子，但四者之间没有跨名事务，进程在其间被 SIGKILL（或 NFS `ESTALE`）会留下部分提交的 `YD_ROOT`——在无跨目录事务的 POSIX 文件系统上不可消解。提交顺序钉死为「两变体 → rivers → boundary」，这是 **best-effort 的排序偏好，不是对 viewer 的就绪保证**：`products-contract` §2/§6 没有为 `input/viewer/` 定义任何就绪标记（不同于 `output/` 的 `DONE`，§4），本 issue 也不发明一个。就绪标记的取舍与崩溃后的人工恢复程序路由为 follow-up issue（见 Non-goals）
+- Failure paths/rollback/stale state: 遗留 staging 守卫与拒绝覆盖都在任何写入之前；旧 `_STAGING_PREFIX*` 命中项只报告、不删除，本次 staging 才由成功/失败清理路径回收；builder 失败/校验失败一律不提交任何变体；提交阶段失败回滚本次新建的父目录与 staging。进程在本次 staging 生命周期内被 SIGKILL 可留下旧 staging，下一次调用按 #83 硬拒绝并指向 agent-ops 人工程序；程序不做 sweep。四个终名的 rename 逐个原子，但四者之间没有跨名事务，进程在其间被杀还会留下部分提交的 `YD_ROOT`——该恢复归 #78。提交顺序「两变体 → rivers → boundary」只是 best-effort 排序，不是 viewer 就绪保证
 - Evidence/audit/readiness: `producer/tests/test_prepare.py` 的全树快照比对用例组；`prepare_fixtures.py` 的记录型假 builder 调用记录
 - Regression rows:
   - 干净根 + 合法基线 -> 四个终名全部新建，scratch 清空，builder 恰 2 次且 source/grid 各异
-  - 四个终名任一预先存在 -> 拒绝，`YD_ROOT` 全树逐字节不变，builder 0 次
+  - `_STAGING_PREFIX*` 任一预先存在 -> 列出全部匹配路径并拒绝，既有条目原样保留、builder/scratch/终名探测均 0 次；四个终名任一预先存在 -> 拒绝，`YD_ROOT` 全树逐字节不变，builder 0 次
   - `ifs` builder 抛异常（`gfs` 已建好）-> `YD_ROOT` 全树逐字节不变（部分成功不得提交），scratch 清空
   - `variants.gfs` 为绝对路径 / 逃逸路径 -> 拒绝，两处均无写入
   - `variants.gfs == variants.ifs` -> 任何写入之前拒绝，builder 0 次
@@ -3014,7 +3018,7 @@ Boundary surfaces（high 强度必填）:
 - 公共入口：`cli.build_parser`/`cli.main`
 - 读面：基线包、变体内率定末态 `cfg.ic`
 - 写/删/覆盖面：`YD_ROOT/input/models/*`、`YD_ROOT/input/viewer/*`、`YD_ROOT` 内本次 staging、`scratch_root/<本次专属>`（删除面恰为后两者 + 提交失败时本次新建的父目录）
-- staging/发布/回滚面：scratch 工作目录（builder 产出）-> `YD_ROOT` 内本次专属 staging（按发布权限新建）-> 四个终名的同盘 rename 提交；回滚面含本次新建的父目录与 staging
+- staging/发布/回滚面：启动时只读枚举并拒绝任何旧 `_STAGING_PREFIX*`（不自动回收）→ scratch 工作目录（builder 产出）→ `YD_ROOT` 内本次专属 staging（按发布权限新建）→ 四个终名的同盘 rename 提交；回滚面只含本次新建的父目录与 staging
 - 生产者/消费者证据边界：viewer 的 `input/viewer/` 契约（products-contract §2/§6）；11.1 消费变体内率定末态
 - 陈旧态/幂等边界：重跑必须被拒绝覆盖挡住（prepare 不幂等、无 `--force`，compute-loop §6.1）
 - 未改动的下游消费者：`init`/`run` 入口、`controller`、`rawscan`

@@ -187,6 +187,8 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 
 `prepare` 和 `init` 都改变长期状态，必须有当前任务明确授权和现场 receipt；不得由 cron 自动调用。
 
+`prepare` 启动时若发现 `YD_ROOT` 顶层有名字以代码常量 `prepare._STAGING_PREFIX` 开头的条目，必须列出全部精确路径并拒绝；程序不得按 PID、mtime 或条目类型猜测它已陈旧，也不得自动删除。人工处置顺序固定为：先确认没有活动的 `yd-producer prepare` 进程或对应现场操作；再逐项 `lstat` 并核对 CLI 报出的每个精确路径仍是待处理条目；记录路径、类型与处置 receipt；最后只清理这些已核对的精确条目，再重新运行 `prepare`。禁止通配符删除、`find -delete` 或在未确认无活动实例时清理。`init` 不认领也不清理该命名空间；正常顺序仍是 `prepare` 成功并确认无 staging 残留后才执行 `init`。
+
 ### 8.2 cron 与 flock
 
 - cron 只调用 `run`；

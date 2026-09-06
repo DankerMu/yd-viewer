@@ -31,6 +31,8 @@
 
 viewer 只需要读取 `input/viewer` 与 `output`。`models`、`states`、`logs` 和 scratch 工件不属于本契约，也不得暴露为 viewer API。
 
+`YD_ROOT` 顶层名字以 `.yd-prepare-staging`（代码权威为 `prepare._STAGING_PREFIX`）开头的条目，是一次性 `prepare` 在同盘 rename 前使用的保留临时命名空间。它只允许在一个已授权、仍在运行的 `prepare` 生命周期内短暂存在，不得放进 `input/viewer/`，也不得挂载或暴露给 viewer。进程中断后留下的匹配条目不是下一次运行可自动认领的产物：后续 `prepare` 必须列出全部残留并拒绝，不得自动删除；运维确认没有活动 `prepare` 后按 [agent-ops.md](agent-ops.md) 的人工程序处理。
+
 ## 3. cycle 与 source
 
 1. `cycle_id` 固定为 10 位数字 `YYYYMMDDHH`，使用 UTC；本期只生产 00Z、12Z。
