@@ -65,7 +65,7 @@ controller 不拥有 `WorkIdentity` 的 model/basin/project 五项，也不能�
 
 M2 的 `AttemptDriver` 是注入式计算节点边界，不是假成功入口：端到端测试必须用一个包住真实 `FakeJobExecutor` 的 terminal hook，在 `poll` 首次返回 `SUCCEEDED` 的同一跃迁内执行合成 DB-free 链、SHUD/tracker/recovery 并生成 DAT/log；提交前这些终态产物必须不存在。hook 内的 recovery 仍只调用 #17 同步 runner，不接触 executor，因此同一 source/cycle 的 `FakeJobExecutor.submissions` 精确为 1。controller 不扩 `FakeJobExecutor` 协议，也不让 fake 自己解释 SHUD。
 
-生产 CLI 暂不绑定该 seam：仓内尚无计算节点 worker 命令，也没有能跨 Slurm 进程携带同一 tracker authority 的原子 receipt；伪造目录扫描或在提交前预埋产物都比 fail closed 更坏。`cli.py run` 继续返回既有 staged-unimplemented 语义，真实 worker/跨进程 receipt 与 node-22 argv 归 M4；M2 只声明上述注入式本地 oracle，不声明真 Slurm 可运行。
+**D16 M2 收尾 `yd-producer run` 生产接线（任务 14.2，覆盖本段旧边界）**：`cli.py run` 不再保持 staged-unimplemented，也不把生产 worker/跨进程 receipt 推给 M4。它必须在同一 `run_with_lock` 生命周期内调用 `controller.run_sources`，并为 `{ifs,gfs}` 注入独立 Slurm executor、生产 `AttemptDriver`、`POLL_INTERVAL_SECONDS = 10` 的实际等待 policy 与 #47 独立 `sacct ExitCode` provider。生产 driver/worker 仍必须守住本段的安全理由：重计算只在 Slurm job 内执行，worker 以原子、checksum/identity 绑定的 work-local receipt 传递同一 tracker authority；不得用目录扫描、提交前预埋产物或测试 terminal hook 冒充生产接线。M4 只做 node-22 真 Slurm/NFS/SHUD receipt、现场值与 cron 安装，不再负责补写 CLI 业务体。
 
 为让 rawcopy/canonical/forcing/registry 共用同一 `LocalObjectStore`，14.1 把 `stage_raw` 的 `work_dir` 实参明确取为 `<attempt-work>/object-store`：raw 落 `object-store/raw/`，本轮 manifest 落 `object-store/raw-manifest.json`，canonical/forcing/models 同根。`stage_raw` 自身的 standalone 合同与 local key `raw/...` 不改；这是 controller 的接线选择。整棵 `<work_root>/<source>/<T>` 仍是一次 attempt 的唯一回收单元。
 
@@ -79,7 +79,7 @@ M2 的 `AttemptDriver` 是注入式计算节点边界，不是假成功入口：
 
 每次成功后下一轮必须重新由 `run_once` 从已落盘 `DONE`/state 发现严格前沿；循环不得在内存里用 `T += 12h`，不得预扫并选择更晚的完整 raw。这样 T+12 缺失而 T+24 完整时仍停在 T+12；运维补齐后下一次调用自然先跑 T+12 再跑 T+24。追赶 horizon 不在调用开始冻结：若下一轮 raw 在前一轮运行期间补齐，同一次调用继续处理，直至首次观察到不完整 raw。因此外部持续以不低于计算速度补入连续 raw 时，本调用与其 flock 可以长期存活；这是 §10 的实时追赶语义，不在 M2 发明任意轮数 cap、快照边界或 watchdog，生产 receipt/精确人工取消归 M4。测试以“运行期间有限补入两轮、随后停止补入”的动态 fixture 判别该行为。
 
-`catch_up_source` 自身不取得细粒度锁；调用方必须用现有 `run_with_lock(lock_path=local.cron.lock_path, action=...)` 包住整个多轮调用，使同一 source 任意时刻最多一个在途作业。双源调度、失败日志/work 回收与崩溃恢复仍归 14.3；生产 CLI/真实 worker receipt 仍归 M4。
+`catch_up_source` 自身不取得细粒度锁；调用方必须用现有 `run_with_lock(lock_path=local.cron.lock_path, action=...)` 包住整个多轮调用，使同一 source 任意时刻最多一个在途作业。双源调度、失败日志/work 回收与崩溃恢复归 14.4（原 14.3）；生产 CLI/worker receipt 归 M2 收尾任务 14.2，M4 只做真实现场验证。
 
 **D15 issue #28 双源独立追赶、失败收尾与崩溃恢复边界**：新增 `controller.run_sources(*, config, local, executors, drivers, poll_waits, failure_exit_codes) -> RunSourcesReport`。它在两个固定 worker 中分别按 D14 的“仅 `SUCCEEDED` 继续”规则独立追赶，但不能直接调用公开 `catch_up_source`：#28 必须向每轮私有 `_controller_run.run_once` 注入本源失败退出码 provider 与一次组合私建的共享 publish lock，而 D14 的公开签名和结构测试均保持不变。每个 worker 在上一轮同步结束后才开始下一轮，因此同源在途作业始终不超过一个；两源的第一轮可同时在途，后续追赶长度互不约束，一个源结束或抛错不取消另一个源。
 
@@ -143,7 +143,7 @@ run staging 完整后，先在commit紧前复探终名，再以同父目录 no-f
 
 测试行使的公共边界，从高到低（每 seam 一行理由）：
 
-1. `controller.run_once(*, config, local, source, executor, driver, poll_wait) -> RunReport`（对 tmp 目录树 + fake executor + 注入式 attempt driver）——任务 14.1 最高可本地行使的 seam，覆盖单源单轮的前沿、residue、raw staging、一次 submit/poll、attempt-local checkpoint authority、DONE 最后写与 work 清理；14.2 再在同一 runlock 内循环该 seam，14.3 再组合双源并发、失败隔离与崩溃恢复，不把那些场景伪算成 14.1 已完成。
+1. `controller.run_once(*, config, local, source, executor, driver, poll_wait) -> RunReport`（对 tmp 目录树 + fake executor + 注入式 attempt driver）——任务 14.1 最高可本地行使的 seam，覆盖单源单轮的前沿、residue、raw staging、一次 submit/poll、attempt-local checkpoint authority、DONE 最后写与 work 清理；14.3（原 14.2）在同一源内循环该 seam，14.4（原 14.3）组合双源并发、失败隔离与崩溃恢复，14.2 最后把生产依赖接到 CLI，不把后继场景伪算成 14.1 已完成。
 2. `rawscan.judge(raw_root, source, cycle, config) -> ScanVerdict`（目录 fixture）——完整性规则与 f000 特例的判定边界，独立于控制器演进。（本行于 issue #6 修订：原写作 `raw_scan.scan(raw_root, source, cycle) -> Manifest | Incomplete`。三处修订理由——模块名以 issue #6 的 `yd_producer.rawscan` 为准；规则全集在 `Config` 内，故 `config` 必须是显式形参而非隐式全局；返回 `Manifest` 与 tasks.md 组 3 的切分冲突——manifest 结构归 3.2，3.1 只返回判定结果 `ScanVerdict`。复制与 manifest 生成的 seam 由 3.2 另行钉定。）
 2b. `rawcopy.stage_raw(verdict, raw_root, work_dir, source, cycle, config) -> StagedRaw`（目录 fixture + 合成源 manifest）——issue #7 按上一行的交接钉定：只读复制与临时 `raw-manifest.json` 生成的边界。独立成 seam 而不并入 `judge` 的三个理由——判定是纯函数、staging 是写面，两者的失败语义不同（不完整不是异常 vs 写面失败即异常）；staging 需要 `work_dir` 与源 manifest 两个 `judge` 不需要的入参；produce→converter 的产物契约（entry 逐变量扇出、`idx_selector` 累积语义、manifest 级 forecast hours）只在此边界可断言。编号取 2b 而非重排后续各行，避免与既有引用（本文件与 tasks.md 多处按序号引用 seam 3–7）产生第二份编号。
 3. `state` 模块文件级纯函数（parse/restamp/negative-residual/check，file→file）——格式正确性是状态链安全的根，必须在最细边界钉死。

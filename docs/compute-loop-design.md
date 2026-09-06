@@ -178,6 +178,8 @@ yd-producer run
   日常发现、追赶、提交、发布和清理
 ```
 
+`run` 的生产接线属于 M2：入口在同一 `cron.lock_path` 锁内调用 `controller.run_sources`，逐源注入 Slurm executor、生产 attempt driver、固定 10 秒实际等待的 poll policy 与独立 `sacct ExitCode` provider。生产 driver 通过原子、checksum/identity 绑定的 work-local receipt 在 Slurm job 与登录节点之间交接同一 source/cycle/work/job 的 DAT、日志、RunDirectory 与 T+12 checkpoint authority；不得用测试 fake、terminal hook 或目录扫描替代。退出码为：全部报告成功或锁竞争跳过 `0`，任一源 `STOPPED`/`JOB_FAILED`（以及 cleanup pending/运行期错误）`3`，参数或配置错误 `2`。M4 只做真实 node-22 receipt 与 cron 安装，不补写 CLI 业务体。
+
 ### 6.1 `prepare`
 
 输入是外部受控、Git ignored 的 yd 基线模型包，其路径经 `prepare --baseline` 在调用时传入，**不进入 `config.toml` 也不进入 `local.toml`**：`prepare` 是一次性、需当前任务明确授权的人工操作（agent-ops §8.1），把只被它消费一次的路径做成常驻必需字段，等于要求 `init`/`run` 也填一个它们从不读的现场值。流程：
