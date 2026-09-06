@@ -962,3 +962,29 @@ expanded/high authority seam 在单轮综合审核与独立终审均 clean，不
 
 复议条件未触发：不存在后续综合轮、rotated catch、已关闭 finding 重报或 residual deferral。Issue #136 已由
 PR #161 关闭；共享 `m2-producer-core` 仍服务 #137 与 #132，本次继续不 archive。
+
+---
+
+## 第 30 次复议（issue #137 / PR #163 docs-only fixture 合并后，2026-09-06）
+
+审计数字：40 行（39 merged、1 terminal），仍为 28 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #163 是 `fixture=none`、`rounds=0` 的 docs-only implementation fixture；
+正式 Sonnet Phase 0.5 fixture review 不计产品综合 round。因此本样本不进入 rotation attribution，也不改变
+core/rotated 数字。
+
+None 桶由 4 个增至 5 个 merged PR，累计 `gate_net_catch=0`，仍低于每个 fixture level 至少 8 个样本的
+keep/cut 门槛；即使未来达到，也只用于裁定 docs-only none 路径，不能外推到 #137 后续 expanded/medium 产品
+review。产品分级上调的原因是公开异常文本格式由 #132 CLI stderr 消费；docs-only 问责 token 与后续产品 fixture
+是两件事，不能混用。
+
+本 PR 的有效信号来自 fixture review 与 evidence hygiene：正式 reviewer 一次完整 verdict 即 pass，三次早期
+`ECONNRESET` 均在报告前终止，未被误计为审核 round 或结果；PR body 的错误完整 SHA 也在发布前由 local/remote
+核对抓到并修正。它们是传输与证据新鲜度门禁的价值，不是 free-slot rotation 收益样本。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；不把
+零轮次 docs-only clean 样本计作“轮换发生但零收益”，也不据此缩减后续 expanded 产品席位。累计 rotated
+后轮捕获仍显著，证据不足时默认 keep。
+
+复议条件未触发：不存在产品综合轮、rotated catch、verifier disposition、已关闭 finding 重报或 residual
+deferral。Issue #137 保持 OPEN，task 14.5 待严格两文件产品 PR 完成；共享 `m2-producer-core` 继续服务
+#137/#132，本次不 archive。
