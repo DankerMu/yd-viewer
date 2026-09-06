@@ -855,3 +855,34 @@ calibrated mutation corpus 封住主要缺口；真正有价值的过程信号�
 复议条件未触发：Round 2 无 rotated seat、无 catch、无已关闭 finding 重报；两轮均无 candidate，故不存在
 verifier disposition 或 residual deferral。共享 `m2-producer-core` 仍服务 #136、#137 与 #132，本次继续不
 archive。
+
+---
+
+## 第 26 次复议（issue #48 / PR #153 合并后，2026-09-06）
+
+审计数字：36 行（35 merged、1 terminal），28 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #153 有两个综合轮，但 Round 2 与上一条 #135 样本同形：Round 1 与首次
+Phase 7 在旧 head 上均 clean，随后 master 合入 #135/PR #151，在同一 `LocalConfig` / `test_config.py` /
+共享 fixture 面新增 timeout policy 叶。Pre-merge hard gate 拒绝沿用旧 28-leaf review 与 CI；Round 2 是
+rebase 后由 `invariant-state` 和 `test-evidence+spec-compliance` 两个 pinned-core 席位完成的 current-merge-tree
+reconciliation，零 candidate、零 catch。因此该 PR 增加一个多轮样本，但不改变 core/rotated 捕获数。
+
+本样本没有发生 free-slot rotation，不能把后轮零 catch 解释为轮换无收益。两席都已在 Round 1 出现，且后轮
+任务是核对 #135 的资源/policy 分离、A 缺席默认 60 / B 显式 37、19+10=29 叶完整性及冲突解决没有丢失
+upstream 测试。它能证明 pinned core 在 base drift 后给出了 clean closure，不能估计未轮入 lens 的边际收益。
+这与第 25 次复议的判据一致。
+
+本 PR 的有效过程信号再次来自机械方法而非 catch 数量：hard gate 在旧 SHA 四项 CI 全绿、四席与 Phase 7
+均 clean 的情况下仍发现 PR 已与 master 冲突；随后 task 被重新开放，fixture 先升级为 29 叶，再 rebase、重跑
+Phase 2 和 calibrated 29/29 provenance mutation，最后才重新勾选。若只看 `gate_net_catch=0`，这条避免把
+新增 timeout 叶漏出完整 oracle 的关键收益完全不可见。它进一步说明当前 core/rotated 数字不记录 base/tip
+integrity、schema reconciliation、mutation 方法或 clean-closure 价值，不能据此自动缩减阵容。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；
+不把本次无 rotation 的 pinned-core reconciliation 计作轮换零收益，也不因 high 桶新增一个零 catch 样本而
+缩减 Round 1。High 桶累计仍有 49 条净捕获，rotated 累计仍为 96；证据不足时默认 keep，符合工作流优先
+正确性的规则。
+
+复议条件未触发：Round 2 无 rotated seat、无 finding，也没有重报已关闭项；两轮均零 candidate，故无
+verifier disposition 或 residual deferral。共享 `m2-producer-core` 仍服务 #46 等后继任务，本次继续不
+archive。
