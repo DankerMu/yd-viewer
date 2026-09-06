@@ -24,7 +24,7 @@
   偏移一律 fail closed，故 `poll` 以 `{**os.environ, **SACCT_ENV}` 调用 runner——叠加
   而非替换：只传 `SACCT_ENV` 会让子进程丢掉 `PATH` 与 Slurm 客户端环境。
 * **进程边界注入**：`runner` 是本模块自身的进程边界，注入它测的是 argv 装配与输出解析
-  的组装；真实 `sbatch`/`sacct` 行为归 M4 现场（`subprocess_runner` 不测行为）。
+  的组装；真实 `sbatch`/`sacct` 响应与时延归 M4，M2 只测本地 `subprocess` kwargs 与异常边界。
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 
+from .config import _DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
 from .executor import ExecutorError, JobRecord, JobSpec, JobState
 
 __all__ = [
@@ -253,11 +254,17 @@ def parse_sacct_record(
 # --- 真实进程边界 ------------------------------------------------------------
 
 
-def subprocess_runner(argv: Sequence[str], *, env: Mapping[str, str] | None) -> str:
+def subprocess_runner(
+    argv: Sequence[str],
+    *,
+    env: Mapping[str, str] | None,
+    command_timeout_seconds: int = _DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS,
+) -> str:
     """真实运行器：执行 argv 并返回 stdout；非零退出码抛 `CalledProcessError`。
 
-    本函数是真实进程边界，其行为归 M4 现场验证；`SlurmJobExecutor` 把它抛出的任何
-    异常转译为 `ExecutorError`。
+    真实 `sbatch`/`sacct` 响应与现场时延归 M4；M2 在本地验证 `subprocess` kwargs 与异常
+    边界。`SlurmJobExecutor` 把它抛出的任何异常转译为 `ExecutorError`；`TimeoutExpired`
+    保持原对象外抛，由同一异常漏斗转译。
     """
     completed = subprocess.run(
         list(argv),
@@ -265,6 +272,7 @@ def subprocess_runner(argv: Sequence[str], *, env: Mapping[str, str] | None) -> 
         capture_output=True,
         text=True,
         env=None if env is None else dict(env),
+        timeout=command_timeout_seconds,
     )
     return completed.stdout
 

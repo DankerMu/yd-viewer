@@ -5,6 +5,7 @@
 `producer/config.toml`，并对照独立字面量账本验证生产规则。
 """
 
+import ast
 import copy
 import dataclasses
 import json
@@ -207,6 +208,11 @@ VALID_LOCAL: dict[str, Any] = {
     },
 }
 
+# #69 的唯一 policy 字段刻意不放入基础 local fixture：它的省略即默认路径必须独立承重。
+SLURM_COMMAND_TIMEOUT_SECONDS = "command_timeout_seconds"
+DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS = 60
+LARGE_SLURM_COMMAND_TIMEOUT_SECONDS = 2_147_483_647
+
 # spec cli-config 反引号钉死的顶层 key，MUST NOT 被加上表前缀
 SPEC_PINNED_TOP_LEVEL_KEYS = (
     "forecast_days",
@@ -288,7 +294,7 @@ PINNED_LOCAL_KEYS = (
     "nwm.raw_root",
     "nwm.checkout_root",
     "nwm.python",
-    # tasks.md:101-107 [slurm]：只钉表本身，键集权威在 config
+    # tasks.md:101-107 [slurm]：只钉表本身，资源键集权威在 config
     "slurm",
     # tasks.md:109-111 [cron]
     "cron",
@@ -346,16 +352,7 @@ def _without(data: Mapping[str, Any], dotted_key: str) -> dict[str, Any]:
 
 
 def _required_keys(cls: type, prefix: str = "") -> list[str]:
-    """从 dataclass 树推导必需 key 清单——新增字段即自动新增一条参数化用例。
-
-    **表本身也产出一条 key**，再递归表内字段：`[cycle]` 整表缺失与 `cycle.hours` 缺失
-    是两种不同的现场故障。只枚举叶子时，「整表缺失就填一份内置默认」的实现无人能发现
-    （round 3 F1：6 个此形态的变异体在 77 条测试下全部存活，其中一个把 partition/
-    account/cpus/memory/walltime 五字段清单重新写死回代码里）。
-
-    本函数只是第一本账，且只能表达 dataclass 树表达得出的东西；第二本账
-    `PINNED_CONFIG_KEYS`/`PINNED_LOCAL_KEYS` 必须独立按 fixture 手工维护——见其上方注释。
-    """
+    """从 dataclass 树推导全部字段路径（表本身也产出一条）。"""
     hints = typing.get_type_hints(cls)
     keys: list[str] = []
     for field in dataclasses.fields(cls):
@@ -451,13 +448,8 @@ _WRONG_VALUE_BY_TYPE: dict[type, Any] = {
 #
 # 不解析 fixture markdown：那只是换一套自带盲区的推导器，并把测试绑死在文档排版上。
 
-# `local.toml` 的 `[slurm]` 表在本 schema 里只钉到表本身：**表内键集的唯一权威是
-# `config.slurm.required_fields`**（tasks.md「TOML key schema」块下方 `[slurm].required_fields`
-# 一节，撰写时位于 tasks.md:81-85），已由 `SLURM_REQUIRED_FIELDS` 驱动的那组用例覆盖，装载器
-# 不对该表另设静态 schema。因此凡是遍历 fixture 的走查都 MUST 在此止步。
-#
-# 这是账本内部的一处**硬编码例外**，而硬编码例外正是前三个盲区的搭建方式，所以它必须写明
-# 权威出处：未来若有人想把别的 key 塞进 stop 来抹平一次真实漂移，得先推翻上面这条权威。
+# `local.toml` 的 `[slurm]` 表只有资源键集，其唯一权威是
+# `config.slurm.required_fields`；可选 timeout 的独立矩阵在下方测试，不属于必需 key 闭包。
 _LOCAL_WALK_STOP = ("slurm",)
 
 
@@ -514,6 +506,24 @@ def _loaded_config(tmp_path: Path, data: Mapping[str, Any] | None = None) -> Con
     return load_config(
         _write_toml(tmp_path / "config.toml", VALID_CONFIG if data is None else data)
     )
+
+
+def _local_loader_schema(cls: type, prefix: str = "") -> list[str]:
+    """装载器 schema：只收录不带 default 的 TOML 必需字段。"""
+    hints = typing.get_type_hints(cls)
+    keys: list[str] = []
+    for field in dataclasses.fields(cls):
+        if field.default is not dataclasses.MISSING:
+            continue
+        path = f"{prefix}.{field.name}" if prefix else field.name
+        keys.append(path)
+        field_type = hints[field.name]
+        if isinstance(field_type, type) and dataclasses.is_dataclass(field_type):
+            keys.extend(_local_loader_schema(field_type, path))
+    return keys
+
+
+LOCAL_LOADER_REQUIRED_KEYS = _local_loader_schema(LocalConfig)
 
 
 # --- 版本化生产实例 -----------------------------------------------------------
@@ -624,7 +634,8 @@ def test_config_required_keys_match_pinned_schema():
 
 
 def test_local_required_keys_match_pinned_schema():
-    assert LOCAL_REQUIRED_KEYS == list(PINNED_LOCAL_KEYS)
+    assert LOCAL_LOADER_REQUIRED_KEYS == list(PINNED_LOCAL_KEYS)
+    assert "slurm_command_timeout_seconds" not in LOCAL_LOADER_REQUIRED_KEYS
 
 
 def test_config_fixture_closure_matches_pinned_schema():
@@ -650,9 +661,9 @@ def test_config_scalar_leaves_agree_with_fixture_value_types():
 
 
 def test_local_scalar_leaves_agree_with_fixture_value_types():
-    assert _type_names(LOCAL_SCALAR_LEAVES) == _type_names(
-        _fixture_scalar_leaves(VALID_LOCAL, stop=_LOCAL_WALK_STOP)
-    )
+    expected = _type_names(_fixture_scalar_leaves(VALID_LOCAL, stop=_LOCAL_WALK_STOP))
+    expected["slurm_command_timeout_seconds"] = "int"
+    assert _type_names(LOCAL_SCALAR_LEAVES) == expected
 
 
 def test_spec_pinned_keys_stay_top_level():
@@ -759,6 +770,72 @@ def test_load_local_returns_all_site_fields(tmp_path):
     assert local.cron.lock_path == "/fixture/run/yd-producer.lock"
     assert local.cron.log_dir == "/fixture/log/yd-producer"
     assert local.slurm == VALID_LOCAL["slurm"]
+    assert local.slurm_command_timeout_seconds == DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
+
+
+# --- #69 Slurm 客户端命令 timeout --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "configured_timeout",
+    [1, DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS, LARGE_SLURM_COMMAND_TIMEOUT_SECONDS],
+)
+def test_load_local_preserves_explicit_strict_positive_command_timeout(
+    tmp_path, configured_timeout
+):
+    config = _loaded_config(tmp_path)
+    data = copy.deepcopy(VALID_LOCAL)
+    data["slurm"][SLURM_COMMAND_TIMEOUT_SECONDS] = configured_timeout
+
+    local = load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    assert local.slurm_command_timeout_seconds == configured_timeout
+    assert type(local.slurm) is MappingProxyType
+    assert dict(local.slurm) == VALID_LOCAL["slurm"]
+    assert SLURM_COMMAND_TIMEOUT_SECONDS not in local.slurm
+
+
+@pytest.mark.parametrize(
+    "invalid_timeout",
+    [True, 1.5, "60", 0, -1],
+    ids=["bool", "float", "string", "zero", "negative"],
+)
+def test_load_local_rejects_non_positive_or_non_integer_command_timeout(
+    tmp_path, invalid_timeout
+):
+    config = _loaded_config(tmp_path)
+    data = copy.deepcopy(VALID_LOCAL)
+    data["slurm"][SLURM_COMMAND_TIMEOUT_SECONDS] = invalid_timeout
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    _assert_locates(excinfo, "slurm.command_timeout_seconds")
+
+
+def test_required_fields_rejects_command_timeout_policy_name(tmp_path):
+    data = copy.deepcopy(VALID_CONFIG)
+    data["slurm"]["required_fields"] = [
+        *SLURM_REQUIRED_FIELDS,
+        SLURM_COMMAND_TIMEOUT_SECONDS,
+    ]
+
+    with pytest.raises(ConfigError) as excinfo:
+        _loaded_config(tmp_path, data)
+
+    _assert_locates(excinfo, "slurm.required_fields")
+
+
+def test_command_timeout_policy_does_not_relax_unknown_resource_rejection(tmp_path):
+    config = _loaded_config(tmp_path)
+    data = copy.deepcopy(VALID_LOCAL)
+    data["slurm"][SLURM_COMMAND_TIMEOUT_SECONDS] = 37
+    data["slurm"]["qos"] = "normal"
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    _assert_locates(excinfo, "slurm.qos")
 
 
 # --- local.[slurm] 只读资源快照 ---------------------------------------------
@@ -1127,7 +1204,7 @@ def test_config_missing_required_key_fails_closed(tmp_path, missing_key):
     _assert_names_no_other_field(excinfo, missing_key, ALL_REQUIRED_KEYS)
 
 
-@pytest.mark.parametrize("missing_key", LOCAL_REQUIRED_KEYS)
+@pytest.mark.parametrize("missing_key", LOCAL_LOADER_REQUIRED_KEYS)
 def test_local_missing_required_key_fails_closed(tmp_path, missing_key):
     config = _loaded_config(tmp_path)
     path = _write_toml(tmp_path / "local.toml", _without(VALID_LOCAL, missing_key))
@@ -1200,8 +1277,16 @@ def test_config_scalar_type_error_fails_closed(tmp_path, dotted_key, annotated):
 
 @pytest.mark.parametrize(
     ("dotted_key", "annotated"),
-    LOCAL_SCALAR_LEAVES,
-    ids=[path for path, _ in LOCAL_SCALAR_LEAVES],
+    [
+        (path, annotated)
+        for path, annotated in LOCAL_SCALAR_LEAVES
+        if path != "slurm_command_timeout_seconds"
+    ],
+    ids=[
+        path
+        for path, _annotated in LOCAL_SCALAR_LEAVES
+        if path != "slurm_command_timeout_seconds"
+    ],
 )
 def test_local_scalar_type_error_fails_closed(tmp_path, dotted_key, annotated):
     config = _loaded_config(tmp_path)
@@ -1632,12 +1717,15 @@ def test_local_slurm_keyset_follows_added_required_field(tmp_path):
     config_data["slurm"]["required_fields"] = [*SLURM_REQUIRED_FIELDS, "qos"]
     local_data = copy.deepcopy(VALID_LOCAL)
     local_data["slurm"]["qos"] = "normal"
+    local_data["slurm"][SLURM_COMMAND_TIMEOUT_SECONDS] = 37
 
     config = _loaded_config(tmp_path, config_data)
     local = load_local(_write_toml(tmp_path / "local.toml", local_data), config)
 
     assert set(local.slurm) == set(config.slurm.required_fields)
     assert local.slurm["qos"] == "normal"
+    assert SLURM_COMMAND_TIMEOUT_SECONDS not in local.slurm
+    assert local.slurm_command_timeout_seconds == 37
 
 
 def test_local_slurm_keyset_follows_removed_required_field(tmp_path):
@@ -1648,12 +1736,15 @@ def test_local_slurm_keyset_follows_removed_required_field(tmp_path):
     ]
     local_data = copy.deepcopy(VALID_LOCAL)
     del local_data["slurm"][dropped]
+    local_data["slurm"][SLURM_COMMAND_TIMEOUT_SECONDS] = 37
 
     config = _loaded_config(tmp_path, config_data)
     local = load_local(_write_toml(tmp_path / "local.toml", local_data), config)
 
     assert set(local.slurm) == set(config.slurm.required_fields)
     assert dropped not in local.slurm
+    assert SLURM_COMMAND_TIMEOUT_SECONDS not in local.slurm
+    assert local.slurm_command_timeout_seconds == 37
 
 
 def test_local_slurm_keyset_shares_no_name_with_production_fields(tmp_path):
@@ -1668,12 +1759,18 @@ def test_local_slurm_keyset_shares_no_name_with_production_fields(tmp_path):
     config_data = copy.deepcopy(VALID_CONFIG)
     config_data["slurm"]["required_fields"] = zero_overlap
     local_data = copy.deepcopy(VALID_LOCAL)
-    local_data["slurm"] = {"alpha": "a-value", "beta": 2}
+    local_data["slurm"] = {
+        "alpha": "a-value",
+        "beta": 2,
+        SLURM_COMMAND_TIMEOUT_SECONDS: 37,
+    }
 
     config = _loaded_config(tmp_path, config_data)
     local = load_local(_write_toml(tmp_path / "local.toml", local_data), config)
 
     assert local.slurm == {"alpha": "a-value", "beta": 2}
+    assert SLURM_COMMAND_TIMEOUT_SECONDS not in local.slurm
+    assert local.slurm_command_timeout_seconds == 37
 
 
 # --- 零默认值 ----------------------------------------------------------------
@@ -1723,13 +1820,109 @@ def test_dataclass_rejects_positional_construction(klass):
         klass(*args)
 
 
-def test_no_dataclass_field_carries_a_default():
-    """任何字段都不得有默认值，缺失只能走 fail-closed 路径而非静默填值。"""
+def test_old_direct_local_construction_keeps_passed_slurm_mapping_and_defaults_timeout():
+    """#31 只约束 loader：直接构造不得冻结、复制或重写调用方的 slurm 映射。"""
+    supplied_slurm = {"alpha": "a-value"}
+    local = LocalConfig(
+        yd_root="/fixture/yd",
+        scratch_root="/fixture/scratch",
+        shud_binary="/fixture/bin/shud",
+        nwm=config_module.NwmLocal(
+            raw_root="/fixture/nwm/raw",
+            checkout_root="/fixture/nwm/checkout",
+            python="/fixture/nwm/python",
+        ),
+        slurm=supplied_slurm,
+        cron=config_module.CronLocal(
+            lock_path="/fixture/run/yd-producer.lock", log_dir="/fixture/log"
+        ),
+    )
+
+    assert local.slurm is supplied_slurm
+    supplied_slurm["beta"] = 2
+    assert local.slurm == {"alpha": "a-value", "beta": 2}
+    assert local.slurm_command_timeout_seconds == DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
+
+
+def test_only_local_command_timeout_field_carries_a_default():
+    """#69 的兼容默认只属于该一个 direct-construction 字段。"""
+    timeout_field = next(
+        field
+        for field in dataclasses.fields(LocalConfig)
+        if field.name == "slurm_command_timeout_seconds"
+    )
+    assert timeout_field.default == DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
+    assert timeout_field.default_factory is dataclasses.MISSING
+
     for klass in _dataclass_tree(Config) + _dataclass_tree(LocalConfig):
         for field in dataclasses.fields(klass):
+            if klass is LocalConfig and field.name == "slurm_command_timeout_seconds":
+                continue
             assert field.default is dataclasses.MISSING, (
                 f"{klass.__name__}.{field.name}"
             )
             assert field.default_factory is dataclasses.MISSING, (
                 f"{klass.__name__}.{field.name}"
             )
+
+
+def test_timeout_default_is_private_config_symbol_and_not_exported():
+    """默认数值只能由 config 私有常量拥有，不能靠小整数对象身份伪造溯源。"""
+    assert config_module._DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS == (
+        DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
+    )
+    assert "_DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS" not in config_module.__all__
+    assert config_module.__all__ == [
+        "CanonicalGridConfig",
+        "Config",
+        "ConfigError",
+        "CronLocal",
+        "CycleConfig",
+        "LocalConfig",
+        "NwmLocal",
+        "RawConfig",
+        "RawSourceConfig",
+        "SlurmSchema",
+        "VariantsConfig",
+        "load_config",
+        "load_local",
+        "variant_relative_violation",
+    ]
+
+
+def test_config_defines_the_only_numeric_timeout_default_in_ast():
+    """结构证据：60 只能作为 config 私有常量的值出现，不把 object identity 当来源。"""
+    config_source = Path(config_module.__file__).read_text(encoding="utf-8")
+    slurm_source = (
+        Path(__file__).resolve().parent.parent / "src" / "yd_producer" / "slurm.py"
+    ).read_text(encoding="utf-8")
+    config_tree = ast.parse(config_source)
+    slurm_tree = ast.parse(slurm_source)
+
+    config_sixty = [
+        node
+        for node in ast.walk(config_tree)
+        if isinstance(node, ast.Constant)
+        and type(node.value) is int
+        and node.value == DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
+    ]
+    assert len(config_sixty) == 1
+    assignment = next(
+        node
+        for node in config_tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "_DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS"
+            for target in node.targets
+        )
+    )
+    assert isinstance(assignment.value, ast.Constant)
+    assert assignment.value.value == DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
+    assert not [
+        node
+        for node in ast.walk(slurm_tree)
+        if isinstance(node, ast.Constant)
+        and type(node.value) is int
+        and node.value == DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
+    ]
