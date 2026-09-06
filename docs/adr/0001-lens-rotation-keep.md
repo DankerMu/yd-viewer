@@ -908,3 +908,31 @@ Rotated-in lenses 累计仍贡献 96 条 later-round catch，对 core 的 125 �
 复议条件未触发：本 PR rounds=0，故无 rotated seat、finding 重报、verifier disposition 或 residual deferral。
 Issue #136 保持 OPEN，后续代码 PR 才进入 expanded/high 综合审核；共享 `m2-producer-core` 继续服务
 #136、#137 与 #132，本次继续不 archive。
+
+---
+
+## 第 28 次复议（issue #46 / PR #158 合并后，2026-09-06）
+
+审计数字：38 行（37 merged、1 terminal），仍为 28 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #158 只有 Round 1：expanded/medium 三席
+`correctness`、`test-evidence+spec-compliance`、`invariant-state` 均零 in-scope candidate，Phase 7 产品
+Gap Sweep CLEAN。它不满足 `rounds >= 2`，所以不进入 rotation attribution，也不改变 core/rotated 数字。
+
+Expanded 桶现在有 17 个 merged PR、累计 `gate_net_catch=325`，远非整个桶零捕获的 cut 条件。本次单轮
+clean 也不是审核失效：综合审核前，直接 metadata AST、10/10 kw-only + 10/10 frozen + 1/1 TypeError
+confounder 已封闭主要 oracle 风险；三席随后独立确认 10-class completeness、删除行为等价或更强、Python
+下界和 userspace non-goal。把“前置证据充分后未找到第二个缺陷”解释为应缩减 expanded seats，没有依据。
+
+本 PR 也没有 free-slot rotation 机会。Phase 7 发现的是两个未发布、gitignored evidence 草稿的计数笔误，
+随后由新鲜 Sonnet 复核修正为 90 个顶层测试、89 个 sibling、106 个顶层函数；它不是产品综合 finding、
+没有改变 tracked SHA，也不计 `gate_net_catch`。Checkpoint tracker 的既存同类测试 hardening 经 issue-scribe
+核实后路由到 #159，同样不属于本 PR residual deferral。这两项说明终审与 out-of-scope 路由有价值，但不能
+挪进 later-round core/rotated 归因。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；
+不以一个没有后轮的 clean PR 评价 rotation，也不以它缩减 expanded Round 1。Rotated 累计 96 条 later catch
+仍不可忽略，且证据不足时默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：不存在后续综合轮、rotated catch 或已关闭 finding 重报；Round 1 零 candidate，故无
+verifier disposition 或 residual deferral。共享 `m2-producer-core` 仍服务 #136/#132 等后继任务，本次继续
+不 archive。
