@@ -477,6 +477,7 @@ Review focus:
 
 - [x] 3.1 实现 IFS/GFS 完整性规则判定（00/12 限定、0–168h、变量/bundle 模式、GFS f000 特例、逐文件检查）
 - [x] 3.2 实现 raw 只读复制到调用方 staging root 的 `raw/`（源不可变断言）与同 root 临时 `raw-manifest.json` 生成（entry 只引用副本）；14.1 把该 root 固定为 `<attempt-work>/object-store`
+- [ ] 3.3 将 bundle grammar 收窄为简单字段并由渲染器统一补零，迁移全部生产消费者 fixture（issue #52）
 
 依赖：组 1（规则来自 config）、组 2（manifest 结构）
 §13.1 归属：raw 扫描
@@ -657,6 +658,72 @@ Review focus:
 - 空列表/取值域校验的 `ConfigError.path` 是否为完整点分路径，断言是否用 `excinfo.value.path ==` 而非子串探测（组 1 已裁定子串探测无判别力）
 - 是否引入 stdlib 之外的依赖，或运行时 import NWM
 - 预期文件集是否严格由 `lead_hours × bundles` 构造，而非列目录后过滤
+
+### Issue #52 delta fixture（任务 3.3，覆盖 #6 的旧 grammar 结论）
+
+Fixture level: expanded（parser/schema/field 与 raw/forcing 均为 mandatory expanded trigger）
+Repair intensity: medium
+Project profile: yd-viewer
+
+Authority and conflict resolution:
+- `docs/compute-loop-design.md` §7.1、`specs/raw-scan/spec.md` 与本 change 的 #6 fixture 已由 Wave 0 commit `6bc8599` 先行改为「只接受简单字段、渲染器内部补零」。它们覆盖 issue #52 旧正文中「`{lead:q}` 仍应从公开路径进入 `_render`」的要求；公开路径现在必须在 `_render` 前拒绝所有 format spec/conversion。
+- `_render` 的 `(ValueError, KeyError, IndexError, TypeError, AttributeError)` 五异常漏斗仍原样保留为私有纵深防御，但不为测试新增绕过 grammar 的公共 API。以 AST 结构断言守住五腿，并在 `.workplans/52/review/grammar-gate-audit.md` 重登记 D1：五腿在两个公开入口上均因 grammar gate 不可达，保留理由是防止未来私有调用重排漏出裸异常。#6 旧 Required evidence 中以公开 `{lead!r:.0}` 模式渲染 `""`/`"."`/`".."` 的要求明确由本 delta 废止：三种退化终名改为直接调用私有 `_render` 的 D1 防御测试；另直接调用 `_render("gfs.f{lead:q}.grib2", 0, 3, path)`，断言抛 `ConfigError` 且 `__cause__` 为 `ValueError`。这两类私有测试只证明既有纵深行为，不形成新 public seam。
+
+Change surface:
+- 唯一允许修改的生产模块：`producer/src/yd_producer/rawscan.py`；`BUNDLE_PATTERN_FIELDS` 仍精确为 `("cycle_hour", "lead")`。
+- 测试迁移面：`producer/tests/test_rawscan.py`、`producer/tests/test_rawcopy.py`、`producer/tests/init_bootstrap_fixtures.py`、`producer/tests/run_once_fixtures.py`、`producer/tests/test_init_scan_window.py`，以及只因这些 fixture 常量传播而必须更新的既有 producer 测试；不得修改其它生产模块。
+- 所有合法基础模板改为简单 `{cycle_hour}` / `{lead}`。raw 文件写入器、source-manifest/local-key/URL 字面 oracle 必须继续得到与 NWM pin 相同的终名；不得为让测试通过而修改终名期望。
+- `config.py`、`rawcopy.py`、init/controller/assemble/forcing、依赖与 lockfile 均不改；版本化生产实例仍归 #29。
+
+Must preserve:
+- `judge` 与 `render_bundle_filename` 的签名、`ConfigError.path`、只校验被请求 source 的惰性、非法配置时 `_render` 与文件系统零调用。
+- 简单模板生成的终名与 NWM pin 一致：cycle hour 两位、lead 三位；00Z/12Z 与 f000/f168 均不漂移。
+- 缺 `{lead}`、预期集单射、单文件名/path、NUL/不可编码、FS 分类与 f000 逻辑仍由各自原门负责；#52 grammar 门不得让这些测试被更早错误吸收。
+- `_render` 的五异常 catch 元组、`BUNDLE_PATTERN_FIELDS` 精确词表及其它 rawscan guards 不缩减。
+
+Must change:
+- grammar 精确接受集合仅为「不含花括号的普通文字」与零个或多个精确 `{cycle_hour}` / `{lead}` token；`{lead:}` 也不是简单 token，必须拒绝。
+- 在调用 `str.format` 前把 `cycle_hour` 与 `lead` 分别规范化为 `f"{cycle_hour:02d}"` 与 `f"{lead:03d}"`，再只对简单 token 渲染。
+- 在 `_render` 与任一文件系统访问之前拒绝：两字段任一 format spec（含 `{cycle_hour:02d}`、`{lead:03d}`、`{lead:}`、嵌套 spec）、所有合法 conversion `!s`/`!r`/`!a`、属性/下标、自动/编号位置字段、词表外字段、语法损坏、转义 `{{`/`}}` 与孤立花括号。
+- 每个 grammar 拒绝都抛 `ConfigError(path="raw.<requested-source>.bundles")`，消息逐字包含原模式及可行动原因；两个原先静默成功的嵌套模式 `gfs.f{lead:{lead.real}}.grib2`、`gfs.f{lead:{cycle_hour}}.grib2` 必须走该路径。
+
+Selected risk packs:
+- Public API / CLI / script entry: selected - `judge` 与 `render_bundle_filename` 是既有公开消费 seam；CLI 本身不改
+- Config / project setup: selected - `raw.<source>.bundles` 的接受域变化
+- File IO / path safety / overwrite: not selected - 不新增写删面；既有「非法配置零 FS」作为 error evidence
+- Schema / columns / units / field names: selected - 精确 token grammar、两位/三位时间身份
+- Auth / permissions / secrets: not selected - 无权限或凭据面
+- Concurrency / shared state / ordering: not selected - 纯同步 parser/renderer
+- Resource limits / large input / discovery: not selected - 小型配置字符串，无发现逻辑
+- Legacy compatibility / examples: selected - 迁移全部既有 producer fixture，终名与 downstream manifest/path oracle不变
+- Error handling / rollback / partial outputs: selected - 所有非法 grammar 稳定收敛到 `ConfigError`，且在 `_render`/FS 前短路
+- Release / packaging / dependency compatibility: not selected - stdlib 内改动且零依赖/lock drift；仍运行冻结同步检查
+- Documentation / migration notes: selected - Wave 0 docs 已先行，本 delta 记录实现迁移与旧结论覆盖
+- Geospatial / CRS: not selected - 无几何
+- Time series / forcing / temporal boundaries: selected - cycle/lead 补零决定 raw 终名与 forcing 准入
+- 状态链 / warm-start: not selected - init 测试只迁移 raw fixture，不改状态语义
+- NWM 快照溯源 / DB-free 隔离: not selected - 终名对拍 pin，但不复制/import NWM 代码
+
+Seams and required evidence:
+- `render_bundle_filename`：GFS 与 IFS 的简单生产模板在 `(cycle_hour, lead)=(0,3)` 分别逐字为 `gfs.t00z.pgrb2.0p25.f003.bundle.grib2`、`ifs.t00z.f003.bundle.grib2`；另断言 12Z/f168 终名。
+- `judge`：用同一简单模板构造字面 raw 路径，00Z/12Z 均返回完全相同终名并能判完整；不得从 renderer 反算 expected。
+- `rawcopy.stage_raw`：其重构出的 source key、copied path、manifest local key/URL 字面值与 `judge` 同终名；GFS/IFS 各有至少一条跨 seam 对拍。
+- `BUNDLE_PATTERN_FIELDS` 精确等于 `("cycle_hour", "lead")`，不得扩词表。
+- grammar 参数矩阵必须覆盖：两字段 format spec（含空 spec）、`!s`/`!r`/`!a`、属性、下标、自动/编号位置、未知字段、语法损坏、两个 escaped-brace 方向、两个静默嵌套模式与 #6 既有四个嵌套失败形状。每个模式都含一个独立裸 `{lead}`（除专测缺 lead），避免被 lead-required 门偶然吸收；断言 `path`、原模式、grammar 独有原因、记录型 `_render` 零调用及 FS 原语零调用。矩阵须分别从两个公开 seam 进入：`judge` 版本承担记录型 FS 零调用；至少一个 IFS 非法模式直接调用 `render_bundle_filename(..., config_path="raw.ifs.bundles")`，断言 `ConfigError.path == "raw.ifs.bundles"`、原模式与 grammar 原因，并以记录型 `_render` 证明零调用。这样不能出现只在 `judge` 前置校验、公开 renderer 仍接受高级模式的双入口分叉。
+- 未请求 source 可持有一个仅因 #52 非法的模式，另一个请求 source 仍成功，证明惰性未破坏。
+- 原门隔离：路径逃逸/NUL 使用简单 `{lead}`；碰撞使用两个不同但在 00Z/同 lead 渲染相同终名的合法简单模板；缺 lead使用不含任何 format spec/conversion 的模式。`""`/`"."`/`".."` 若只可由私有绕过产生，则从公共行为矩阵移入 D1 防御登记，不伪称公开可达。
+- AST 断言 `_render` 的 except 元组精确保留五种异常；D1 audit 记录公共不可达理由，并以至少一组移除/放宽 grammar gate 的变异体证明新矩阵会红。控制变异必须先变红；scratch 变异按 `openspec/project-profile.md` 的 venv/pyc 纪律执行。
+- 一次 batched red proof：只撤回 `rawscan.py` 的实现改动，保留新/迁移测试，新行为用例必须红且无 collection error；随后恢复源文件、绿跑并清理唯一 tag 的 stash，`git stash list` 不留 `red-proof`。
+- `cd producer && uv sync --frozen`、`uv run pytest`、`uv run ruff check .`、`uv run ruff format --check .` 与 OpenSpec strict/all 均通过。
+
+Non-goals:
+- 扩展 token 词表、修改配置 loader/schema、提交 `producer/config.toml`、改 rawcopy/init/controller 产品行为、真实 NWM/NFS 运行。
+
+Review focus:
+- 简单 token grammar 是否在最高 owner 一次性收口，而不是逐危险例子黑名单。
+- 补零是否只改变模板入参表示，不改变任何最终文件名、manifest identity 或下游 consumer。
+- 旧测试是否迁移到仍能命中原守卫的载体，避免被新 grammar 门吸收后假绿。
+- public grammar 与私有 `_render` 防御账是否分开，旧 issue 与新权威文档的冲突是否如实记录。
 
 ### Issue #7 fixture（任务 3.2）
 
