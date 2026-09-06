@@ -5,7 +5,7 @@
 ## 1. cli-config：配置装载与 CLI 骨架
 
 - [x] 1.1 实现 `config.toml` 类型化装载与 fail-closed 校验（业务规则字段全集含 `reach_count`，spec cli-config）
-- [x] 1.2 实现 `local.toml` 现场值装载（含 NWM checkout 根），缺失即报错、零内置默认；唯一例外为 #69 后补的 `[slurm].command_timeout_seconds`，缺席时版本化默认 60 秒
+- [x] 1.2 实现 `local.toml` 基础现场值装载（含 NWM checkout 根），缺失即报错、零内置默认；#69 的 `[slurm].command_timeout_seconds` 唯一默认增量尚未实现，另见 5.3
 - [x] 1.3 实现 argparse 三入口骨架（prepare/init/run 薄委托，注册 `[project.scripts]` 入口点）、未知子命令拒绝、`DATABASE_URL` 环境守卫、run 入口状态目录缺失/为空即报错停止且不触发 init 逻辑
 - [x] 1.4 实现 NWM 解释器薄外壳（精确路径调用、cwd/`PYTHONPATH` 取自 checkout 字段、fail-closed），以假解释器脚本测试调用形态
 - [x] 1.5 提交版本化 `producer/config.toml` 生产实例，以实际文件装载测试钉死文档与 NWM pin 的逐字段取值（issue #29）
@@ -1555,7 +1555,8 @@ Domain packs (from active profile):
 ## 5. 执行器抽象：JobExecutor 协议与 fake
 
 - [x] 5.1 定义 `JobExecutor` 协议（submit/poll、job ID/partition/终态/起止时间语义）与进程内 fake（成功/失败/超时可编排），接口契约测试
-- [x] 5.2 实现 Slurm 生产执行器（`sbatch`/`sacct` 封装，资源参数全部装配自 `local.toml` 且零默认）；#69 后补客户端命令 timeout，默认只来自配置层的唯一常量 60；本地验证参数装配、协议一致性与 timeout 转发/异常边界，真实 Slurm 时延归 M4
+- [x] 5.2 实现 Slurm 生产执行器（`sbatch`/`sacct` 封装，资源参数全部装配自 `local.toml` 且零默认）；本地验证参数装配与协议一致性，真实 Slurm 行为归 M4
+- [ ] 5.3 由 #135 消费已完成的 1.6/#31，只落地 #69：唯一客户端命令 timeout 配置及真实 `subprocess_runner` 的 timeout 转发/异常边界；CLI/provider 的生产绑定仍归 14.2
 
 依赖：组 1（Slurm 字段结构）
 §13.1 归属：控制器（支撑）
@@ -1842,6 +1843,53 @@ Review focus:
 - **成功路径的输入归一化是否也有 oracle**（常驻轴，非一次性检查）：`strip()`、"非空行"判据、分隔符切分这一类**接受态**属性，是否各有一条"改坏即变红"的用例——而不是只测失败路径。本 PR 三轮复发的 test-coverage-gap 全部源自这一轴从未进过变异清单（gate retro 的根因结论）
 - argv 断言是否逐元素精确比对，而非"包含某个 flag"式的弱断言
 
+### Issue #135 fixture（任务 5.3：消费 #31，落地 #69 Slurm 客户端命令时限）
+
+Fixture level: expanded；Upstream suggested level: expanded（agree：配置 schema、既有公共 API 与外部进程边界）
+Repair intensity / effective tier: high（production config；漏限时会让持锁进程无限阻塞，策略混入资源会改变提交）
+Project profile: yd-viewer
+Minimal mergeable slice: #31 已由 PR #143 完成；本 slice 只落 #69 config + runner seam，production binding/provider/CLI 归 #132/14.2
+
+**Surface / preserve / change**：
+- 代码 PR 上限仍是 `config.py`、`slurm.py`、`test_config.py`、`test_slurm.py`，但已满足的 #31 行为只作回归、无需为了“用满边界”改文件。`config.py` 唯一拥有 timeout 默认/校验，`slurm.py` 只引用并透传。
+- 必须保留 PR #143 的 loader-only `MappingProxyType(dict(values))` 与 Issue #31 Non-goal：不得新增 `LocalConfig.__post_init__`，不得改变程序内直接构造时 `slurm` 入参的形态；直接构造只新增 timeout 默认。required_fields 仍是资源键集唯一权威，策略永不进入资源、flags 或 argv。
+- `config.__all__`/`slurm.__all__` 不扩；旧 `LocalConfig(...)`、旧 `subprocess_runner(argv, *, env=...)` 可用；除 timeout 外无 dataclass 默认；executor/JobRecord/内部二参数 runner、既有 subprocess kwargs 与非-timeout 漏斗不变。
+- 新增私有唯一默认 `config._DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS = 60` 与 frozen `slurm_command_timeout_seconds` 字段；schema 拒保留名，local loader 剥离策略键并只收 strict positive int。
+- runner 只增加 keyword-only timeout 并传 `subprocess.run(timeout=...)`；原 `TimeoutExpired` 一次外抛，executor 再保留 cause 并按 submit/poll 赋 `job_id=None/<known>`。
+
+**Risk packs（本 slice 全量）**：
+- Public API / CLI / script entry: selected - `LocalConfig` 与已导出 runner；CLI 不改。
+- Config / project setup: selected - production policy、唯一默认与资源/策略分离。
+- File IO / path safety / overwrite: not selected - 不新增路径解引用、写、删或覆盖。
+- Schema / columns / units / field names: selected - 新字段、保留键与秒单位。
+- Auth / permissions / secrets: not selected - 无凭据；禁止环境/数据库通道。
+- Concurrency / shared state / ordering: not selected - executor 状态机不改，runner 无状态。
+- Resource limits / large input / discovery: selected - 每个真实客户端子进程有正整数时限。
+- Legacy compatibility / examples: selected - 保留直接构造、旧 runner 调用、PR #143 loader 与 subprocess kwargs。
+- Error handling / rollback / partial outputs: selected - `ConfigError.path` 与 timeout 原对象/cause/job ID/零重试。
+- Release / packaging / dependency compatibility: selected - stdlib-only、零 lock drift、exports 不扩。
+- Documentation / migration notes: not selected - additive 默认无需迁移，既有 docs/spec 已钉死。
+- Geospatial / CRS；Time series / forcing；状态链 / warm-start: not selected - 无几何、水文时间轴或状态 IO。
+- NWM snapshot / DB-free: not selected - 不改 NWM；不得连 PostgreSQL/registry 或设置 `DATABASE_URL`。
+
+**Invariant Matrix / boundary checklist**：
+- Governing invariant / truth: #31 的 required-fields→只读 loader 投影保持不变；独立 strict-positive timeout 只源于 config 私有默认或 TOML 显式值，只在真实 subprocess 边界生效，并保持客户端 timeout 的保守错误极性。
+- Producer/validator/storage: dataclass 默认服务旧直接构造；schema 拒保留名，loader 从已只读资源投影前剥离/校验策略；两值分栏、无缓存，不新增构造期资源改写。
+- Public/downstream: `LocalConfig`、`load_local`、`subprocess_runner`；executor 仍只见资源和二参数 runner，#132 后继才绑定 production callable。
+- Failure/external boundary: 非法配置零对象/进程；`subprocess.run(timeout=...)` 是唯一新副作用；原异常/单次调用/cause/job ID 可机检，不伪造 JobState TIMEOUT、不 retry/cancel/delete。
+- Unchanged siblings: PR #143 tests/loader invariant、executor.py、CLI/provider/controller/NWM、flags/JobSpec/argv 保持；无新 IO/发布/回滚/陈旧态面。
+
+**Required evidence（复用组 1 的 #69 配置矩阵与 Issue #11 §E 的 runner 签名/`#69 超时转译`；排除 `#69 生产绑定`）**：
+- loader 省略/显式 `1`/`60`/大正整数 → 独立字段 60/原值，`local.slurm` 仍为 PR #143 的精确 `MappingProxyType` 快照且不含策略；直接用旧参数构造 `LocalConfig` → timeout 60，但 `slurm` 保留所传对象/既有语义。
+- bool/float/string/0/负数 → `ConfigError.path="slurm.command_timeout_seconds"`；required_fields 含保留名 → `"slurm.required_fields"`；未知资源键仍走既有精确键集错误。只有 timeout 字段有 default。
+- 结构/AST → exports 不扩，数值 60 只在 config 私有常量，slurm 默认表达式引用该符号；不得用小整数 `is` 冒充来源证明。
+- runner 默认/显式 37 → subprocess 精确收到 60/37，原 kwargs/env/一次调用不变；预建 `TimeoutExpired` 从 runner 同一对象外抛，submit/poll 再成为保留 cause 的 `ExecutorError(job_id=None/<known>)`，OSError/CalledProcessError 回归不变。
+- 资源/argv 与四文件上限 diff gate；变异至少覆盖 bool/0、策略泄漏、第二个 60、漏传/覆盖/吞掉/重试 timeout、丢 cause/job ID、argv 污染，以及新增 `__post_init__` 改写 direct slurm，全部红。
+- `cd producer && uv run pytest -q`、ruff、format、frozen sync；OpenSpec strict/all 与 stage anchor 全绿。
+
+**Non-goals / review focus**：
+- 不重做 #31，不新增 `LocalConfig.__post_init__` 或 direct-construction freeze；不实现 Issue #11 §E 的 `#69 生产绑定`（production `partial`/同一 runner→两 executor/两 provider及三命令同值归 #132/14.2）。也不改 provider/CLI/controller/protocol/JobState/walltime/watchdog/retry/cancel/work/M4 阈值。
+- Review 必查 PR #143 兼容、默认真单一、timeout 两层极性/cause/job ID/一次调用、策略零资源泄漏及 #132 firewall；测试必须 input→exact output 且可杀。
 ## 6. forcing-chain（二）：科学计算依赖引入
 
 - [x] 6.1 引入 numpy/xarray/cfgrib 并 `uv lock`，加 import 冒烟测试，确保 CI producer job 绿（必要时 CI 补 eccodes 系统依赖，作为依赖引入的伴生动作显式提交）
