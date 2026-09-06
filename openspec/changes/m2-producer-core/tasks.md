@@ -13,7 +13,7 @@
 - [x] 1.7 在 `config.toml` 装载边界落实三条已裁决取值域及精确错误路径（issue #32）
 - [x] 1.8 在同一装载期 domain owner 内拒绝 IFS/GFS 各自重复的 raw variable（issue #72）
 - [x] 1.9 将 config/local 齐备装载收口为两套完整取值的 provenance oracle（issue #48）
-- [ ] 1.10 将 config/local dataclass 的 `kw_only` / `frozen` 守卫改为直接 metadata oracle（issue #46）
+- [x] 1.10 将 config/local dataclass 的 `kw_only` / `frozen` 守卫改为直接 metadata oracle（issue #46）
 
 依赖：无
 §13.1 归属：无直接行（基础设施，支撑全部行）
