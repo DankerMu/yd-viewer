@@ -156,7 +156,13 @@ run MUST 经作业执行器抽象为每源提交至多一个作业；提交参�
 - **THEN** 三次底层 subprocess 调用的 `timeout` 均逐字等于该配置值，且 `JobSpec.resources`/sbatch argv 中不含 `command_timeout_seconds`
 
 ### Requirement: 并发与锁
-run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过不排队；锁 MUST 覆盖发现、提交、等待、发布、清理全生命周期。IFS/GFS 最多各一个作业并行。`cron.lock_path` MUST 是绝对路径：相对路径与 `~` 前缀（`Path` 不展开 `~`）MUST 在创建锁文件之前 fail closed，报错 MUST 指名 `cron.lock_path`。锁文件 MUST NOT 在释放时删除。
+run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过不排队；锁 MUST 覆盖发现、提交、等待、发布、清理全生命周期。IFS/GFS 最多各一个作业并行。`cron.lock_path` MUST 是绝对路径：相对路径与 `~` 前缀（`Path` 不展开 `~`）MUST 在创建锁文件之前 fail closed，报错 MUST 指名 `cron.lock_path`。
+
+`cron.lock_path` MUST 位于 node-22 本地文件系统的专属 `run/` 目录，MUST NOT 位于 yd/NWM NFS、`scratch_root` 或其它网络/共享挂载；这是部署时按实际挂载信息验收并写入 M4 receipt 的现场约束，业务代码 MUST NOT 按路径前缀、hostname 或平台猜文件系统类型。Linux NFS 把 `flock` 仿真为整文件 byte-range lock，不能提供本项目进程内判别器依赖的 per-open-file-description 前提。锁文件及其专属目录是长期哨兵：runlock 释放时只能 unlock/close，retention、work、staging 等任何仓内清理以及运维命令、tmp sweeper 等外部主体都 MUST NOT unlink、rename、replace 锁文件或删除/替换目录。
+
+每次成功 `flock` 后，runlock MUST 先以 `fstat(lock_fd)` 冻结普通文件的 `(st_dev, st_ino)`，再以 no-follow path stat 核对 `cron.lock_path` 仍是同一普通文件；只有核对成功才可调用被包裹 action。首次核对不稳定时 MUST unlock/close 旧 fd 并从 open/flock 开始完整重取一次，旧 attempt 下 action 零调用；重取遇真实锁竞争仍按成功跳过，第二次仍缺失、为 symlink/非普通文件、identity 不一致或状态不可确定则 MUST 抛指名 `cron.lock_path` 的 `RunLockError`，不得修补、重建、删除或返回 `acquired=False`。
+
+被包裹 action 返回或抛错后，runlock MUST 在仍持有 flock 时再次执行同一 no-follow 普通文件/identity 核对，再 unlock/close。退出核对失败时不得重跑 action：action 正常返回则抛 `RunLockError`；action 自身已抛异常则保留同一异常对象与 cause，追加锁身份漂移 note 后原样抛出。所有成功、跳过和异常路径都 MUST 释放本调用持有的锁并关闭 fd，且 MUST NOT unlink 当前 pathname 或 replacement。两次边界核对用于发现违反哨兵生命周期的替换，不宣称阻止两次检查之间的不合作 unlink；外部永不删除或替换哨兵仍是防止旧、新 inode 双持有者的必要不变量。
 
 #### Scenario: 锁被持有即跳过
 - **WHEN** 锁文件已被另一进程持有时进入 run 包装
@@ -165,6 +171,18 @@ run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过�
 #### Scenario: 非绝对锁路径即拒
 - **WHEN** `cron.lock_path` 为 `yd.lock` 或 `~/yd.lock`
 - **THEN** run 包装报错退出并指名 `cron.lock_path`，不创建任何锁文件，不执行发现
+
+#### Scenario: 首次取得的 fd 与锁路径不是同一 inode
+- **WHEN** 第一次 `flock` 成功后、action 前，`cron.lock_path` 缺失或 no-follow `(st_dev, st_ino)` 不等于 `fstat(lock_fd)`
+- **THEN** runlock 在 action 零调用下释放旧 fd 并完整重取至多一次；稳定的第二次取得才执行 action，第二次仍不稳定则抛 `RunLockError` 且不删除当前路径
+
+#### Scenario: 持锁期间锁路径被外部替换
+- **WHEN** action 运行期间外部 unlink 或替换 `cron.lock_path`，使退出核对的普通文件身份与已冻结身份不一致
+- **THEN** runlock 不重跑 action、不删除 replacement，释放旧锁/fd 后响亮失败；若 action 同时抛错则原异常对象与 cause 保持，只追加锁漂移 note
+
+#### Scenario: 锁路径只部署在 node-22 本地盘
+- **WHEN** M4 安装 cron 并检查 `local.toml` 中 `cron.lock_path` 的实际挂载
+- **THEN** 只有专属 node-22 本地文件系统路径可写入 receipt 并启用 cron；yd/NWM NFS、scratch 或其它网络/共享挂载必须拒绝
 
 #### Scenario: 双源并行单源失败不阻塞
 - **WHEN** fake executor 令 IFS 作业失败、GFS 作业成功
@@ -299,7 +317,7 @@ raw staging 失败时 MUST 保持 rawcopy 既有“不留半套”和本控制�
 - **THEN** 该 source/cycle 无 `DONE`、状态链未动、存在唯一含该轮 job ID 的合并日志、work 目录不存在
 
 ### Requirement: 保留窗口与安全清理
-清理 MUST 保留最新成功 cycle 往前 14 天的 `output` source 目录，窗口外目录与对应失败日志删除；每个删除目标（含成功轮 work 删除）MUST 先经 `realpath` 确认位于 yd 自己的根内，否则拒绝删除。
+清理 MUST 保留最新成功 cycle 往前 14 天的 `output` source 目录，窗口外目录与对应失败日志删除；每个删除目标（含成功轮 work 删除）MUST 先经 `realpath` 确认位于 yd 自己的根内，否则拒绝删除。node-22 本地 `cron.lock_path` 及其专属 `run/` 目录 MUST 位于全部 retention、work、staging 与 residue 清理根之外，并是所有清理的显式禁区；任何删除候选中的 symlink 都不得被跟随到该哨兵。
 
 #### Scenario: 14 天窗口
 - **WHEN** 模拟根含最新成功 cycle 与一个 15 天前的 source 目录

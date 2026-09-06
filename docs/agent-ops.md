@@ -195,6 +195,10 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 - 使用非阻塞 `flock -n`，已有实例时本 tick 跳过；
 - 锁覆盖发现、Slurm 提交、等待、NFS 发布和清理的完整生命周期；
 - 手工 `run` 使用同一把锁，不能绕开；
+- `cron.lock_path` 必须位于 node-22 本地文件系统的专属 `run/` 目录，不得位于 yd/NWM NFS 或其它网络、共享挂载。部署时必须按该路径的实际挂载信息确认并写入 receipt，不能按路径前缀或 hostname 猜测；Linux 在 NFS 上会把 `flock` 仿真为整文件 byte-range lock，本项目依赖的 per-open-file-description 判别前提在那里不成立；
+- 锁文件是长期哨兵。producer 释放时只 unlock/close；retention、work、staging 等任何清理以及运维命令、tmp sweeper 等外部主体都不得 unlink、rename、replace `cron.lock_path`，也不得删除或替换其专属 `run/` 目录。迁移该路径前必须先停 cron，确认无 controller 持锁或运行，再更新现场配置并记录 receipt；
+- `runlock` 在 `flock` 成功后必须以 `fstat(lock_fd)` 冻结 `(st_dev, st_ino)`，并在调用 controller 前、controller 返回或抛错后但 unlock 前，分别以 no-follow path stat 确认 `cron.lock_path` 仍是同一普通文件。首次取锁后的检查不一致时只允许释放旧 fd 并重取一次；再次不一致、路径缺失、symlink、类型异常或持锁期间 identity 漂移都必须响亮失败，不能修补、重建或静默报告成功。controller 自身异常与 identity 漂移同时发生时保留原异常并附加锁漂移证据；任何路径都仍须 unlock/close；
+- 上述 identity 检查用于在入口和退出边界发现违反生命周期约束的替换，不宣称能阻止两个检查点之间的不合作外部 unlink；禁止外部删除长期哨兵才是防止新 inode 上出现第二持有者的必要前提；
 - 每次 run 在本源首次前沿发现前完整扫描 `work/<source>/` 顶层合法 00/12 cycle：先确认 `output/` 根可枚举，只对同源 `DONE(T)` 经 no-follow 判为普通文件的真实目录 exact work 做 identity-bound 删除，并把 source/cycle/绝对 path 写进本轮报告；无有效 DONE 的候选全部保留，扫完后以最早 cycle 停源待人工确认，不能遮住其它可回收目录；
 - 不同时启动第二个前台 controller；
 - cron 最终分钟点由现场配置决定，未定前不写死。

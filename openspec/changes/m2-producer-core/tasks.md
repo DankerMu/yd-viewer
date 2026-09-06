@@ -120,7 +120,8 @@ walltime = "<如 04:00:00>"
 command_timeout_seconds = 60
 
 [cron]
-lock_path = "<绝对路径>"
+# node-22 本地文件系统上的专属长期哨兵；不得位于 yd/NWM NFS、scratch_root 或清理根
+lock_path = "<本地绝对路径>"
 log_dir = "<绝对路径>"
 ```
 
@@ -3305,7 +3306,7 @@ Review focus:
 
 - [x] 12.1 实现严格前沿纯函数：`DONE`/状态文件集合 → 每源待跑 T 或停止原因（全新链、D+12h、状态缺失、时间头不对应 T、raw 缺口、缺轮阻塞）
 - [x] 12.2 实现未提交残留识别与清理重跑判定（保留 T 状态、删更晚状态与半成品）
-- [x] 12.3 实现非阻塞 flock 封装（持有即跳过、覆盖全生命周期），进程内测试跳过语义
+- [x] 12.3 实现非阻塞 flock 封装（持有即跳过、覆盖全生命周期、本地盘长期哨兵与持锁 inode 一致性），进程内测试跳过语义与外部替换 fail-closed
 
 依赖：组 1、组 4（12.1 时间头校验读分段 header）
 §13.1 归属：控制器（前沿/flock 幂等/raw 缺口）
@@ -3527,20 +3528,23 @@ Project profile: yd-viewer
    - **窗口 2（已提交但未登记）**：同上——没有任何 job ID 存在，但也没有任何 Slurm 作业会写 NFS 侧路径，故对 12.2 的删除集合同样不可达。
    - **仍然成立的危害与其落点**：一旦 #28 把 work 的删除接进重跑路径，两个窗口都恢复可达，且窗口 2 按 #59 的构造性不对称无法用 job ID 覆盖。因此 #59 的两条候选（(a) 存活确认 / (b) 见半成品即停等）与 `spec.md`「未提交残留清理重跑」是否需要 delta，**整体归 #28 裁决**，本 issue MUST NOT 替它选。本 issue 的义务是把边界写死在此并在 #59 上留证。
 10. **本 #23 不接线 `run` CLI**。`cli.py:116` 的 `run` 在本 issue 交付时仍是 `_unimplemented`；最终接线归 M2 收尾任务 14.2。12.3 只交付可复用的上下文管理器 / 包装函数，MUST NOT 在本 issue 内修改 `cli.py` 的子命令行为。
-11. **flock 语义钉死**：用 `fcntl.flock(fd, LOCK_EX | LOCK_NB)`，MUST NOT 用 `fcntl.lockf`；释放时 MUST NOT `unlink` 锁文件（删掉后另一实例会在新 inode 上建锁，两个持有者同时成立）；被包裹的可调用对象在跳过分支 MUST NOT 被调用；跳过是**成功**语义（与「跑过了」可区分的返回值，不是异常，不是非零退出）。`fcntl.flock` 的锁挂在 open file description 上，故同一进程内两次独立 `open()` 互相冲突——进程内用例因此是有效判别器。spec 的 Scenario 写的是「另一进程」，任务 12.3 写的是「进程内测试」：等价性由上一句给出，但 MUST 另加一条子进程用例正面覆盖 spec 的字面 WHEN。
+11. **flock 语义钉死**：用 `fcntl.flock(fd, LOCK_EX | LOCK_NB)`，MUST NOT 用 `fcntl.lockf`；释放时 MUST NOT `unlink` 锁文件（删掉后另一实例会在新 inode 上建锁，两个持有者同时成立）；被包裹的可调用对象在跳过分支 MUST NOT 被调用；跳过是**成功**语义（与「跑过了」可区分的返回值，不是异常，不是非零退出）。在本地文件系统这一部署前提下，`fcntl.flock` 的锁挂在 open file description 上，故同一进程内两次独立 `open()` 互相冲突——进程内用例因此是有效判别器。spec 的 Scenario 写的是「另一进程」，任务 12.3 写的是「进程内测试」：等价性由上一句给出，但 MUST 另加一条子进程用例正面覆盖 spec 的字面 WHEN。Linux NFS 会把 `flock` 仿真成整文件 byte-range lock，锁属主退化为进程；这不证明跨进程互斥必然失效，但会使本进程内判别前提不成立，故不能把 `cron.lock_path` 部署在 NFS。
     **进程内跳过用例的第一持有者 MUST 也经同一个封装取得锁，MUST NOT 由测试自己直接 `fcntl.flock`**（fixture 复核实测，darwin 24.6.0）：XNU 把 `flock` 与 `lockf` 并进同一条 lock list，测试自持 `flock` 时封装侧的 `lockf` 仍报 `EAGAIN`，于是 `flock → lockf` 变异体照样走跳过分支、用例保持绿而存活。两侧同经封装则该变异体使两把锁都变成同进程不冲突的 `lockf`，第二次进入会**真执行**，用例变红。这条不是风格：判别器的两端必须同时被变异，否则平台的锁合并语义会把变异体藏住。
 12. **零新增依赖**：`fcntl`、`os`、`pathlib` 全在 stdlib。本 issue MUST NOT 引入 `filelock` 之类的第三方包。
+13. **#85 M2 收尾裁决——本地盘长期哨兵 + 持锁 identity**：`cron.lock_path` MUST 位于 node-22 本地文件系统的专属 `run/` 目录，MUST NOT 位于 yd/NWM NFS、`scratch_root` 或其它网络/共享挂载。该判定由 M4 安装 cron 时读取实际挂载信息并写 receipt，M2 业务代码不猜路径前缀、hostname 或平台。锁文件及其目录是长期哨兵：runlock 只 unlock/close；本仓 retention/work/staging/residue 清理以及运维 `rm`、tmp sweeper 等外部主体都不得 unlink、rename、replace 文件或删除/替换目录。迁移只能先停 cron、确认无 controller 持锁/运行，再改现场配置并留 receipt。
+    runlock 每次成功 `flock` 后 MUST 以 `fstat(fd)` 冻结 `(st_dev, st_ino)`，并用 no-follow path stat 确认 `cron.lock_path` 是同一普通文件后才调用 action。首次 action 前失配只允许 unlock/close 旧 fd，从 open/flock 开始完整重取一次；重取遇竞争按既有成功跳过，第二次仍缺失、symlink/非普通、identity 不等或不可确定则 `RunLockError`，action 零调用，不创建 replacement、不删当前路径。action 返回或抛错后、unlock 前必须再做同一检查；失配不得重跑 action，正常 action 转 `RunLockError`，原 action 异常则保持同一对象/cause 并 `add_note` 附锁漂移证据。所有路径释放本调用的锁/fd。两处检查只能发现已经发生的替换；禁止外部删除长期哨兵仍是防止旧、新 inode 双持有者的必要不变量，fixture MUST NOT 把有限检查写成原子防护。
 
 Must-preserve behavior:
 - 除 #86 明确翻转的共享 `output/` 根级 `ENOENT`/`ENOTDIR` 外，`decide_frontier` 与 `controller` 现有导出行为保持不变；尤其 `output/` 可枚举但某个 cycle/source/`DONE` 子路径不存在时仍只表示该处无 `DONE`，`states/<source>/` 缺失仍是 `NO_INITIAL_STATE`。实现面限于 `controller.done_cycles` 的根严格枚举及 `residue.plan_residue` 对同一根前置条件的独立复核；不得扩成所有路径的 ENOENT 都停源
 - 「前沿只由 `DONE` 推进」——清理动作 MUST NOT 反过来影响 T 的计算：清理前后对同一棵树调用 `decide_frontier`，T 不变（清理后 T 仍是 T，正是「以 T 状态重新组装本轮」在发现层的可证形式）
 - `states/<source>/<T>.cfg.ic` 在任何路径上都不被删除
 - 已带 `DONE` 的 `output/<cycle>/<source>/` 及其 `yd.rivqdown.dat` 在任何路径上都不被删除
+- `cron.lock_path` 的文件在正常、跳过、action 异常与 identity 异常路径上都不被 runlock unlink/rename/replace；当前 pathname 若已是 replacement 同样原样保留
 - `store/safe_fs.py` 零改动（本 issue 是它的消费者，不是它的维护者）
 
 Seams under test:
 - 目录树 fixture（`tmp_path.resolve()` 下的合成 `YD_ROOT`），无注入式 fake——删除是真实文件系统动作，记录型 fake 会让「删对了没有」退化为永真式
-- 锁：封装自身持锁 + 同进程第二次进入同一封装（跳过语义；两端同经封装，见裁决 11 末段）+ 一个子进程持锁（spec 字面 WHEN）
+- 锁：本地 tmp 文件系统上的封装自身持锁 + 同进程第二次进入同一封装（跳过语义；两端同经封装，见裁决 11 末段）+ 一个子进程持锁（spec 字面 WHEN）；真实 node-22 挂载类型只由 M4 receipt 验收，不用 tmp fixture 冒充
 - 时间/cycle：直接构造文件名，不注入时钟
 
 Required evidence:
@@ -3573,7 +3577,13 @@ Required evidence:
 - **锁：释放后可再取**：第一次正常退出后第二次进入 -> 真正执行；锁文件在释放后**仍存在**（不 unlink）
 - **锁：异常路径也释放**：被包裹的可调用对象抛异常 -> 异常向外传播且锁已释放（同棵树第二次进入能拿到锁）
 - **非绝对锁路径**：`"yd.lock"` 与 `"~/yd.lock"` 两种形态 -> 抛错且消息含 `cron.lock_path`；断言 cwd 下与 `Path.home()` 下**都没有**新建锁文件，且被包裹的可调用对象零调用（spec Scenario 逐字要求「不执行发现」；副作用先于闸门是本条要杀的形态）
-- 预登记变异体（(a)–(af) 共 32 条，此处刻意写全数；(t)–(aa) 由 round 1 核验门追加，(ab)–(af) 由 round 2 核验门追加），每条 MUST 被上列用例杀死（跑法见 `openspec/project-profile.md` 的 Mutation-testing hazards，用 `uv run python -m pytest`）：
+- **action 前首次 identity 失配只重取一次**：在第一次 flock 后、no-follow path stat 前把锁 pathname 外部 unlink 并放入不同 inode 的普通文件 -> 旧 fd unlock/close、action 零调用；第二次 open/flock/fstat/path-stat 稳定时 action 恰执行一次并正常返回，当前普通文件保留。记录 open/flock/unlock/close 次数，证明重取完整且上限为一次
+- **action 前持续 identity 失配 fail closed**：两次取得后都把 pathname 换成不同 inode；第二次抛指名 `cron.lock_path` 的 `RunLockError`，action 零调用，两份已打开 fd 均 unlock/close，当前 replacement 保留。另参数化第二次 path 为缺失、symlink、目录/FIFO 及 path stat I/O 不可确定，均不得返回 `acquired=False`、创建修补文件或泄漏 fd
+- **持锁 action 期间外部 unlink 的实序列**：action 内 unlink 锁 pathname 并创建不同 inode 普通 replacement 后正常返回 -> 退出 identity 闸抛 `RunLockError`，action 恰一次、不重跑，replacement 原样保留，旧 fd unlock/close。该用例必须断言 replacement `(st_dev, st_ino)` 与 action 前冻结值不同，不能只看路径存在
+- **action 异常与退出漂移并存**：action 先把 pathname 换 inode，再抛带 cause 与既有 note 的自定义异常 -> runlock 保持同一异常对象/cause/note，只追加一条点名 `cron.lock_path`、expected/actual identity 的 note 后原样抛出；不得用 `RunLockError` 替换原错误，replacement 保留，fd 释放
+- **入口类型判据与 no-follow**：稳定普通文件通过；在 action 前把 pathname 换成指向原 inode 或其它普通文件的 symlink也拒绝，证明不是跟随 `stat` 后只比 inode。`fstat(fd)` 自身或 no-follow path stat 的错误均按真错而非锁竞争处理
+- **M4 本地盘 receipt 合同**：文档/fixture 的结构断言必须证明 `cron.lock_path` 明文排除 yd/NWM NFS、`scratch_root` 与其它共享挂载，要求按实际 mount 证据验收；M2 单元测试不 monkeypatch/猜测 filesystem type，也不把 tmp_path 声称为 node-22 receipt
+- 预登记变异体（(a)–(am) 共 39 条；(ag)–(am) 为 #85 收尾裁决追加），每条 MUST 被上列用例杀死（跑法见 `openspec/project-profile.md` 的 Mutation-testing hazards，用 `uv run python -m pytest`）：
   (a) 「更晚」判据 `>` 改 `>=` -> 保留 T 用例变红；
   (b) 逐源过滤去掉（对 `states/` 全域比较）-> 逐源隔离用例变红；
   (c) `DONE` 存在性判据改为「目录非空」-> `DONE` 保护用例变红；
@@ -3606,6 +3616,13 @@ Required evidence:
   (ad) `safe_fs.remove_tree_allow_symlinks` 首行的 `_reject_unsafe_entry_name(name)` 删除（**变异只在 scratch 副本内做**，`store/safe_fs.py` 仓内零改动）-> `..` 条目名用例变红。这条登记的是**消费者侧依赖**：`..` 清单不会真删到 `output/` 是由该行独家承载的，而仓内此前无任何用例钉住它（round 2 实测：删掉该行后全套 1003 绿，且 `..` 清单会真的删掉另一源已提交的 `DONE` 产物）；
   (ae) `ResiduePlan.empty` 退化成 `return not self.state_files`（丢掉半成品那条臂）-> 半成品独臂清单用例变红（round 2 实测存活：既有断言用的树两臂要么同空、要么同非空；`empty` 是公开 API 且 13.2 只消费清单不执行，按它分支的调用方会静默跳过真实半成品）；
   (af) `execute_residue_plan` 的两个删除循环对调（先状态、后半成品）-> 执行序用例变红（round 2 实测存活。判别树：`states/<source>/<T+12>.cfg.ic` 是 symlink + 同时有半成品树；两种顺序都抛 `SafeFilesystemError`，但钉死的顺序在抛之前已把半成品删掉，对调后半成品每 tick 原地不动）
+  (ag) 去掉 action 前 `fstat(fd)` 与 no-follow path identity 核对 -> 首次/持续失配用例变红；
+  (ah) path 核对改用跟随 symlink 的 `os.stat` -> 指向原 inode 的 symlink 用例变红；
+  (ai) 首次失配后无限重试，或第二次失配再重取 -> 持续失配用例的 open/flock 次数上限变红；
+  (aj) 首次失配时复用旧 fd/不 unlock-close 就重试 -> 重取完整性与 fd 生命周期断言变红；
+  (ak) 去掉 action 后、unlock 前的 identity 核对 -> action 内 unlink/replacement 实序列用例变红；
+  (al) 退出 identity 失败覆盖 action 原异常 -> 同对象/cause/note 用例变红；
+  (am) identity/type/stat 错误吞成 `RunLockResult(acquired=False)` -> action 前持续失配与错误分流用例变红。
 - `cd producer && uv run pytest` -> 退出码 0
 - `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
 - `cd producer && uv sync --frozen` -> 退出码 0（不得新增依赖）
@@ -3942,11 +3959,11 @@ Minimal mergeable slice: issue #25 的 13.2 + 13.3（接受上游 `merged-tasks`
    **时间锚同样是删除身份，不能只做字段间自洽**（round 1 `data-integrity` cand-01，独立 verifier 实测）：当 `latest_done` 非空时，构造点与执行点 MUST 用上述 cleanup-owned no-follow discovery 重新读取该 source 当前普通文件 `DONE` 集合并校验其最新值 `D_current`；集合为空，或 `latest_done > D_current`，均在任何删除前 `CleanupError(phase="validate", path=None)`。只拒绝“未来/伪造锚”，不要求相等：`latest_done < D_current` 的旧 plan cutoff 更早、删除集是当前合法删除集的严格子集，MUST 允许保守重放。discovery 的 `SafeFilesystemError`/`OSError`/兼容边界注入的 `DiscoveryUnreadableError` 必须保留为 `__cause__` 并收敛为 validate；构造点和执行期重绑都要有独立 oracle。验证裁决的反例为：真实 D=`2026082600`、受保护对象 `2026081300`，手工锚 D+2d 会把 cutoff 推到 `2026081400` 并删除该对象；Phase 6.2 复发现为 `output/2026082800` 指向根内伪造目录时，同样会把 cutoff 推到 `2026081400`。两种形态都必须在构造或执行首删前拒绝。
 7. 当前 `D_current` 的 `output`、cycle、source 与 `DONE` 四个分量在同一次 fd-bound walk 中逐一 no-follow 类型校验：前三者只能是真目录，`DONE` 只能是普通文件；每次向下一层都相对已打开父 fd，不能先用 `Path.iterdir`/`os.stat`/`realpath` 得出候选后再只 `lstat` 末端。指向根内或根外的 symlink 一律因分量类型拒绝；真正缺失的 source/`DONE` 仍是不完成。planner 上的发现/锚点失败归 `CleanupError(phase="retention-plan", path=<可指名的不安全或不可读分量>)`，公开 plan 构造与 execute 重绑上的同类失败归 `CleanupError(phase="validate", path=None)`；底层异常只作为 cause。每个拟删目标在计划期全部完成以下预检，任一失败则**整个计划报错且零删除**：存在性可确定、output 目标是真目录/log 目标是普通文件、`realpath(strict=True)` 位于 `Path(yd_root).resolve()` 之内且不等于根本身。symlink 指向根外必须指名目标并拒绝；symlink 指向根内也因类型不符拒绝，不把正式 lane 的异常形态当正常旧数据。
 8. `execute_retention_plan` 在第一处删除前对**全部仍存在目标**重复第 7 条 realpath/类型预检，并通过 `safe_fs` 的可复用只读 fd-walk 对每棵正式 output 目标树完成一次 no-follow 内容预扫；这是抵御“计划后、执行前换成 symlink”以及“静态树内 symlink 到删除途中才发现”的 point-of-use 闸。预扫 MUST 从 containment root 逐分量 `O_NOFOLLOW` 打开，只 `stat/list`、零 unlink/rmdir；任一树内 symlink 或不安全分量必须在**整批第一处删除之前**拒绝，故静态不安全树的全树字节/类型快照、其它计划目标、链接与根外目标均存活（round 1 `data-integrity` cand-02：现有 `rmtree_no_follow` 会按 `os.listdir` 顺序先删普通兄弟、遇 link 才拒绝，违反 fixture 的“该树存活”）。完整预检之后，output 正式树仍用 `rmtree_no_follow` 作为预扫后 race 的最终 no-follow 防线，失败日志用 `unlink_no_follow`，均带 `containment_root=plan.yd_root` 与 `missing_ok=True`。顺序为 output 后 logs；**只对预检完成后发生的 IO 错误或竞态拒绝**允许部分完成，静态安全拒绝不在此 carve-out 内；旧 plan 重放与重新计划都必须幂等。
-9. 保留器不删除 `output/<cycle>/` 空父目录，不扫 scratch work，不清 states，不引入 wall-clock/配置默认值；这些都不是本 issue 两条 Scenario 的对象。固定 14 天来自现有产品契约，不新增配置旋钮。**#43 M2 收尾裁决覆盖本块此前“固定 14 天/不新增配置旋钮”的取值归属：上列 `14 days` 仅是测试配置值，保留窗口天数 MUST 来自配置，`object_path.DEFAULT_RETENTION_WINDOW_DAYS` 不是取值来源。**
+9. 保留器不删除 `output/<cycle>/` 空父目录，不扫 scratch work，不清 states，不引入 wall-clock/配置默认值；这些都不是本 issue 两条 Scenario 的对象。固定 14 天来自现有产品契约，不新增配置旋钮。**#43 M2 收尾裁决覆盖本块此前“固定 14 天/不新增配置旋钮”的取值归属：上列 `14 days` 仅是测试配置值，保留窗口天数 MUST 来自配置，`object_path.DEFAULT_RETENTION_WINDOW_DAYS` 不是取值来源。** **#85 另把 node-22 本地 `cron.lock_path` 及其专属 `run/` 目录列为所有 retention/work/staging/residue 清理的显式禁区：现场路径必须位于这些清理根外；cleanup 不取得、迁移或重建锁，删除候选中的 symlink 也不得被跟随到该哨兵。**
 10. 零新增依赖；仅 stdlib + 现有 `executor/controller/store.safe_fs`。不得用 `shutil.rmtree`、裸 `Path.unlink`、跟随 symlink 的 `Path.open/read_bytes`，不得在本模块复制 `safe_fs` 的递归删除实现。
 
 Invariant Matrix
-Governing invariant: 失败收尾只能把“同一 source/T 的完整失败证据”提交后删除“同一 source/T 的精确 work”，而保留清理只能删除由该 source 最新 `DONE` 锚定、严格落在 14 天窗口外且在已解析 `YD_ROOT` 内的对象；两条路径都不得推进/破坏状态链或越到兄弟源/根外。
+Governing invariant: 失败收尾只能把“同一 source/T 的完整失败证据”提交后删除“同一 source/T 的精确 work”，而保留清理只能删除由该 source 最新 `DONE` 锚定、严格落在 14 天窗口外且在已解析 `YD_ROOT` 内的对象；两条路径都不得推进/破坏状态链或越到兄弟源/根外，并始终不得触碰 node-22 本地 `cron.lock_path` 或其专属 `run/` 目录。
 Source-of-truth identity/contract: `(source, cycle T)` + terminal `JobRecord.job_id` 标识失败轮；cleanup-owned、从 resolved YD_ROOT fd-bound 逐分量 no-follow 发现的每源最新普通文件 `output/<D>/<source>/DONE` 标识保留窗口锚点；`Path(yd_root).resolve()` / `Path(work_root).resolve()` 标识各自容纳根。
 Surfaces:
 - Producers: `finalize_failed_job` 产出 `logs/<source>/<T>.log`；`plan_retention` 产出不可变删除清单
@@ -3961,6 +3978,7 @@ Regression rows:
 - 当前锚点的 `output`/cycle/source/`DONE` 任一分量是不安全形态，或计划后被换成该形态 -> planner/constructor/execute 在首删前按各自错误域拒绝，整批目标与外部对象存活
 - 日志目标/输入或 retention 候选是根外 symlink，或计划后被换成根外 symlink -> 在任何相关删除前稳定拒绝，链接与根外目标存活
 - D-14d / 兄弟 source / 非法名字 / 无最新 DONE -> 完整保留；D-14d-12h 本源 output 与对应失败日志 -> 删除
+- `cron.lock_path` 与其专属 `run/` 目录位于 node-22 本地、全部删除根之外；在 `YD_ROOT`/scratch 的清理候选内放置指向该锁或目录的 symlink -> failure、retention、residue、startup hygiene 与 staging cleanup 都只拒绝或删除链接自身，绝不跟随，哨兵 identity/字节与目录树快照不变；结构检查另证明没有清理 API 直接消费 `cron.lock_path`
 
 Boundary-surface checklist:
 - 共享 helper 根：消费 `store/safe_fs.py` 的 fd/no-follow 原语与只读树预扫；只允许为 cleanup-owned discovery 补一个最小可复用 read-only helper，不能改写既有删除语义
@@ -4014,6 +4032,7 @@ Required evidence（真实 tmp 目录树；期望 cycle/路径由构造期独立
 - TOCTOU：先得到含两个目标的合法 plan，再把排序靠后的目标换成根外 symlink -> `execute_retention_plan` 在第一删前拒绝，排序靠前目标仍在；证明二次**全量**预检而非边删边查
 - 正式 output 目录内部同时放至少三份普通文件、一个**位于嵌套子目录内**且指向根外的 symlink 与一个排序在 link 后的普通文件 -> 执行期全批只读 no-follow 预扫在首删前拒绝，`snapshot_tree` 证明该树所有条目逐项存活，链接/根外目标/其它计划目标同样存活；随后 `rmtree_no_follow` 只承担预扫后 race 防线。独立 safe_fs 用例还须直接钉住只读预扫对嵌套纯目录树通过、对 nested-descendant symlink 零变更拒绝；把 `_verify_tree_no_symlinks_fd` 的递归调用替成 no-op 时，helper 与 cleanup whole-plan 两个新 killer 都必须变红。unexpected regular-file/FIFO lane -> 稳定错误、不阻塞读取
 - `YD_ROOT` 经 `link -> real` 到达 -> 合法计划/执行成功且 `plan.yd_root` 是实路径；同一 plan 重放和重新计划均 no-op
+- **#85 锁哨兵禁区的结构与行为双证据**：结构上枚举 failure/retention/residue/startup-hygiene/prepare-staging 的每个删除 producer，证明删除目标只能由各自精确 lane 派生且没有 `cron.lock_path`/其父 `run/` consumer；行为上把带可识别字节/inode 的锁文件置于本地清理根外，并从各清理候选放入指向锁文件或 `run/` 的 symlink，逐条运行公开 plan/execute/finalizer，断言仅链接自身按既有策略被拒绝或删除，目标锁文件和目录 identity/字节/条目集合不变。不得为测试把合法 lock 配到 `YD_ROOT`/scratch 内，也不得放宽生产路径合同
 - 公共错误域矩阵：非法 FailureInputs/RetentionPlan -> `CleanupError(phase='validate')`；日志输入/目标异常 -> `phase='log'`；日志已提交但 work 删除失败 -> `phase='work'` 且日志存活；DONE/候选枚举或计划期 realpath/type 异常 -> `phase='retention-plan'`；二次预检/删除期异常 -> `phase='retention-execute'`。每条断言异常类型、`phase`、涉事时 `path`，并断言底层 `ValueError`/`DiscoveryUnreadableError`/`SafeFilesystemError`/`OSError` 不穿透
 - Batched red proof：新测试对 pre-change source 一次运行必须红（模块不存在即可），随后恢复实现全绿；不得遗留 `red-proof` stash
 

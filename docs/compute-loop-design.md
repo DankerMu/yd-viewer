@@ -162,7 +162,7 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 - SHUD 二进制；
 - Slurm partition、account、CPU、内存和 walltime；装载后以 `MappingProxyType` 只读资源映射暴露，调用方不得改写；
 - `[slurm].command_timeout_seconds`：每次 `sbatch`/`sacct` 客户端子进程的正整数秒时限，缺席时版本化默认 60；它从资源映射剥离，不是作业 walltime；
-- cron lock 与日志位置。
+- cron lock 与日志位置；其中 lock 必须是 node-22 本地文件系统上的专属长期哨兵路径，不能放在任何 NFS 挂载或清理根内。
 
 项目不维护动态 registry。复制来的 file backend 如要求 NWM 结构的 registry/model manifest，控制器根据 TOML 在本轮 work 内临时生成，用完随 work 删除。
 
@@ -330,7 +330,11 @@ cron 每小时调用 `yd-producer run --config <path> --local <path>` 的非阻�
 
 - 前一实例仍持锁时，本 tick 直接跳过，不排队；
 - 锁覆盖发现、提交、等待、发布和清理的完整生命周期；
-- 手工补跑也必须走同一个锁入口，不能绕过互斥。
+- 手工补跑也必须走同一个锁入口，不能绕过互斥；
+- `cron.lock_path` 必须位于 node-22 本地文件系统的专属 `run/` 目录，不得位于 yd/NWM NFS 或其它网络、共享挂载；M4 安装 cron 前按实际挂载确认并记录 receipt，代码不按路径前缀或 hostname 猜文件系统类型；
+- 锁文件与专属 `run/` 目录是长期哨兵，producer 只 unlock/close，任何 retention/work/staging 清理、运维命令或系统 tmp sweeper 都不得 unlink、rename、replace 或删除；
+- `runlock` 在成功 `flock` 后以 `fstat(lock_fd)` 冻结 `(st_dev, st_ino)`，调用 controller 前和其返回或抛错后但 unlock 前，都以 no-follow path stat 确认路径仍是同一普通文件。首次检查失配只释放旧 fd 并重取一次；再次失配、路径缺失、symlink、类型异常或运行期 identity 漂移均 fail closed，任何路径仍 unlock/close。若 action 自身与退出检查同时失败，保留原异常并附加锁漂移证据；
+- identity 边界检查只能发现已发生的路径替换，不能阻止两个检查点之间的不合作 unlink；防止新 inode 上出现第二持有者仍以“外部永不删除或替换哨兵”为必要部署不变量。Linux NFS 对 `flock` 的整文件 byte-range-lock 仿真也不提供本项目依赖的 per-open-file-description 测试前提，因此不能把锁文件放在 NFS。
 
 一次 run 在四份双源依赖映射全局校验通过后，由每个 source worker 先完成本源配置/路径 preflight，再在本源首次前沿发现之前做一次 scratch hygiene。它先确认共享 `output/` 根可枚举，再按 cycle 扫描 `work/<source>/` 顶层全部合法 00/12 候选；非法名字保留且不映射成 NFS 路径。只有同源 `output/<T>/<source>/DONE` 经 no-follow 判为普通文件时，才删除对应的真实目录 exact work；`DONE(T)` 已证明这棵 work 树不再是运行 authority。删除前必须 no-follow 冻结目录 `(st_dev, st_ino)`，并以 scratch `work_root` 为 containment root 在打开和最终 `rmdir` 前复核同一 identity；树内 symlink 只删链接、不跟随。所有无有效 `DONE(T)` 的候选先保留，不能遮住其它可删目录；完整扫描后以最早一个复用 `UNVERIFIED_WORK_RESIDUE` 停源。普通文件 DONE 对应的 exact 路径若是非目录、identity 漂移或无法确定也保留并响亮失败——非目录不是有效 work 树，且现有原语没有 identity-conditional unlink，不能按 pathname 盲删。成功删除的 source/cycle/绝对 path 以 `startup cleanup:` 前缀记入该源本轮首个 `RunReport.detail`；若首个报告前抛出其它 `RunError`，在保留原异常对象、cause 和既有 notes 的前提下追加到其 `__notes__`，聚合错误与 CLI 必须按源渲染每项。清理自身失败的错误正文列出此前已删项与失败路径；已完成删除不回滚。公开 report 字段不扩展，`residue.plan_residue` 的 NFS DONE 极性不改。
 
@@ -402,8 +406,9 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 | scratch `work/<source>/<T>` | 本 attempt 的 token 匹配时在成功或失败收尾删除；post-`DONE` 历史孤儿由下一次 run 启动 hygiene 重新冻结并复核 identity 后删除、记入报告；无 `DONE` 或 identity 漂移则保留并响亮报告 |
 | NWM NFS raw 原件 | yd 永不清理 |
 | scratch raw 副本/canonical/forcing/raw-manifest | 本轮临时工件，随 work 删除 |
+| node-22 本地 `cron.lock_path` 及其专属 `run/` 目录 | 长期互斥哨兵，所有 producer/retention/work/staging 清理与外部清理均不得 unlink、rename、replace 或删除 |
 
-清理只允许作用于经 `realpath` 确认位于 yd 自己根目录下的对象；不得跟随路径进入 NWM raw 根。
+清理只允许作用于经 `realpath` 确认位于 yd 自己根目录下的对象；不得跟随路径进入 NWM raw 根。`cron.lock_path` 及其专属本地 `run/` 目录必须位于这些清理根之外，也是显式禁区；任何删除候选中的 symlink 都不得被跟随到该哨兵。
 
 ## 13. 验证计划
 

@@ -67,6 +67,8 @@ M2 的 `AttemptDriver` 是注入式计算节点边界，不是假成功入口：
 
 **D16 M2 收尾 `yd-producer run` 生产接线（任务 14.2，覆盖本段旧边界）**：`cli.py run` 不再保持 staged-unimplemented，也不把生产 worker/跨进程 receipt 推给 M4。它必须在同一 `run_with_lock` 生命周期内调用 `controller.run_sources`，并为 `{ifs,gfs}` 注入独立 Slurm executor、生产 `AttemptDriver`、`POLL_INTERVAL_SECONDS = 10` 的实际等待 policy 与 #47 独立 `sacct ExitCode` provider。#69 的客户端命令时限来自 `local.toml [slurm].command_timeout_seconds`，loader 唯一默认 60 秒；生产以同一 bounded subprocess runner 覆盖 `sbatch`、轮询 `sacct` 与 ExitCode `sacct`，timeout 转 `ExecutorError` 后按 #58 保留 work、终止本源，绝不伪造作业 `TIMEOUT` 或自动重试/回收。生产 driver/worker 仍必须守住本段的安全理由：重计算只在 Slurm job 内执行，worker 以原子、checksum/identity 绑定的 work-local receipt 传递同一 tracker authority；不得用目录扫描、提交前预埋产物或测试 terminal hook 冒充生产接线。M4 只做 node-22 真 Slurm/NFS/SHUD receipt、现场值与 cron 安装，不再负责补写 CLI 业务体。
 
+**D17 M2 收尾 runlock 位置与生命周期（#85）**：`cron.lock_path` 是 node-22 本地文件系统上专属 `run/` 目录内的长期哨兵，不得放入 yd/NWM NFS、`scratch_root` 或其它网络/共享挂载；M4 以实际挂载证据验收该现场值，业务代码不按路径前缀、hostname 或平台猜文件系统。producer 释放只 unlock/close，retention/work/staging 清理及外部运维、tmp sweeper 均不得 unlink、rename、replace 锁文件或删除/替换该目录。`run_with_lock` 成功 `flock` 后以 `fstat(fd)` 冻结 `(st_dev, st_ino)`，在 action 前及 action 返回/抛错后、unlock 前，用 no-follow path stat 验证路径仍是同一普通文件；首次 action 前失配只允许释放旧 fd 并完整重取一次，持续失配或持锁期间漂移均 fail closed。action 自身异常与退出检查失败并存时保留原异常并附加锁证据；所有路径仍释放锁并关闭 fd。该边界检查用于发现违反生命周期约束的替换，不虚称能阻止两检查点之间的不合作 unlink；“外部永不删除长期哨兵”仍是防止旧、新 inode 双持有者的必要部署不变量。
+
 为让 rawcopy/canonical/forcing/registry 共用同一 `LocalObjectStore`，14.1 把 `stage_raw` 的 `work_dir` 实参明确取为 `<attempt-work>/object-store`：raw 落 `object-store/raw/`，本轮 manifest 落 `object-store/raw-manifest.json`，canonical/forcing/models 同根。`stage_raw` 自身的 standalone 合同与 local key `raw/...` 不改；这是 controller 的接线选择。整棵 `<work_root>/<source>/<T>` 仍是一次 attempt 的唯一回收单元。
 
 报告拆为 `JobRunReport`（job ID、提交记录中的 partition、终态、submitted/started/ended）与 `RunReport`（source/cycle/outcome/stop reason/detail/job/publish/DONE path）。资源键集必须与 config/local 完全一致，且 `partition` 必须同时出现在 `Config.slurm.required_fields` 和 `LocalConfig.slurm`；该 preflight 在发现、清理、建 work、driver 与 submit 之前完成。`poll_wait` 无默认，controller 不内置 sleep/interval，也不发明 watchdog、自动取消或 controller timeout；它在每次非终态 poll 后调用一次该策略，再继续查询。每个 poll record 的 job/name/resources/submitted_at 与状态单调性都相对提交记录重验；M2 fake 序列必须确定性到达终态，真实等待/取消仍归 M4。
@@ -161,7 +163,7 @@ CLI 入口层**不做业务行为测试**（薄委托）：`prepare`/`init`/`run
 - [cfgrib/eccodes 在 CI ubuntu 上安装失败] → 已按「优先二进制 wheel」分支解决：显式加 `eccodeslib` 依赖（PyPI 上 `eccodes` 仅发 win_amd64 wheel，linux/macOS 不自带库），CI producer job 无需 `apt-get libeccodes0`。
 - [pyproj/shapely 在 CI 安装失败] → 已随 prepare-variants 依赖任务（10.1）解决并验证：三者均走 cp312 manylinux wheel（pyproj `manylinux_2_28`、shapely `manylinux_2_17`、pyshp 纯 py3），CI producer job 无需额外 apt 包。
 - [无真实 GRIB/canonical 数据可本地验证数值] → 合成 fixture 验证结构与管线正确性；数值正确性显式归 M4 receipt，不在 M2 声明。
-- [flock 语义测试跨平台脆弱（macOS/Linux 差异）] → 锁封装为小模块，单元测试进程内验证非阻塞跳过语义；真实 cron+flock 行为归 M4。
+- [flock 语义测试受平台与文件系统影响] → 锁封装为小模块，单元测试只在本地文件系统验证进程内非阻塞跳过与 inode 漂移；Linux NFS 的整文件 byte-range-lock 仿真不满足该进程内判别前提。真实 node-22 挂载类型与 cron+flock 行为归 M4 receipt，业务代码不猜文件系统。
 
 ## Migration Plan
 
