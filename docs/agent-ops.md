@@ -206,8 +206,9 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 - 只通过 yd CLI 提交，避免手拼 `sbatch` 参数；
 - 普通轮询用 `sacct` 读取 job ID/state/start/end，不取 `ExitCode`；仅在同一 yd job 已终态 `FAILED`/`TIMEOUT` 后，由失败收尾 provider 单独执行一次 `sacct -j <job_id> -n -P --format=ExitCode`，所得字符串进入失败日志；
 - 取消必须使用本次 yd receipt 中的精确 job ID；禁止 `scancel -u`、名称通配或模糊匹配；
-- 不为未观察到的卡死编写 watchdog；walltime 属 Slurm 配置，异常由日志和人工操作处理；
-- Slurm partition/account/CPU/内存/walltime 只放 `local.toml`。
+- 不为未观察到的作业卡死编写 watchdog；walltime 属 Slurm 作业配置，异常由日志和人工操作处理；
+- 每次 `sbatch`、轮询 `sacct` 与失败 ExitCode `sacct` 客户端命令必须使用 `[slurm].command_timeout_seconds`（缺席默认 60 秒）的同一时限；这不是 job walltime/watchdog。命令 timeout 后保留 work、停本源且不自动重试/删 work，兄弟源继续；`sbatch` 可能已被服务端接收，运维须按保留证据排查，下一 tick 的无 DONE work 闸会阻止重复提交；
+- Slurm partition/account/CPU/内存/walltime 与客户端 command timeout 只放 `local.toml`；timeout 从 JobSpec 资源映射剥离。
 
 ### 8.4 发布
 

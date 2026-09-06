@@ -160,7 +160,8 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 - `scratch_root`；
 - NWM raw 根和 NWM checkout/解释器（仅 prepare）；
 - SHUD 二进制；
-- Slurm partition、account、CPU、内存和 walltime；装载后以 `MappingProxyType` 只读映射暴露，调用方不得改写；
+- Slurm partition、account、CPU、内存和 walltime；装载后以 `MappingProxyType` 只读资源映射暴露，调用方不得改写；
+- `[slurm].command_timeout_seconds`：每次 `sbatch`/`sacct` 客户端子进程的正整数秒时限，缺席时版本化默认 60；它从资源映射剥离，不是作业 walltime；
 - cron lock 与日志位置。
 
 项目不维护动态 registry。复制来的 file backend 如要求 NWM 结构的 registry/model manifest，控制器根据 TOML 在本轮 work 内临时生成，用完随 work 删除。
@@ -350,7 +351,7 @@ cron 每小时调用 `yd-producer run --config <path> --local <path>` 的非阻�
 
 raw 一次补齐多轮时按时序全补；中间永久缺轮时停在缺口，运维人员补齐原始资料后自动继续。不自动跳过 cycle。
 
-Slurm 的 partition/account/资源/walltime 来自 `local.toml`。不为尚未出现的卡死增加 CLI watchdog；人工取消时只能按本次 receipt 记录的 yd job ID 操作，不得模糊匹配或取消 NWM 作业。
+Slurm 的 partition/account/资源/walltime 来自 `local.toml`。同一表的 `command_timeout_seconds` 只限制每次 `sbatch`、轮询 `sacct` 和失败 ExitCode `sacct` 客户端子进程，缺席时版本化默认 60 秒；它不限制 Slurm 作业运行时长，也不重试或取消作业。客户端 timeout 转为 `ExecutorError`：controller 保留 exact work、停止本源，兄弟源继续；不得伪造 `JobState.TIMEOUT`、执行失败 finalizer 或自动重提，因为 `sbatch` 服务端可能已经接收。下一 tick 看到无 `DONE` 的 work 仍按人工闸停源。不为尚未出现的作业卡死增加 CLI watchdog；人工取消时只能按本次 receipt 记录的 yd job ID 操作，不得模糊匹配或取消 NWM 作业。
 
 ## 11. 发布、崩溃恢复与幂等
 

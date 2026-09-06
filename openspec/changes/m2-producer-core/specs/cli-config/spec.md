@@ -20,7 +20,7 @@
 - **THEN** 以 argparse 用法错误退出，不装载配置、不执行任何业务逻辑（基线包路径只经调用传入，代码 MUST NOT 内置默认路径，compute-loop §6.1）
 
 ### Requirement: `yd-producer run` 必须接通生产控制器
-`cli.run` MUST 在同一 `run_with_lock(local.cron.lock_path, ...)` 生命周期内调用一次 `controller.run_sources`，并为固定 `{ifs,gfs}` 注入两份独立的 Slurm executor、两份满足既有 `AttemptDriver` 协议的生产 driver、两个实际等待的 poll-wait callable，以及两个独立 `sacct ExitCode` 失败收尾 provider。poll wait 使用版本化 `POLL_INTERVAL_SECONDS = 10`，每次恰调用 `time.sleep(10)`；该值不是 watchdog/总超时，也不新增 TOML 字段。MUST NOT 以 `FakeJobExecutor`、测试 terminal hook、no-op wait、目录扫描或 staged-unimplemented 分支冒充生产接线；`run_sources`、`run_once`、`catch_up_source` 与七字段 `JobRecord` 的公共签名保持不变。
+`cli.run` MUST 在同一 `run_with_lock(local.cron.lock_path, ...)` 生命周期内调用一次 `controller.run_sources`，并为固定 `{ifs,gfs}` 注入两份独立的 Slurm executor、两份满足既有 `AttemptDriver` 协议的生产 driver、两个实际等待的 poll-wait callable，以及两个独立 `sacct ExitCode` 失败收尾 provider。poll wait 使用版本化 `POLL_INTERVAL_SECONDS = 10`，每次恰调用 `time.sleep(10)`；该值不是 watchdog/总超时，也不新增 TOML 字段。生产入口还 MUST 用 `partial(subprocess_runner, command_timeout_seconds=local.slurm_command_timeout_seconds)` 创建一份无状态 bounded runner，由两份 executor 与两个 provider 共同消费，使每次 sbatch/两类 sacct 使用同一客户端时限；不得让 timeout 进入 JobSpec resources。MUST NOT 以 `FakeJobExecutor`、测试 terminal hook、no-op wait、目录扫描或 staged-unimplemented 分支冒充生产接线；`run_sources`、`run_once`、`catch_up_source` 与七字段 `JobRecord` 的公共签名保持不变。
 
 生产 driver MUST 让 canonical/forcing/assemble/SHUD/tracker/recovery 在 Slurm job 内执行，并通过原子、checksum/identity 绑定的 work-local receipt 把同一 source/cycle/work/job 的 `RunDirectory`、DAT、merged log 与已验证 T+12 checkpoint 交给 `collect`；登录节点不得补跑或从规范文件名重建 checkpoint authority。M4 只负责 node-22 真实 Slurm/NFS/SHUD receipt 与 cron 安装，不负责补写 CLI 业务体。
 
@@ -31,8 +31,8 @@
 - **THEN** 命令逐字包含 `--config <path> --local <path>`，不依赖任何内置配置路径
 
 #### Scenario: 生产依赖在同一锁内注入
-- **WHEN** 状态与配置齐备且锁可取得时执行 `run`
-- **THEN** `run_sources` 在锁内恰调用一次，四份按源 mapping 均恰含 `{ifs,gfs}`，两源 executor/driver 实例互不相同，poll wait 会实际等待，失败 provider 遵守独立一次 `sacct -j <job_id> -n -P --format=ExitCode` 契约
+- **WHEN** 状态与配置齐备、显式 `command_timeout_seconds = 37` 且锁可取得时执行 `run`
+- **THEN** `run_sources` 在锁内恰调用一次，四份按源 mapping 均恰含 `{ifs,gfs}`，两源 executor/driver 实例互不相同，poll wait 会实际等待，失败 provider 遵守独立一次 `sacct -j <job_id> -n -P --format=ExitCode` 契约；两 executor 与两 provider 消费同一 bounded runner，sbatch/普通 sacct/ExitCode sacct 的底层 timeout 都为 37，资源映射与 sbatch argv 不含策略键
 
 #### Scenario: run 退出码区分结果与配置错误
 - **WHEN** 分别出现全成功报告、任一 `STOPPED`、任一 `JOB_FAILED`、cleanup pending、运行期错误，以及参数/配置错误
@@ -60,15 +60,25 @@
 - **THEN** 装载器抛 `ConfigError`，`path` 精确指向对应字段，不返回配置对象；checkpoint 上界随 `forecast_days` 改变，不写死 168
 
 ### Requirement: local.toml 现场值不得猜测
-装载器 MUST 从 gitignored `local.toml` 读取现场值（`yd_root`、`scratch_root`、NWM raw 根、NWM checkout 根与解释器路径（仅 prepare）、SHUD 二进制、Slurm partition/account/CPU/内存/walltime、cron lock 与日志位置）；文件缺失或字段缺失 MUST 明确报错，代码中 MUST NOT 内置任何现场默认值。`LocalConfig.slurm` MUST 以只读 `Mapping[str, str | int]` 暴露，装载器复制校验后的值并用 `types.MappingProxyType` 冻结；调用方不得通过该字段增删改资源配置。键集的唯一权威仍是 `Config.slurm.required_fields`，不得改成固定 Slurm 字段 dataclass。
+装载器 MUST 从 gitignored `local.toml` 读取现场值（`yd_root`、`scratch_root`、NWM raw 根、NWM checkout 根与解释器路径（仅 prepare）、SHUD 二进制、Slurm partition/account/CPU/内存/walltime、cron lock 与日志位置）；文件缺失或必需字段缺失 MUST 明确报错。唯一例外是 #69 明确授权的 `[slurm].command_timeout_seconds`：它是每次 `sbatch`/`sacct` 客户端子进程的时限，缺席时 MUST 使用唯一内部版本化常量 `yd_producer.config._DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS = 60`，显式值 MUST 是 strict positive `int`，不是 Slurm 作业 walltime。
+
+`Config.slurm.required_fields` 仍是资源键集的唯一权威，并 MUST NOT 声明保留名 `command_timeout_seconds`。`LocalConfig.slurm` MUST 以只读 `Mapping[str, str | int]` 暴露且只含与 `required_fields` 完全相等的资源投影；装载器从 TOML 表中剥离 timeout，复制资源并用 `types.MappingProxyType` 冻结，调用方不得增删改。timeout 暴露为 additive `LocalConfig.slurm_command_timeout_seconds: int = _DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS`；字段默认只保持既有程序内 `LocalConfig(...)` 构造兼容，不授权任何其它 local 默认值，也不得把策略键传入 `JobSpec.resources` 或翻译成 `sbatch` flag。
 
 #### Scenario: local.toml 缺失
 - **WHEN** 指定路径不存在 `local.toml`
 - **THEN** 报错退出并提示需要现场创建，不使用任何内置路径
 
 #### Scenario: 现场字段齐备
-- **WHEN** `local.toml` 提供全部必需现场字段
-- **THEN** 配置对象暴露这些值供 `prepare`/`init`/`run` 使用；`LocalConfig.slurm` 是 `MappingProxyType` 只读快照，装载后修改输入或尝试改写该映射均不能改变配置对象
+- **WHEN** `local.toml` 提供全部必需现场字段以及显式 `command_timeout_seconds = 45`
+- **THEN** 配置对象暴露这些值供 `prepare`/`init`/`run` 使用；`LocalConfig.slurm` 是不含 timeout 的 `MappingProxyType` 资源快照，`slurm_command_timeout_seconds == 45`，装载后修改输入或尝试改写资源映射均不能改变配置对象
+
+#### Scenario: Slurm 客户端命令时限有唯一默认
+- **WHEN** `[slurm]` 省略 `command_timeout_seconds`
+- **THEN** `slurm_command_timeout_seconds == 60`，资源映射键集仍恰等于 `required_fields`；直接用旧参数构造 `LocalConfig` 同样得到 60，除此之外没有字段获得默认值
+
+#### Scenario: 非正整数命令时限被拒绝
+- **WHEN** `command_timeout_seconds` 为 bool、float、string、0 或负数，或 `required_fields` 含该保留名
+- **THEN** 装载器抛 `ConfigError`，`path` 分别精确为 `slurm.command_timeout_seconds` 或 `slurm.required_fields`，不返回配置对象
 
 ### Requirement: run 永不自动 bootstrap
 `run` 发现状态目录缺失或为空时 MUST 报错停止，MUST NOT 调用 init 逻辑或自建状态。

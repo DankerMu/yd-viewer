@@ -109,7 +109,11 @@
 - **THEN** 同一次持锁 run 按 T → T+12h → T+24h 处理，并在首次观察到 T+36h 不完整时停止；MUST NOT 在调用开始冻结 raw horizon 或设置任意轮数上限
 
 ### Requirement: 作业提交经执行器抽象且身份可追溯
-run MUST 经作业执行器抽象为每源提交至多一个作业；提交参数（partition、account、CPU、内存、walltime）MUST 全部取自 `local.toml`，代码 MUST NOT 内置任何默认值；每次提交的 job ID、partition、终态与起止时间 MUST 记入本次运行报告，失败源的日志 MUST 含同一 job ID。真实 `sbatch`/`sacct` 行为归 M4 oracle，本地以注入 fake 验证。
+run MUST 经作业执行器抽象为每源提交至多一个作业；提交参数（partition、account、CPU、内存、walltime）MUST 全部取自 `local.toml`，代码 MUST NOT 为这些资源内置任何默认值；每次提交的 job ID、partition、终态与起止时间 MUST 记入本次运行报告，失败源的日志 MUST 含同一 job ID。真实 `sbatch`/`sacct` 行为归 M4 oracle，本地以注入 fake 验证。
+
+每一次真实 `sbatch`、普通轮询 `sacct` 与失败 ExitCode `sacct` 客户端子进程 MUST 设置同一个正整数秒数的调用时限，取自 `LocalConfig.slurm_command_timeout_seconds`；其唯一缺省为配置装载器的版本化 60 秒。该值不得进入 `JobSpec.resources` 或 `sbatch` argv，也不是 Slurm job walltime、job watchdog 或取消策略。客户端超时 MUST 经既有异常漏斗转成 `ExecutorError`，不自动重试。
+
+客户端 timeout 只证明 submit/query 调用没有及时返回，MUST NOT 伪造 `JobState.TIMEOUT`。若发生在 submit，controller 产生保留该 `ExecutorError` 为 cause 的 `RunError(phase="submit", job_id=None)`；若发生在普通 poll，产生 `RunError(phase="poll", job_id=<已知 job>)`。两者都必须保留 exact work、零 ExitCode provider/finalizer/collect/publish/DONE。若调度器已明确返回 terminal `FAILED/TIMEOUT`，但随后 ExitCode `sacct` 客户端 timeout，则产生绑定同一 job ID 的 `RunError(phase="cleanup")`，保留 work 与已在 scratch 的 job log，零失败日志提交/删除。三者都终止本源 worker并经 `RunSourcesError` 聚合，兄弟 source 继续到自己的结局，且均不自动重试。由于 `sbatch` timeout 可能发生在服务端已接收之后，下一 tick 仍由无 DONE work 的人工闸保护，不得自动删除重提。
 
 #### Scenario: job 身份进入运行报告
 - **WHEN** fake executor 返回 job ID 与终态，完成一轮双源 run
@@ -134,6 +138,22 @@ run MUST 经作业执行器抽象为每源提交至多一个作业；提交参�
 #### Scenario: 每源至多一个作业
 - **WHEN** 一次 run 中某源有多轮 raw 可追赶
 - **THEN** 任意时刻该源在 executor 上的在途提交计数不超过 1（逐轮串行）
+
+#### Scenario: sbatch 客户端超时保留未知提交证据
+- **WHEN** IFS 的 `sbatch` 子进程达到配置的 `command_timeout_seconds` 而抛 `TimeoutExpired`，GFS 可正常追赶
+- **THEN** IFS 产生 `RunError(phase="submit", job_id=None)`，其 cause 链含 `ExecutorError`/原 `TimeoutExpired`；IFS exact work 保留且零 ExitCode/失败 finalizer/collect/publish/DONE，GFS 不被取消；不得假定服务端未接收作业或自动重提
+
+#### Scenario: sacct 客户端超时不伪造作业 TIMEOUT
+- **WHEN** IFS 已取得 job ID 后，普通轮询 `sacct` 达到同一命令时限，GFS 可正常追赶
+- **THEN** IFS 产生绑定同一 job ID 的 `RunError(phase="poll")`，work 保留、零 ExitCode provider/finalizer/collect/publish/DONE；不得构造 `JobState.TIMEOUT`，GFS 继续到自己的结局
+
+#### Scenario: 失败退出码查询超时不猜测后删除
+- **WHEN** IFS 已明确得到 terminal `FAILED` 或 `TIMEOUT`，但独立 ExitCode `sacct` 达到客户端命令时限
+- **THEN** IFS 产生绑定同一 job ID 的 `RunError(phase="cleanup")`，保留 exact work 与 scratch job log，零正式失败日志提交和 work 删除；不得猜退出码或重试查询，GFS 继续到自己的结局
+
+#### Scenario: 三条 Slurm 命令共享一个客户端时限
+- **WHEN** 生产装配以显式非默认 `command_timeout_seconds` 分别执行 sbatch、普通 sacct 与失败 ExitCode sacct
+- **THEN** 三次底层 subprocess 调用的 `timeout` 均逐字等于该配置值，且 `JobSpec.resources`/sbatch argv 中不含 `command_timeout_seconds`
 
 ### Requirement: 并发与锁
 run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过不排队；锁 MUST 覆盖发现、提交、等待、发布、清理全生命周期。IFS/GFS 最多各一个作业并行。`cron.lock_path` MUST 是绝对路径：相对路径与 `~` 前缀（`Path` 不展开 `~`）MUST 在创建锁文件之前 fail closed，报错 MUST 指名 `cron.lock_path`。锁文件 MUST NOT 在释放时删除。
