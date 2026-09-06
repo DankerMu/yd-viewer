@@ -801,3 +801,29 @@ high-tier 初审与独立终审均 clean，不能估计新 lens 在后轮换入�
 
 复议条件未触发：不存在后续综合轮、rotated catch 或已关闭 finding 重报。共享 `m2-producer-core` 仍承载
 #72、#48、#46 及其它后继任务，本次继续不 archive。
+
+---
+
+## 第 24 次复议（issue #72 / PR #150 合并后，2026-09-06）
+
+审计数字：34 行（33 merged、1 terminal），26 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #150 只有 Round 1：四席覆盖六个 canonical lens，候选 finding 为 0，
+独立 Phase 7 Gap Sweep 同样 clean。它不满足 `rounds >= 2`，因此不进入 rotation attribution，也不改变
+多轮样本数或 core/rotated 数字。
+
+high 桶现在有 12 个 merged PR、累计 `gate_net_catch=49`。本次产品 review 的零 catch 不满足整个桶总捕获
+为零的 cut 前提。测试先行、逐 source/path 矩阵、#32/结构错误优先级、消息 token 多重数 oracle 与 6 个
+判别变异已在综合审核前闭合 variables 单射性；四席与终审随后独立确认 owner、下游兼容与无静默规范化。
+这是前置证据充分后的正常 clean，不支持缩减 high-tier Round 1。
+
+本 PR 的 fixture review Round 1 确实抓到一处显示顺序契约自相矛盾，并在实现前修复、Round 2 pass；该 catch
+属于 Phase 0.5 `fixture-review`，不是产品综合 round，也不是 free-slot rotation。它证明 docs-first fixture
+复核有独立价值，但不能被挪入 core/rotated 任一侧为轮换策略加分。产品 Round 1 后无 Phase 6 或后续综合轮，
+因此本样本没有真实 rotation 机会。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；
+不以单轮 clean 缩减 high-tier 初审，也不把 fixture-review catch 错归给后轮轮换。累计 rotated 捕获仍显著，
+且证据不足时默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：不存在后续综合轮、rotated catch 或已关闭 finding 重报。共享 `m2-producer-core` 仍承载
+#48、#46 及其它后继任务，本次继续不 archive。
