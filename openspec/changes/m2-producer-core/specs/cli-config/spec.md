@@ -24,7 +24,7 @@
 
 生产 driver MUST 让 canonical/forcing/assemble/SHUD/tracker/recovery 在 Slurm job 内执行，并通过原子、checksum/identity 绑定的 work-local receipt 把同一 source/cycle/work/job 的 `RunDirectory`、DAT、merged log 与已验证 T+12 checkpoint 交给 `collect`；登录节点不得补跑或从规范文件名重建 checkpoint authority。M4 只负责 node-22 真实 Slurm/NFS/SHUD receipt 与 cron 安装，不负责补写 CLI 业务体。
 
-`run` 的退出码 MUST 为：`0` 表示锁竞争下的成功跳过或返回报告全部为 `SUCCEEDED`；`3` 表示任一源 `STOPPED`/`JOB_FAILED`，以及 `SUCCEEDED_CLEANUP_PENDING` 或运行期 controller/executor/driver/provider 错误；`2` 表示参数或配置错误。raw 缺口产生的 `STOPPED` 因而是 `3`，MUST NOT 为制造退出码 `0` 添加追赶轮数上限。该约定只修改 `run`；`prepare`/`init` 的既有退出码不变。
+`run` 的退出码 MUST 为：`0` 表示锁竞争下的成功跳过或返回报告全部为 `SUCCEEDED`；`3` 表示任一源 `STOPPED`/`JOB_FAILED`，以及 `SUCCEEDED_CLEANUP_PENDING` 或运行期 controller/executor/driver/provider 错误；`2` 表示参数或配置错误。raw 缺口产生的 `STOPPED` 因而是 `3`，MUST NOT 为制造退出码 `0` 添加追赶轮数上限。该约定只修改 `run`；`prepare`/`init` 的既有退出码不变。`RunSourcesError` 的单份人读文本 MUST 按 `ifs`、`gfs` 固定顺序包含其中每个底层 `RunError` 及其每条 `__notes__`，每项恰一次；CLI 把该完整文本输出到 stderr 一次且不打印 traceback。这包括 #108 startup hygiene 在首报告前完成的删除审计，不得沿用不含 notes 的旧聚合摘要或另行重复打印底层项。
 
 #### Scenario: 文档中的 run 调用可直接执行
 - **WHEN** 运维从 compute-loop 的 synopsis 或 cron 段复制 `run` 命令
@@ -37,6 +37,10 @@
 #### Scenario: run 退出码区分结果与配置错误
 - **WHEN** 分别出现全成功报告、任一 `STOPPED`、任一 `JOB_FAILED`、cleanup pending、运行期错误，以及参数/配置错误
 - **THEN** 退出码分别为 `0`、`3`、`3`、`3`、`3`、`2`，stderr 不含 traceback；锁已被持有时以 `0` 跳过且零 controller 调用
+
+#### Scenario: 双源聚合错误完整渲染 startup cleanup notes
+- **WHEN** `RunSourcesError` 的 IFS/GFS 底层错误各带互异 `__notes__`，且 IFS note 含不在异常正文中的 #108 startup cleanup source/cycle/path 清单
+- **THEN** `RunSourcesError` 的单份文本按 IFS/GFS 顺序包含每个底层错误及每条 note 恰一次；`run` 返回 `3` 并把该文本输出到 stderr 一次，不含 traceback，不丢失或重复清理审计
 
 ### Requirement: config.toml 装载与校验
 装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构、NWM mapping-builder module 点分名 `nwm_mapping_builder_module` 与每 source 的 NWM canonical grid 标识 `nwm_canonical_grid_id.gfs`/`.ifs`（两者均为版本化快照事实，非现场值）；任何必需字段缺失或类型错误 MUST fail closed。

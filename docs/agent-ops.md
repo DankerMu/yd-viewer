@@ -195,6 +195,7 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 - 使用非阻塞 `flock -n`，已有实例时本 tick 跳过；
 - 锁覆盖发现、Slurm 提交、等待、NFS 发布和清理的完整生命周期；
 - 手工 `run` 使用同一把锁，不能绕开；
+- 每次 run 在本源首次前沿发现前完整扫描 `work/<source>/` 顶层合法 00/12 cycle：先确认 `output/` 根可枚举，只对同源 `DONE(T)` 经 no-follow 判为普通文件的真实目录 exact work 做 identity-bound 删除，并把 source/cycle/绝对 path 写进本轮报告；无有效 DONE 的候选全部保留，扫完后以最早 cycle 停源待人工确认，不能遮住其它可回收目录；
 - 不同时启动第二个前台 controller；
 - cron 最终分钟点由现场配置决定，未定前不写死。
 

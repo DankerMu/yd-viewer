@@ -331,13 +331,15 @@ cron 每小时调用 `yd-producer run --config <path> --local <path>` 的非阻�
 - 锁覆盖发现、提交、等待、发布和清理的完整生命周期；
 - 手工补跑也必须走同一个锁入口，不能绕过互斥。
 
-一次 run 先为每个 source 确定严格前沿：
+一次 run 在四份双源依赖映射全局校验通过后，由每个 source worker 先完成本源配置/路径 preflight，再在本源首次前沿发现之前做一次 scratch hygiene。它先确认共享 `output/` 根可枚举，再按 cycle 扫描 `work/<source>/` 顶层全部合法 00/12 候选；非法名字保留且不映射成 NFS 路径。只有同源 `output/<T>/<source>/DONE` 经 no-follow 判为普通文件时，才删除对应的真实目录 exact work；`DONE(T)` 已证明这棵 work 树不再是运行 authority。删除前必须 no-follow 冻结目录 `(st_dev, st_ino)`，并以 scratch `work_root` 为 containment root 在打开和最终 `rmdir` 前复核同一 identity；树内 symlink 只删链接、不跟随。所有无有效 `DONE(T)` 的候选先保留，不能遮住其它可删目录；完整扫描后以最早一个复用 `UNVERIFIED_WORK_RESIDUE` 停源。普通文件 DONE 对应的 exact 路径若是非目录、identity 漂移或无法确定也保留并响亮失败——非目录不是有效 work 树，且现有原语没有 identity-conditional unlink，不能按 pathname 盲删。成功删除的 source/cycle/绝对 path 以 `startup cleanup:` 前缀记入该源本轮首个 `RunReport.detail`；若首个报告前抛出其它 `RunError`，在保留原异常对象、cause 和既有 notes 的前提下追加到其 `__notes__`，聚合错误与 CLI 必须按源渲染每项。清理自身失败的错误正文列出此前已删项与失败路径；已完成删除不回滚。公开 report 字段不扩展，`residue.plan_residue` 的 NFS DONE 极性不改。
+
+随后为每个 source 确定严格前沿：
 
 1. 先确认共享 `output/` 根是可枚举目录；根缺失（`ENOENT`）或被非目录占据（`ENOTDIR`）都是根异常，停止本源，不判全新链、不做残留清理；
 2. 在根可枚举的前提下，若该源被确定为没有任何 `DONE`，全新链只允许存在 init 写入的最早状态，该文件名就是待跑 T；否则取该源最新 `DONE` cycle D，待跑 T 固定为 D+12h；
 3. 必须存在 `states/<source>/<T>.cfg.ic`，否则停止该源；
 4. 若无 `DONE(T)` 却存在比 T 更晚的状态或 T 目录半成品，它们是上次发布中断的 NFS 未提交残留：保留 T 状态，删除这些 NFS 残留；
-5. 若此时 `work/<source>/<T>` 仍存在，控制器不得删除或复用：它无法区分已死亡进程留下的目录与仍由孤儿 Slurm 作业写入的目录，也无法用 job ID 覆盖“已提交但 ID 未解析”的窗口；停止该源并保留证据，待运维确认无在途作业并移走该 work 后，下次 tick 才重跑 T；
+5. 若此时无 `DONE(T)` 且 `work/<source>/<T>` 仍存在，控制器不得删除或复用：它无法区分已死亡进程留下的目录与仍由孤儿 Slurm 作业写入的目录，也无法用 job ID 覆盖“已提交但 ID 未解析”的窗口；停止该源并保留证据，待运维确认无在途作业并移走该 work 后，下次 tick 才重跑 T；
 6. 扫描 T 的 raw；未完整则该源暂不提交；
 7. staging 前通过 no-follow 父目录排他认领 `work/<source>/<T>`，并把该目录的设备号/inode 身份作为本 attempt 的 ownership token；竞争者先创建任何形态时零 staging、零提交且保留对方条目；
 8. 为每源最多组装一个 work 并提交一个 Slurm 作业；raw staging、作业产物读取、失败收尾与成功发布都必须重验同一个 ownership token，不能从后来可能重绑的 pathname 重新推导所有权；
@@ -374,7 +376,7 @@ Slurm 的 partition/account/资源/walltime 来自 `local.toml`。不为尚未�
 6. `DONE` 成功后才删除比 T 更旧的状态；最终保留 T 与 T+12；
 7. 删除 scratch work。
 
-多个文件无法同时原子提交，因此用“旧状态保留 + DONE 最后写”恢复：若步骤 1–4 间宕机且无 `DONE`，下次删除该 source/cycle 的 NFS 半成品；精确 scratch work 不存在时仍用 T 状态整轮重跑。若同一 work 仍存在则先停源保留证据，运维确认没有在途孤儿 Slurm 作业并移走 work 后再重跑；不得把旧 work 文件当作恢复 authority。不得先写 `DONE` 再提交状态。
+多个文件无法同时原子提交，因此用“旧状态保留 + DONE 最后写”恢复：若步骤 1–4 间宕机且无 `DONE`，下次删除该 source/cycle 的 NFS 半成品；精确 scratch work 不存在时仍用 T 状态整轮重跑。若同一 work 仍存在则先停源保留证据，运维确认没有在途孤儿 Slurm 作业并移走 work 后再重跑；不得把旧 work 文件当作恢复 authority。反之，若步骤 5 之后、步骤 6/7 之前宕机，下一次 run 的启动 hygiene 以 `DONE(T)` 为完成证明，identity-bound 删除精确历史 work，并把动作记入报告。不得先写 `DONE` 再提交状态。
 
 scratch work 的删除还受本 attempt 的 ownership token 约束：删除前当前 `work/<source>/<T>` 必须仍是 staging 前排他认领的同一设备号/inode。`DONE` 前发现 identity 漂移时不得写 `DONE`，当前条目保留并响亮失败；`DONE` 后发现漂移时本轮仍按已完成上报，但标记 cleanup pending 并保留 replacement。pathname 相同、父根一起重绑或事后 `realpath` 重新匹配都不能替代原 identity。
 
@@ -396,7 +398,7 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 | `output/<T>/<source>/{yd.rivqdown.dat,DONE}` | 保留最新成功 cycle 往前 14 天 |
 | `states/<source>/*.cfg.ic` | 每源保留下一待跑状态及其前一份 |
 | `logs/<source>/<T>.log` | 仅失败轮；与 output 的 14 天窗口一起清理 |
-| scratch `work/<source>/<T>` | ownership token 始终匹配时在成功或失败收尾后删除；identity 漂移则保留当前 entry 并响亮报告 |
+| scratch `work/<source>/<T>` | 本 attempt 的 token 匹配时在成功或失败收尾删除；post-`DONE` 历史孤儿由下一次 run 启动 hygiene 重新冻结并复核 identity 后删除、记入报告；无 `DONE` 或 identity 漂移则保留并响亮报告 |
 | NWM NFS raw 原件 | yd 永不清理 |
 | scratch raw 副本/canonical/forcing/raw-manifest | 本轮临时工件，随 work 删除 |
 

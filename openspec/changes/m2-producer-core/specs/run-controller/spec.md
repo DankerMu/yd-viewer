@@ -54,6 +54,41 @@
 - **WHEN** IFS 有无 `DONE(T)` 的半成品与比 T 更晚的状态，GFS 在同一 cycle 上也有更晚状态
 - **THEN** 只删除 IFS 侧的残留，GFS 的状态与产物不受影响
 
+### Requirement: run 启动时清理 DONE 已证明完成的历史 work
+`run_sources` MUST 先完成四份依赖 mapping 的全局快照与校验，随后让每个 source worker 先完成该源既有纯 preflight，再恰执行一次 startup hygiene；任何前置失败都不得触发该范围内的 discovery 或删除。hygiene MUST 位于本源首次前沿发现之前，先确认共享 `output/` 根可枚举，再只枚举 resolved scratch `work_root/<source>` 的直接子项。只有现有公开 `parse_cycle_id` 接受且 hour 属于 `config.cycle.hours` 的名字是候选；其它名字 MUST 原样保留且不得映射成 `output` 路径。候选集合不得按墙钟、mtime、最新 DONE 或当前 frontier 截断。
+
+候选 MUST 按 cycle 升序处理。对每个候选，只有既有 `safe_fs.stat_no_follow(..., containment_root=resolved YD_ROOT)` 返回普通文件身份时，同源 `output/<T>/<source>/DONE` 才是删除授权。DONE 缺席，或该探测确认叶子/父链为 symlink、目录、FIFO 等不安全或非普通形态时，均按“无有效 DONE”处理；`SafeFilesystemError.kind` 为 `io`、`identity_changed`、`indeterminate` 等无法确定状态时则产生 cleanup error，不能静默降成无 DONE。所有无有效 DONE 的候选 MUST 先保留，不能让其中一个候选遮蔽其它 DONE-backed 候选；完整扫描结束后，最早的无有效 DONE 候选 MUST 复用 `STOPPED/UNVERIFIED_WORK_RESIDUE` 成为本源首报告，且 frontier/raw/driver/submit 零调用。不得为本 Requirement 改变 `safe_fs.stat_no_follow` 或其它公共 helper 合同。
+
+有普通文件 `DONE(T)` 时，它已证明对应 work 不再是运行 authority。若 exact work 是真实目录，MUST 先 no-follow 取得 `(st_dev, st_ino)`，再以 resolved scratch `work_root` 为 containment root 执行 expected-identity tree delete，并在打开目录与最终 `rmdir` 前复核同一 identity；树内 symlink 只删除链接、不跟随目标。不得等待 T 再次成为 frontier，也不得要求旧 attempt receipt。若有普通文件 DONE 的 exact work 是普通文件、FIFO、symlink/断链等非目录，现有原语无法 identity-conditionally unlink，它 MUST 保留并产生本源 `RunError(phase="cleanup")`；identity 漂移、枚举或 I/O 无法确定时同样保留并失败。已成功删除项不回滚；发生清理错误后尚未处理的后续候选不得删除。一源的 hygiene 停止或失败不得阻止、取消或截断兄弟 source worker。
+
+每个成功删除项 MUST 以稳定 `startup cleanup:` 前缀记录 source、cycle 与绝对 exact path，并按 cycle 有序前缀到本源首个 `RunReport.detail`；该首报告可以是 hygiene 生成的 unknown-work STOPPED，也可以是首次 `run_once` 的报告。若首报告前另有 `RunError`，MUST 对原异常对象 `add_note` 写入同一清单，保留其 identity、cause 与既有 notes；启动清理自身失败的 `RunError` 正文 MUST 列出此前已删除项及失败 source/cycle/绝对路径。`RunSourcesError` 的单份人读文本 MUST 按 `ifs,gfs` 渲染底层错误及其 notes，每项恰一次；CLI MUST 把该完整消息输出一次且无 traceback。`RunReport` 八字段、`RunSourcesReport` 两字段与 outcome/phase 词表均不得扩展。
+
+`output/` 根的 `ENOENT/ENOTDIR` 是特例：两源分别返回既有 `STOPPED/DISCOVERY_UNREADABLE`，startup hygiene 与 NFS residue 均零删除，不转成 cleanup error。该 no-follow DONE 判据只授权危险的历史 scratch 删除；既有前沿发现及 `residue.plan_residue` 的 NFS 语义不因本 Requirement 改写，特别是 `DONE(T)` 存在时后者仍返回空 NFS 清单。
+
+#### Scenario: DONE 对应的全部历史 work 在启动时删除并入报告
+- **WHEN** 某源乱序存在多个合法 cycle work，其中多个有普通文件 `DONE(T)` 且目录内含指向 scratch 外的 symlink，另一个更早候选无有效 DONE
+- **THEN** 所有 DONE-backed work 都在首次前沿发现前按 cycle 删除，外部 symlink 目标与 NFS `output/`/`states/` 逐字节不变；随后最早无 DONE 候选产生 `STOPPED/UNVERIFIED_WORK_RESIDUE`，该首报告 `detail` 以 `startup cleanup:` 按序列出每个已删 source/cycle/绝对路径
+
+#### Scenario: 无有效 DONE 的各种 work 都停源并保留
+- **WHEN** 合法 cycle exact work 是目录、普通文件、FIFO、symlink 或断链 symlink，而对应 DONE 缺失或为目录、FIFO、最终 symlink/断链
+- **THEN** run 不读、不删、不复用这些 work，完整扫描其它候选后以最早 cycle 返回 `STOPPED/UNVERIFIED_WORK_RESIDUE`；只有同源 no-follow 普通文件 DONE 才允许删除对应真实目录
+
+#### Scenario: 普通文件 DONE 不授权 pathname-only unlink
+- **WHEN** 普通文件 `DONE(T)` 存在，但对应 exact work 是普通文件、FIFO、symlink或断链
+- **THEN** exact entry 及 symlink 目标均保留，本源产生指名 source/cycle/绝对路径的 `RunError(phase="cleanup")`，不得调用无 expected identity 的 unlink
+
+#### Scenario: 历史 work identity 漂移时拒绝删除 replacement
+- **WHEN** 启动清理已按 cycle 删除至少一个历史目录，随后另一个 exact work 在 identity 冻结后被替换为另一个 inode
+- **THEN** replacement 与 NFS 正式产物保持不变，本源产生 `RunError(phase="cleanup")`，错误正文保留此前已删除路径及当前失败路径；已删项不回滚，后续候选不再删除，兄弟源继续到自身结局
+
+#### Scenario: 启动清理后其它运行错误保留原对象与审计
+- **WHEN** 某源成功清理一个或多个 DONE-backed work 后，在形成首报告前由首次 `run_once` 抛出已有 cause/note 的 `RunError`
+- **THEN** `RunSourcesError.errors[source]` 保留同一个 `RunError` 对象及原 cause/note，只追加一条有序 startup-cleanup note；聚合错误的单份文本含底层错误与每条 note 各一次，CLI 将该完整文本打印一次
+
+#### Scenario: output 根异常时历史 work 零删除
+- **WHEN** `output/` 根缺失或不是目录，同时 scratch 有若干看似可清理的历史 work
+- **THEN** 两源按 `DISCOVERY_UNREADABLE` 停止，work/state/NFS 逐字节不变，startup hygiene 与 residue delete 零调用
+
 ### Requirement: raw 缺口阻塞不跳轮
 待跑 T 的 raw 不完整时该源本次 MUST 不提交；raw 一次补齐多轮时 MUST 按时序逐轮全补；中间永久缺轮时 MUST 停在缺口等待，MUST NOT 自动跳过 cycle。
 
