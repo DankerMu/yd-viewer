@@ -8,6 +8,7 @@ argv 一律**逐元素精确比对**，不做"含某个 flag"式的弱断言—�
 
 from __future__ import annotations
 
+import ast
 import inspect
 import os
 import subprocess
@@ -16,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+import yd_producer.config as config_module
+import yd_producer.slurm as slurm_module
 from yd_producer.executor import (
     ExecutorError,
     JobExecutor,
@@ -615,12 +618,188 @@ def test_executor_constructor_params_are_keyword_only():
 
 
 def test_subprocess_runner_signature_matches_runner_contract():
-    """符号必须存在且签名对得上——否则它可以完全不存在而全绿（仓库无类型检查闸）。"""
+    """新增 policy 参数保持 additive，旧 argv/env 调用形态仍可用。"""
     params = list(inspect.signature(subprocess_runner).parameters.values())
-    assert [p.name for p in params] == ["argv", "env"]
+    assert [p.name for p in params] == ["argv", "env", "command_timeout_seconds"]
     assert params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
     assert params[1].kind is inspect.Parameter.KEYWORD_ONLY
     assert params[1].default is inspect.Parameter.empty
+    assert params[2].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params[2].default == config_module._DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
+
+
+def test_subprocess_runner_default_expression_references_config_symbol_and_exports_stay_fixed():
+    """AST 证明默认参数用导入符号，不以整数对象 identity 冒充来源。"""
+    source = Path(slurm_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "subprocess_runner"
+    )
+
+    assert isinstance(function.args.kw_defaults[1], ast.Name)
+    assert function.args.kw_defaults[1].id == "_DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS"
+    assert slurm_module.__all__ == [
+        "SACCT_ENV",
+        "SBATCH_FLAGS",
+        "SLURM_STATE_MAP",
+        "SlurmJobExecutor",
+        "build_sacct_command",
+        "build_sbatch_command",
+        "parse_sacct_record",
+        "parse_sbatch_job_id",
+        "subprocess_runner",
+    ]
+    assert "_DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS" not in slurm_module.__all__
+
+
+@pytest.mark.parametrize(
+    ("provided_timeout", "expected_timeout"),
+    [(None, 60), (37, 37)],
+    ids=["default", "explicit"],
+)
+def test_subprocess_runner_forwards_timeout_and_existing_subprocess_kwargs(
+    monkeypatch, provided_timeout, expected_timeout
+):
+    calls: list[tuple[list[str], dict[object, object]]] = []
+    completed = subprocess.CompletedProcess(
+        ["sbatch", "--parsable"], 0, stdout="12345\\n"
+    )
+
+    def record_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return completed
+
+    monkeypatch.setattr(slurm_module.subprocess, "run", record_run)
+    env = {"PATH": "/fixture/bin", "YD_SENTINEL": "1"}
+    kwargs = {"env": env}
+    if provided_timeout is not None:
+        kwargs["command_timeout_seconds"] = provided_timeout
+
+    assert subprocess_runner(("sbatch", "--parsable"), **kwargs) == "12345\\n"
+    assert calls == [
+        (
+            ["sbatch", "--parsable"],
+            {
+                "check": True,
+                "capture_output": True,
+                "text": True,
+                "env": env,
+                "timeout": expected_timeout,
+            },
+        )
+    ]
+    assert calls[0][1]["env"] is not env
+
+
+def test_subprocess_runner_re_raises_the_same_timeout_expired_once(monkeypatch):
+    timeout = subprocess.TimeoutExpired(["sbatch"], 37)
+    calls = 0
+
+    def raise_timeout(argv, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise timeout
+
+    monkeypatch.setattr(slurm_module.subprocess, "run", raise_timeout)
+
+    with pytest.raises(subprocess.TimeoutExpired) as excinfo:
+        subprocess_runner(("sbatch",), env=None, command_timeout_seconds=37)
+
+    assert excinfo.value is timeout
+    assert calls == 1
+
+
+def test_subprocess_runner_uses_none_environment_verbatim(monkeypatch):
+    calls: list[dict[object, object]] = []
+
+    def record_run(argv, **kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="12345\\n")
+
+    monkeypatch.setattr(slurm_module.subprocess, "run", record_run)
+
+    assert subprocess_runner(("sbatch",), env=None) == "12345\\n"
+    assert calls[0]["env"] is None
+
+
+@pytest.mark.parametrize(
+    ("phase", "outputs", "expected_job_id", "expected_command"),
+    [
+        pytest.param(
+            "submit",
+            [subprocess.TimeoutExpired(["sbatch"], 37)],
+            None,
+            "sbatch",
+            id="submit",
+        ),
+        pytest.param(
+            "poll",
+            ["12345\n", subprocess.TimeoutExpired(["sacct"], 37)],
+            "12345",
+            "sacct",
+            id="poll",
+        ),
+    ],
+)
+def test_executor_wraps_timeout_expired_once_with_identity_and_cause(
+    phase, outputs, expected_job_id, expected_command
+):
+    original_timeout = outputs[-1]
+    assert isinstance(original_timeout, subprocess.TimeoutExpired)
+    executor, runner = make_executor(outputs)
+
+    with pytest.raises(ExecutorError) as excinfo:
+        if phase == "submit":
+            executor.submit(make_spec())
+        else:
+            executor.submit(make_spec())
+            executor.poll("12345")
+
+    error = excinfo.value
+    assert error.job_id == expected_job_id
+    assert error.__cause__ is original_timeout
+    assert expected_command in str(error)
+    assert "TimeoutExpired" in str(error)
+    assert "37" in str(error)
+    assert runner.count == (1 if phase == "submit" else 2)
+
+
+def test_executor_does_not_retry_timeout_expired_after_submit_failure():
+    timeout = subprocess.TimeoutExpired(["sbatch"], 37)
+    executor, runner = make_executor([timeout])
+
+    with pytest.raises(ExecutorError) as excinfo:
+        executor.submit(make_spec())
+
+    assert excinfo.value.__cause__ is timeout
+    assert runner.count == 1
+
+
+def test_sbatch_command_rejects_command_timeout_policy_as_resource():
+    resources = dict(SITE_RESOURCES) | {"command_timeout_seconds": 37}
+
+    with pytest.raises(ExecutorError) as excinfo:
+        build_sbatch_command(
+            make_spec(resources=resources), required_fields=REQUIRED_FIVE
+        )
+
+    assert excinfo.value.job_id is None
+    assert "command_timeout_seconds" in str(excinfo.value)
+
+
+def test_timeout_policy_does_not_enter_resources_flags_or_sbatch_argv():
+    resources = dict(SITE_RESOURCES)
+    assert "command_timeout_seconds" not in resources
+    assert "command_timeout_seconds" not in SBATCH_FLAGS
+
+    argv = build_sbatch_command(
+        make_spec(resources=resources), required_fields=REQUIRED_FIVE
+    )
+
+    assert "command_timeout_seconds" not in argv
+    assert argv == EXPECTED_SBATCH
 
 
 def test_translation_table_covers_the_five_site_fields():
