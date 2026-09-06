@@ -164,7 +164,17 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 - `[slurm].command_timeout_seconds`：每次 `sbatch`/`sacct` 客户端子进程的正整数秒时限，缺席时版本化默认 60；它从资源映射剥离，不是作业 walltime；
 - cron lock 与日志位置；其中 lock 必须是 node-22 本地文件系统上的专属长期哨兵路径，不能放在任何 NFS 挂载或清理根内。
 
-项目不维护动态 registry。复制来的 file backend 如要求 NWM 结构的 registry/model manifest，控制器根据 TOML 在本轮 work 内临时生成，用完随 work 删除。
+项目不维护动态 registry。复制来的 file backend 如要求 NWM 结构的 registry/model manifest，production attempt driver 依据控制器显式交入的本轮 `AttemptRequest` 与 §5.1 的 prepare 资产交接，在本轮 work 内临时生成，用完随 work 删除；TOML 只提供既有业务规则和路径，不能生成或填充 `WorkIdentity`。
+
+### 5.1 production driver 的 WorkIdentity 与 direct-grid 资产权威
+
+`config.toml` 与 `local.toml` 的 identity schema 已闭合：不得新增 `source_id`、`cycle_time`、`project_name`、`model_id`、`basin_id`、`basin_version_id` 或 `river_network_version_id` 字段。每次 attempt 中，`source_id` 与 `cycle_time` 只逐字取 controller 建立的 `AttemptRequest.source` / `.cycle`；`project_name` 只从 `prepare.calibrated_state_path(variant_dir)` 指向、prepare 已验证的率定状态文件名仅移除末尾一次 `.cfg.ic` 后取得，绝不从 `variant_dir` basename 推导。它们都不是 TOML、环境、数据库或 binding 的回填面。
+
+`model_id`、`basin_id`、`basin_version_id`、`river_network_version_id` 由 production driver 为本 attempt 唯一持有的一组 versioned、work-local registry identifier；M2 只检查其安全形态和与同一 `WorkIdentity`/work/receipt 的一致性，不宣称任何跨轮持久或现场外部权威。四值只能贯穿同一 scratch 的 registry → forcing → assemble 链，并随 worker receipt 记录；M4 再以 node-22 的真实 builder/site artifact 对账，不能把 M2 合成值或测试字面量升格为现场值。
+
+direct-grid 的生产输入是同一 prepare 已验证变体的显式资产交接：这里的 handoff 是一次 attempt 的显式参数集合（contract、`.sp.att` asset path、两份 asset checksum 及 source/cycle/project/work identity），不是 config/local 字段、持久 registry 或未定义的文件格式。`DirectGridForcingContract` 只取该 prepare-owned 验证 handoff，不从 raw builder 文件在运行时反推；`yd.binding` 只取 prepare 已验证的 `variant_dir/yd.binding` 精确 bytes；`.sp.att` 只取 handoff 指名并与 contract 匹配的精确 bytes。登录侧 driver 只对 handoff 明示的 variant asset path 作有界、逐分量 no-follow 普通文件读取，核验 handoff 的 source/cycle/project/work identity、contract 的 current-source identity 及 binding/`.sp.att` SHA-256，随后把同一 checksum/identity-bound handoff 放入已认领的 scratch work；其资产成员只能是这些精确读取结果。Slurm worker 只读这份 handoff 并在使用前再次核验；worker receipt 必须绑定同一 `WorkIdentity`（含四个 work-local identifier）和两份 asset checksum。不得从环境、`DATABASE_URL`、NWM PostgreSQL/服务型 registry、目录扫描、variant basename 或测试 fixture 推导任何 identity、contract、路径或 bytes。
+
+§6.1 的“重写 `sp.att`”不是其物理位置或 source parser 的运行时发现契约；`contract.binding_uri` 与 `contract.sp_att_path` 都是 D11 `stage_work_registry` 提交后的 work-local relative keys，不是生产资产读取路径。当前 M2 文档没有可证明的真实 `.sp.att` 位置/parser；若 prepare-owned handoff 不能给出该 D11 work-local key shape 的 contract 及明示 asset path，production driver 必须在 submit 前 fail closed，不能猜 `variant_dir` 子路径或扫描。M4 负责以真实 node-22 builder/site artifact 确认该布局/parser、stage mapping 及上述四个 identifier 的现场值。M2 的可执行 oracle 仅是独立进程的合成 handoff：fixture 显式给出同源 contract、率定状态文件名、`yd.binding` 和 UTF-8 `.sp.att` literal bytes 及彼此匹配的 SHA-256；篡改任一 bytes/checksum/source/cycle/project/work identity 必须拒绝并不写 receipt/DONE。该 oracle 只证明本地交接和 fail-closed 校验，不证明真实 builder、Slurm、NFS 或 SHUD 值。
 
 ## 6. CLI
 
@@ -181,7 +191,7 @@ yd-producer run --config <path> --local <path>
   日常发现、追赶、提交、发布和清理
 ```
 
-`run` 的生产接线属于 M2：入口在同一 `cron.lock_path` 锁内调用 `controller.run_sources`，逐源注入 Slurm executor、生产 attempt driver、固定 10 秒实际等待的 poll policy 与独立 `sacct ExitCode` provider。生产 driver 通过原子、checksum/identity 绑定的 work-local receipt 在 Slurm job 与登录节点之间交接同一 source/cycle/work/job 的 DAT、日志、RunDirectory 与 T+12 checkpoint authority；不得用测试 fake、terminal hook 或目录扫描替代。退出码为：全部报告成功或锁竞争跳过 `0`，任一源 `STOPPED`/`JOB_FAILED`（以及 cleanup pending/运行期错误）`3`，参数或配置错误 `2`。M4 只做真实 node-22 receipt 与 cron 安装，不补写 CLI 业务体。
+`run` 的生产接线属于 M2：入口在同一 `cron.lock_path` 锁内调用 `controller.run_sources`，逐源注入 Slurm executor、生产 attempt driver、固定 10 秒实际等待的 poll policy 与独立 `sacct ExitCode` provider。生产 driver 通过原子、checksum/identity 绑定的 work-local receipt 在 Slurm job 与登录节点之间交接同一 source/cycle/work/job 的 DAT、日志、RunDirectory 与 T+12 checkpoint authority；其 `WorkIdentity` 与 direct-grid asset handoff 必须遵守 §5.1。不得用测试 fake、terminal hook 或目录扫描替代。退出码为：全部报告成功或锁竞争跳过 `0`，任一源 `STOPPED`/`JOB_FAILED`（以及 cleanup pending/运行期错误）`3`，参数或配置错误 `2`。M4 只做真实 node-22 receipt 与 cron 安装，不补写 CLI 业务体。
 
 ### 6.1 `prepare`
 
@@ -417,7 +427,7 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 | 项 | 验证 |
 |---|---|
 | raw 扫描 | IFS/GFS 完整、缺文件、GFS f000 特例和临时 manifest |
-| DB-free 链 | 合成 raw/canonical fixture 跑到 direct-grid forcing 包 |
+| DB-free 链 | 合成 raw/canonical fixture 跑到 direct-grid forcing 包；独立进程 M2 synthetic handoff 验证 WorkIdentity、binding/UTF-8 `.sp.att` checksum、receipt 篡改拒绝和同一 registry → forcing → assemble 链，不声明现场值 |
 | prepare | 两个 source-specific 变体、拒绝覆盖、两个 GeoJSON |
 | state | 原生 mesh/river/lake 分段解析、T 重戳、负残差处理 |
 | tracker | T+12 正常捕获、快速覆盖漏采、12h 补跑成功/失败 |
@@ -436,7 +446,8 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 6. 下一轮精确消费该状态；
 7. 单源失败时另一源继续；
 8. NFS 只在控制器收尾阶段出现正式文件，`DONE` 最后写；
-9. scratch work 最终清理，失败只留一份日志。
+9. scratch work 最终清理，失败只留一份日志；
+10. 真实 builder/site artifact 对账 `DirectGridForcingContract`、`.sp.att` 物理布局/parser、四个 work-local registry identifier 与 receipt，不能用 M2 synthetic handoff 代替。
 
 ### 13.3 node-27 闭环
 
