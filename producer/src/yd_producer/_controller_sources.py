@@ -204,7 +204,12 @@ class RunSourcesError(RuntimeError):
                     f"实得 {error!r}"
                 )
         parts = [
-            f"{source}: phase={errors_snap[source].phase} {errors_snap[source]}"
+            "\n".join(
+                (
+                    f"{source}: phase={errors_snap[source].phase} {errors_snap[source]}",
+                    *getattr(errors_snap[source], "__notes__", ()),
+                )
+            )
             for source in _SOURCE_ORDER
             if source in errors_snap
         ]
