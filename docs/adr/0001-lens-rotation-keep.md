@@ -1014,3 +1014,31 @@ oracle 的收益，不是后轮 lens rotation 的收益样本。
 复议条件未触发：不存在产品综合轮、rotated catch、verifier disposition、已关闭 finding 重报或 residual
 deferral。Issue #67 保持 OPEN；#54/#66/#68/#70 保持 CLOSED；共享 `m2-producer-core` 继续服务
 #67/#137/#132，本次不 archive。
+
+---
+
+## 第 32 次复议（issue #137 / PR #165 产品实现合并后，2026-09-06）
+
+审计数字：42 行（41 merged、1 terminal），29 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #165 有两个综合轮，但 Round 2 是 #67 docs-only base drift 触发的 current-merge
+reconciliation，不是 finding 修复后的 free-slot rotation。Round 1 三席与首次 Phase 7 在旧 head clean；rebase 后
+Round 2 仅保留 Round 1 已出现的 `correctness`、`test-evidence+spec-compliance` 两席，零 candidate；current-head
+Phase 7 同样 CLEAN。因此本 PR 增加一个多轮样本，却不改变 core/rotated 捕获数。
+
+Expanded 桶由 17 增至 18 个 merged PR，累计 `gate_net_catch=325`，显然不满足整个桶零捕获的 cut 条件。本次
+零 catch 也不能解释为 expanded reviewer 无价值：进入审核前，test-body red 与 9/9 mutation 已封住旧摘要、漏项、
+首条、重复、source mapping 顺序及 note sort/set 等主要反例；两轮 reviewer 与两次 Gap Sweep随后独立确认 legacy
+文本、source/note 双层顺序、exception identity/cause/snapshot 与 #132 one-print consumer。前置证据充分后的 clean
+是正常收敛。
+
+本 PR 的 Round 2 没有发生 rotation，不能拿它评价 free-slot 边际收益。它的价值在 base/tip integrity：#67 只改
+state docs，#137/#132 fixture 与产品 hashes 全部不变，hard gate 仍要求重建 current merge-result Phase 2/review/CI；
+随后另一次 branch-tip gate 又抓到外部并发 checkout 把本 worktree 切到无关分支，阻断了在错误 local HEAD 上发布/
+合并。两次阻断都是机械完整性收益，不进入 `catches`，也与 reviewer lens 编制无关。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；不把
+base-drift pinned reconciliation 当作“发生轮换但零收益”，也不以一次零 finding 缩减 expanded Round 1。累计
+rotated 后轮捕获仍显著，证据不足时默认 keep。
+
+复议条件未触发：Round 2 无 rotated seat、无 finding，也没有已关闭项重报或 residual deferral。Issue #137 已由
+PR #165 关闭；#132 保持 OPEN，shared `m2-producer-core` 继续服务 #67/#132，本次不 archive。
