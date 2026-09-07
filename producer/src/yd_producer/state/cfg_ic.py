@@ -232,9 +232,10 @@ class CfgIcDocument:
         越界行号、或替换值内含任何会被 `str.splitlines` 断行的字符（即会改变行数）一律
         抛 `ValueError`。
         """
+        replacement_items = _preflight_replacements(replacements)
         line_count = len(self.lines)
         new_lines = list(self.lines)
-        for index, text in replacements.items():
+        for index, text in replacement_items:
             if not isinstance(index, int) or isinstance(index, bool):
                 # TRY004 豁免的理由：本模块族的约定是「结构性/语义性拒绝一律 `ValueError`」（#8 确立），
                 # 调用方无需分辨两种异常类型；此处刻意不抛 `TypeError`。
@@ -254,7 +255,7 @@ class CfgIcDocument:
             body = original.splitlines()[0] if original.splitlines() else ""
             new_lines[index] = text + original[len(body) :]
 
-        replaced = set(replacements)
+        replaced = {index for index, _ in replacement_items}
 
         def _refreshed(section: Section | None) -> Section | None:
             if section is None or replaced.isdisjoint(section.data_line_indices):
@@ -280,15 +281,16 @@ class CfgIcDocument:
 
 
 def parse(
-    source: Path | str | bytes,
+    source: Path | str | bytes | bytearray | memoryview,
     *,
     max_bytes: int = MAX_STATE_IC_BYTES,
 ) -> CfgIcDocument:
     """解析原生分段 `cfg.ic`，返回逐行保真的文档模型。
 
     `source` 为 `Path`/`str` 时按**文件路径**读入（有界读，最多 `max_bytes + 1` 字节）；
-    为 `bytes` 时按**文件内容**直接解析。任何结构性不可用一律抛 `ValueError`（不外泄
-    `OSError` / `UnicodeDecodeError`），且失败时不返回部分文档。
+    `bytes`、`bytearray`、`memoryview` 时按**文件内容**直接解析。可变 bytes-like 输入会在
+    解析前快照。任何结构性不可用一律抛 `ValueError`（不外泄 `OSError` /
+    `UnicodeDecodeError`），且失败时不返回部分文档。
 
     `max_bytes` 为负时**在任何读取之前**抛 `ValueError`（见模块头偏离 5）。
     """
@@ -296,6 +298,8 @@ def parse(
         raise ValueError(f"max_bytes must be non-negative, got {max_bytes}")
     if isinstance(source, bytes):
         data = source
+    elif isinstance(source, bytearray | memoryview):
+        data = _snapshot_bytes_like(source, max_bytes=max_bytes)
     else:
         path = Path(source)
         # NWM@8ae9b8f2 packages/common/state_qc.py:431-435（调用点注释逐字保留）
@@ -487,6 +491,38 @@ def parse(
         declared_mesh_count=declared_mesh_count,
         declared_lake_count=declared_lake_count,
     )
+
+
+def _preflight_replacements(
+    replacements: Mapping[int, str],
+) -> tuple[tuple[int, str], ...]:
+    if not isinstance(replacements, Mapping):
+        raise ValueError(  # noqa: TRY004
+            f"replacements must be a Mapping, got {type(replacements).__name__}"
+        )
+    items = tuple(replacements.items())
+    for index, text in items:
+        if not isinstance(text, str):
+            raise ValueError(  # noqa: TRY004
+                f"replacement line text at index {index!r} must be str, "
+                f"got {type(text).__name__}"
+            )
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError(
+                f"replacement line text at index {index!r} is not UTF-8 encodable"
+            ) from error
+    return items
+
+
+def _snapshot_bytes_like(
+    source: bytes | bytearray | memoryview, *, max_bytes: int
+) -> bytes:
+    size = source.nbytes if isinstance(source, memoryview) else len(source)
+    if size > max_bytes:
+        raise ValueError(f"IC file exceeds size limit of {max_bytes} bytes")
+    return bytes(source)
 
 
 def render(doc: CfgIcDocument) -> bytes:
