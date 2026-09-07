@@ -1042,3 +1042,32 @@ rotated 后轮捕获仍显著，证据不足时默认 keep。
 
 复议条件未触发：Round 2 无 rotated seat、无 finding，也没有已关闭项重报或 residual deferral。Issue #137 已由
 PR #165 关闭；#132 保持 OPEN，shared `m2-producer-core` 继续服务 #67/#132，本次不 archive。
+
+---
+
+## 第 33 次复议（issue #67 / PR #168 产品实现合并后，2026-09-06）
+
+审计数字：43 行（42 merged、1 terminal），30 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #168 有两个综合轮：Round 1 四席抓到 1 条经独立 verifier 确认的
+`test-evidence` minor/FIX_NOW；Round 2 只保留 Round 1 已出现的 `invariant-state+security-perf` 与
+`test-evidence+spec-compliance` pinned core，双重确认 finding CLOSED 且零新 candidate。因此本 PR 增加一个
+多轮样本，但唯一 catch 在 Round 1，不改变 later-round core/rotated 数字。
+
+High 桶由 15 增至 16 个 merged PR，累计 `gate_net_catch` 由 49 增至 50，显然不满足整个桶零捕获的 cut
+条件。本次 catch 还有明确增量价值：生产实现本身正确，但 runtime memoryview 用例被 post-copy guard 的同一
+`ValueError` 掩盖，旧 AST 又只钉 guard-before-copy，故精确 `source.nbytes -> len(source)` mutant 可绿着恢复
+超限副本分配。Round 1 test-evidence 抓到后，verifier 以 T1/T2/T3 确认，修复用精确 AST true-branch pin 杀死
+mutant。这是 high 初审 test-evidence 席位的实证收益。
+
+它仍不是 free-slot rotation 的正反样本。Round 2 的两席全部来自 Round 1，且因前轮最高仅 minor、无 failure-class
+repeat，按成本规则没有轮入自由席；后轮 clean 证明修复闭合，不能用于估计“若轮入新 lens 会不会多抓”。本 PR
+同时再次说明方法与 lens 名称不能混为一谈：真正关闭 finding 的是精确 mutant + AST 判别器，catch 归属只说明
+哪个席位提出缺口，不代表换视角本身完成证明。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；保留
+high Round 1 的 test-evidence 覆盖，不以本次无 rotation 的后轮 clean 缩减后轮策略。Rotated 累计 96 条后轮
+catch 仍显著，且证据不足时默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：Round 2 无 rotated seat、无新 finding、无已关闭项重报或 residual deferral；Phase 7 CLEAN。
+Issue #67 已由 PR #168 关闭；#54/#66/#68/#70 保持 CLOSED；#132 保持 OPEN，shared `m2-producer-core`
+继续服务 #132，本次不 archive。
