@@ -340,6 +340,37 @@ def test_bytes_like_snapshot_helper_checks_its_bound_before_copying() -> None:
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "_snapshot_bytes_like"
     )
+    size_assignment = next(
+        node
+        for node in helper.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "size"
+    )
+    assert isinstance(size_assignment.value, ast.IfExp)
+    size_expression = size_assignment.value
+    assert isinstance(size_expression.test, ast.Call)
+    assert isinstance(size_expression.test.func, ast.Name)
+    assert size_expression.test.func.id == "isinstance"
+    assert not size_expression.test.keywords
+    assert len(size_expression.test.args) == 2
+    assert isinstance(size_expression.test.args[0], ast.Name)
+    assert size_expression.test.args[0].id == "source"
+    assert isinstance(size_expression.test.args[1], ast.Name)
+    assert size_expression.test.args[1].id == "memoryview"
+    assert isinstance(size_expression.body, ast.Attribute)
+    assert isinstance(size_expression.body.value, ast.Name)
+    assert size_expression.body.value.id == "source"
+    assert size_expression.body.attr == "nbytes"
+    assert isinstance(size_expression.orelse, ast.Call)
+    assert isinstance(size_expression.orelse.func, ast.Name)
+    assert size_expression.orelse.func.id == "len"
+    assert not size_expression.orelse.keywords
+    assert len(size_expression.orelse.args) == 1
+    assert isinstance(size_expression.orelse.args[0], ast.Name)
+    assert size_expression.orelse.args[0].id == "source"
+
     guard = next(
         node
         for node in helper.body
