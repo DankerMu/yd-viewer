@@ -109,9 +109,18 @@ STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID = (
 def _ensure_utc(value: datetime) -> datetime:
     """naive datetime 视为 UTC，aware 转 UTC（pin 语义逐字，见模块头）。"""
     # NWM@8ae9b8f2 packages/common/state_cli.py:1186-1189（逐字移植）
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+    try:
+        if not isinstance(value, datetime):
+            raise ValueError(  # noqa: TRY004
+                f"expected datetime, got {type(value).__name__}"
+            )
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        if value.utcoffset() is None:
+            raise ValueError("aware datetime has an unknown UTC offset")
+        return value.astimezone(UTC)
+    except (TypeError, OverflowError) as error:
+        raise ValueError("unable to normalize datetime to UTC") from error
 
 
 def restamp_to_absolute_time(doc: CfgIcDocument, target: datetime) -> CfgIcDocument:
