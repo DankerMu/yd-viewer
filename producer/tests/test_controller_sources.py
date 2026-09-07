@@ -8,6 +8,7 @@ import json
 import pathlib
 import stat
 import threading
+from typing import Literal
 
 import pytest
 from controller_sources_fixtures import (
@@ -75,6 +76,146 @@ def _dual_success(tmp_path: pathlib.Path, *, barrier: DualBarrier | None = None)
     }
     waits = {"ifs": noop_wait, "gfs": noop_wait}
     return config, local, executors, drivers, waits, providers, barrier, gate
+
+
+def _stopped_report(source: str) -> c.RunReport:
+    return c.RunReport(
+        source=source,
+        cycle=None,
+        outcome=RunOutcome.STOPPED,
+        stop_reason=StopReason.NO_INITIAL_STATE,
+        detail="test stopped",
+        job=None,
+        published=None,
+        done_path=None,
+    )
+
+
+def test_run_sources_error_renders_reverse_inserted_notes_in_source_order() -> None:
+    gfs_error = c.RunError("GFS-BODY-7f4c", phase="collect", source="gfs")
+    gfs_error.add_note("GFS-NOTE-9a21")
+    ifs_error = c.RunError("IFS-BODY-3d8e", phase="cleanup", source="ifs")
+    ifs_error.add_note("IFS-NOTE-FIRST-1b6d")
+    ifs_error.add_note("IFS-NOTE-SECOND-5c2a")
+
+    wrapper = RunSourcesError(
+        {"gfs": (), "ifs": ()}, {"gfs": gfs_error, "ifs": ifs_error}
+    )
+
+    expected = (
+        "ifs: phase=cleanup IFS-BODY-3d8e\n"
+        "IFS-NOTE-FIRST-1b6d\n"
+        "IFS-NOTE-SECOND-5c2a; "
+        "gfs: phase=collect GFS-BODY-7f4c\n"
+        "GFS-NOTE-9a21"
+    )
+    assert str(wrapper) == expected
+    for token in (
+        "IFS-BODY-3d8e",
+        "IFS-NOTE-FIRST-1b6d",
+        "IFS-NOTE-SECOND-5c2a",
+        "GFS-BODY-7f4c",
+        "GFS-NOTE-9a21",
+    ):
+        assert str(wrapper).count(token) == 1
+
+
+@pytest.mark.parametrize(
+    ("source", "phase", "body", "expected"),
+    [
+        ("ifs", "cleanup", "IFS-LEGACY-BODY", "ifs: phase=cleanup IFS-LEGACY-BODY"),
+        ("gfs", "collect", "GFS-LEGACY-BODY", "gfs: phase=collect GFS-LEGACY-BODY"),
+    ],
+)
+def test_run_sources_error_keeps_one_source_without_notes_byte_for_byte(
+    source: str, phase: Literal["cleanup", "collect"], body: str, expected: str
+) -> None:
+    error = c.RunError(body, phase=phase, source=source)
+    reports = {
+        "ifs": () if source == "ifs" else (_stopped_report("ifs"),),
+        "gfs": () if source == "gfs" else (_stopped_report("gfs"),),
+    }
+
+    wrapper = RunSourcesError(reports, {source: error})
+
+    assert str(wrapper) == expected
+    assert "\n" not in str(wrapper)
+    assert "; " not in str(wrapper)
+
+
+def test_run_sources_error_keeps_two_sources_without_notes_byte_for_byte() -> None:
+    ifs_error = c.RunError("IFS-OLD-SUMMARY", phase="raw", source="ifs")
+    gfs_error = c.RunError("GFS-OLD-SUMMARY", phase="poll", source="gfs")
+
+    wrapper = RunSourcesError(
+        {"gfs": (), "ifs": ()}, {"gfs": gfs_error, "ifs": ifs_error}
+    )
+
+    assert (
+        str(wrapper)
+        == "ifs: phase=raw IFS-OLD-SUMMARY; gfs: phase=poll GFS-OLD-SUMMARY"
+    )
+
+
+def test_run_sources_error_keeps_zero_and_three_notes_in_original_order() -> None:
+    ifs_error = c.RunError("IFS-ZERO-BODY", phase="frontier", source="ifs")
+    gfs_error = c.RunError("GFS-MULTI-BODY", phase="publish", source="gfs")
+    gfs_error.add_note("GFS-THIRD-NOTE-4ef0")
+    gfs_error.add_note("GFS-FIRST-NOTE-8c1b")
+    gfs_error.add_note("GFS-FIRST-NOTE-8c1b")
+    gfs_error.add_note("GFS-SECOND-NOTE-2da6")
+
+    wrapper = RunSourcesError(
+        {"ifs": (), "gfs": ()}, {"ifs": ifs_error, "gfs": gfs_error}
+    )
+
+    expected = (
+        "ifs: phase=frontier IFS-ZERO-BODY; "
+        "gfs: phase=publish GFS-MULTI-BODY\n"
+        "GFS-THIRD-NOTE-4ef0\n"
+        "GFS-FIRST-NOTE-8c1b\n"
+        "GFS-FIRST-NOTE-8c1b\n"
+        "GFS-SECOND-NOTE-2da6"
+    )
+    assert str(wrapper) == expected
+    assert str(wrapper).count("GFS-THIRD-NOTE-4ef0") == 1
+    assert str(wrapper).count("GFS-FIRST-NOTE-8c1b") == 2
+    assert str(wrapper).count("GFS-SECOND-NOTE-2da6") == 1
+
+
+def test_run_sources_error_snapshots_mappings_without_changing_error_evidence() -> None:
+    cause = OSError("IFS-CAUSE-736e")
+    ifs_error = c.RunError("IFS-SNAPSHOT-BODY", phase="cleanup", source="ifs")
+    ifs_error.__cause__ = cause
+    ifs_error.add_note("IFS-SNAPSHOT-NOTE-TWO-9f4e")
+    ifs_error.add_note("IFS-SNAPSHOT-NOTE-ONE-1ab3")
+    original_notes = ifs_error.__notes__
+    gfs_error = c.RunError("GFS-MUTATED-AWAY", phase="raw", source="gfs")
+    reports = {"ifs": (), "gfs": (_stopped_report("gfs"),)}
+    errors = {"ifs": ifs_error}
+
+    wrapper = RunSourcesError(reports, errors)
+    expected = (
+        "ifs: phase=cleanup IFS-SNAPSHOT-BODY\n"
+        "IFS-SNAPSHOT-NOTE-TWO-9f4e\n"
+        "IFS-SNAPSHOT-NOTE-ONE-1ab3"
+    )
+    reports["ifs"] = ()
+    reports["gfs"] = ()
+    errors["ifs"] = gfs_error
+    errors["gfs"] = gfs_error
+
+    assert wrapper.reports["ifs"] == ()
+    assert wrapper.reports["gfs"] == (_stopped_report("gfs"),)
+    assert set(wrapper.errors) == {"ifs"}
+    assert wrapper.errors["ifs"] is ifs_error
+    assert wrapper.errors["ifs"].__cause__ is cause
+    assert ifs_error.__notes__ is original_notes
+    assert ifs_error.__notes__ == [
+        "IFS-SNAPSHOT-NOTE-TWO-9f4e",
+        "IFS-SNAPSHOT-NOTE-ONE-1ab3",
+    ]
+    assert str(wrapper) == expected
 
 
 def test_dual_source_jobs_overlap_before_either_poll(tmp_path: pathlib.Path) -> None:
@@ -641,8 +782,28 @@ def test_public_structure_is_frozen_keyword_only() -> None:
     report_ann = c.RunSourcesReport.__annotations__
     assert report_ann["ifs"] == "tuple[RunReport, ...]"
     assert report_ann["gfs"] == "tuple[RunReport, ...]"
-    error_ann = c.RunSourcesError.__init__.__annotations__
+    error_init = c.RunSourcesError.__init__
+    error_sig = inspect.signature(error_init)
+    assert tuple(error_sig.parameters) == ("self", "reports", "errors")
+    assert all(
+        parameter.default is inspect.Parameter.empty
+        for parameter in error_sig.parameters.values()
+    )
+    assert issubclass(c.RunSourcesError, RuntimeError)
+    assert isinstance(c.RunSourcesError.reports, property)
+    assert isinstance(c.RunSourcesError.errors, property)
+    for property_name in ("reports", "errors"):
+        getter = getattr(c.RunSourcesError, property_name).fget
+        assert getter is not None
+        assert tuple(inspect.signature(getter).parameters) == ("self",)
+    error_ann = error_init.__annotations__
     assert "tuple[RunReport, ...]" in error_ann["reports"]
+    source_path = pathlib.Path(inspect.getsourcefile(c.RunSourcesError)).resolve()
+    source_text = source_path.read_text(encoding="utf-8")
+    assert "traceback" not in source_text
+    assert "yd_producer.cli" not in source_text
+    assert len(source_text.splitlines()) < 1000
+    assert len(pathlib.Path(__file__).read_text(encoding="utf-8").splitlines()) < 1000
     from datetime import UTC, datetime
     from pathlib import Path
 
@@ -706,6 +867,7 @@ def test_public_structure_is_frozen_keyword_only() -> None:
     with pytest.raises(ValueError, match="至少"):
         c.RunSourcesReport(ifs=(), gfs=(_stopped("gfs"),))
     ifs_err = c.RunError("boom", phase="cleanup", source="ifs")
+    ifs_err.add_note("OVERLAP-NOTE-2e1a")
     gfs_err = c.RunError("nope", phase="cleanup", source="gfs")
     overlap = c.RunSourcesError(
         {"ifs": (_succeeded("ifs"),), "gfs": (_stopped("gfs"),)},
@@ -715,6 +877,7 @@ def test_public_structure_is_frozen_keyword_only() -> None:
     assert overlap.reports["ifs"][0].outcome is RunOutcome.SUCCEEDED
     assert overlap.reports["gfs"][-1].outcome is RunOutcome.STOPPED
     assert overlap.errors["ifs"] is ifs_err
+    assert str(overlap) == "ifs: phase=cleanup boom\nOVERLAP-NOTE-2e1a"
     empty_partial = c.RunSourcesError(
         {"ifs": (), "gfs": (_stopped("gfs"),)},
         {"ifs": ifs_err},
