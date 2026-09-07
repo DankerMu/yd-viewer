@@ -37,6 +37,29 @@
 - **WHEN** 将率定末态重戳到指定 T
 - **THEN** header 时间对应 T，数据区与原文件一致
 
+### Requirement: state 输入边界保持单一异常契约
+state 文档 API MUST 保留合法输入的既有行为，并对本 Requirement 点名的畸形实参统一抛 `ValueError`；失败时 MUST NOT 返回部分文档或修改源文档。时间归一 MUST 与宿主时区无关。
+
+#### Scenario: offset 未知的 aware datetime 被确定性拒绝
+- **WHEN** `_ensure_utc` 或重戳入口收到 `tzinfo` 非空、但 `utcoffset()` 返回 `None` 的 datetime，并分别在 UTC、EST、Asia/Shanghai 宿主时区执行
+- **THEN** 三种环境均抛 `ValueError`，MUST NOT 把该 wall clock 当宿主本地时间重释
+
+#### Scenario: 既有 datetime 语义保持
+- **WHEN** 重戳入口收到 naive datetime 或带合法非 UTC offset 的 aware datetime
+- **THEN** naive 值仍按 UTC 解释，aware 值仍转换为同一 UTC 时刻
+
+#### Scenario: 畸形或溢出的重戳 target 使用 ValueError
+- **WHEN** target 为 `None`、`date`、float、其 timezone 返回非 `timedelta` offset，或为 UTC 转换时溢出的 `datetime.max @ -14:00` / `datetime.min @ +14:00`
+- **THEN** 重戳抛 `ValueError`，不返回文档，源文档字节不变
+
+#### Scenario: 行替换实参在文档边界预检
+- **WHEN** `with_replaced_lines` 收到非 Mapping 实参、值为 `None`/bytes/int，或替换文本含孤立 Unicode surrogate
+- **THEN** 该入口立即抛 `ValueError`，不返回文档，源文档字节不变
+
+#### Scenario: bytes-like cfg.ic 内容有明确解析语义
+- **WHEN** `cfg_ic.parse` 分别收到内容相同的 bytes、bytearray 与 memoryview
+- **THEN** 三者产出字节等价的文档；可变 bytes-like 输入在解析前快照，且超出 `max_bytes` 时在制造不可变副本前抛 `ValueError`
+
 ### Requirement: 负残差处理
 负残差处理 MUST 以 NWM 已验证纯函数语义为兼容基线：负残差归零，并执行对应的域均修正阈值检查；超阈值 MUST 报错。非有限值 MUST 在任何归零投影之前被拒。yd MAY 在本仓修复 `state/cfg_ic.py` 的快照缺陷，不要求它与 pin 逐字或 AST 等价；每一处偏离 MUST 同时在模块头说明，并在 `nwm-snapshot-inventory.md` 对应行的「剥离点」列登记一句“问题 + 修法”。
 
