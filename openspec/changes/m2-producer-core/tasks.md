@@ -1524,6 +1524,7 @@ Regression rows:
 - [x] 4.2 实现结构检查（缺段、行数与 header 不符、数值区损坏）
 - [x] 4.3 实现重戳到目标 cycle 绝对时间（只改 header、数据不变；服务 init 首态与发布前 T+12 定戳两条路径）
 - [x] 4.4 快照负残差归零与域均修正阈值检查纯函数
+- [ ] 4.5 关闭 issue #67 的 state `ValueError` 契约缺口：确定性 UTC 归一、替换输入预检与 bytes-like 解析
 
 依赖：组 2（勘察清单定原路径）
 §13.1 归属：state
@@ -1942,6 +1943,150 @@ Domain packs (from active profile):
 - `cfg_ic.py` 的改动是否严格限于 #54 第 3/4/5 条，有无顺手改动分段识别辅助的判定语义（那会让 #8 的 Must-preserve 失效）
 - 是否越界落地了 rekey 面 / 落盘面 / `water_balance` 的死代码
 - 逐值手算证据是否真的逐值（#8 实测：只断 `len()` 与 `isinstance(float)` 时，把三处 `append` 换成全零元组的变异体在全套 46 条下存活）
+
+### Issue #67 fixture（任务 4.5：state `ValueError` 契约三处闭合）
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: yd-viewer
+Upstream suggested level: absent（本 issue 来自 PR #61 的 DEFER 路由，不是 stage-change-pipeline 产物）
+Minimal mergeable slice: 任务 4.5 全部——两个 state 边界共享「拒绝统一为 `ValueError`、不返回部分文档」不变量；拆开会让模块族契约继续只闭合一部分。产品 PR 仍只有两个源码文件与一个测试文件。
+
+**风险分级理由**：`state` / `cfg.ic` / `restamp` 命中 project profile 的 mandatory expanded triggers；`_ensure_utc` 是 init 首态与发布前 T+12 重戳的共享时间归一根，当前伪 aware 输入会静默按宿主时区重释，可能把不同节点上的同一 wall clock 写成不同 epoch 分钟，故按 shared-helper + 状态链静默数据错误上调 high repair intensity。今日仓内调用方只传标准 datetime，现实可达性低，不把 issue 优先级夸成 P1。
+
+#### 核心裁决
+
+1. `_ensure_utc` 仍是唯一归一 owner。先要求 `datetime` 实例；`tzinfo is None` 继续按 pin 语义直接补 UTC，MUST NOT 改成拒绝 naive。对 `tzinfo` 非空的值先求 `utcoffset()`：返回 `None` 时立即抛 `ValueError`，MUST NOT 调 `astimezone`；offset 类型非法或 UTC 转换在 datetime 极值处溢出时，把 `TypeError` / `OverflowError` 收敛为带 cause 的 `ValueError`。不捕获任意 `BaseException`，不吞自定义 timezone 的非契约异常。
+2. `restamp_to_absolute_time` 的 valid-doc header shape 闸门与只改 minute token 语义不变；target 拒绝发生在返回新文档前，原 `CfgIcDocument` 是 frozen 且 bytes 不变。`_ensure_utc` 的「offset 未知拒绝」是 pin 未定义格上的新增守卫，不是把 pin 的 naive 分支改窄，故 `restamp.py` 既有五条偏离计数不增加。
+3. `CfgIcDocument.with_replaced_lines` 在任何替换应用前预检：实参必须是 `collections.abc.Mapping`，每个 value 必须是 `str`，且必须能编码为 UTF-8；非 Mapping、`None`/bytes/int value 与孤立 surrogate 均转成稳定 `ValueError`。新增检查放进一个私有 helper；既有 method 内四类 `raise`（index 类型、越界、断行字符、数据行非数值）的 AST 闭合不搬、不删、不改 oracle。
+4. `cfg_ic.parse` 把 bytes / bytearray / memoryview 都定义为「内存内容」：bytes 维持原路径，bytearray/memoryview 在语义解析前快照成不可变 bytes。对 bytes-like 先按 `len`（memoryview 用 `nbytes`）执行既有 `max_bytes` 上界，再制造副本，避免超限输入先造成第二份大分配；Path/str 文件读取行为不变。docstring 明确三种内容类型。`test_cfg_ic.py` 还把 `parse` 函数体内的 `raise` 数量闭合为现有 16 条，且本 issue 禁改该 oracle：bytes-like 的前置上界检查 MUST 经私有 helper 行使，或复用/移动现有 `exceeds size limit` 拒绝，MUST NOT 在 `parse` 体内新增第二个 size-limit `raise` 节点。
+5. 上述三项是本仓 API 对 pin 未定义实参面的前置条件/模型扩展，不改变 pin 受支持输入的判定语义；`cfg_ic.py` 与 `restamp.py` 模块头既有偏离清单、`nwm-snapshot-inventory.md` 的抽取/剥离台账及所有溯源断言均保持不变，不伪造新的 NWM 偏离。
+
+#### Change surface / PR boundary
+
+Docs-first fixture PR（本小节）：
+- `openspec/changes/m2-producer-core/design.md`
+- `openspec/changes/m2-producer-core/specs/state-tools/spec.md`
+- `openspec/changes/m2-producer-core/tasks.md`
+
+产品 PR（fixture 合并后从最新 master 新建，精确 write set）：
+- `producer/src/yd_producer/state/restamp.py`
+- `producer/src/yd_producer/state/cfg_ic.py`
+- `producer/tests/test_state_valueerror_contract.py`
+
+MUST NOT 修改 `producer/tests/test_cfg_ic.py`、`producer/tests/test_state_tools_restamp.py`、`producer/src/yd_producer/state/state_qc.py` 或其他 runtime/test 文件。新测试文件名满足本 issue 的 `producer/tests/test_state_*.py` 归属；docs/OpenSpec/review evidence 是工作流产物，不算产品文件越界。
+
+#### Must preserve
+
+- naive datetime 仍按 UTC 解释；合法非 UTC aware datetime 仍转换为同一 UTC 时刻。
+- 重戳仍只改 header minute token，输入文档不就地修改；header shape 错误前缀、数据区字节保真和幂等语义不变。
+- `cfg_ic.parse` 的 Path/str/bytes、UTF-8/结构拒绝、`MAX_STATE_IC_BYTES` 默认值和有界文件读取不变；bytearray/memoryview 不被误作路径。
+- `CfgIcDocument.with_replaced_lines` 的合法 Mapping、行尾保真、行号/断行/数值视图刷新语义不变。
+- `state_ic_structure_complete` 的「解析失败返回 False」承诺不变；本 issue 不主张其 `expected_*` 类型面有缺陷。
+- #54、#66、#68、#70 保持 CLOSED，不重开、不改其裁决；#21/#24 调用方接线不在本 PR。
+- stdlib-only、零 NWM runtime import、零数据库/scheduler 依赖；不改依赖与 `uv.lock`。
+
+#### Seams under test
+
+- `restamp._ensure_utc(value)`：issue 验收点名的共享归一根；直接钉 unknown-offset 与 naive/aware 分支。
+- `restamp.restamp_to_absolute_time(doc, target)`：对外文档边界，钉异常类型、无返回值与源文档不变。
+- `CfgIcDocument.with_replaced_lines(replacements)`：文档修改入口，钉容器/value/renderability 前置条件。
+- `cfg_ic.parse(source, max_bytes=...)` + `cfg_ic.render(doc)`：内存内容边界，钉 bytes-like 等价与上界。
+
+#### Risk packs considered
+
+Core:
+- Public API / CLI / script entry: **selected** - 三个模块 API 与 `_ensure_utc` 共享根的异常契约；不接 CLI。
+- Config / project setup: not selected - 无配置字段或默认值。
+- File IO / path safety / overwrite: not selected - Path 读取不改，无写/删/覆写。
+- Schema / columns / units / field names: not selected - cfg.ic 布局、列与分钟单位不改。
+- Auth / permissions / secrets: not selected - 无身份或凭据面。
+- Concurrency / shared state / ordering: not selected - frozen 文档纯函数；宿主 TZ 差异是确定性问题，不是共享状态协议。
+- Resource limits / large input / discovery: **selected** - bytes-like 快照不得绕过或后置 `max_bytes` 上界。
+- Legacy compatibility / examples: **selected** - naive-as-UTC、合法 aware、Path/str/bytes 与合法 Mapping 均保持。
+- Error handling / rollback / partial outputs: **selected** - 点名的原生异常统一为 `ValueError`，失败不返回文档、源对象不变。
+- Release / packaging / dependency compatibility: not selected - stdlib-only，无依赖/打包变化。
+- Documentation / migration notes: **selected** - `parse` docstring 固定 bytes-like 语义；兼容增加，无迁移步骤。
+
+Domain:
+- Geospatial / CRS / shapefile sidecars: not selected - 无几何。
+- Time series / forcing / temporal boundaries: **selected** - UTC offset、宿主 TZ 与 datetime 极值是本 issue 核心边界。
+- 状态链 / warm-start 定戳一致性: **selected** - 重戳 minute 必须是 host-independent 的同一绝对时刻。
+- NWM 快照溯源与 DB-free 隔离: not selected for new behavior - 不改 pin 受支持语义、抽取集或隔离面；既有溯源/DB-free 测试继续作为 must-preserve 证据。
+
+#### Invariant Matrix
+
+- Governing invariant: 每个点名的 state 边界要么返回确定、可 UTF-8 render、满足既有格式契约的文档，要么抛 `ValueError`；不得返回宿主相关时间、泄漏点名的原生异常或留下部分结果。
+- Source-of-truth identity/contract: datetime 的 runtime 类型 / `tzinfo` / `utcoffset()`，替换值的 Mapping + str + UTF-8 可编码性，以及既有 `max_bytes`。
+- Producers: `cfg_ic.parse`、`CfgIcDocument.with_replaced_lines`、`restamp_to_absolute_time`。
+- Validators/preflight: `_ensure_utc` 与新增 replacement 私有 preflight helper。
+- Storage/cache/query: none - 本 issue 全部是内存纯函数，不读写正式状态目录。
+- Public routes/entrypoints: 上述三个 state 文档 API；CLI 不变。
+- Frontend/downstream consumers: init/publish/prepare/assembly/state-QC 既有合法调用保持。
+- Failure paths/rollback/stale state: 点名坏输入抛 `ValueError`；result 变量保持未赋值，源 frozen 文档 render bytes 不变。
+- Evidence/audit/readiness: `test_state_valueerror_contract.py` + producer 全套/Ruff + OpenSpec/stage gate；既有 state suites 保兼容。
+- Regression rows:
+  - naive 或合法 offset datetime -> 与现行 UTC minute 逐值相同。
+  - unknown/bad/overflowing datetime、坏 replacements、孤立 surrogate -> `ValueError`，无 result，源文档 bytes 不变。
+  - 同一 payload 的 bytes/bytearray/memoryview -> render bytes 相同；超限 bytes-like -> `ValueError`。
+  - 未改 sibling `state_ic_structure_complete` + parse failure -> 仍返回 False 而不抛。
+
+#### Boundary-surface checklist
+
+- Shared helper roots: `_ensure_utc`；replacement 私有 preflight helper。
+- Public entrypoints: `restamp_to_absolute_time`、`CfgIcDocument.with_replaced_lines`、`cfg_ic.parse`。
+- Read surfaces: `cfg_ic.parse` 的 Path/str/bytes lane 保持；新增 bytes-like 只走内存 lane。
+- Write/delete/overwrite surfaces: none。
+- Staging/publish/rollback surfaces: none；#21/#24 不改。
+- Producer/consumer evidence boundaries: restamped header bytes 与 `cfg_ic.render`。
+- Stale-state/idempotency boundaries: source frozen document never mutates；既有重戳幂等测试继续绿。
+- Unchanged downstream consumers: `state_qc`、prepare/init/assemble/publish 的合法参数调用。
+
+#### Required evidence（input -> exact expected outcome）
+
+**时间归一与重戳**
+- 自定义 `tzinfo` 非空、`utcoffset()` 返回 `None` 的 `datetime(2026,1,1,...)`，分别在 `TZ=EST` / `Asia/Shanghai` / `UTC` 下调用 `_ensure_utc` -> 三次均抛 plain contract `ValueError`；每例在 `finally` 恢复环境并调用 `time.tzset()`，MUST NOT 依赖测试顺序。
+- naive `datetime(2026,1,1)` -> 精确 `2026-01-01 00:00:00+00:00`；合法 `-05:00` aware -> 与等值 UTC datetime 相同，钉住 pin 两条分支。
+- valid clean doc + target `None` / `date(2026,1,1)` / `1.0` -> 每例 `ValueError`，MUST NOT 泄漏 `AttributeError`。
+- custom tzinfo 的 `utcoffset()` 返回 int -> `ValueError`，MUST NOT 泄漏 `TypeError`。
+- `datetime.max` with `timezone(-14h)` 与 `datetime.min` with `timezone(+14h)` -> 各抛 `ValueError`，MUST NOT 泄漏 `OverflowError`。
+- 上述每个失败例均用 result sentinel 断言没有文档返回，并断言 `cfg_ic.render(source_doc)` 与调用前 bytes 相同；不得只写 `pytest.raises(ValueError)`。
+
+**文档替换**
+- `with_replaced_lines(None)` 与 `with_replaced_lines([(0, "x")])` -> `ValueError`，MUST NOT 泄漏 `.items` 的 `AttributeError`。
+- 合法 index 对应 value 为 `None` / `b"x"` / `1` -> 各抛 `ValueError`，MUST NOT 泄漏 membership `TypeError`。
+- 替换 value 含 U+D800 或 U+DFFF 的孤立 surrogate -> 在 `with_replaced_lines` 当场抛 `ValueError`；MUST NOT 先返回不可 render 的文档再由 `render` 抛错。
+- 失败矩阵每例均断言无 result 且源文档 bytes 不变；另有一条合法 Mapping 替换继续保持原行尾并可 render，防止守卫全拒。
+
+**bytes-like parse**
+- 同一合法合成 payload 分别以 bytes、`bytearray(payload)`、`memoryview(payload)` 输入 -> `render(doc)` 均逐字等于 payload，段索引/row count 与 bytes 基线相同。
+- 由 mutable bytearray 建 memoryview，parse 返回后修改 backing bytearray -> 已返回文档的 render bytes 仍等于调用时 payload，证明快照而非持有可变 view。
+- bytearray 与 memoryview 各以 `max_bytes=len(payload)-1` 输入 -> `ValueError` 且消息保留 `exceeds size limit` 语义；既有 Path 与 bytes happy path 同文件回归保持。
+- `parse` docstring 明确 Path/str 为路径，bytes/bytearray/memoryview 为内容。
+
+**证明与验证**
+- implementer 写完源码与新测试后，只暂存两个既有源码文件到唯一标签 `red-proof-issue-67-*` 的 stash；因 stash 栈跨 worktree 共享，MUST `git stash push -m <unique> -- <two source paths>`、立即按 tag 取得 SHA、用 `git stash apply <sha>` 恢复并按 tag 定位后 drop，MUST NOT 用裸 `git stash` 或 `git stash pop`。新行为测试在 pre-change source 上批量变红，兼容性测试允许保持绿；报告逐条映射哪些新行为断言红。最后 `git stash list` 无该 tag。
+- `cd producer && uv run pytest` -> 全绿；现有 `test_state_tools_restamp.py`、`test_cfg_ic.py`、`test_state_tools_qc.py` 包含在全套内且 oracle 未修改。
+- `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出 0。
+- `cd viewer && uv run pytest && uv run ruff check . && uv run ruff format --check .` -> 默认 build+test 回归退出 0。
+- `openspec validate m2-producer-core --strict --no-interactive`、`openspec validate --all` 与 `bash scripts/check-stage-pipeline-log.sh origin/master` -> 退出 0。
+- scope gate：产品 PR 相对 base 的 tracked diff 精确等于本 fixture 三个产品路径；`git diff --check` 退出 0；#54/#66/#68/#70 的 GitHub state 仍为 CLOSED。
+
+#### Non-goals
+
+- `state_ic_structure_complete` 的 `expected_*` 类型强制、QC 内容策略、非有限值/river 行数/段重入/BOM 等 #54 已关闭面。
+- #66、#68、#70 的任何裁决或代码面；不得重开四个已关闭 issue。
+- #21/#24 的 target 构造与落盘接线；文件发布、NFS、node-22/node-27 运行验证。
+- 静态类型检查器、新异常层、配置或依赖。
+- 扩展 bytes-like 到任意 buffer protocol 对象；本 issue 只钉 bytearray 与 memoryview。
+
+#### Review focus
+
+- `_ensure_utc` 是否先保留 naive 分支、再拒 unknown offset，避免用 `value.utcoffset() is None` 一刀误拒 naive；异常转换是否只包点名的类型而非吞任意异常。
+- datetime 极值是否在 `astimezone` 溢出处转成 `ValueError`；是否误把同一 wall clock 按 host TZ 解释。
+- replacement 检查是否位于文档模型 owner 且先于任何返回，是否保持 method 既有四类 AST raise oracle，不靠改测试放行。
+- bytes-like 是否在 size guard 后快照、没有落到 `Path(source)`；Path/str/bytes 与有界读取是否完全保持。
+- 产品 diff 是否精确三文件；现有 state 测试、snapshot 偏离计数、#54/#66/#68/#70 与 `state_ic_structure_complete` 是否未动。
 
 ## 5. 执行器抽象：JobExecutor 协议与 fake
 
