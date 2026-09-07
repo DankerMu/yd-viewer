@@ -988,3 +988,29 @@ review。产品分级上调的原因是公开异常文本格式由 #132 CLI stde
 复议条件未触发：不存在产品综合轮、rotated catch、verifier disposition、已关闭 finding 重报或 residual
 deferral。Issue #137 保持 OPEN，task 14.5 待严格两文件产品 PR 完成；共享 `m2-producer-core` 继续服务
 #137/#132，本次不 archive。
+
+---
+
+## 第 31 次复议（issue #67 / PR #166 docs-only fixture 合并后，2026-09-06）
+
+审计数字：41 行（40 merged、1 terminal），仍为 28 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #166 是 `fixture=none`、`rounds=0` 的 docs-only implementation fixture；
+正式 fixture reviewer 的 pass 与补充核对不计产品综合 round。因此本样本不进入 rotation attribution，也不改变
+core/rotated 数字。
+
+None 桶由 5 个增至 6 个 merged PR，累计 `gate_net_catch=0`，仍低于每个 fixture level 至少 8 个样本的
+keep/cut 门槛。该结果只能描述 docs-only 前置，不能外推到 #67 后续 `expanded/high` 产品 PR；后者仍须四席
+综合审核、候选 verifier gate 与独立 Gap Sweep。
+
+本 PR 的有效信号来自 fixture owner 与机械闸门：初稿独立 change 因 stage-anchor 不成立而在 tracking 前迁入
+已有 `m2-producer-core/state-tools`，fresh reviewer 对最终形态重新 pass；reviewer 又指出 `parse` 体内 16 条
+`raise` 的既有 AST 闭合，fixture 随即固定 bytes-like 上界不能新增第二个 size-limit `raise`。这些是文档/机械
+oracle 的收益，不是后轮 lens rotation 的收益样本。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；不把
+零轮次 docs-only clean 样本计作“轮换发生但零收益”，也不据此缩减后续 high 产品席位。累计 rotated 后轮捕获
+仍显著，证据不足时默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：不存在产品综合轮、rotated catch、verifier disposition、已关闭 finding 重报或 residual
+deferral。Issue #67 保持 OPEN；#54/#66/#68/#70 保持 CLOSED；共享 `m2-producer-core` 继续服务
+#67/#137/#132，本次不 archive。
