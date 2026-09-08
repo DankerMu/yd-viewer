@@ -3583,7 +3583,7 @@ def import_verified_checkpoint(
 - [x] 10.1 引入几何依赖（pyshp/pyproj/shapely）并 `uv lock`，构造带自定义 Albers `.prj` 的合成 shapefile 基线 fixture，实现 `.prj` 解析与重投影工具，CI 绿
 - [x] 10.2 实现 `rivers.geojson`（`reach_id`=DBF Index、数量一致）与 `boundary.geojson`（单元合并边界）生成，落点 `input/viewer/`
 - [x] 10.3 实现 prepare 编排：拒绝覆盖检查 → 薄外壳按源两次调用 builder（记录型假 builder 断言两次入参 source/grid 不同、输出分别落 `yd_gfs`/`yd_ifs`）→ 每变体顶层 `*.cfg.ic` 普通文件基数恰为 1 且 reach 数等于 `reach_count` → 提交到 `input/models/` 与 `input/viewer/` → scratch 清理
-- [ ] 10.4 为每个 prepared variant 持久化并验证版本化 direct-grid handoff（固定 manifest + 明示 `.sp.att`），供独立 `run` 进程的 #132 production driver 只读消费（issue #171）
+- [x] 10.4 为每个 prepared variant 持久化并验证版本化 direct-grid handoff（固定 manifest + 明示 `.sp.att`），供独立 `run` 进程的 #132 production driver 只读消费（issue #171）
 
 依赖：组 1（薄外壳、`reach_count`）；10.4 另依赖已完成 8.2/8.3、10.3 与 #134，并前置于 14.2/#132
 §13.1 归属：prepare
