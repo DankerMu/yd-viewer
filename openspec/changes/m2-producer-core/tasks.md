@@ -5178,8 +5178,9 @@ Review focus:
 - [x] 14.3 多轮追赶与缺口停等：raw 一次补齐 T/T+12h/T+24h 时序推进、每源在途提交计数 ≤1、缺轮停在缺口（原任务 14.2；§13.1：同源顺序/raw 缺口）
 - [x] 14.4 双源并行、单源失败隔离与崩溃恢复端到端：IFS 失败 GFS 继续、失败日志与 work 清理、无 DONE 残留下次重跑（原任务 14.3；§13.1：双源并行/单源失败/无 DONE 崩溃恢复）
 - [x] 14.5 `RunSourcesError` 按固定源顺序保留每个底层 `RunError` 正文与 `__notes__`（14.2 前置；issue #137）
+- [ ] 14.6 controller 将 #171 exact-five variant 与精确 cycle state 有界提交为 claimed-work capability，并新增不放宽 legacy guard 的 staged assemble seam（14.2 前置；issue #177）
 
-依赖：组 5、组 8、组 9、组 12、组 13；14.2 是后补的 M2 收尾接线，按实现依赖位于 14.4 与窄前置 14.5 之后
+依赖：组 5、组 8、组 9、组 12、组 13；14.2 是后补的 M2 收尾接线，按实现依赖位于 14.4、窄前置 14.5 与 14.6 之后
 §13.1 归属：控制器/发布（逐 task 标注场景）
 Suggested fixture level: expanded - 多轮端到端目录树与可编排 fake executor
 Minimal mergeable slice: 单源单轮骨架（14.1）——一条端到端路径独立合并保绿；追赶（14.3）、双源（14.4）与生产 CLI 接线（14.2，最后实施）为后继
@@ -5785,7 +5786,7 @@ Minimal mergeable slice: 只修改聚合消息构造与原测试模块中的判�
 Fixture level: expanded（CLI 入口、生产 Slurm、跨进程 worker/receipt、双源控制器、锁与退出码均是公共/状态边界）
 Repair intensity: high
 Project profile: yd-viewer
-依赖：14.1、14.3、14.4、10.4/#171、#47、#134、#135、#136、#137；编号 14.2 是用户指定的收尾编号，不表示它先于已完成的 14.3/14.4 实施
+依赖：14.1、14.3、14.4、14.6/#177、10.4/#171、#47、#134、#135、#136、#137；编号 14.2 是用户指定的收尾编号，不表示它先于已完成的 14.3/14.4 实施
 
 **裁决与范围**：
 
@@ -5927,3 +5928,139 @@ Project profile: yd-viewer
 - 不在 M2 伪造 node-22 真运行 receipt、Slurm/SHUD 数值 oracle、cron 安装或现场路径/资源值；这些仍归 M4。
 - 不新增自动 `scancel`、watchdog、失败重试/退避、持久跨 tick job registry 或任意追赶轮数 cap。
 - 不改 viewer、NWM 服务或 `JobRecord` schema；不恢复数据库/scheduler 依赖。
+
+### Issue #177 fixture（任务 14.6：claimed-work staged variant/state；#132 前置）
+
+Fixture level: expanded（NFS→scratch 文件提交、JSON schema、state/variant source authority、controller/assemble 公共边界）
+Upstream suggested level: high（agree；effective fixture token `high`，文件/证据/cleanup 与生产拓扑触发 high repair intensity）
+Repair intensity: high
+Project profile: yd-viewer
+Minimal mergeable slice: 先合并严格六文件 docs-first PR；随后单一 product PR 只交 controller staging + public capability loader + staged assemble，共享 change 继续 active，不与 #132 六文件接线混交
+
+**冲突与裁决**：
+
+1. node-22 compute node 看不到 yd NFS，但 D11 `assemble(...)` 刻意拒绝任意 work-relative variant/states root；`AttemptRequest` 当前只携带 NFS source paths。让 compute 读 NFS、登录节点提前 canonical/forcing/assemble、把副本放 work 外 sibling、在 `nwm.py` 复制 assembler、或删除 outside-work guard 都不可接受。14.6 先建立 controller-owned work-local capability，14.2/#132 后续只消费。
+2. scratch 终名固定为 `<work>/input/variant/<exact-five>`、`<work>/input/states/<source>/<T>.cfg.ic` 与最后写的 `<work>/input/yd.staged-inputs.json`。schema 固定 `yd.run.staged-inputs.v1`；top-level exact keys 恰 `schema_version/source_id/cycle_id/work_dir/files`；`files` 恰六个安全 work-relative key，值为 `sha256:<64 lowercase hex>`。manifest canonical encoding逐字为 `json.dumps(payload, allow_nan=False, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")`；它不自含 checksum，loader 返回 manifest checksum。
+3. `AttemptRequest` 既有字段/签名不改。NFS `request.variant_dir/state_path` 仍只供登录节点 `driver.prepare` 重载 #171 source snapshot并与 controller staged snapshot对账；worker argv/env/attempt handoff/receipt/compute assemble必须零 NFS path，只引用 exact work、staged manifest checksum 与 work-local relative members。
+4. `WorkClaim.identity` 只授权 controller 当前节点/进程相对 exact root 的 mkdir/O_EXCL 写；禁止序列化或跨节点比较 `(st_dev, st_ino)`，因为 `st_dev` 不是跨挂载稳定 identity。每个 loader/consumer进程各自 no-follow open/fstat 冻结当前 work root并在读前后/点用时复验；跨进程只绑定 canonical manifest digest、source/cycle/work path与六份内容 checksum。
+5. public seams 逐字固定，全部 keyword-only、无默认：
+   ```python
+   def stage_work_inputs(
+       *, claim: WorkClaim, source_variant_dir: Path | str,
+       source_state_path: Path | str, source: str, cycle: datetime,
+       project_name: str, grid_id: str, max_manifest_bytes: int,
+       max_asset_bytes: int, max_state_bytes: int,
+   ) -> StagedWorkInputs: ...
+
+   def load_staged_work_inputs(
+       *, work_dir: Path | str, source: str, cycle: datetime,
+       project_name: str, grid_id: str, max_manifest_bytes: int,
+       max_asset_bytes: int, max_state_bytes: int,
+   ) -> StagedWorkInputs: ...
+
+   def assemble_staged(
+       *, registry: WorkRegistry, staged_inputs: StagedWorkInputs,
+       forcing: ForcingProductionResult,
+   ) -> RunDirectory: ...
+   ```
+   新模块名固定 `yd_producer.staged_inputs`；`StagedWorkInputsError(ValueError)` 统一 schema/path/IO/identity/content拒绝。frozen + kw-only `StagedWorkInputs` 字段固定为 `source: str, cycle: datetime, work_dir: Path, variant_dir: Path, state_path: Path, manifest_path: Path, work_identity: tuple[int, int], manifest_checksum: str, file_checksums: tuple[tuple[str, str], ...], prepared: PreparedVariantHandoff, project_name: str, grid_id: str, max_manifest_bytes: int, max_asset_bytes: int, max_state_bytes: int`。所有 nested fields 深冻结；不含 NFS source path、fd、bytes大快照或 mutable mapping。
+6. controller 的顺序固定为 `claim_exact_work -> stage_raw -> source variant/reach/#171 + exact frontier state validation -> stage_work_inputs -> driver.prepare -> JobSpec -> submit`。source全部 admission 通过后才写 `input/`；目标只 claim-relative mkdir/O_EXCL，readiness manifest最后写。目标 reload通过后，stager再次重载 NFS source snapshot并要求六份 checksum/#171 snapshot未漂，才返回 capability。失败收敛为 `RunError(phase="prepare", job_id=None)`，保留 cause/notes与同一 exact work；raw 已存在，禁止调用 empty-root release或细粒度删 input。
+7. `load_staged_work_inputs` 同时是 controller、登录节点 driver、compute worker与 `assemble_staged` 的唯一 parser。它以固定路径读取，不扫描候选；work/input root与所有祖先/leaf no-follow，读前后校验本进程 work identity与exact entry set；manifest先按cap bounded read，再做UTF-8/JSON recursion/depth/node/canonical/exact schema；六份文件各按对应cap从同一descriptor-bound read/stream取得checksum。它调用 #171唯一 loader并验证caller source/project/grid；state复用 D11 唯一 parser/time predicate验证原生结构与绝对T，不复制 parser。checksum验证必须在用于copy/parse的同一fd/bytes上；mtime/path/inode-only不得替代内容绑定。
+8. `assemble_staged` 首先按 capability记录的 exact expected值重调 loader并要求整个 frozen snapshot相等；随后与 legacy `assemble` 共享同一 parameter/state/forcing/variant-copy/stage/rename内核。parameter与state按cap有界读且同bytes验checksum；另外三个 exact-five leaves descriptor-bound streaming checksum-copy，避免六份大bytes常驻内存。跳过率定`yd.cfg.ic`、T state覆盖同名、参数六项渲染；opaque binding、handoff JSON与manifest明示`.sp.att`按原名复制。不得扫描work或复制第二套参数/state/forcing/commit逻辑。
+9. legacy `assemble(*, registry, variant_dir, forcing, states_root, state_path)` 签名/语义不变：外部递归variant保持无额外entry/depth cap，任意直接 work-relative variant/states仍validate拒绝。不得用union/default/flag放宽；只有public loader返回且点用重验相等的capability可进入新seam。
+10. cleanup不新增owner：input/partial staging始终在同一 claim内。成功publish和明确FAILED/TIMEOUT日志提交后沿用既有整树删除；submit/poll timeout、未知crash/pre-submit failure按既有证据政策保留work，下一tick `UNVERIFIED_WORK_RESIDUE`停源。不得建work外副本、input sweeper、自动恢复或细粒度delete API。
+
+**Must preserve / downstream compatibility**：
+
+- #171 `PreparedVariantHandoff` 十字段/public loader/constants、exact-five、opaque binding与prepare双重snapshot不改；`yd.binding`不能解析成metadata carrier。
+- D11 `WorkIdentity`、`WorkRegistry`、`RunDirectory`、`stage_work_registry`、legacy `assemble`签名与所有外部递归variant caller不改；`test_input_roots_inside_work_are_rejected_before_staging`仍有判别力。
+- `AttemptRequest`/`PreparedAttempt`/`AttemptProducts`/`AttemptDriver`、`run_once`/`catch_up_source`/`run_sources`、`WorkClaim`字段及publish/cleanup/tracker签名不改。
+- raw object-store布局、frontier选择、warm-start bytes、六项参数、forcing package、checkpoint/publisher/viewer `DONE` consumer不改。
+- config/local schema闭合；不新增identity/path/cap字段。producer不连接NWM PostgreSQL、不设置/消费`DATABASE_URL`，不import日常NWM checkout。
+- #95/#44/#45/#175/#108是unchanged siblings；不修其空判定、权限、mapping-builder env、prepare内容保真或startup hygiene政策。
+
+**Risk packs considered（core）**：
+
+- Public API / CLI / script entry: selected - 新 public staged module与`assemble_staged`；CLI仅后续#132消费，本issue不改。
+- Config / project setup: not selected - 复用versioned constants与现有grid config；无schema/default新增。
+- File IO / path safety / overwrite: selected - NFS source bounded/no-follow读、claim-relative O_EXCL写、exact layout、identity/race与整树cleanup。
+- Schema / columns / units / field names: selected - staged JSON exact schema/canonical bytes/SHA文法；state格式/时间与prepared handoff嵌套合同。
+- Auth / permissions / secrets: selected - NFS uid/mode不可读稳定拒绝；无凭据/secret输出。
+- Concurrency / shared state / ordering: selected - WorkClaim单写、manifest-last readiness、source/staged重验与submit顺序。
+- Resource limits / large input / discovery: selected - manifest/depth/node/entry/asset/state caps；streaming checksum-copy；固定路径零候选扫描。
+- Legacy compatibility / examples: selected - legacy recursive assemble与所有既有caller保持；新production exact-five走独立capability。
+- Error handling / rollback / partial outputs: selected - partial input/pre-submit/timeout/crash保留；明确failure/success整树删；零第二cleanup。
+- Release / packaging / dependency compatibility: selected - 新module/export但stdlib-only、无依赖/lock变更；所有非豁免文件<1000行。
+- Documentation / migration notes: selected - 六文件docs-first、D20/14.6与#132依赖；staged input不是viewer/YD_ROOT迁移。
+
+**Domain packs**：
+
+- Geospatial / CRS / shapefile sidecars: not selected - grid ID只逐字交给#171 validator，无几何转换/sidecar。
+- Time series / forcing / temporal boundaries: selected - UTC 00/12 cycle、cycle-state绝对分钟、forcing/assemble source/cycle绑定。
+- 状态链 / warm-start 定戳一致性: selected - exact T state不重戳、不回退，覆盖率定态且bytes/checksum一致。
+- NWM snapshot provenance and DB-free isolation: selected - 只消费本仓#171/forcing/state seam；零DB/env/NWM runtime import。
+
+**Invariant Matrix**：
+
+- Governing invariant: compute worker只能用controller在同一claimed exact work内提交、由canonical manifest+内容checksum证明且点用重验的source-specific exact-five variant与exact T state；任何NFS泄漏、identity/content/layout漂移不得进入assemble或DONE。
+- Source-of-truth identity/contract: `WorkClaim(work_dir, identity)`只授权controller写；`yd.run.staged-inputs.v1`+manifest digest+六checksum跨进程绑定；内嵌`yd.prepare.direct-grid-handoff.v1`拥有模型四ID/contract/assets；`AttemptRequest.source/cycle`拥有attempt source/time。
+- Producers: `_controller_run`顺序调用`staged_inputs.stage_work_inputs`；无其它writer。
+- Validators/preflight: #171 loader、public staged loader、state parser/header predicate、claim/no-follow/entry/cap/checksum guards；`assemble_staged` reload equality。
+- Storage/cache/query: `<work>/input`只属于当前attempt；无cache/DB/registry/NFS write。
+- Public routes/entrypoints: `stage_work_inputs`、`load_staged_work_inputs`、`assemble_staged`；legacy `assemble` unchanged；CLI后续#132。
+- Frontend/downstream consumers: #132 production driver/worker将消费capability；`stage_work_registry -> ForcingProducer -> RunDirectory -> tracker/publisher/viewer DONE`字段/行为不变。
+- Failure paths/rollback/stale state: manifest未落即未ready；任何失败/timeout/crash residue只在exact work，保留或整树删遵守现policy；replacement不删、不`DONE`。
+- Evidence/audit/readiness: focused schema/path/race/state/assemble/controller tests、batched red、calibrated mutation、full producer/viewer/OpenSpec/CI；M4现场明确非本地证明。
+- Regression rows:
+  - valid NFS exact-five + exact T state -> controller staged loader与独立consumer snapshot相等；移除/禁读NFS后`assemble_staged`仍成功，worker边界零NFS path。
+  - source/staged symlink/FIFO/extra/missing/cap+1/noncanonical/deep/wide/invalid UTF-8/checksum/cycle/work/root replacement -> pre-submit或pre-model稳定失败，零跨root mutation/`DONE`。
+  - staged file在load后、copy/parse前或中途替换 -> same-fd checksum/bytes或post-root check拒绝，final model不存在；不能mtime/inode/path自证。
+  - legacy external recursive variant ->旧`assemble`成功且无新entry/depth cap；直接work-relative raw paths仍validate失败。
+  - submit/poll timeout与unknown crash ->exact work/input保留；明确failure/success ->既有owner整树删除；work外零副本。
+  - unchanged #171 prepare、raw/controller reports、checkpoint/publish/viewer、#95/#44/#45/#175 tests ->兼容全绿。
+
+**Boundary-surface checklist**：
+
+- Shared helper roots: `_work_claim`与`safe_fs`只消费；不改变其public/standalone合同。若缺claimed目录list/read primitive，仅在新module内用`open_claimed_root`绑定fd，不改shared helper。
+- Public entrypoints: 新staged module三符号族；legacy assemble/controller/CLI signatures不改。
+- Read surfaces: NFS exact variant/state；claimed manifest/exact-six；registry/forcing由旧内核。
+- Write/delete/overwrite: claim-relative input mkdir/O_EXCL/manifest-last；不覆盖，不新增delete API。
+- Staging/publish/rollback: input是pre-submit readiness而非job receipt；partial保留；publish/failure整树owner不变。
+- Producer/consumer evidence: NFS source snapshot -> staged manifest/capability -> #132 attempt handoff -> worker receipt；三层不得互相冒充。
+- Stale-state/idempotency: preexisting exact work/input任意形态拒绝；不重用旧capability或从规范文件名恢复。
+- Unchanged downstream consumers: forcing/tracker/publisher/viewer与legacy assemble callers；config、NWM mapping wrapper。
+
+**Required evidence（input → exact output）**：
+
+1. public API/signature/deep-freeze：三seam与dataclass字段/无默认逐字；修改caller mappings无影响；构造伪capability不能绕过reload equality。
+2. canonical manifest fixture：exact五键与exact六file keys，独立stdlib编码/checksum oracle逐字相等；NaN、unknown/missing/wrong-type、absolute/`..`/backslash/NUL/重复语义、uppercase/bare SHA、self-entry均拒绝。
+3. source/staged矩阵：leaf/ancestor symlink、FIFO/目录/device、extra/missing/depth、unreadable、cap+1、source/root/target identity swap、O_EXCL collision、partial write、post-copy source drift -> typed error，manifest/submit/model/DONE零发生或按manifest-last未ready；work外字节/identity不变。
+4. state矩阵：valid absolute T header逐字copy；relative720/wrong cycle/malformed/超64MiB/checksum-correct semantic invalid均拒绝；不得重戳/QC/旧态fallback。
+5. NFS disconnect discriminator：controller stage后删除或chmod源variant/state；新的独立consumer进程只收到work/source/cycle/project/grid/caps并成功load+assemble；记录worker argv/env/handoff/receipt/assemble args断言两个NFS绝对路径均未出现。
+6. legacy/staged differential：内容等价的external recursive variant与exact-five staged capability各在独立work组装，共同model成员bytes相等；legacy nested ordinary file继续复制；direct work-relative path仍`AssemblyError.phase="validate"`且零model。
+7. controller integration：记录器证明`claim -> raw -> stage inputs -> driver.prepare -> JobSpec -> submit`；`AttemptRequest.variant_dir/state_path`仍逐字NFS source；staging error变`RunError(prepare,None)`并保留raw+partial input，driver/submit零调用，run_sources兄弟源继续。
+8. lifecycle：submit/poll timeout、worker crash residue不调用input delete且next tick STOPPED；terminal failed日志先提交后整树删；publish DONE后整树删；expected identity漂移时replacement保留。不得误称未调用的`delete_claimed_tree`为生产owner。
+9. same-fd/tamper mutation：删除entry cap/canonical check/source second snapshot/manifest-last/work identity postcheck、宽松SHA、跨节点inode比较、path-only read、跳过`assemble_staged`reload equality、放宽legacyinside-work guard、从stream copy移除checksum任一腿 ->至少一条test-body red。
+10. batched pre-change red proof：保留新测试、临时恢复产品文件至fixture parent，以`uv run --project producer python -m pytest -q <focused files>`进入test body并因缺public staged seam/ordering变红；hash恢复，禁共享stash，零red-proof残留。
+11. mutation discipline：唯一仓外scratch，rsync排除`.venv`/`__pycache__`/`.pytest_cache`，`env -u VIRTUAL_ENV uv sync --frozen`，`PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest`，assert import/module/marker落scratch；每mutant清bytecode并恢复source hash；0 survived/0 unrun，collection/import red不计kill。
+12. final matrix：focused staged/assemble/run_once/controller tests；producer full + Ruff/format/frozen sync；viewer full；OpenSpec strict/all；stage anchor；docs/product精确scope、line<1000、diff-check/oracle；merge-ref若base前进重跑。
+
+**PR Boundary**：
+
+- docs-first（本 fixture）恰六文件：`docs/compute-loop-design.md`、`docs/agent-ops.md`、`openspec/changes/m2-producer-core/design.md`、`tasks.md`、`specs/forcing-chain/spec.md`、`specs/run-controller/spec.md`。不改`docs/products-contract.md`、代码或测试；合并后#177保持OPEN、14.6保持`[ ]`、shared change不archive。
+- product恰七文件：`producer/src/yd_producer/staged_inputs.py`（新增）、`assemble.py`、`_controller_run.py`、`producer/tests/test_staged_inputs.py`（新增）、`test_assemble_run.py`、`run_once_fixtures.py`、`test_controller_run_once.py`。其它controller/assemble siblings只运行回归、不修改。不得改`controller.py`、`_work_claim.py`、`safe_fs.py`、`prepare*.py`、`assembly_fixtures.py`、`cli.py`、`nwm.py`、`slurm.py`、config、viewer、docs/spec或增加large-file豁免；需从已1000行`assemble.py`和992行`_controller_run.py`抽/删等量私有结构使每个非豁免文件<1000。
+
+**Non-goals / scope firewall**：
+
+- 不实现#132 CLI/production driver/worker argv/attempt handoff/job receipt/ExitCode provider/0-2-3退出码；本issue只交其可消费work-local staged seam。
+- 不做node-22真实NFS/Slurm/SHUD/cron或数值oracle；M2 synthetic只证明schema/path/checksum/process handoff。
+- 不修#95/#44/#45/#175/#108；不改变prepare staging、startup hygiene、timeout、failure log或DONE极性。
+- 不新增config/local/environment identity/cap/path、DATABASE_URL、NWM DB/scheduler/import、work外cache、扫描恢复、watchdog/retry/scancel。
+
+**Review focus**：
+
+- staged readiness、#171 model authority与#132 job receipt是否保持三层单owner，是否有NFS path泄入compute边界。
+- claim当前进程identity与跨节点内容绑定是否区分；是否错误序列化/比较`st_dev`。
+- source/staged读写是否descriptor-bound、bounded、exact-set、manifest-last且关闭swap；assemble copy/parse是否同bytes校验。
+- legacy assemble是否真正保持签名/递归输入/inside-work拒绝，是否只有一个参数/state/forcing/commit内核。
+- 任一失败/timeout/crash/success的input residue是否只遵循现有exact-work owner，未建立第二删除协议。

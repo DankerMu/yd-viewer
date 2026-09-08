@@ -92,8 +92,11 @@ NWM 当前物理角色必须牢记：
 - node-22 登录节点和 Slurm 计算节点共同可见 `/scratch`；
 - Slurm 计算节点看不到 `/ghdc` yd NFS；
 - 作业只能在 yd 自己的 `/scratch/.../yd-loop/work/...` 内运行；
-- 控制器负责把模型与状态从 NFS 搬入 scratch，等待作业，验证后再搬回 NFS；
+- 控制器负责在取得 exact-work ownership token 后、提交作业前，把 #171 已验证的 source prepared variant exact five 与精确 cycle state 从 NFS 搬入同一 work 的固定 `input/`，并以 canonical、checksum/identity 绑定的 `yd.staged-inputs.json` 重验；
+- `AttemptRequest.variant_dir`/`state_path` 的 NFS source 路径只供登录节点 `driver.prepare` 对账；worker argv/环境、attempt handoff、receipt 与计算节点 assemble 输入只能引用已验证的 work-local capability，不得携带 `YD_ROOT` 路径；
 - 计算节点不能直接写 `YD_ROOT/output` 或 `YD_ROOT/states`。
+
+staged input 不是第二个长期模型仓或恢复 registry：成功发布/明确失败收尾时随既有 exact-work owner 删除；`sbatch`/`sacct` 客户端 timeout、未知 worker 崩溃等保留证据路径则连同整棵 work 原样保留，下一 tick 继续由 `UNVERIFIED_WORK_RESIDUE` 停源。禁止把副本放到 exact work 外的 scratch sibling、单独扫除 `input/`、让 worker 直接读 NFS、或在登录节点提前运行 canonical/forcing/assemble/SHUD。
 
 ### 4.3 NWM raw
 
