@@ -96,6 +96,27 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 - **WHEN** 对已由 prepare 验证并提交的 source-specific v1 variant 调用唯一 loader，再把其四个版本标识、contract 与 exact bytes 与当前 `AttemptRequest.source/cycle` 组成 `WorkIdentity` 并交给 `stage_work_registry`
 - **THEN** `FileForcingRepository` 读回同一 source/project/model/basin/contract/assets；全链不需要 config identity 字段、NWM 数据库、外部 registry、目录扫描或第二 parser
 
+### Requirement: controller 把 prepared variant 与 cycle state 安全提交为 work-local capability
+node-22 controller MUST 在取得当前 source/cycle exact-work `WorkClaim`、完成 raw staging 后且在 `driver.prepare` / `sbatch` 前，把唯一 #171 loader 接受的 NFS prepared variant exact five 与精确 `states/<source>/<T>.cfg.ic` 搬入同一 claimed work 的固定 `input/`。目标布局 MUST 恰为 `input/variant/<five leaves>`、`input/states/<source>/<YYYYMMDDHH>.cfg.ic` 与最后写入的 `input/yd.staged-inputs.json`；`input/`/`states/`/source 目录不得有额外、缺失或非普通成员。源 variant MUST 在一次完整 snapshot 前后重验 root identity、exact-five entry set 与六份 bytes；源和目标都必须逐分量 descriptor-bound/no-follow，variant handoff 用 caller 显式 manifest/asset caps，cycle state 用显式 `MAX_STATE_IC_BYTES` 等价 cap。目标目录/leaf 只相对同一 claim 创建，文件 O_EXCL，禁止覆盖、symlink、特殊文件、work 外写入或 source/destination 重叠。
+
+`yd.staged-inputs.json` schema MUST 固定为 `yd.run.staged-inputs.v1`，UTF-8 canonical JSON（`allow_nan=False, ensure_ascii=True, sort_keys=True, separators=(",", ":")`），顶层 exact keys MUST 恰为 `schema_version/source_id/cycle_id/work_dir/files`。`cycle_id` 是 UTC 10 位 `YYYYMMDDHH`，`work_dir` 是 exact work 绝对路径；`files` MUST 恰含相对该 work 的五个 `input/variant/<leaf>` 与一个 `input/states/<source>/<cycle>.cfg.ic` 安全 key，每值逐字为 `sha256:<64 lowercase hex>`。manifest 本身的 checksum 由 loader 返回而不自引用。manifest MUST NOT 携带 NFS source path、job ID、模型四个版本标识、forcing、RunDirectory、checkpoint、DAT 或 receipt 字段；这些分别由 #171 handoff 或 #132 attempt/job receipt 拥有。
+
+唯一 module seam MUST 为 `stage_work_inputs(*, claim, source_variant_dir, source_state_path, source, cycle, project_name, grid_id, max_manifest_bytes, max_asset_bytes, max_state_bytes) -> StagedWorkInputs` 与 `load_staged_work_inputs(*, work_dir, source, cycle, project_name, grid_id, max_manifest_bytes, max_asset_bytes, max_state_bytes) -> StagedWorkInputs`。全部参数 keyword-only、无默认。`StagedWorkInputs` MUST 是 frozen、keyword-only、深冻结 capability，至少绑定 current source/cycle、exact work/variant/state/manifest paths、本进程 no-follow 打开后冻结的 work `(st_dev, st_ino)`、canonical manifest checksum、六个有序 file checksum、#171 `PreparedVariantHandoff` 与上述显式 expected grid/limits；不得持有 source NFS path、open fd 或 caller 可变 mapping。`WorkClaim.identity` 只授权 controller 当前进程写入，MUST NOT 序列化或被不同节点逐字比较；每个 consumer 独立冻结和复验自己所见 work identity，跨进程只以 manifest digest、source/cycle/work path 与内容 checksum 绑定。
+
+loader MUST 在每次加载与 point-of-use 前后重新验证同一 work/input root identity、exact layout、manifest byte/depth/node/schema/key/type/path/checksum，以及六个普通文件的 bounded content；调用 #171 唯一 loader并以 caller expected project/grid 重建深冻结 prepared snapshot；cycle state还必须经唯一共享 state validator证明原生分段可解析且绝对时间头对应 T。stager MUST 在所有源验证通过后才开始目标写入、manifest 最后 O_EXCL；完成后用同一 loader 重载 staged tree，要求六份 checksum 与 source snapshot 相同、prepared snapshot 相等，并在返回前再取得 source snapshot且全对象/bytes checksum 未漂。任一失败时不得提交 readiness manifest、不得 `sbatch`/`DONE`；已写 partial input 只留在同一 exact work 作为未验证 residue，由既有整棵 work owner处理，不另建细粒度或 work 外删除协议。
+
+#### Scenario: NFS 源变成不可达后 worker 仍只消费 work-local input
+- **WHEN** controller 从 valid exact-five variant 和对应 T state 成功取得 `StagedWorkInputs`，随后测试使两个 NFS source path 不可读或移除，并在独立 consumer 中仅以 exact work/source/cycle/project/grid/limits重载
+- **THEN** loader 与 staged assembler 仍只从 `input/` 成功工作；worker argv、环境、attempt handoff、receipt 与 assembler 入参均不含两个 NFS 路径，且所有最终 model bytes来自 checksum-bound staged files
+
+#### Scenario: staged input 形态、内容或进程本地 root identity 漂移即拒绝
+- **WHEN** `input`/`variant`/`states` 的 leaf/ancestor 为 symlink、FIFO/目录，存在额外/缺失 member、manifest 非 canonical/超限/深宽/malformed/invalid UTF-8，source/cycle/work/path/key/checksum 任一漂移，六份 file 任一被替换，或 consumer 冻结 work identity 后 named root 被另一 inode替换
+- **THEN** loader/assembler 在读取不受信内容或提交 `<work>/model` 前稳定拒绝，零 `sbatch`/`DONE`，不删除 replacement 或 work 外对象；单一 NFS path、pathname/mtime/inode-only 比较、跨节点 `st_dev` 相等均不能替代内容 checksum
+
+#### Scenario: staging 失败与 timeout/crash 都留在同一 cleanup authority
+- **WHEN** source admission、目标 O_EXCL 写或最终 reload 失败，或完整 input 之后发生 submit/poll timeout、worker crash、明确 FAILED/TIMEOUT 或成功 publish
+- **THEN** staged/partial input 只可能位于同一 claimed exact work；pre-submit/timeout/未知 crash 路径按现有证据政策保留整棵 work并让下一 tick停源，明确 failure 仍由日志提交后的 cleanup owner 删除整棵 work，成功仍由 publish owner 删除整棵 work；不得建立 work 外 sibling、单独 input sweeper或第二套 recovery registry
+
 ### Requirement: work 内临时 registry
 快照 file backend 要求 NWM 结构的 registry/model manifest 时，组装层 MUST 依据调用方显式提供的本轮 WorkIdentity、direct-grid contract 与已验证 binding/`.sp.att` bytes，在本轮 work 内的隔离 shadow object-store staging 中以最终相对 key 构造并由真实 `FileForcingRepository` 读回，再把 staged model 子树以同一 work/filesystem 的一次 no-follow rename 提交到 `<work>/object-store/models/<model_id>/`；MUST NOT 从变体 basename、`yd.binding` 文本、环境变量、数据库或外部 registry 服务猜测身份/contract。生产调用的四个版本标识、contract 与 exact asset bytes MUST 来自上述唯一 prepared-variant loader；生成的 registry/model manifest MUST 可由 `FileForcingRepository` 原样消费，且 contract 的 binding/`.sp.att` checksum、source/project/model/basin identity 与本轮 work 必须一致。受支持的生产调用 MUST 在既有 `run_with_lock` 覆盖的 controller 全生命周期内完成，并在裸 POSIX rename 紧前复探终名；该复探只在共同遵守 runlock 的单写模型中保证不覆盖，MUST NOT 被描述成跨不合作写者的原子 rename-noreplace。项目 MUST NOT 维护跨轮动态 registry；整棵 work 的成功/失败清理仍由既有 publish/cleanup owner 负责，组装层不得另建跨 work 删除协议。
 
@@ -135,6 +156,19 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 #### Scenario: 组装失败保持三源且无终名
 - **WHEN** 复制变体、状态、forcing 或改写参数的任一步骤失败，或 staging 清理本身失败
 - **THEN** final `<work>/model` 不存在，variant/state/forcing package 的全树 bytes/类型快照不变；只允许本次 staging 作为可由整棵 work 清理 owner 回收的残留并把清理失败附到原异常
+
+### Requirement: verified staged capability 使用既有组装内核且不放宽 legacy path guard
+新增 `assemble_staged(*, registry, staged_inputs, forcing) -> RunDirectory` MUST 只接受当前 registry identity/work/source/cycle/project 全部一致的 `StagedWorkInputs`，全部参数 keyword-only、无默认。它必须先以 capability 的 exact work/source/cycle/project/grid/limits调用 `load_staged_work_inputs`，要求 reload 返回值与 caller capability 全对象相等，再与既有 `assemble` 共用同一个 parameter/state/forcing/staging/rename 内核；不得复制第二套 SHUD 参数 writer、state validator、forcing validator、variant copier或 commit protocol。production exact-five variant仍跳过率定 `yd.cfg.ic`，以 T state 覆盖同名并渲染 `yd.para`，其它三个普通 leaves（opaque `yd.binding`、`yd.direct-grid-handoff.json`、manifest 明示 `.sp.att`）按原名复制；不扫描 work 或接受 manifest 未声明成员。
+
+既有 `assemble(*, registry, variant_dir, forcing, states_root, state_path) -> RunDirectory` 的公开签名和 legacy 语义 MUST 保持：外部、绝对、no-follow recursive variant仍合法且不新增 entry/depth cap；任意位于 `registry.work_dir` 内但没有 `StagedWorkInputs` capability 的 `variant_dir`/`states_root` 仍在 validate phase 拒绝且零 final model。不得通过 union/default/additive flag、伪造 capability或删除 outside-work guard 把受信入口扩成任意 work-relative path。
+
+#### Scenario: legacy 与 staged 两入口共享相同 model bytes
+- **WHEN** 用同一 WorkRegistry、forcing、project parameter、cycle state和内容等价的外部 legacy variant / verified exact-five staged capability分别组装
+- **THEN** 两条路径的六项参数、warm-state、forcing index/CSV和共同 variant leaves bytes相同，均只提交一次 `<work>/model`；测试用不同 exact work避免终名冲突，production helper/参数 writer/forcing/state validator各只有一个实现 owner
+
+#### Scenario: 未验证 work 内路径继续被 public assemble 拒绝
+- **WHEN** caller直接把 `work/inside-variant`、`work/inside-states` 或手工构造的 staged path传给既有 `assemble`，即使目录内容看似合法
+- **THEN** 在 validate phase 拒绝且不写 `model`；只有由 public staged loader返回并在点用时全对象重验的 capability可进入 `assemble_staged`
 
 ### Requirement: 快照模块可追溯
 每个从 NWM 复制的模块 MUST 在文件头部记录来源 `NWM@8ae9b8f2` 与原仓相对路径；快照 MUST NOT 包含 DB/scheduler 分支代码。pin 是溯源与差异审计基线，不是逐字冻结：yd MAY 在本仓修复 `store/safe_fs.py`、`store/object_store.py` 与 `canonical/converter.py` 的快照缺陷，但每一处偏离 MUST 先在 `nwm-snapshot-inventory.md` 对应行的「剥离点」列登记一句“问题 + 修法”；未登记的语义偏离 MUST 被拒绝。

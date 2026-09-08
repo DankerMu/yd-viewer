@@ -108,6 +108,25 @@
 - **WHEN** 调用开始时只有 T 的 raw 完整，但 T+12h、T+24h 分别在前一轮运行期间补齐，此后 T+36h 保持不完整
 - **THEN** 同一次持锁 run 按 T → T+12h → T+24h 处理，并在首次观察到 T+36h 不完整时停止；MUST NOT 在调用开始冻结 raw horizon 或设置任意轮数上限
 
+### Requirement: controller 在 driver 与 submit 前提交 work-local model/state capability
+对 raw 完整的合法 T，controller MUST 在取得并持续验证同一 `WorkClaim`、`rawcopy.stage_raw` 成功后，调用 forcing-chain 的唯一 `stage_work_inputs`，把 `prepare.variant_targets(local, config)[source]` 的 #171 exact-five variant 与已由前沿选中的精确 state 搬入该 claim 下固定 `input/`。这一步 MUST 在 `driver.prepare`、JobSpec 构造和 `executor.submit` 之前完成；project 继续只来自 source variant 顶层率定态固定文件名，grid ID 继续取 `config.nwm_canonical_grid_id.<source>`，manifest/asset/state caps 继续取版本化代码常量而非 local/env。controller MUST 把前沿已经确认的 exact state path传给 stager，不得另扫、取旧态、重戳或从 staged target反推。
+
+`AttemptRequest` 的 frozen kw-only 字段与公开 `AttemptDriver` 协议 MUST 保持不变。`request.variant_dir/state_path` 仍是两个 NFS source 路径，只供运行在登录节点的 production `driver.prepare` 独立调用 #171 source loader并与 `request.work_dir/input` 的 public staged loader结果对账；controller/fake 不得把字段改为 staged path而丢失 source authority。production driver 构造的 worker argv/环境/attempt handoff，及 worker receipt、compute-side canonical/forcing/assemble输入，MUST NOT包含这两个 NFS 路径，只允许 exact work-local relative paths、canonical staged-manifest checksum与已验证内容/identity。计算节点不得访问 `YD_ROOT`，登录节点不得为规避该约束提前运行 canonical/forcing/assemble/SHUD。
+
+staging 任一失败 MUST 变成保留 cause/notes 的 `RunError(phase="prepare", source, cycle, job_id=None)`，driver/executor零调用、零`DONE`。由于 raw 已成功写入，同一 exact work作为未验证 residue保留，不运行 raw 的 empty-root release，也不按 pathname细粒度删除 input；下一 tick继续由既有 `UNVERIFIED_WORK_RESIDUE` 停源。成功 publish与明确 FAILED/TIMEOUT failure finalizer仍按现有顺序整树删除，因 containment自动包含 input；submit/poll timeout、未知 worker崩溃与其它证据保留路径继续保留整树。不得新增 work 外 sibling staging、input sweeper、自动 crash recovery或第二套 cleanup owner。
+
+#### Scenario: controller staging 顺序与登录/计算节点边界
+- **WHEN** NFS prepared variant/state合法且 raw staging 成功
+- **THEN** exact work先出现 checksum-bound staged capability，production `driver.prepare`随后收到仍指向NFS source的原 `AttemptRequest`并能对账；JobSpec/submit最后发生，worker command/env/handoff中零 NFS路径，compute-side chain只使用同一 work-local input
+
+#### Scenario: staged input失败保留 exact work并阻止提交
+- **WHEN** source/staged variant或state的形态、identity、entry set、size、schema、cycle、checksum任一非法，目标O_EXCL冲突，或stager最终reload发现漂移
+- **THEN** controller抛`RunError(phase="prepare", job_id=None)`并保留同一claimed exact work和原cause/notes，driver/submit/poll/finalizer/publish/DONE零调用；兄弟source在`run_sources`下继续
+
+#### Scenario: staged input 生命周期只跟随 exact work
+- **WHEN** staged capability成功后分别发生submit timeout、poll timeout、未知worker崩溃、明确FAILED/TIMEOUT finalizer成功、或publish成功
+- **THEN**前三类按既有证据政策连同整棵work保留且下一tick停源，后两类由既有failure/publish owner整树删除；work外零variant/state副本且没有input单独删除调用
+
 ### Requirement: 作业提交经执行器抽象且身份可追溯
 run MUST 经作业执行器抽象为每源提交至多一个作业；提交参数（partition、account、CPU、内存、walltime）MUST 全部取自 `local.toml`，代码 MUST NOT 为这些资源内置任何默认值；每次提交的 job ID、partition、终态与起止时间 MUST 记入本次运行报告，失败源的日志 MUST 含同一 job ID。真实 `sbatch`/`sacct` 行为归 M4 oracle，本地以注入 fake 验证。
 

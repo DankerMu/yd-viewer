@@ -83,13 +83,21 @@
       canonical/
       forcing/
       models/                    # 本轮临时 file registry/model package
+    input/                       # controller 提交、Slurm worker 只读
+      variant/                   # #171 exact-five prepared variant 副本
+      states/<source>/<cycle>.cfg.ic
+      yd.staged-inputs.json
     model/
       state_checkpoints/
     output/
     job.log
 ```
 
-每轮 work 目录是一次性隔离单元。成功发布后删除；失败先回收一份日志，再删除。下次运行从零组装，不复用失败残留。
+每轮 work 目录是一次性隔离单元。`input/` 与 `object-store/raw/` 都由 node-22 控制器在提交前从 NFS 只读源生成。`AttemptRequest.variant_dir`/`state_path` 继续只把 NFS source 路径交给运行在登录节点的 `driver.prepare` 做独立源快照对账，字段集合与语义不变；driver 生成的 worker argv/环境/attempt handoff、后续 receipt 与 assemble 入参不得含这些 `YD_ROOT` 路径，只能引用同一 exact work 内已对账的 staged-input capability。
+
+`input/yd.staged-inputs.json` 是 pre-submit staged-input readiness manifest，不是 job receipt：它固定使用 schema `yd.run.staged-inputs.v1`，绑定当前 source/cycle 与 exact work 绝对路径，并以 `sha256:<64 lowercase hex>` 分别绑定 `variant/` 的 exact five files 与唯一 `states/<source>/<cycle>.cfg.ic`；它不含 job ID、`WorkIdentity` 四个模型版本标识、forcing/RunDirectory/checkpoint/DAT，也不形成第二个 registry。controller 的 `WorkClaim` `(st_dev, st_ino)` 只作为当前节点/进程的写入 authority，绝不序列化成跨节点相等判据；登录节点 driver 与计算节点 worker 各自以 no-follow open/fstat 冻结当前所见 work root identity，并在本进程加载/点用期间复验。跨进程绑定只依赖 canonical manifest digest、source/cycle/work path 与六份内容 checksum，不能假定不同节点的 `st_dev` 相同。
+
+成功发布或明确失败收尾删除整棵 exact work 时，`input/` 随既有 publish/cleanup owner 一并删除。submit/poll 客户端 timeout、worker 未知崩溃或其它按契约须留证的路径仍保留整棵 exact work，`input/` 不单独删除；后续只走既有 DONE-backed hygiene 或人工确认，不建立 work 外 sibling staging 或第二套清理协议。下次运行从零组装，不复用失败残留。
 
 ## 4. 与 NWM 的关系
 
@@ -174,7 +182,11 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 
 direct-grid 的跨 `prepare` → `run` 生产交接固定为每个 source 变体顶层的 `yd.direct-grid-handoff.json`（schema `yd.prepare.direct-grid-handoff.v1`）与该 manifest 逐字指名的一个单层 `*.sp.att` 普通文件。manifest 只承载模型级稳定事实：source、project、四个版本标识、完整 `DirectGridForcingContract` 与 `.sp.att` 资产名；它不承载 cycle/work/job。`yd.binding` 仍是同一变体内的 opaque 精确 bytes，不能被扩写或解析为 metadata carrier。prepare 在任何 `YD_ROOT` 写入前验证 manifest 与两份资产，并在复制到本次 `YD_ROOT` staging 后再次用同一 loader 重验且与首次快照相等，随后才允许既有四终名提交。
 
-production driver 只把 caller 已知的精确 `variant_dir`、`AttemptRequest.source`、由上述率定态文件名取得的 `project_name`、本 source 的 canonical grid ID，以及两项显式 manifest/asset byte cap 交给 `prepare_handoff.load_prepared_variant_handoff`；该 loader 以固定 manifest 名和 manifest 明示 asset 名作有界、逐分量 no-follow 普通文件读取，严格验证 schema/key/type、current source/project/grid、逐字段 identity value domain、contract singleton-source 语义与 binding/`.sp.att` SHA-256，并返回深冻结 contract 与两份 immutable bytes。driver 再把 `AttemptRequest.cycle/work` 加入 claimed-work 内的 attempt handoff；Slurm worker 使用前重验，worker receipt 必须绑定同一 `WorkIdentity`、source/cycle/work/job 与两份 checksum。不得从环境、`DATABASE_URL`、NWM PostgreSQL/服务型 registry、目录扫描、variant basename、`yd.binding` 内容或测试 fixture 推导任何 identity、contract、路径或 bytes。
+node-22 控制器在取得 exact-work ownership token 后、调用 `driver.prepare` 前，才从 NFS source variant 调用 `prepare_handoff.load_prepared_variant_handoff`：只把 caller 已知的精确 source `variant_dir`、`AttemptRequest.source`、由上述率定态文件名取得的 `project_name`、本 source 的 canonical grid ID，以及两项显式 manifest/asset byte cap 交给 loader。该 loader 以固定 manifest 名和 manifest 明示 asset 名作有界、逐分量 no-follow 普通文件读取，严格验证 schema/key/type、current source/project/grid、逐字段 identity value domain、contract singleton-source 语义与 binding/`.sp.att` SHA-256，并返回深冻结 contract 与两份 immutable bytes。
+
+同一 controller staging 边界另对 `yd.cfg.ic`、`yd.para` 与 exact cycle state 作各自上限内的 descriptor-bound no-follow 读取，把 source variant exact five 与 cycle state以 O_EXCL 写入 §3.3 固定 `input/`，再用 public staged-input loader 从目标根重验 exact paths、root identity、entry set、manifest canonical bytes、六份 checksum、prepared handoff 全对象相等与 cycle-state 原生结构/绝对 T 时间头。只有 source snapshot、staged snapshot 和 checksum 全部一致才允许调用 `driver.prepare`。
+
+`AttemptRequest.variant_dir`/`state_path` 仍逐字保留 NFS source 路径，只供登录节点 `prepare` 把自己通过 #171 loader 取得的 source snapshot 与 controller-staged snapshot 对账；不得把这两个字段放入 worker argv、环境、attempt handoff 或 receipt。production driver 把匹配后的 work-local capability 与 `AttemptRequest.source/cycle/work` 加入 #132 的 attempt handoff；Slurm worker 使用前仍重验 staged-input capability 与 attempt handoff，worker receipt 必须绑定同一 `WorkIdentity`、source/cycle/work/job 与两份 direct-grid asset checksum。不得从环境、`DATABASE_URL`、NWM PostgreSQL/服务型 registry、目录扫描、variant basename、`yd.binding` 内容或测试 fixture 推导任何 identity、contract、路径或 bytes。
 
 §6.1 的“重写 `sp.att`”只说明 real builder 必须产出 manifest 明示的 source-specific asset，不授权按后缀扫描；`contract.binding_uri` 与 `contract.sp_att_path` 仍是 D11 `stage_work_registry` 提交后的 work-local relative keys，不是 prepared variant 的读取路径。缺少 manifest/明示 asset、schema/identity/checksum 不一致或文件形态不可安全确认时，prepare 拒绝提交，production driver 也在 `sbatch` 前 fail closed。M2 以独立进程合成 builder/loader/worker 链证明 carrier、checksum、identity 与篡改拒绝；M4 才以真实 node-22 builder/site artifact 确认 `.sp.att` 物理布局/parser、stage mapping、四个 identifier 的现场值及 Slurm/NFS/SHUD receipt。
 
