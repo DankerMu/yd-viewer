@@ -1071,3 +1071,31 @@ catch 仍显著，且证据不足时默认 keep，符合工作流优先正确性
 复议条件未触发：Round 2 无 rotated seat、无新 finding、无已关闭项重报或 residual deferral；Phase 7 CLEAN。
 Issue #67 已由 PR #168 关闭；#54/#66/#68/#70 保持 CLOSED；#132 保持 OPEN，shared `m2-producer-core`
 继续服务 #132，本次不 archive。
+
+---
+
+## 第 34 次复议（issue #171 / PR #172 docs-only fixture 合并后，2026-09-07）
+
+审计数字：44 行（43 merged、1 terminal），仍为 30 个多轮合并 PR，后续轮次命中仍为
+**core=125 / rotated=96**。PR #172 是 `fixture=none`、`rounds=0` 的 docs-first implementation fixture，
+没有综合轮或 free-slot rotation，因此既不增加 rotation attribution 分母，也不改变 core/rotated 数字。
+脚本再次输出 DECIDABLE 是达到门槛后的重复提醒，不是新的轮换样本。
+
+本 PR 确实提供了两条新增审核收益，但归因面不同：fresh Phase 7 Gap Sweep 找到 loader 排他入参清单漏三项与
+owner spec 漏 checksum-correct/non-UTF-8 asset 失败腿，独立 verifier 均判 CONFIRMED，修复后第二次 Gap
+Sweep clean。问责行将它们记为 `round=0`、`lens=gap-sweep`；`loop_log_audit.py` 明确把 phase lens 与
+pinned/rotated 分桶隔离，故不能把这两条挪给任一综合席位。这反而再次证明独立终审有价值，但不是
+free-slot rotation 的正反样本。
+
+None 桶由 6 个增至 7 个 merged PR，累计 `gate_net_catch` 从 0 增至 2。它尚未达到 8 个样本门槛；即使
+下一条达到，也已因累计 catch 非零而不满足「整个桶零捕获」的 narrow/cut 条件。本次 docs-only catch
+支持保留独立 Gap Sweep，不能外推成 product high fixture 的席位结论；#171 产品 PR 仍按 expanded/high
+四席初审执行。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的 free-slot rotation + 独立终审；
+不把 phase-lens catch 错归给 rotation，也不把无后轮的 docs-only 样本解释为轮换零收益。累计 rotated 后轮
+捕获仍显著，且证据不足时默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：不存在 rotated catch、连续 rotated P3 或已关闭 finding 重报；两项 docs candidate 均经
+verifier 后在合并前关闭，无 residual deferral。Issue #171 与任务 10.4 保持 OPEN/未完成，#132 仍依赖
+#171；shared `m2-producer-core` 继续服务二者，本次不 archive。
