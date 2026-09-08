@@ -89,8 +89,15 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 - **WHEN** 同一 source/cycle/model 已 ready 后，`rn_shortwave_factor` 或其它影响 package bytes/shape/path/选择策略的 forcing config 发生变化但 `producer_version` 不变
 - **THEN** stable output-config identity 不匹配，producer 重算或 fail closed，不得返回旧 `already_done`
 
+### Requirement: prepared-variant handoff 是临时 registry 的唯一生产输入
+`prepare` 与后续独立 `run` 进程之间的 direct-grid 模型事实 MUST 只由 prepared variant 顶层固定 v1 handoff manifest 交接。唯一 loader 以调用方已知的 exact variant root/current source/project/grid 和显式 byte limits，返回深冻结 contract、四个 prepared-variant 版本标识与 exact opaque binding/UTF-8 `.sp.att` bytes；它 MUST 复用现有 direct-grid parser/semantic validator，不得在 prepare、driver 或组装层复制第二套 contract parser。manifest 中 `binding_uri`/`sp_att_path` 继续只表示 work-local registry keys；prepared asset 读取只使用固定 binding 名与 manifest 明示的安全单层 `.sp.att` 名，不得反向用这些 keys 扫描变体。
+
+#### Scenario: prepared handoff 可直接驱动既有 registry seam
+- **WHEN** 对已由 prepare 验证并提交的 source-specific v1 variant 调用唯一 loader，再把其四个版本标识、contract 与 exact bytes 与当前 `AttemptRequest.source/cycle` 组成 `WorkIdentity` 并交给 `stage_work_registry`
+- **THEN** `FileForcingRepository` 读回同一 source/project/model/basin/contract/assets；全链不需要 config identity 字段、NWM 数据库、外部 registry、目录扫描或第二 parser
+
 ### Requirement: work 内临时 registry
-快照 file backend 要求 NWM 结构的 registry/model manifest 时，组装层 MUST 依据调用方显式提供的本轮 WorkIdentity、direct-grid contract 与已验证 binding/`.sp.att` bytes，在本轮 work 内的隔离 shadow object-store staging 中以最终相对 key 构造并由真实 `FileForcingRepository` 读回，再把 staged model 子树以同一 work/filesystem 的一次 no-follow rename 提交到 `<work>/object-store/models/<model_id>/`；MUST NOT 从变体 basename、`yd.binding` 文本、环境变量、数据库或外部 registry 服务猜测身份/contract。生成的 registry/model manifest MUST 可由 `FileForcingRepository` 原样消费，且 contract 的 binding/`.sp.att` checksum、source/project/model/basin identity 与本轮 work 必须一致。受支持的生产调用 MUST 在既有 `run_with_lock` 覆盖的 controller 全生命周期内完成，并在裸 POSIX rename 紧前复探终名；该复探只在共同遵守 runlock 的单写模型中保证不覆盖，MUST NOT 被描述成跨不合作写者的原子 rename-noreplace。项目 MUST NOT 维护跨轮动态 registry；整棵 work 的成功/失败清理仍由既有 publish/cleanup owner 负责，组装层不得另建跨 work 删除协议。
+快照 file backend 要求 NWM 结构的 registry/model manifest 时，组装层 MUST 依据调用方显式提供的本轮 WorkIdentity、direct-grid contract 与已验证 binding/`.sp.att` bytes，在本轮 work 内的隔离 shadow object-store staging 中以最终相对 key 构造并由真实 `FileForcingRepository` 读回，再把 staged model 子树以同一 work/filesystem 的一次 no-follow rename 提交到 `<work>/object-store/models/<model_id>/`；MUST NOT 从变体 basename、`yd.binding` 文本、环境变量、数据库或外部 registry 服务猜测身份/contract。生产调用的四个版本标识、contract 与 exact asset bytes MUST 来自上述唯一 prepared-variant loader；生成的 registry/model manifest MUST 可由 `FileForcingRepository` 原样消费，且 contract 的 binding/`.sp.att` checksum、source/project/model/basin identity 与本轮 work 必须一致。受支持的生产调用 MUST 在既有 `run_with_lock` 覆盖的 controller 全生命周期内完成，并在裸 POSIX rename 紧前复探终名；该复探只在共同遵守 runlock 的单写模型中保证不覆盖，MUST NOT 被描述成跨不合作写者的原子 rename-noreplace。项目 MUST NOT 维护跨轮动态 registry；整棵 work 的成功/失败清理仍由既有 publish/cleanup owner 负责，组装层不得另建跨 work 删除协议。
 
 #### Scenario: 临时 registry 生命周期
 - **WHEN** 对显式 WorkIdentity、source-specific contract 与 checksum-correct assets 生成临时 file backend

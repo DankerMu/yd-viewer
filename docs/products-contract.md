@@ -29,7 +29,9 @@
         DONE
 ```
 
-viewer 只需要读取 `input/viewer` 与 `output`。`models`、`states`、`logs` 和 scratch 工件不属于本契约，也不得暴露为 viewer API。
+viewer 只需要读取 `input/viewer` 与 `output`。`models`、`states`、`logs` 和 scratch 工件不属于 viewer 契约，也不得暴露为 viewer API；其中 prepared model variant 另受下列 producer 内部交接合同约束。
+
+每个 `config.toml variants.<source>` 指向的 prepared variant 顶层恰含五个普通文件：既有 `yd.cfg.ic`、`yd.para`、opaque `yd.binding`，固定 `yd.direct-grid-handoff.json`，以及该 manifest 的 `sp_att_asset_name` 明示的一个安全单层 `*.sp.att`。`project_name` 由顶层唯一率定态文件名仅移除末尾一次 `.cfg.ic` 得到（本仓即 `yd`），绝不从变体目录名猜测。manifest schema 固定为 `yd.prepare.direct-grid-handoff.v1`，承载 source/project、四个 builder 声明且随该 prepared variant 稳定的版本标识、完整 source-specific direct-grid contract 与 `.sp.att` 资产名；contract 的 `binding_checksum`/`sp_att_checksum` 使用 `sha256:<64 lowercase hex>` 并绑定同变体的 opaque binding 与明示 asset 精确 bytes。该 manifest 不承载 cycle/work/job，不是 config/local、动态 registry 或 viewer API。M2 synthetic builder 只证明格式与校验；M4 必须让真实 builder 产出同一 v1 carrier，并对账真实值。
 
 `YD_ROOT` 顶层名字以 `.yd-prepare-staging`（代码权威为 `prepare._STAGING_PREFIX`）开头的条目，是一次性 `prepare` 在同盘 rename 前使用的保留临时命名空间。它只允许在一个已授权、仍在运行的 `prepare` 生命周期内短暂存在，不得放进 `input/viewer/`，也不得挂载或暴露给 viewer。进程中断后留下的匹配条目不是下一次运行可自动认领的产物：后续 `prepare` 必须列出全部残留并拒绝，不得自动删除；运维确认没有活动 `prepare` 后按 [agent-ops.md](agent-ops.md) 的人工程序处理。
 
