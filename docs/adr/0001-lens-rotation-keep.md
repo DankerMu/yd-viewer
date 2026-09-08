@@ -1099,3 +1099,30 @@ None 桶由 6 个增至 7 个 merged PR，累计 `gate_net_catch` 从 0 增至 2
 复议条件未触发：不存在 rotated catch、连续 rotated P3 或已关闭 finding 重报；两项 docs candidate 均经
 verifier 后在合并前关闭，无 residual deferral。Issue #171 与任务 10.4 保持 OPEN/未完成，#132 仍依赖
 #171；shared `m2-producer-core` 继续服务二者，本次不 archive。
+
+---
+
+## 第 35 次复议（issue #171 / PR #174 产品实现合并后，2026-09-08）
+
+审计数字：45 行（44 merged、1 terminal），31 个多轮合并 PR；high 桶由 16/50 增至 **17/52**。
+后续轮次 attribution 仍为 **core=125 / rotated=96**，另有 9 条历史 non-compliant catch 被脚本明确排除。
+脚本再次输出 DECIDABLE 是达到阈值后的重复提醒；本次没有新增 rotated catch，不能把数字未变误写成轮换反证。
+
+PR #174 的 high Round 1 四席产生两条独立净收益：`test-evidence` 抓到公共 loader 缺 duplicate-cell
+semantic discriminator，`correctness` 首先提出 scratch/staging 对 state/parameter 内容不保真的既有残留。
+两项都经 verifier 判 CONFIRMED：前者 FIX_NOW，以 test-only 修复和精确 guard-removal mutant 闭合；后者因
+同一路径在 base 已存在且不属于冻结十字段 API 而 DEFER，并路由 #175。因此本产品样本支持保留 high 初审的
+`test-evidence`、`correctness` 与独立 verifier；不能因一项最终 deferred 就从 net catch 中抹掉真实审核收益。
+
+Round 2 由 `correctness` full-PR 与 `test-evidence+spec-compliance` delta/full-access 两席复核后 clean。前轮虽有
+major signal，按规则最多可买一个 free slot，但 Round 1 已覆盖全部 canonical lens，没有尚未使用的 lens 可轮入；
+所以本轮只增加 multi-round 样本数，不增加 core/rotated catch，也不是 free-slot rotation 的正反实验。
+Phase 7 fresh Gap Sweep 在同一 final SHA 上 CLEAN，证明修复闭合但同样不应错归给 rotation。
+
+**决策不变：keep。** 继续保留 pinned core + major/repeat 信号触发的未使用 free-slot rotation + 独立终审；
+保留 high Round 1 四席。累计 rotated 后轮 catch 仍为 96，足以证明轮入互补 lens 曾持续提供额外 recall；本次
+缺少可轮换候选，不能支持回退到固定 Round 1 mix。证据不足时默认 keep，符合工作流优先正确性的规则。
+
+复议条件未触发：Round 2 无 rotated seat、无新 finding、无已关闭项重报；唯一 residual deferral 已路由 #175。
+Issue #171 已由 PR #174 关闭，task 10.4 在同一问责 PR 结账；#47 保持 CLOSED，#132 与 Epic #1 保持 OPEN。
+Shared `m2-producer-core` 继续服务 #132，本次不 archive。
