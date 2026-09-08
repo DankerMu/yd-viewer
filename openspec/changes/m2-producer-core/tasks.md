@@ -3583,8 +3583,9 @@ def import_verified_checkpoint(
 - [x] 10.1 引入几何依赖（pyshp/pyproj/shapely）并 `uv lock`，构造带自定义 Albers `.prj` 的合成 shapefile 基线 fixture，实现 `.prj` 解析与重投影工具，CI 绿
 - [x] 10.2 实现 `rivers.geojson`（`reach_id`=DBF Index、数量一致）与 `boundary.geojson`（单元合并边界）生成，落点 `input/viewer/`
 - [x] 10.3 实现 prepare 编排：拒绝覆盖检查 → 薄外壳按源两次调用 builder（记录型假 builder 断言两次入参 source/grid 不同、输出分别落 `yd_gfs`/`yd_ifs`）→ 每变体顶层 `*.cfg.ic` 普通文件基数恰为 1 且 reach 数等于 `reach_count` → 提交到 `input/models/` 与 `input/viewer/` → scratch 清理
+- [ ] 10.4 为每个 prepared variant 持久化并验证版本化 direct-grid handoff（固定 manifest + 明示 `.sp.att`），供独立 `run` 进程的 #132 production driver 只读消费（issue #171）
 
-依赖：组 1（薄外壳、`reach_count`）
+依赖：组 1（薄外壳、`reach_count`）；10.4 另依赖已完成 8.2/8.3、10.3 与 #134，并前置于 14.2/#132
 §13.1 归属：prepare
 Suggested fixture level: expanded - 需构造带自定义投影的合成 shapefile 基线包
 Minimal mergeable slice: 几何依赖与重投影工具（10.1）——依赖+fixture+纯函数独立合并保绿，产物生成与编排为后继
@@ -4000,6 +4001,182 @@ Review focus:
 - 是否复用 `safe_fs` 原语，还是在 `prepare.py` 里另写了一套 fs 操作
 - "无新写入"的断言是全树快照还是单点探测
 - 新增必需 config 字段后，既有 `Config` 构造点是否全部补齐且未被改成带默认值
+
+### Issue #171 fixture（任务 10.4：prepared variant direct-grid handoff；#132 前置）
+
+Fixture level: expanded（公开 producer/consumer API、版本化 JSON schema、路径/文件读取、prepare 提交顺序与 forcing evidence chain 均为 mandatory expanded trigger）
+Upstream suggested level: absent
+Repair intensity / effective tier: high（跨进程 evidence、bounded no-follow 文件读取与双 source 四终名提交；错误采纳会把另一 source/model 的 contract/资产带入本轮 registry，适用 Invariant Matrix 与 boundary checklist）
+Project profile: yd-viewer
+Minimal mergeable slice: docs-first fixture 独立合并；随后产品 PR 只交唯一 loader、prepare 双重验证和 synthetic builder/tests，不实现 #132 worker/receipt，也不实现 M4 real builder
+
+**Phase 0.5 来源与冲突裁决**：
+
+- #132 的正式 fixture reviewer 在 `eed1cb865e211127e35eb47805cac1071e878814` 上判 `revise`：`prepare`/`run` 是独立进程，但现有 builder 只在 per-source `variant_root` 写三文件且返回 `None`，所有 config/env/DB/controller/目录/binding 推导通道又被 #134 关闭，因此六文件内的 production driver 只能永久 pre-submit fail closed。#171 是新 owner，不把死代码包装成生产接线。
+- 选择 variant 内 carrier，不加第五个 `YD_ROOT` 顶层终名：builder 的唯一既有输出 channel 就是 fresh per-source `variant_root`，后续 controller 已按 source 持有 exact `variant_dir`。继续用 `Builder = Callable[[VariantBuildRequest], None]`，不扩 config/local、`AttemptRequest`、controller 或 `PrepareReport`。
+- 选择一个 JSON manifest + 一个明示 `.sp.att` 普通文件，不把 payload 塞进 `yd.binding`：binding 是 checksum-bound opaque bytes，现有合同明禁从其内容推导 metadata；单独 asset 保留真实 `.sp.att` exact bytes，M2 不发明其现场 parser。
+- 四个版本标识是 prepared-variant 稳定属性：由 builder 在 manifest 声明，prepare/后续 loader 只验证并复制。它们不是逐 attempt UUID，也不从 cfg/para/binding checksum 派生；attempt 的 source/cycle/work/job 仍由 #132 另行绑定。
+- #83（旧 prepare staging 只拒绝不回收）与 #97（顶层唯一 `*.cfg.ic`）是 unchanged siblings，非本 issue 依赖或吸收项；#171 只把合法 variant 的 exact entry set 从当前三项升级为五项。
+
+**严格两段 PR Boundary**：
+
+- docs-first fixture PR 只改 `docs/compute-loop-design.md`、`docs/products-contract.md`、本 change 的 `design.md`/`tasks.md` 与 `specs/prepare-variants`、`specs/cli-config`、`specs/forcing-chain` 七份文档；不改代码/测试。
+- 产品 PR 精确限于 `producer/src/yd_producer/prepare.py`、新增 `producer/src/yd_producer/prepare_handoff.py`、`producer/tests/prepare_fixtures.py`、`producer/tests/test_prepare.py`、新增 `producer/tests/test_prepare_handoff.py`；产品 PR 不再改 docs/spec。不改 CLI/controller/nwm/slurm/config/viewer/assemble/direct-grid parser/shared safe_fs/bounded_json/large-file config。
+
+**公开 seam 与固定字面量**：
+
+```python
+PREPARED_VARIANT_CALIBRATED_STATE_FILENAME = "yd.cfg.ic"
+PREPARED_VARIANT_PARAMETER_FILENAME = "yd.para"
+PREPARED_VARIANT_BINDING_FILENAME = "yd.binding"
+PREPARED_VARIANT_HANDOFF_FILENAME = "yd.direct-grid-handoff.json"
+PREPARED_VARIANT_HANDOFF_SCHEMA = "yd.prepare.direct-grid-handoff.v1"
+MAX_PREPARED_VARIANT_MANIFEST_BYTES = MAX_OBJECT_MANIFEST_BYTES
+MAX_PREPARED_VARIANT_ASSET_BYTES = MAX_OBJECT_MANIFEST_BYTES
+
+class PreparedVariantHandoffError(ValueError): ...
+
+@dataclass(frozen=True, kw_only=True)
+class PreparedVariantHandoff:
+    source_id: str
+    project_name: str
+    model_id: str
+    basin_id: str
+    basin_version_id: str
+    river_network_version_id: str
+    contract: DirectGridForcingContract
+    sp_att_asset_name: str
+    binding_content: bytes
+    sp_att_content: bytes
+
+def load_prepared_variant_handoff(
+    *,
+    variant_root: Path | str,
+    source_id: str,
+    project_name: str,
+    grid_id: str,
+    max_manifest_bytes: int,
+    max_asset_bytes: int,
+) -> PreparedVariantHandoff: ...
+```
+
+- 上述类/函数/常量是 `yd_producer.prepare_handoff.__all__` 的精确公开集合；全部函数参数 keyword-only、无默认。`prepare.py` 既有 `VARIANT_CALIBRATED_STATE_NAME`/`VARIANT_HYDRO_PARAM_NAME`/`VARIANT_BINDING_NAME` 名称和值继续公开，可别名到新 owner；`Builder`/`VariantBuildRequest`/`PrepareReport`/`run_prepare`/`calibrated_state_path` 的公开形状不变。
+- 两个 production cap 必须按名引用既有 `store.object_store.MAX_OBJECT_MANIFEST_BYTES`，不得复制 `16 * 1024 * 1024` 数字或进 config；loader 仍要求 caller 显式传值，便于 synthetic boundary 用小 cap 判别。
+- `variant_root` 必须是 absolute path；两个 limit 只接受 strict positive `int`（bool/float/string/0/负数拒绝）。source/project/grid 与四 identifier 都必须是 nonblank `str`；四 identifier 统一采用 safe ASCII component grammar `^[A-Za-z0-9][A-Za-z0-9_.-]*$` 且不含 `..`，保证后续 model/basin key 直接可消费。`project_name` 走同等 path-component 安全；grid 逐字对 current caller 值。
+
+**v1 manifest 与 exact variant shape**：
+
+- 顶层 key 恰为 `schema_version/source_id/project_name/model_id/basin_id/basin_version_id/river_network_version_id/direct_grid_forcing_contract/sp_att_asset_name`。JSON bytes 必须是 UTF-8、`allow_nan=False`、`ensure_ascii=True`、`sort_keys=True`、`separators=(",", ":")` 的无尾换行 canonical object；loader 先用既有 `load_bounded_json` 执行 byte/depth/node/decoder-recursion bounds，再以同一 stdlib canonical encoding 对拍原 bytes。因此 duplicate key、NaN/Infinity、额外 whitespace/非 canonical key order/escape 与不确定数字表示都稳定拒绝，不修改 shared bounded-json owner。
+- `direct_grid_forcing_contract` 必须是 object，key 恰为 `forcing_mapping_mode/binding_uri/binding_checksum/model_input_package_id/sp_att_path/sp_att_checksum/applicable_source_ids/grid_id/grid_signature/station_bindings`；每个 station object 恰含现有 `REQUIRED_STATION_FIELDS` 十键，v1 不接受 optional `properties` 或其它未知 key。shape gate 后必须调用现有 `parse_direct_grid_forcing_contract(..., source_id=current_source)` 与 semantic validator，不复制字段/坐标/station/index/filename 语义。
+- `sp_att_asset_name` 是单个安全 ASCII leaf，必须以 `.sp.att` 结尾，不能为绝对路径、`.`/`..`、含 `/`/反斜杠/NUL/`..`、前导 `-`，也不能与四个固定名碰撞。它是唯一 prepared asset path authority；不得 glob/后缀扫描或使用 `contract.sp_att_path` 发现。
+- contract 的 `applicable_source_ids` 必须精确为 current source singleton，`grid_id` 必须逐字等于 caller 的 current grid；`binding_uri` 精确为 `models/<model_id>/direct-grid/binding.json`，`sp_att_path` 精确为 `input/<project_name>.sp.att`。这两个是 work-local keys，不是 variant path。
+- `binding_checksum`/`sp_att_checksum` 必须逐字匹配 `sha256:<64 lowercase hex>`，并分别等于 fixed `yd.binding` 与 manifest 明示 asset exact bytes 的 stdlib SHA-256。`.sp.att` 还必须是 UTF-8；M2 不解析现场 layout，只保留 exact bytes。
+- exact 顶层集合是四个固定名加 manifest 明示 asset，恰五项；loader 用 `list_directory_no_follow_limited(max_entries=5)` 的 max+1 sentinel，绝不无界枚举。开始/结束各重验一次 root no-follow directory identity 与 exact entry set；每个文件经 `read_bytes_limited_no_follow(max+1 sentinel, containment_root=variant_root)`，拒绝 leaf/ancestor symlink、目录/FIFO/device、不可读与 identity drift。边界检查只发现不合作替换，不虚称能阻止两个检查点之间 swap-back；prepare 的 staging-copy 二次 snapshot 对拍是提交前的最终权威。
+- parser 返回的 contract/stations 另做深快照：station tuple 重建，`properties` 冻结为只读空 mapping（v1 input 禁 properties）；所有 payload/assets 转 immutable tuple/str/bytes。caller 后改原 JSON container 或 mutable contract property 不得改变返回值。
+
+**prepare 生产/提交规则**：
+
+1. `RecordingBuilder` 与未来 real builder 都在各自 fresh `variant_root` 写五项；builder return 仍是 `None`。现有 `default_builder` 在 M4 real binding 落地前继续于任何 subprocess/YD_ROOT write 前 fail closed，#171 不用 synthetic literals 冒充默认生产值。
+2. `prepare._validate_variant` 在既有 cfg.ic parse/reach 检查旁调用唯一 loader，current source/project/grid 来自已有 owner；返回该 source 的 frozen snapshot。两个 source 都通过后才进入 YD_ROOT staging。
+3. `_copy_tree_publish` 按既有发布权限复制五项。复制两源后、GeoJSON/任何终名 rename 前，对 `models_staging/<source>` 调同一 loader，并要求与 scratch snapshot 全对象相等；任何 bytes/schema/identity 变化按 `PrepareError` 收敛，四终名零提交。
+4. handoff 的 `PreparedVariantHandoffError`、`SafeFilesystemError`、`BoundedJSONError`、`DirectGridContractError` 与 expected decode/hash/path错误统一由 loader 包成 `PreparedVariantHandoffError` 并保留 cause；process-level `BaseException` 不包。prepare 再包成指名 source/variant 的 `PrepareError`。失败不删除 foreign variant entry，只按既有 owner 清理本次 scratch/staging。
+5. 三文件 legacy variant 没有 fallback：prepare 产三项则因 missing manifest/asset 拒绝；run consumer 同样 fail closed。部署不原地改旧变体，须由支持 v1 的 real builder 在干净根重新 prepare/init/验证后切换。
+
+**Must preserve / unchanged consumers**：
+
+- #20 四个 YD_ROOT 终名、双 source all-or-nothing、提交顺序、scratch/staging cleanup、default-builder exit 3、PrepareError exit 1、existing parent/mode 语义不变；只改变每个变体内部合法 entry set。
+- #83 顶层旧 staging 仍在 builder/scratch 前只读拒绝且从不自动删除；#97 唯一顶层 `*.cfg.ic`/river/reach owner不变。init 仍只消费率定态；viewer 仍只读 `input/viewer`/`output` 与 DONE。
+- `stage_work_registry`、`DirectGridForcingContract`/parser/validator、`FileForcingRepository`、controller/AttemptRequest/JobRecord 与 config/local schema不改。#132 只能 import loader，不能在 nwm.py 复制 JSON/path/contract parser。
+- `prepare.py` 当前 965 行，产品最终 MUST ≤1000；通过移除旧三项 exact-set 实现并委托 loader腾挪，不新增 large-file exclude。`test_prepare.py` 既有豁免不扩大；主要新矩阵放 `<1000` 行的 `test_prepare_handoff.py`，新 module/fixture同样 `<1000`。
+
+**Risk packs considered（core）**：
+
+- Public API / CLI / script entry: selected —— 新 public loader/value/error/constants；CLI 参数和三命令不改，#132 是明确下游。
+- Config / project setup: selected —— 读取 caller 已有 source/project/grid，禁止新增 config/local identity/cap 字段；default builder M4 边界保留。
+- File IO / path safety / overwrite: selected —— exact root/五项、bounded no-follow reads、symlink/nonregular/identity drift 与 prepare staging copy/recheck。
+- Schema / columns / units / field names: selected —— v1 exact envelope、nested contract/station keys、checksum文本与 identifier grammar。
+- Auth / permissions / secrets: not selected —— 无认证/secret；NFS mode沿用 prepare既有发布权限且有兼容用例。
+- Concurrency / shared state / ordering: selected —— scratch验证→复制→staging重验→rename；双源全过才提交，root identity前后重验。
+- Resource limits / large input / discovery: selected —— manifest/asset byte cap、JSON depth/node/recursion、station既有10000 cap、目录最多5+sentinel。
+- Legacy compatibility / examples: selected —— 三文件 legacy明确fail closed；builder返回/API、四终名、prepare aliases、init/viewer/assemble consumers保持。
+- Error handling / rollback / partial outputs: selected —— 任一 source/阶段失败四终名零提交，cause保留，既有清理/rollback不削弱。
+- Release / packaging / dependency compatibility: selected —— stdlib/现有模块，无依赖/lock/large-file豁免变化；新 module export与行数闸。
+- Documentation / migration notes: selected —— compute-loop/products-contract/D11/D16/三spec与本 fixture同步，部署只允许干净 re-prepare。
+
+**Domain packs**：
+
+- Geospatial / CRS / shapefile sidecars: not selected —— GeoJSON/shapefile bytes与10.1/10.2行为不改。
+- Time series / forcing / temporal boundaries: selected —— GFS/IFS current-source/grid contract隔离；manifest无 cycle，#132才绑定 cycle。
+- 状态链 / warm-start 定戳一致性: selected —— variant内唯一率定态/parameter保持，project由既有state filename owner给出；不改状态bytes/header。
+- NWM snapshot / DB-free isolation: selected —— carrier只读本地变体，无NWM runtime import、DB/env/registry服务；real builder值归M4。
+
+**Invariant Matrix**：
+
+- Governing invariant: 只有 prepare 在 scratch 与 YD_ROOT staging 两次以同一唯一 loader 证明的 source-specific、exact-five-entry、schema/checksum/identity-bound prepared variant，才能成为后续 run 的模型级 authority；run 只复制该 immutable snapshot并加入本 attempt 身份，绝不猜值。
+- Source-of-truth identity/contract: caller current source/project/grid；fixed v1 manifest；builder声明的四版本标识；manifest contract；fixed opaque binding与明示 `.sp.att` exact bytes/SHA-256；root directory identity。
+- Producers: injected/未来real mapping-builder写五项；prepare只验证/复制/提交，不补写缺字段或资产。
+- Validators/preflight: `load_prepared_variant_handoff`唯一parser；safe_fs bounded no-follow/entry cap；bounded_json；existing direct-grid parser/validator；prepare scratch+staging双验。
+- Storage/cache/query: committed per-source variant持久保存模型级handoff；无DB/cache/dynamic registry；attempt work内registry/receipt仍临时。
+- Public routes/entrypoints: loader API；`run_prepare`既有入口消费；#132 `AttemptDriver.prepare`后继消费；CLI形状不变。
+- Frontend/downstream consumers: #132 stage_work_registry/forcing/assemble/worker receipt；init只读率定态；viewer不读handoff。
+- Failure paths/rollback/stale state: malformed/tampered/legacy variant在commit/submit前拒绝；一源失败四终名零提交；staging mismatch回滚本次条目；旧已提交variant不自动覆盖/迁移。
+- Evidence/audit/readiness: focused schema/path/size/deep-freeze tests、prepare双源全树快照、pre-change body red、calibrated mutation、full CI/scope/line gates；M4真实值receipt单列。
+- Regression rows:
+  - 两个合法source-specific五项variant -> scratch/staging snapshots相等、四终名提交、独立进程loader与prepare返回同值。
+  - 任一schema/path/type/size/source/project/grid/identifier/checksum/root identity/staging-copy mismatch -> PreparedVariantHandoffError/PrepareError、四终名零提交、外部target/既有树不变。
+  - 三文件legacy、第二`.sp.att`、unknownentry或另一source contract -> fail closed，不fallback、不扫描、不串源。
+  - unchanged sibling：#83旧staging拒绝、#97 state基数、default builder、init/viewer/assemble/controller测试全绿。
+
+**Boundary-surface checklist**：
+
+- Shared helper roots: 只消费不改 safe_fs、bounded_json、direct-grid parser/validator、object-store cap；不得复制或扩 shared helper。
+- Public entrypoints: 新 loader/value/error/constants；prepare旧exports/Builder/run_prepare不改；无新CLI命令/参数。
+- Read surfaces: exact absolute variant root的固定manifest/binding/明示asset与有限顶层list；不读cfg/para内容来派生metadata。
+- Write/delete/overwrite: loader零写删；builder写fresh scratch五项；prepare沿既有copy/rename/rollback，只删本次scratch/staging。
+- Staging/publish/rollback: scratch validate → YD_ROOT staging copy → staging validate/equality → existing four rename；任一验失败零终名。
+- Producer/consumer evidence: builder declaration+asset bytes → immutable prepared snapshot → #132 WorkIdentity/attempt handoff → worker registry/receipt；每层追加自身identity而不改前层。
+- Stale/idempotency: legacy/missing/old schema拒绝；prepare仍no-overwrite/no-force；不从旧receipt/work恢复。
+- Unchanged downstream: #83/#97、init、viewer DONE、assemble/file repository、controller、config/local、M4真实builder owner。
+
+**Required evidence（input → exact expected，全部需独立判别器）**：
+
+1. public structure：模块`__all__`、五常量/两cap按名引用、error继承、dataclass frozen+kw-only十字段、loader六个kw-only/no-default参数与return annotation精确；prepare三旧文件名常量/Builder/请求/报告/入口签名不变。
+2. valid loader：独立stdlib literal构造canonical v1 manifest + exact binding/sp bytes + current source/project/grid -> 返回字段逐字相等、asset为`bytes`、contract/stations为tuple、properties只读；二次调用值相等但独立snapshot。
+3. deep freeze：构造后修改原payload/contract/station/properties容器或调用方bytes buffer -> 返回值不变；尝试改dataclass/properties失败。删除深copy/MappingProxyType或返回bytearray/memoryview的变异必红。
+4. input preflight：relative/错误类型variant root，source/project/grid错误类型/空白/unsafe project，两个limit为bool/float/string/0/negative -> filesystem/list/read零调用的PreparedVariantHandoffError。
+5. canonical JSON：非UTF8、malformed、top-level list/null、duplicate key、NaN/Infinity、extra whitespace/reordered key/noncanonical escape/trailing newline -> 稳定拒绝；合法canonical exact bytes正控制通过。
+6. envelope矩阵：九键每键逐一缺失/unknown/错误类型/blank，schema旧/未知；目标腿前置均合法 -> 拒绝且不返回partial。
+7. nested shape：contract非object、十键逐一缺失/unknown；station非list、0条、10001条、row非object、十键逐一缺失/unknown/带properties；随后既有parser语义bad mode/index/filename/grid/cell/coordinate各有到腿用例。
+8. identity：四identifier逐字段wrong type/blank/`.`/`..`/前导`-`/slash/backslash/NUL/nonASCII/含`..`；合法`A-z/0-9/_.-`边界通过。manifest source/project与caller不等、contract grid与caller不等、applicable sources为另源/双源 -> 拒绝。
+9. D11 keys：binding_uri不是`models/<model>/direct-grid/binding.json`、sp_att_path不是`input/<project>.sp.att`各自拒绝；不得用两值读取prepared资产。model/project含安全但会改变期望key的值作为判别器。
+10. asset name：absolute、`.`/`..`、含separator/backslash/NUL/`..`、前导`-`、不以`.sp.att`结尾、碰撞四固定名 -> 读asset前拒绝；只有manifest exact leaf被读，旁置第二个`.sp.att`使exact-set拒绝而非任选。
+11. checksum/asset UTF-8：两声明分别测试无prefix/大写hex/错误长度/非hex；binding/sp bytes与各自checksum逐项tamper -> 拒绝。每腿另一资产合法，确保不被前腿遮蔽；opaque binding可为任意bytes且从不JSON decode。另以非 UTF-8 `.sp.att` bytes（如 `b"\xff"`）及其正确 SHA-256 声明、其余五项/contract/checksum 全合法作独立反例 -> loader 抛 `PreparedVariantHandoffError`；prepare 经同一 loader 包成 `PrepareError`、四终名零提交、YD_ROOT 全树与 before 相等。合法 UTF-8 asset 是正控制，不能用 checksum mismatch 代替 decode 拒绝。
+12. filesystem shape：manifest/binding/asset各自 missing、leaf symlink（指向root外）、ancestor symlink、directory、FIFO/device、EACCES/EIO/ESTALE、open前后regular inode替换 -> domain error、不阻塞、不读外部target；entry与target snapshot不变。
+13. bounds：manifest/两asset分别在cap恰边界通过（内容构造仍合法）与cap+1拒绝；JSON depth/node恰边界/超一；directory五项通过、第六项以max+1 sentinel拒绝。reader/list实参按caller cap/5精确记录。
+14. root coherence：开始list/read后替换variant root identity或改变entry set -> 结束边界拒绝；正常root两次identity/entry checks一致。不得宣称防住swap-back，只断言可见漂移。
+15. prepare success：RecordingBuilder按gfs/ifs写不同source/grid/IDs/contract/assets的五项，return None；scratch loader各一次、copy后staging各一次且全对象相等后，原四终名按既有顺序提交。final两variant exact五项且bytes与builder逐字相同，GeoJSON/cleanup旧证据不变。
+16. prepare failure：GFS合法、IFS在manifest/asset/schema/checksum/identity任一矩阵失败 -> 两variant/两GeoJSON均零提交，YD_ROOT全树与before相等，scratch清；不能提前提交GFS。
+17. staging TOCTOU/copy：scratch两源都valid，复制时漏/改任一manifest/binding/sp byte、添加entry、换inode -> staging二次loader/equality在首rename前拒绝，四终名零提交；跳过二验或只比path/checksum一部分的变异必红。
+18. legacy/compatibility：三文件variant、schema v0、缺asset均拒绝；不fallback到literal/synthetic/config/env/DB/dirname/binding parse/glob。default_builder仍exit3且零subprocess/YD_ROOT write；#83/#97/init/viewer/assemble/controller现有tests不弱化。
+19. consumer import：不改#132六文件下的临时独立进程只import public loader，读取final synthetic variant后把返回值直接喂`stage_work_registry`，FileForcingRepository→ForcingProducer→assemble链消费同identity/contract/assets；零第二parser/目录扫描/DB/env。
+20. pre-change red：在本docs fixture base加入final focused tests，public lookup放在test body；至少loader缺失、五项variant被当前三项gate拒绝、staging二验缺失三类行为到test body后red，不以collection/import error冒充。恢复source后green，stash无red-proof残留。
+21. calibrated mutation：唯一仓外scratch、排除venv/cache/bytecode、`env -u VIRTUAL_ENV` frozen sync、`uv run ... python -m pytest`、校验import/source marker、每mutant清bytecode/恢复hash；至少杀死exact-set/schema/canonical/duplicate/identifier/source-project-grid/singleton/D11/checksum/asset UTF-8 decode/path/no-follow/byte-depth-node-entry caps/deep-freeze/root identity/staging二验/双源原子性/legacy fallback与parser复制，0 survived/0 unrun。
+22. final matrix：new focused + existing prepare/assemble/direct-grid/forcing/controller consumer tests、producer full、viewer default；producer/viewer frozen sync+Ruff/format；OpenSpec strict/all、stage anchor、scope/line/large-file/git-diff gates与current merge-result CI全绿。
+
+**Non-goals / scope firewall**：
+
+- 不实现#132 CLI/AttemptDriver/worker/receipt/Slurm provider；不改其六文件。#132只在#171产品合并后消费public loader。
+- 不实现real NWM mapping-builder或声明真实`.sp.att` layout/parser/site identifier；default builder继续fail closed，M4必须产v1 carrier并现场对账。
+- 不改config/local/AttemptRequest/controller/assemble/direct-grid parser/shared safe_fs/bounded_json；不引入DB/env/dynamic registry/目录扫描/legacy fallback。
+- 不吸收#83/#97/#78或其它prepare恢复/升级状态机；不增加第五个YD_ROOT顶层终名、不覆盖已有variant、不新增`--force`。
+
+**Review focus**：
+
+- carrier是否真跨独立prepare/run持久存在，还是仍只在test注入/内存；四标识是否错误地逐attempt随机或从禁用来源派生。
+- parser是否只有一个public owner，是否复用direct-grid语义validator并严格挡住其会忽略的unknown/properties；返回是否真正深冻结。
+- exact五项、manifest明示asset、bounded no-follow/root identity与scratch→staging二验是否都有可达判别器，而非只检查DONE/单点路径。
+- 双source失败是否始终在首个四终名rename前，是否削弱#20/#83/#97/default-builder/四终名rollback与existing userspace。
+- tests是否以独立canonical/checksumliteral和actual mutants证明schema/path/resource/atomicity，且没有把M2 synthetic值冒充M4事实或扩大large-file豁免。
 
 ## 11. init-bootstrap：首态建链
 
@@ -5608,7 +5785,7 @@ Minimal mergeable slice: 只修改聚合消息构造与原测试模块中的判�
 Fixture level: expanded（CLI 入口、生产 Slurm、跨进程 worker/receipt、双源控制器、锁与退出码均是公共/状态边界）
 Repair intensity: high
 Project profile: yd-viewer
-依赖：14.1、14.3、14.4、#47、#134、#135、#136、#137；编号 14.2 是用户指定的收尾编号，不表示它先于已完成的 14.3/14.4 实施
+依赖：14.1、14.3、14.4、10.4/#171、#47、#134、#135、#136、#137；编号 14.2 是用户指定的收尾编号，不表示它先于已完成的 14.3/14.4 实施
 
 **裁决与范围**：
 
@@ -5617,7 +5794,7 @@ Project profile: yd-viewer
 3. `SlurmJobExecutor` 的资源键集与值来自 `config.slurm.required_fields` / `local.slurm`，后者不含 #69 策略键。生产入口用 `partial(subprocess_runner, command_timeout_seconds=local.slurm_command_timeout_seconds)` 恰构造一份无状态 bounded runner，并把同一 callable 注入两份 executor 与两个 ExitCode provider；因此 `sbatch`、普通 `sacct` 和 #47 失败查询都显式使用同一时限。provider 仍逐源独立且只执行钉死的一次 `sacct -j <job_id> -n -P --format=ExitCode`；轮询与退出码查询不得合并，`JobRecord` 七字段不变。
 4. PR #129 留给 M4 的生产 `AttemptDriver`/worker/receipt 现在由本任务认领，不能只接一个不存在的对象。最小实现 MUST 是既有 `AttemptDriver` 协议的生产适配器：`prepare` 只生成 identity、精确 worker argv 与 work 内 DAT 终名；重 canonical/forcing/assemble/SHUD/tracker/recovery 在 Slurm job 内执行；`collect` 只读取该 job 原子提交、checksum/identity 绑定的 work-local receipt，并据此交回既有 `AttemptProducts`。receipt 必须绑定 source/cycle/work/job ID、`WorkIdentity`、`RunDirectory`、DAT、merged log 与已验证 T+12 checkpoint；不得扫描规范文件名、改写私有 `_captured`、在登录节点补跑 SHUD，或用测试 terminal hook 伪装生产 worker。`collect` 在完整验证 receipt 信封后 MUST 调用 #136 已落地的 tracker-owned `import_verified_checkpoint(*, tracker, record)`，由 tracker 对五字段与 current canonical bytes 重验后恢复同一对象 authority；随后既有 controller 仍调用 `ensure_twelve_hour_checkpoint` 做第二次 point-of-use 重验。driver 不得直接写 `_captured`、拿值相等对象替换 record、从旧 receipt/文件名恢复，或绕过任一层。
 
-   `WorkIdentity` 的唯一来源为：`source_id`/`cycle_time` 逐字取 `AttemptRequest.source`/`.cycle`；`project_name` 只从 `prepare.calibrated_state_path(request.variant_dir)` 指向、prepare 已验证的率定状态文件名仅移除末尾一次 `.cfg.ic` 后取得，绝不取变体目录 basename；`model_id`、`basin_id`、`basin_version_id`、`river_network_version_id` 是该 production driver 为一次 attempt 唯一拥有的一组 versioned、work-local registry identifier。后四值没有 M2 的持久/外部 authority，不能写入 config/local，不能编造生产字符串；只在同一 scratch registry → forcing → assemble 链中使用并逐字写入 receipt，M4 才以真实 node-22 builder/site artifact 对账。`DirectGridForcingContract` 只取 prepare-owned 验证 handoff，不从 raw builder 文件在运行时反推；`yd.binding` 只读 prepare 已验证的 `request.variant_dir/yd.binding`，`.sp.att` 只取 prepare 明示 handoff；driver 写入已认领 work 前和 worker 使用前都只对 handoff 明示的 path 作有界、逐分量 no-follow 普通文件读取，重验 handoff source/cycle/project/work identity、contract current-source identity 和声明的 SHA-256。receipt 必须逐字记录同一 `WorkIdentity`（含四个 identifier）及 binding/`.sp.att` checksum。禁止从 TOML、环境、`DATABASE_URL`、NWM PostgreSQL/服务型 registry、目录扫描、`yd.binding` 内容或测试 fixture 推导上述任一值/路径/bytes。`contract.binding_uri`/`contract.sp_att_path` 仅是 registry commit 后的 work-local relative keys，不能拿来发现变体输入；现有 M2 文档没有真实 `.sp.att` 位置/parser，handoff 未给出 D11 work-local key shape 的 contract 与明示 asset path 时 driver MUST 在 submit 前 fail closed。
+   `WorkIdentity` 的唯一来源为：`source_id`/`cycle_time` 逐字取 `AttemptRequest.source`/`.cycle`；`project_name` 只从 `prepare.calibrated_state_path(request.variant_dir)` 指向、prepare 已验证的率定状态文件名仅移除末尾一次 `.cfg.ic` 后取得，绝不取变体目录 basename；`model_id`、`basin_id`、`basin_version_id`、`river_network_version_id` 逐字取 #171 `load_prepared_variant_handoff` 返回的同一 prepared-variant 稳定版本标识。driver 不得逐 attempt 随机生成、写入 config/local、内置生产字符串或从资产内容补值；四值只在本 attempt 的 scratch registry → forcing → assemble → receipt 链中使用，M4 以真实 node-22 builder/site v1 artifact 对账。`DirectGridForcingContract`、opaque `yd.binding` bytes 与 manifest 明示 `.sp.att` bytes 也只取同一次 loader 返回值；driver 将该模型级 immutable snapshot 与 `AttemptRequest` 的 source/cycle/work 绑定后写入已认领 work，worker 使用前重验。receipt 必须逐字记录同一 `WorkIdentity` 及 binding/`.sp.att` checksum。禁止从 TOML、环境、`DATABASE_URL`、NWM PostgreSQL/服务型 registry、目录扫描、variant basename、`yd.binding` 内容或测试 fixture 推导上述任一值/路径/bytes。`contract.binding_uri`/`contract.sp_att_path` 仅是 registry commit 后的 work-local relative keys，不能拿来发现 prepared asset；missing/invalid v1 handoff 必须在 submit 前 fail closed。
 5. poll wait MUST 是会实际等待的生产 callable，不能 busy-loop；等待策略固定为版本化常量 `POLL_INTERVAL_SECONDS = 10`，生产 callable 每次调用恰执行 `time.sleep(POLL_INTERVAL_SECONDS)`。这是调度查询节律而非现场资源值，不新增 TOML 字段。它只控制两次非终态 `sacct` 轮询之间的等待，不是作业 watchdog、总超时、重试或取消。
 6. `run` 的退出码逐字为：`0` = 锁竞争成功跳过，或控制器返回且两源全部报告均为 `SUCCEEDED`；`3` = 任一报告为 `STOPPED` 或 `JOB_FAILED`。`SUCCEEDED_CLEANUP_PENDING`、`RunSourcesError` 及其它运行期 controller/executor/driver/provider 错误也不是“全部成功”，统一返回 `3` 并向 stderr 输出可定位信息，不打印 traceback。`RunSourcesError` 的单份人读文本必须按 `ifs,gfs` 固定顺序包含每个底层 `RunError` 及其每条 `__notes__`，每项恰一次；CLI 把该完整文本输出一次，不得沿用不含 notes 的旧聚合摘要或另行重复打印而丢失/复制 #108 startup-cleanup 清单。参数解析错误及 `run` 的 `ConfigError`/配置装配错误返回 `2`；`prepare`/`init` 既有退出码不因本任务改变。当前 `run_sources` 的实时追赶合同正常会以首次非 `SUCCEEDED` 末项结束，因此 raw 缺口的 `STOPPED` 按本裁决确实返回 `3`；入口不得把“追到当前 raw 尽头”静默改算成 `0`，也不得为制造 `0` 增加追赶 cap。
 7. `build_parser()` 仍且只暴露三个子命令，`run --config/--local` 参数形态不变；不新增公开 `worker` 子命令。若生产 worker 需要入口，只能是包内私有 module/console target，且 argv 由 production driver 精确构造，不通过 shell 拼接。
@@ -5632,14 +5809,14 @@ Project profile: yd-viewer
 - **#132 M2-only 合成资产 oracle（非生产事实，且不复用既有测试 fixture 字面量）**：生产 driver 的端到端合成子进程 fixture（不是 terminal hook）固定下列独立字节/identity；`stage_work_registry(..., max_asset_bytes=4096)` 必须能消费它们：
 
   ```python
+  import json
   from datetime import UTC, datetime
   from hashlib import sha256
 
   from yd_producer.assemble import WorkIdentity, stage_work_registry
-  from yd_producer.forcing import DirectGridForcingContract, DirectGridStationBinding
   from yd_producer.prepare import calibrated_state_path
+  from yd_producer.prepare_handoff import load_prepared_variant_handoff
   from yd_producer.state import parse as parse_cfg_ic
-  from yd_producer.store.safe_fs import read_bytes_limited_no_follow
 
   source = "gfs"
   cycle_time = datetime(2026, 1, 2, 0, tzinfo=UTC)
@@ -5670,52 +5847,77 @@ Project profile: yd-viewer
       b'{"grid_points":[["m2-synthetic-cell",0.0,0.0]]}'
   ).hexdigest() == GRID_SIGNATURE
   assert parse_cfg_ic(VALID_SYNTHETIC_CFG_IC).river is not None
-  identity = WorkIdentity(
-      source_id=source, cycle_time=cycle_time,
-      model_id="m2-synthetic-model", basin_id="m2-synthetic-basin",
-      basin_version_id="m2-synthetic-basin-v1",
-      river_network_version_id="m2-synthetic-rivnet-v1", project_name="yd",
-  )
-  contract = DirectGridForcingContract(
-      forcing_mapping_mode="direct_grid",
-      binding_uri="models/m2-synthetic-model/direct-grid/binding.json",
-      binding_checksum="sha256:" + BINDING_SHA256,
-      model_input_package_id="m2-synthetic-package",
-      sp_att_path="input/yd.sp.att", sp_att_checksum="sha256:" + SP_ATT_SHA256,
-      applicable_source_ids=(source,), grid_id="m2-synthetic-gfs-grid",
-      grid_signature=GRID_SIGNATURE,
-      stations=(DirectGridStationBinding(
-          station_id="m2-synthetic-station", shud_forcing_index=1,
-          forcing_filename="m2-synthetic-station.csv", longitude=0.0,
-          latitude=0.0, x=0.0, y=0.0, z=0.0,
-          grid_id="m2-synthetic-gfs-grid", grid_cell_id="m2-synthetic-cell",
-      ),),
-  )
+  contract_payload = {
+      "applicable_source_ids": [source],
+      "binding_checksum": "sha256:" + BINDING_SHA256,
+      "binding_uri": "models/m2-synthetic-model/direct-grid/binding.json",
+      "forcing_mapping_mode": "direct_grid",
+      "grid_id": "m2-synthetic-gfs-grid",
+      "grid_signature": GRID_SIGNATURE,
+      "model_input_package_id": "m2-synthetic-package",
+      "sp_att_checksum": "sha256:" + SP_ATT_SHA256,
+      "sp_att_path": "input/yd.sp.att",
+      "station_bindings": [{
+          "forcing_filename": "m2-synthetic-station.csv",
+          "grid_cell_id": "m2-synthetic-cell",
+          "grid_id": "m2-synthetic-gfs-grid",
+          "latitude": 0.0, "longitude": 0.0,
+          "shud_forcing_index": 1,
+          "station_id": "m2-synthetic-station",
+          "x": 0.0, "y": 0.0, "z": 0.0,
+      }],
+  }
+  handoff_payload = {
+      "basin_id": "m2-synthetic-basin",
+      "basin_version_id": "m2-synthetic-basin-v1",
+      "direct_grid_forcing_contract": contract_payload,
+      "model_id": "m2-synthetic-model",
+      "project_name": "yd",
+      "river_network_version_id": "m2-synthetic-rivnet-v1",
+      "schema_version": "yd.prepare.direct-grid-handoff.v1",
+      "source_id": source,
+      "sp_att_asset_name": "explicit-synthetic.sp.att",
+  }
   work_root = tmp_path / "work"
   attempt_work = work_root / "gfs" / "2026010200"
   attempt_work.mkdir(parents=True)
   variant_dir = tmp_path / "variant"
   variant_dir.mkdir()
   calibrated_state_path(variant_dir).write_bytes(VALID_SYNTHETIC_CFG_IC)
-  assert calibrated_state_path(variant_dir).name.removesuffix(".cfg.ic") == identity.project_name
   (variant_dir / "yd.para").write_bytes(b"# m2 synthetic parameters\n")
   (variant_dir / "yd.binding").write_bytes(BINDING)
-  sp_att_handoff_path = tmp_path / "explicit-synthetic.sp.att"
-  sp_att_handoff_path.write_bytes(SP_ATT)
+  (variant_dir / "explicit-synthetic.sp.att").write_bytes(SP_ATT)
+  (variant_dir / "yd.direct-grid-handoff.json").write_bytes(
+      json.dumps(
+          handoff_payload, allow_nan=False, ensure_ascii=True,
+          sort_keys=True, separators=(",", ":"),
+      ).encode("utf-8")
+  )
+  prepared = load_prepared_variant_handoff(
+      variant_root=variant_dir,
+      source_id=source,
+      project_name=calibrated_state_path(variant_dir).name.removesuffix(".cfg.ic"),
+      grid_id="m2-synthetic-gfs-grid",
+      max_manifest_bytes=4096,
+      max_asset_bytes=4096,
+  )
+  identity = WorkIdentity(
+      source_id=source, cycle_time=cycle_time,
+      model_id=prepared.model_id, basin_id=prepared.basin_id,
+      basin_version_id=prepared.basin_version_id,
+      river_network_version_id=prepared.river_network_version_id,
+      project_name=prepared.project_name,
+  )
   registry = stage_work_registry(
-      work_root=work_root, identity=identity, contract=contract,
-      binding_content=read_bytes_limited_no_follow(
-          variant_dir / "yd.binding", max_bytes=4096, containment_root=variant_dir,
-      ),
-      sp_att_content=read_bytes_limited_no_follow(
-          sp_att_handoff_path, max_bytes=4096, containment_root=tmp_path,
-      ),
+      work_root=work_root, identity=identity, contract=prepared.contract,
+      binding_content=prepared.binding_content,
+      sp_att_content=prepared.sp_att_content,
       max_asset_bytes=4096,
   )
   assert registry.identity == identity
   ```
 
-  fixture 在 `prepare.calibrated_state_path(variant_dir)` 返回的 `yd.cfg.ic` 安装独立有效的合成率定状态，故期望 `project_name == "yd"`，并将 `BINDING` 写入精确 `variant_dir/yd.binding`；`SP_ATT` 写入 handoff 明示的 no-follow 普通临时文件，绝非从 `contract.sp_att_path` 或变体扫描推导。上述 `binding_uri`/`sp_att_path` 是 `stage_work_registry` 的提交后 work-local keys，不是生产或合成来源路径。返回的 `registry` MUST 进入同一独立 worker 的真实 `FileForcingRepository -> ForcingProducer -> assemble` 链：独立 canonical catalog 的每个 required GFS product 都使用同一 source/cycle、`m2-synthetic-gfs-grid`、一格 `SYNTHETIC_GRID_DEFINITION`、上面的 `GRID_SIGNATURE`、以及 contract station 的 `m2-synthetic-cell`；NetCDF 的自描述 identity 必须与各 catalog 行相同。其它 canonical/SHUD/tracker 输入可以是独立构造的合成工件，但不得以测试 fixture 取代本段明确的 contract/binding/`.sp.att` handoff。该 `yd` 仅行使既有 `calibrated_state_path` 的 M2 合成 seam，不声明 project/site 生产值；synthetic `.sp.att` 只行使既有 UTF-8、SHA-256 与单一 `FORC=1` 对应单一 synthetic station 的最小现有生产校验，不把该字面量或该局部语法校验宣称为真实模型 `.sp.att` layout/parser。worker 在独立进程仅从该 handoff 写原子 receipt，`collect` 逐项重验 source/cycle/work/job/identity/checksum 后构造 `AttemptProducts`。篡改任一 receipt 字段、路径越 work、checkpoint checksum、job ID、binding/`.sp.att` bytes/checksum、contract current-source 或 handoff source/cycle/project/work binding、四个 identifier 的链内一致性，以及任一 handoff leaf/ancestor symlink、非普通文件或超过显式 `max_asset_bytes` -> `RunError`/driver error，零 `DONE`；没有显式 `.sp.att` handoff 同样在 submit 前拒绝。该 oracle 不声明这些 literal 是生产 model/basin/site 值，也不扫描变体或从 `contract.sp_att_path` 猜路径。
+  fixture 在 `prepare.calibrated_state_path(variant_dir)` 返回的 `yd.cfg.ic` 安装独立有效的合成率定状态，写入固定 manifest、opaque `yd.binding` 与 manifest 明示的同目录 `.sp.att`，再以 #171 唯一 loader 取得模型级 immutable snapshot；绝不从 `contract.sp_att_path`、目录扫描或测试默认值推导。上述 `binding_uri`/`sp_att_path` 是 `stage_work_registry` 的提交后 work-local keys，不是 prepared variant 的来源路径。返回的 `registry` MUST 进入同一独立 worker 的真实 `FileForcingRepository -> ForcingProducer -> assemble` 链：独立 canonical catalog 的每个 required GFS product 都使用同一 source/cycle、`m2-synthetic-gfs-grid`、一格 `SYNTHETIC_GRID_DEFINITION`、上面的 `GRID_SIGNATURE`、以及 contract station 的 `m2-synthetic-cell`；NetCDF 的自描述 identity 必须与各 catalog 行相同。其它 canonical/SHUD/tracker 输入可以是独立构造的合成工件，但不得以测试 fixture 取代本段由 public loader 验证的 contract/binding/`.sp.att` handoff。该 `yd` 与四个 `m2-synthetic-*` 只行使 M2 synthetic seam，不声明 project/site 生产值；synthetic `.sp.att` 只行使 UTF-8、SHA-256 与单一 `FORC=1` 对应单一 station 的最小既有校验，不把该字面量或局部语法宣称为真实 `.sp.att` layout/parser。driver 在 claimed work 内把 loader snapshot 与 `AttemptRequest` source/cycle/work 绑定，worker 独立进程重验后写原子 receipt，`collect` 再逐项重验 source/cycle/work/job/identity/checksum 后构造 `AttemptProducts`。篡改 prepared manifest/asset/contract/identifier 由 #171 loader 在 submit 前拒绝；篡改 attempt handoff/receipt、路径越 work、checkpoint checksum、job ID、链内 identity/checksum 则由 #132 driver/worker/collect 拒绝；两类均零 `DONE`。
 - M2 证据只证明上述本地合成进程、checksum/identity/no-follow handoff 与 receipt 交接；M4 必须另用真实 node-22 builder/site artifact 核验 `.sp.att` layout/parser、四个 registry identifier、Slurm/NFS/SHUD 与真实 receipt，不能用 M2 fixture 代替。
 - 源码/结构守卫：`cli.run` 不含 `_unimplemented`；生产默认 import 不含 `FakeJobExecutor` 或 tests fixture；timeout 数字字面量 60 只在 `yd_producer.config._DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS` 出现，`slurm.py` 引用该内部常量、CLI 只读配置字段，`config.__all__` 不扩；parser 子命令集合仍恰为三项；`controller.run_sources`、`run_once`、`catch_up_source` 与 `JobRecord` 公共签名不改。
 - `cd producer && uv run pytest -q`、ruff/format、frozen sync 与 `openspec validate m2-producer-core --strict --no-interactive` 全绿。
