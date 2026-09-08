@@ -127,7 +127,7 @@
 ### Requirement: prepared variant handoff 可跨进程验证
 每个 source 的 mapping-builder MUST 在 fresh `variant_root` 顶层写出固定名 `yd.direct-grid-handoff.json` 和 manifest 字段 `sp_att_asset_name` 明示的一个安全单层 `*.sp.att` 普通文件；builder 的 filesystem-output seam 与 `None` 返回值保持不变。manifest 顶层 key 集合 MUST 恰为 `schema_version/source_id/project_name/model_id/basin_id/basin_version_id/river_network_version_id/direct_grid_forcing_contract/sp_att_asset_name`，schema 固定为 `yd.prepare.direct-grid-handoff.v1`，不得接受缺失/未知/重复 key、非 object、非标准 JSON 常量或错误类型。四个版本标识由 builder 声明并随 prepared variant 稳定，不得逐 attempt 随机生成或从资产内容推导。
 
-唯一公共读取 seam MUST 是 `load_prepared_variant_handoff(*, variant_root, source_id, project_name, grid_id, max_manifest_bytes, max_asset_bytes) -> PreparedVariantHandoff`，全部参数 keyword-only、无默认。调用方给出已知的 exact variant root/current source/project/grid；loader 不读 config/env/DB、不扫描候选 manifest/asset、不从 variant basename 或 opaque binding 内容推导 metadata。它 MUST 用固定 manifest 名与 manifest 明示 asset 名，通过有界 descriptor-bound no-follow 普通文件读取和现有 bounded JSON/direct-grid contract validator，验证 exact 顶层五项、schema/key/type、safe identifiers、source/project/grid、current-source singleton contract、D11 work-local URI shape，以及 `sha256:<64 lowercase hex>` 对 exact binding/`.sp.att` bytes 的绑定。JSON byte/depth/node、顶层 entry 数与两资产 byte 数都 MUST 有显式上限；symlink leaf/ancestor、目录、FIFO、设备、不可读、替换竞态、越界路径与超限都 fail closed。
+唯一公共读取 seam MUST 是 `load_prepared_variant_handoff(*, variant_root, source_id, project_name, grid_id, max_manifest_bytes, max_asset_bytes) -> PreparedVariantHandoff`，全部参数 keyword-only、无默认。调用方给出已知的 exact variant root/current source/project/grid；loader 不读 config/env/DB、不扫描候选 manifest/asset、不从 variant basename 或 opaque binding 内容推导 metadata。它 MUST 用固定 manifest 名与 manifest 明示 asset 名，通过有界 descriptor-bound no-follow 普通文件读取和现有 bounded JSON/direct-grid contract validator，验证 exact 顶层五项、schema/key/type、safe identifiers、source/project/grid、current-source singleton contract、D11 work-local URI shape、明示 `.sp.att` 的严格 UTF-8，以及 `sha256:<64 lowercase hex>` 对 exact binding/`.sp.att` bytes 的绑定。JSON byte/depth/node、顶层 entry 数与两资产 byte 数都 MUST 有显式上限；symlink leaf/ancestor、目录、FIFO、设备、不可读、替换竞态、越界路径与超限都 fail closed。
 
 `PreparedVariantHandoff` MUST 是 frozen keyword-only value object，包含 source/project、四个版本标识、深冻结的 `DirectGridForcingContract`、`sp_att_asset_name` 与 immutable binding/`.sp.att` bytes。contract/station/properties 的 caller-owned mutable container 不得在返回后改变该快照。`prepare` MUST 在任何 `YD_ROOT` 写入前调用同一 loader；scratch→`YD_ROOT` staging 复制后、任何终名 rename 前，再对 staging 副本调用一次并要求整个返回值相等，防止验证后撕裂或复制错误。任一 source 任一轮验证失败时四个终名全部不提交；既有 all-or-nothing 回滚不变。#83 的旧 staging 拒绝和 #97 的唯一率定态谓词均为 unchanged siblings。
 
@@ -136,7 +136,7 @@
 - **THEN** prepare 在 scratch 与 staging 各验证一次同一 immutable handoff 后才提交既有四个终名；两个 final variant 各恰含五项且 loader 返回其本源 contract/标识/exact bytes，builder 仍返回 `None`
 
 #### Scenario: handoff 任一证据不可信则零提交
-- **WHEN** 任一 source 的 manifest/schema/key/type/source/project/grid/identifier/D11 URI/checksum 漂移，manifest 或 asset 为 symlink/非普通/不可读/超限，JSON malformed/deep/wide，asset path 越界或顶层条目多/少一项，或 scratch 验证后 staging bytes 被替换
+- **WHEN** 任一 source 的 manifest/schema/key/type/source/project/grid/identifier/D11 URI/checksum 漂移，manifest 或 asset 为 symlink/非普通/不可读/超限，JSON malformed/deep/wide，或 `.sp.att` checksum 正确但不是 UTF-8，asset path 越界或顶层条目多/少一项，或 scratch 验证后 staging bytes 被替换
 - **THEN** prepare 以 `PrepareError` fail closed，四个终名及其既有父树逐项不变，不从另一 source、config、目录、binding 内容或测试常量补值
 
 #### Scenario: 独立 run consumer 复用唯一 loader
