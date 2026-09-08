@@ -18,30 +18,30 @@ from __future__ import annotations
 
 import os
 import stat
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from cli_fixtures import (
     ALT_CANONICAL_GRID_IDS,
     CANONICAL_GRID_IDS,
-    write_config,
-    write_local,
 )
 from geometry_fixtures import write_bowtie_domain_layer
 from prepare_fixtures import (
     BASELINE_HYDRO_PARAM_BYTES,
-    RecordingBuilder,
+    VARIANT_HANDOFF_NAME,
+    Env,
     RenameProbe,
-    SyntheticBaselinePackage,
     VariantScript,
+    assert_untouched,
     binding_bytes,
+    make_builder,
+    make_env,
+    run,
     tree_snapshot,
-    write_baseline_package,
+    variant_asset_name,
 )
 
 from yd_producer import prepare as prepare_module
-from yd_producer.config import Config, LocalConfig, load_config, load_local
 from yd_producer.prepare import (
     VARIANT_BINDING_NAME,
     VARIANT_CALIBRATED_STATE_NAME,
@@ -66,93 +66,23 @@ EXPECTED_NEW_ENTRIES = {
     f"input/models/yd_gfs/{VARIANT_HYDRO_PARAM_NAME}",
     f"input/models/yd_gfs/{VARIANT_BINDING_NAME}",
     f"input/models/yd_gfs/{VARIANT_CALIBRATED_STATE_NAME}",
+    f"input/models/yd_gfs/{VARIANT_HANDOFF_NAME}",
+    f"input/models/yd_gfs/{variant_asset_name('gfs')}",
     "input/models/yd_ifs",
     f"input/models/yd_ifs/{VARIANT_HYDRO_PARAM_NAME}",
     f"input/models/yd_ifs/{VARIANT_BINDING_NAME}",
     f"input/models/yd_ifs/{VARIANT_CALIBRATED_STATE_NAME}",
+    f"input/models/yd_ifs/{VARIANT_HANDOFF_NAME}",
+    f"input/models/yd_ifs/{variant_asset_name('ifs')}",
     "input/viewer",
     "input/viewer/rivers.geojson",
     "input/viewer/boundary.geojson",
 }
 
 
-@dataclass
-class Env:
-    """一次编排所需的全部现场对象。"""
-
-    config: Config
-    local: LocalConfig
-    yd_root: Path
-    scratch_root: Path
-    package: SyntheticBaselinePackage
-
-
-def make_env(
-    tmp_path: Path,
-    *,
-    variants: dict[str, str] | None = None,
-    reach_count: int = REACH_COUNT,
-    grid_ids: dict[str, str] | None = None,
-    river_count: int = 3,
-) -> Env:
-    """建一份齐备现场：真 TOML -> 真装载器 -> 真 `Config`/`LocalConfig`。
-
-    刻意不手工构造 dataclass：新增的必需字段 `nwm_canonical_grid_id` 必须真的经过装载
-    路径，否则本文件对 `grid_id` 的断言与装载器脱钩。
-
-    `YD_ROOT` 预置一份**与本次无关的既有内容**（`output/<cycle>/gfs/DONE`），使"既有内容
-    逐字节不变"这条断言有东西可咬——空根上它恒真。
-    """
-    config_path = write_config(
-        tmp_path, variants=variants, reach_count=reach_count, grid_ids=grid_ids
-    )
-    local_path = write_local(tmp_path)
-    config = load_config(config_path)
-    local = load_local(local_path, config)
-    yd_root = Path(local.yd_root)
-    scratch_root = Path(local.scratch_root)
-    yd_root.mkdir(parents=True, exist_ok=True)
-    scratch_root.mkdir(parents=True, exist_ok=True)
-    done_dir = yd_root / "output" / "2025010100" / "gfs"
-    done_dir.mkdir(parents=True)
-    (done_dir / "DONE").write_bytes(b"")
-    (done_dir / "yd.rivqdown.dat").write_bytes(b"pre-existing product bytes\n")
-    package = write_baseline_package(tmp_path / "baseline", river_count=river_count)
-    return Env(
-        config=config,
-        local=local,
-        yd_root=yd_root,
-        scratch_root=scratch_root,
-        package=package,
-    )
-
-
 @pytest.fixture
-def env(tmp_path) -> Env:
+def env(tmp_path):
     return make_env(tmp_path)
-
-
-def make_builder(env: Env, scripts: dict[str, VariantScript] | None = None):
-    return RecordingBuilder(
-        env.package, river_count=env.config.reach_count, scripts=scripts
-    )
-
-
-def run(env: Env, builder):
-    return run_prepare(
-        local=env.local,
-        config=env.config,
-        baseline_root=env.package.root,
-        builder=builder,
-    )
-
-
-def assert_untouched(env: Env, before: dict, builder=None) -> None:
-    """`YD_ROOT` 全树逐字节回到执行前，且 scratch 下无任何残留。"""
-    assert tree_snapshot(env.yd_root) == before
-    assert tree_snapshot(env.scratch_root) == {}
-    if builder is not None:
-        assert builder.count == 0
 
 
 # --- 成功路径 ----------------------------------------------------------------

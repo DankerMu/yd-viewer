@@ -105,7 +105,6 @@ fixture 定义的合成约定，以模块常量暴露给 11.1 消费；真实外
 from __future__ import annotations
 
 import os
-import stat
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -114,8 +113,19 @@ from pathlib import Path
 
 from yd_producer.config import Config, LocalConfig, variant_relative_violation
 from yd_producer.geometry import GeometryError, write_viewer_geojson
+from yd_producer.prepare_handoff import (
+    MAX_PREPARED_VARIANT_ASSET_BYTES,
+    MAX_PREPARED_VARIANT_MANIFEST_BYTES,
+    PREPARED_VARIANT_BINDING_FILENAME,
+    PREPARED_VARIANT_CALIBRATED_STATE_FILENAME,
+    PREPARED_VARIANT_HANDOFF_FILENAME,
+    PREPARED_VARIANT_PARAMETER_FILENAME,
+    PreparedVariantHandoff,
+    PreparedVariantHandoffError,
+    load_prepared_variant_handoff,
+)
 from yd_producer.raw.source_identity import normalize_source_id
-from yd_producer.state import cfg_ic
+from yd_producer.state import MAX_STATE_IC_BYTES, cfg_ic
 from yd_producer.store import safe_fs
 
 __all__ = [
@@ -152,11 +162,10 @@ BASELINE_RIVERS_SHP_NAME = "rivers.shp"
 BASELINE_DOMAIN_SHP_NAME = "domain.shp"
 
 #: 变体内文件名（合成约定，11.1 消费其中的率定末态）
-VARIANT_CALIBRATED_STATE_NAME = "yd.cfg.ic"
-VARIANT_HYDRO_PARAM_NAME = "yd.para"
-VARIANT_BINDING_NAME = "yd.binding"
-#: 变体目录**恰**应含有的条目集合：多一条（含 `.tmp` 残留）或少一条都拒绝提交
-#: pinned: test_scratch_residue_refuses_commit、test_missing_variant_entry_refuses_commit
+VARIANT_CALIBRATED_STATE_NAME = PREPARED_VARIANT_CALIBRATED_STATE_FILENAME
+VARIANT_HYDRO_PARAM_NAME = PREPARED_VARIANT_PARAMETER_FILENAME
+VARIANT_BINDING_NAME = PREPARED_VARIANT_BINDING_FILENAME
+#: 旧公开常量保留三项值；合法 v1 exact-five 集合只由 handoff loader 持有。
 VARIANT_REQUIRED_ENTRIES = frozenset(
     {VARIANT_CALIBRATED_STATE_NAME, VARIANT_HYDRO_PARAM_NAME, VARIANT_BINDING_NAME}
 )
@@ -592,113 +601,74 @@ def _run_cleanup_steps(steps: Iterable[Callable[[], None]]) -> list[str]:
 
 
 def _copy_tree_publish(
-    source: Path, destination: Path, created: list[Path], *, lower_bound: Path
+    source: Path,
+    destination: Path,
+    created: list[Path],
+    *,
+    lower_bound: Path,
+    file_limits: Mapping[str, int],
 ) -> None:
-    """把 `source` 树按**发布权限新建条目**的方式复制到 `destination`。
-
-    刻意不是 `shutil.copytree(copy2)`/`cp -a`：那会把计算节点的 uid/gid/mode 原样带进
-    NFS（agent-ops §10「复制 scratch 文件不用 `cp -a` 把计算节点 uid/gid/模式带入 NFS；
-    由控制器按发布权限创建」）。这里每个条目都是**新建**的：目录走
-    `safe_fs.ensure_directory_no_follow`（显式 0o755），普通文件走
-    `safe_fs.write_bytes_no_follow_exclusive`（新建，落地权限由本进程 umask 决定，不读
-    源 mode）。属主/权限的进一步收紧归 #24/#25 的发布面。pinned:
-    test_published_entries_do_not_inherit_scratch_modes。
-
-    非普通文件（symlink/FIFO/设备）一律拒绝。symlink 那一支由 `safe_fs.stat_no_follow`
-    直接抛（等价变异，不可判别：下游读/列目录原语同为 no-follow——把这里换成跟随
-    symlink 的 `os.stat`，symlink 仍会被 `read_bytes_no_follow` /
-    `list_directory_no_follow` 拒掉，异常类型与 `YD_ROOT` 终态一致，只有消息文本不同；
-    `test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed` 挡在步骤 4
-    `_validate_variant` 的条目集合闸门上，根本到不了这里——那道闸门自己的 pinned 标注在
-    `_validate_variant` 内，不在本处）。
-    其余类型在此点名——FIFO/socket/设备那一支**未钉**：只有当 builder 恰以三个必需条目名
-    之一产出这类文件时才可达，round-1 已裁定在本阶段真实输入域之外（归 M4，本阶段不
-    声明）。
-    """
-    _ensure_directory(destination, created, lower_bound=lower_bound)
+    """按发布权限复制已验证的五文件变体；race 增长也只读到 cap+1。"""
     names = _wrap_fs(
-        lambda: safe_fs.list_directory_no_follow(source), f"读取目录失败：{source}"
+        lambda: safe_fs.list_directory_no_follow_limited(source, max_entries=5),
+        f"读取目录失败：{source}",
     )
+    if set(names) != set(file_limits):
+        raise PrepareError(f"变体复制前条目集合改变：{source}")
+    _ensure_directory(destination, created, lower_bound=lower_bound)
     for name in sorted(names):
-        child = source / name
-        info = _wrap_fs(
-            lambda child=child: safe_fs.stat_no_follow(child), f"读取条目失败：{child}"
+        child, limit = source / name, file_limits[name]
+        payload = _wrap_fs(
+            lambda child=child, limit=limit: safe_fs.read_bytes_limited_no_follow(
+                child, max_bytes=limit, containment_root=source
+            ),
+            f"读取文件失败：{child}",
         )
-        if stat.S_ISDIR(info.st_mode):
-            _copy_tree_publish(
-                child, destination / name, created, lower_bound=lower_bound
-            )
-        elif stat.S_ISREG(info.st_mode):
-            payload = _wrap_fs(
-                lambda child=child: safe_fs.read_bytes_no_follow(child),
-                f"读取文件失败：{child}",
-            )
-            _wrap_fs(
-                lambda name=name, payload=payload: (
-                    safe_fs.write_bytes_no_follow_exclusive(destination / name, payload)
-                ),
-                f"写入 staging 失败：{destination / name}",
-            )
-        else:
-            raise PrepareError(f"变体内出现非普通文件条目，拒绝发布：{child}")
+        if len(payload) > limit:
+            raise PrepareError(f"变体复制文件超过 {limit} byte limit：{child}")
+        _wrap_fs(
+            lambda name=name, payload=payload: safe_fs.write_bytes_no_follow_exclusive(
+                destination / name, payload
+            ),
+            f"写入 staging 失败：{destination / name}",
+        )
 
 
 # --- 产物校验 ----------------------------------------------------------------
 
 
-def _validate_variant(source: str, variant_root: Path, config: Config) -> None:
-    """逐变体的提交前校验；任一条不成立即 `PrepareError`，一个变体都不提交。
-
-    「一个都不提交」pinned: test_partial_success_commits_nothing（`ifs` 失败时 `gfs` 也不
-    落地）、test_reach_count_mismatch_refuses_commit、test_missing_variant_root_refuses_commit。
-    """
-    if not variant_root.is_dir():
-        raise PrepareError(
-            f"builder 未在 {source} 的 variant_root 产出目录：{variant_root}"
-        )
-
-    names = set(
-        _wrap_fs(
-            lambda: safe_fs.list_directory_no_follow(variant_root),
-            f"读取 {source} 变体目录失败：{variant_root}",
-        )
-    )
-    unexpected = sorted(names - VARIANT_REQUIRED_ENTRIES)
-    if unexpected:
-        # `.tmp` 残留是最常见的一种，但判据是"恰为预期集合"而非"没有 .tmp"：按后缀
-        # 挑剔等于给未来每一种残留形态留一个洞。
-        # pinned: test_builder_symlink_residue_is_refused_and_scratch_is_fully_removed
-        # （残留条目不带 `.tmp` 后缀，把判据窄化成按后缀挑剔即变红）、
-        # test_scratch_residue_refuses_commit、test_missing_variant_entry_refuses_commit
-        raise PrepareError(
-            f"{source} 变体目录含未预期条目，拒绝提交："
-            + "、".join(unexpected)
-            + f"（{variant_root}）"
-        )
-    missing = sorted(VARIANT_REQUIRED_ENTRIES - names)
-    if missing:
-        raise PrepareError(
-            f"{source} 变体目录缺少必需条目："
-            + "、".join(missing)
-            + f"（{variant_root}）"
-        )
-
+def _validate_variant(
+    source: str, variant_root: Path, config: Config
+) -> PreparedVariantHandoff:
+    """验证率定态与唯一 v1 handoff，返回 immutable scratch snapshot。"""
     state_path = calibrated_state_path(variant_root)
+    project_name = state_path.name.removesuffix(".cfg.ic")
     try:
-        document = cfg_ic.parse(state_path)
+        snapshot = load_prepared_variant_handoff(
+            variant_root=variant_root,
+            source_id=source,
+            project_name=project_name,
+            grid_id=getattr(config.nwm_canonical_grid_id, source),
+            max_manifest_bytes=MAX_PREPARED_VARIANT_MANIFEST_BYTES,
+            max_asset_bytes=MAX_PREPARED_VARIANT_ASSET_BYTES,
+        )
+    except PreparedVariantHandoffError as exc:
+        raise PrepareError(
+            f"{source} 变体 handoff 不可验证：{variant_root}（{exc}）"
+        ) from exc
+    try:
+        state_bytes = _wrap_fs(
+            lambda: safe_fs.read_bytes_limited_no_follow(
+                state_path, max_bytes=MAX_STATE_IC_BYTES, containment_root=variant_root
+            ),
+            f"{source} 变体率定态安全读取失败：{state_path}",
+        )
+        document = cfg_ic.parse(state_bytes)
     except ValueError as exc:
-        # `cfg_ic.parse` 把 OSError/UnicodeDecodeError 都收敛成 ValueError，故这一条
-        # 兜住全部解析侧失败；MUST NOT 让它逃出本模块。
-        # pinned: test_unparsable_calibrated_state_refuses_commit
         raise PrepareError(
             f"{source} 变体的率定末态不可解析：{state_path}（{exc}）"
         ) from exc
-
     if document.river is None:
-        # `CfgIcDocument.river` 是 `Section | None`。把 `None` 当成"0 条 reach"会在
-        # `reach_count == 0` 的配置下静默通过——缺 river 段是结构性缺陷，不是一个数量。
-        # pinned: test_missing_river_section_is_not_treated_as_zero_reaches
-        # （`reach_count == 0` 的判别性用例）、test_missing_river_section_refuses_commit
         raise PrepareError(
             f"{source} 变体的率定末态没有 river 段（不是 0 条河段，是缺段）：{state_path}"
         )
@@ -707,6 +677,7 @@ def _validate_variant(source: str, variant_root: Path, config: Config) -> None:
             f"{source} 变体的 reach 数与 `reach_count` 不符："
             f"期望 {config.reach_count}，实际 {document.river.row_count}（{state_path}）"
         )
+    return snapshot
 
 
 # --- 编排 --------------------------------------------------------------------
@@ -861,9 +832,11 @@ def run_prepare(
             except Exception as exc:
                 raise PrepareError(f"builder 构建 {source} 变体失败：{exc}") from exc
 
-        # 步骤 4：逐变体产物校验（两个都过才进入搬运）。
-        for source in SOURCE_IDS:
-            _validate_variant(source, requests[source].variant_root, config)
+        # 步骤 4：两个 scratch handoff 都验证为 immutable snapshot 后才允许搬运。
+        snapshots = {
+            source: _validate_variant(source, requests[source].variant_root, config)
+            for source in SOURCE_IDS
+        }
 
         # 步骤 5：scratch -> `YD_ROOT` 内 staging（按发布权限新建条目）。
         _ensure_directory(staging_root, created, lower_bound=yd_root)
@@ -879,7 +852,40 @@ def run_prepare(
                 models_staging / source,
                 created,
                 lower_bound=yd_root,
+                file_limits={
+                    PREPARED_VARIANT_HANDOFF_FILENAME: MAX_PREPARED_VARIANT_MANIFEST_BYTES,
+                    **{
+                        name: MAX_PREPARED_VARIANT_ASSET_BYTES
+                        for name in (
+                            VARIANT_CALIBRATED_STATE_NAME,
+                            VARIANT_HYDRO_PARAM_NAME,
+                            VARIANT_BINDING_NAME,
+                            snapshots[source].sp_att_asset_name,
+                        )
+                    },
+                },
             )
+        # 复制后的 staging snapshot 是提交前最后权威；任何撕裂/复制错误均在首个
+        # rename 前失败，不能只比较路径或其中一项 checksum。
+        for source in SOURCE_IDS:
+            try:
+                staged = load_prepared_variant_handoff(
+                    variant_root=models_staging / source,
+                    source_id=source,
+                    project_name=snapshots[source].project_name,
+                    grid_id=getattr(config.nwm_canonical_grid_id, source),
+                    max_manifest_bytes=MAX_PREPARED_VARIANT_MANIFEST_BYTES,
+                    max_asset_bytes=MAX_PREPARED_VARIANT_ASSET_BYTES,
+                )
+            except PreparedVariantHandoffError as exc:
+                raise PrepareError(
+                    f"{source} staging 变体 handoff 不可验证：{models_staging / source}（{exc}）"
+                ) from exc
+            if staged != snapshots[source]:
+                raise PrepareError(
+                    f"{source} staging 变体 handoff 与 scratch snapshot 不一致："
+                    f"{models_staging / source}"
+                )
 
         # 步骤 6：GeoJSON 直接落 staging（唯一落点，不经 scratch）。
         # pinned: test_geojson_feature_counts_match_the_baseline、
