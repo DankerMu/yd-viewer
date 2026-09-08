@@ -1074,7 +1074,7 @@ Issue #67 已由 PR #168 关闭；#54/#66/#68/#70 保持 CLOSED；#132 保持 OP
 
 ---
 
-## 第 34 次复议（issue #171 / PR #172 docs-only fixture 合并后，2026-09-08）
+## 第 34 次复议（issue #171 / PR #172 docs-only fixture 合并后，2026-09-07）
 
 审计数字：44 行（43 merged、1 terminal），仍为 30 个多轮合并 PR，后续轮次命中仍为
 **core=125 / rotated=96**。PR #172 是 `fixture=none`、`rounds=0` 的 docs-first implementation fixture，
