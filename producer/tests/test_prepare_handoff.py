@@ -79,6 +79,7 @@ from yd_producer.forcing.bounded_json import (
 )
 from yd_producer.forcing.direct_grid_contract import (
     REQUIRED_STATION_FIELDS,
+    DirectGridContractError,
     parse_direct_grid_forcing_contract,
 )
 from yd_producer.prepare import (
@@ -151,7 +152,11 @@ def test_public_structure_is_exact():
 def test_valid_loader_returns_independent_frozen_snapshot(tmp_path):
     binding = binding_bytes(grid_id=GFS_GRID, source_id=GFS)
     sp_att = sp_att_bytes(source_id=GFS)
-    root = _variant(tmp_path, binding=binding, sp_att=sp_att)
+    payload = _envelope()
+    payload["direct_grid_forcing_contract"]["station_bindings"].append(
+        station_payload(grid_id=GFS_GRID, index=2)
+    )
+    root = _variant(tmp_path, binding=binding, sp_att=sp_att, payload=payload)
     first = _load(root)
     ids = synthetic_variant_ids(GFS)
     assert first.source_id == GFS
@@ -168,7 +173,10 @@ def test_valid_loader_returns_independent_frozen_snapshot(tmp_path):
     assert first.contract.grid_id == GFS_GRID
     assert first.contract.applicable_source_ids == (GFS,)
     assert type(first.contract.stations) is tuple
-    assert len(first.contract.stations) == 1
+    assert tuple(s.grid_cell_id for s in first.contract.stations) == (
+        "cell-1",
+        "cell-2",
+    )
     assert isinstance(first.contract.stations[0].properties, MappingProxyType)
     second = _load(root)
     assert first == second
@@ -340,47 +348,39 @@ def test_nested_contract_shape_matrix(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "mutate",
+    "field,value",
     [
-        lambda payload: payload["direct_grid_forcing_contract"].__setitem__(
-            "forcing_mapping_mode", "idw"
-        ),
-        lambda payload: payload["direct_grid_forcing_contract"]["station_bindings"][
-            0
-        ].__setitem__("shud_forcing_index", 2),
-        lambda payload: payload["direct_grid_forcing_contract"]["station_bindings"][
-            0
-        ].__setitem__("forcing_filename", "../x.csv"),
-        lambda payload: payload["direct_grid_forcing_contract"]["station_bindings"][
-            0
-        ].__setitem__("grid_id", "other-grid"),
-        lambda payload: payload["direct_grid_forcing_contract"]["station_bindings"][
-            0
-        ].__setitem__("longitude", "nan"),
+        ("forcing_mapping_mode", "idw"),
+        ("shud_forcing_index", 2),
+        ("forcing_filename", "../x.csv"),
+        ("grid_id", "other-grid"),
+        ("longitude", "nan"),
+        ("grid_cell_id", "cell-1"),
     ],
-    ids=["mode", "index", "filename", "station-grid", "coordinate"],
+    ids=["mode", "index", "filename", "station-grid", "coordinate", "cell"],
 )
-def test_parser_semantic_failures_are_rejected(tmp_path, mutate):
+def test_parser_semantic_failures_are_rejected(tmp_path, field, value):
     payload = _envelope()
-    mutate(payload)
-    _refuse(_variant(tmp_path, payload=payload))
+    contract = payload["direct_grid_forcing_contract"]
+    if field == "forcing_mapping_mode":
+        contract[field] = value
+    else:
+        row = contract["station_bindings"][0]
+        if field == "grid_cell_id":
+            row = station_payload(grid_id=GFS_GRID, index=2)
+            contract["station_bindings"].append(row)
+        row[field] = value
+    cause = _refuse(_variant(tmp_path, payload=payload)).__cause__
+    assert isinstance(cause, DirectGridContractError)
+    assert cause.field == field
+    if field == "grid_cell_id":
+        assert cause.station_id == "station-2"
+        assert cause.details == {"duplicate_grid_cell_id": "cell-1"}
 
 
 @pytest.mark.parametrize(
     "value",
-    [
-        1,
-        "",
-        ".",
-        "..",
-        "-lead",
-        "a/b",
-        "a\\b",
-        "a\x00b",
-        "模型",
-        "a..b",
-        "-v",
-    ],
+    [1, "", ".", "..", "-lead", "a/b", "a\\b", "a\x00b", "模型", "a..b", "-v"],
 )
 @pytest.mark.parametrize(
     "field_name",
