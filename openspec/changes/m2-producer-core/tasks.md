@@ -891,9 +891,11 @@ Required evidence:
 - Unchanged sibling row: `LocalObjectStore.write_bytes_atomic` 原捕获 OSError/SafeFilesystemError，part 后缀写失败 TypeError/KeyboardInterrupt 仍裸穿，不修改调用者。
 - Fault rows (tmp/part): non-bytes 在 temp create 后触发 TypeError；write/fsync 注入 MemoryError/KeyboardInterrupt（同一对象）-> 写 fd fstat 为 EBADF，无本次点文件，旧目标、兄弟与外来点文件字节不变；cleanup close 注入 OSError 时仍保留主异常。
 - Post-replace row: directory fsync 注入 KeyboardInterrupt -> 原对象传播且新目标保留；成功 -> 完整字节与无本次临时文件；pre-replace OSError -> kind=io、旧目标不变；strict post-replace OSError -> kind=indeterminate、新目标保留。
-- [ ] 新回归在旧源码红、修复后绿；覆盖上述异常与 tmp/part，fd 以 fstat/EBADF 验证而非 /proc。
-- [ ] `cd producer && uv run pytest && uv run ruff check . && uv run ruff format --check .`；viewer 默认矩阵；`openspec validate --all` 与 stage-pipeline log check。
-- [ ] 四席 high-risk cross-review、独立 final review、CI 与 SHA 匹配证据完成后合并。
+- [x] 新回归在旧源码红、修复后绿；覆盖上述异常与 tmp/part，fd 以 fstat/EBADF 验证而非 /proc。
+- [x] `cd producer && uv run pytest && uv run ruff check . && uv run ruff format --check .`；viewer 默认矩阵；`openspec validate --all` 与 stage-pipeline log check。
+- [x] 四席 high-risk cross-review、独立 final review、CI 与 SHA 匹配证据完成后合并。
+Merge evidence: PR #180，final `741456b`，merge `9c2fd72`；producer 2962 passed / 3 skipped，C1 caller exception context 经独立 verifier 确认并关闭。共享 change 尚有未完成 M2 任务，保留 active，不按单 issue 整体 archive。
+Review-loop audit deferral: 2026-09-09 lens-rotation 达到 DECIDABLE（32 multi-round，later core=125/rotated=96）；保持当前 reviewer 席位，不自动削减；keep/cut 是人工政策决定，本次授权仅含三项修复，延后人工裁决。
 
 ### 组 2 剩余任务（2.2/2.3）的 issue #5 fixture
 
