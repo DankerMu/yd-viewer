@@ -576,24 +576,78 @@ class BoundAssemblyIO:
         if path == self.work:
             return
         fd = self.root_fd
-        for part in _relative_parts(self._claim, path):
-            try:
-                next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
-            except FileNotFoundError:
-                os.mkdir(part, 0o755, dir_fd=fd)
-                next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
-            previous = fd
-            fd = next_fd
-            _close_walk(previous, self.root_fd)
-        _close_walk(fd, self.root_fd)
+        primary: BaseException | None = None
+        try:
+            for part in _relative_parts(self._claim, path):
+                try:
+                    next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                except FileNotFoundError:
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                    next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                previous, fd = fd, next_fd
+                try:
+                    _close_walk(previous, self.root_fd)
+                except BaseException as error:
+                    _note_close(error, _close_owned_walk(fd, self.root_fd))
+                    fd = self.root_fd
+                    raise
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            note = _close_owned_walk(fd, self.root_fd)
+            if primary is not None:
+                _note_close(primary, note)
+            elif note is not None:
+                raise note
 
     def _open(self, path: Path, flags: int, mode: int = 0) -> int:
         parts = _relative_parts(self._claim, path)
         parent = _walk_to_parent(self.root_fd, parts, path=path)
+        fd: int | None = None
+        named: os.stat_result | None = None
+        primary: BaseException | None = None
         try:
-            return os.open(parts[-1], flags, mode, dir_fd=parent)
+            if flags == _FILE_READ_FLAGS:
+                named = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISREG(named.st_mode):
+                    raise ValueError(f"{path} is not a regular file")
+            fd = os.open(parts[-1], flags, mode, dir_fd=parent)
+            if flags == _FILE_READ_FLAGS:
+                opened = os.fstat(fd)
+                if named is None or (opened.st_dev, opened.st_ino) != (
+                    named.st_dev,
+                    named.st_ino,
+                ):
+                    raise ValueError(f"{path} changed while being opened")
+                if not stat.S_ISREG(opened.st_mode):
+                    raise ValueError(f"{path} is not a regular file")
+            close_parent, parent = parent, None
+            _close_walk(close_parent, self.root_fd)
+            result, fd = fd, None
+            return result
+        except BaseException as error:
+            primary = error
+            raise
         finally:
-            _close_walk(parent, self.root_fd)
+            if fd is not None:
+                _note_close(primary, _close_fd(fd))
+            if parent is not None:
+                try:
+                    _close_walk(parent, self.root_fd)
+                except BaseException as error:
+                    if primary is None:
+                        raise
+                    primary.add_note(f"{_FILE_CLOSE_NOTE}: {error}")
+
+
+def _close_owned_walk(fd: int, root_fd: int) -> OSError | None:
+    return None if fd == root_fd else _close_fd(fd)
+
+
+def _note_close(primary: BaseException | None, note: OSError | None) -> None:
+    if primary is not None and note is not None:
+        primary.add_note(f"{_FILE_CLOSE_NOTE}: {note}")
 
 
 def _write(fd: int, content: bytes) -> None:

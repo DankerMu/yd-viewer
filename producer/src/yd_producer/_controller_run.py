@@ -88,6 +88,20 @@ def _stopped_report(
     )
 
 
+def _discovery_unreadable_stop(
+    source: str, error: controller.DiscoveryUnreadableError
+) -> RunReport:
+    """探测「无法确定」收敛为本源 STOPPED，与 `decide_frontier` 同一 detail 形态
+    （Required evidence 7 计入既有 contract）；单源探测失败不得放大成整 tick 的
+    `RunError(frontier)`，也不得吞成「空集合」。"""
+    return _stopped_report(
+        source,
+        cycle=None,
+        stop_reason=controller.StopReason.DISCOVERY_UNREADABLE,
+        detail=f"{source}: {error.detail}",
+    )
+
+
 def _phase_error(
     message: str, phase: controller.RunPhase, source: str, cycle: datetime, job_id=None
 ):
@@ -492,18 +506,11 @@ def _run_once(
     publish_lock: Lock | None,
 ) -> RunReport:
     controller._preflight(config=config, local=local, source=source)
-    # 前沿前半段（DONE/状态 -> T；不含 raw 判定）
     ctx.phase = "frontier"
     try:
         gathered = controller._target_and_state(Path(local.yd_root), source)
     except controller.DiscoveryUnreadableError as exc:
-        # 探测「无法确定」= 该源 STOPPED，不与 `decide_frontier` 既有契约分叉。
-        return _stopped_report(
-            source,
-            cycle=None,
-            stop_reason=controller.StopReason.DISCOVERY_UNREADABLE,
-            detail=f"{source}: {exc.detail}",
-        )
+        return _discovery_unreadable_stop(source, exc)
     except Exception as exc:
         raise RunError(
             f"前沿判定失败：{exc}",
@@ -533,7 +540,6 @@ def _run_once(
             ),
         )
 
-    # 3. 合法 T：residue plan/execute，然后 rawscan.judge
     ctx.phase = "residue"
     decision = controller.FrontierDecision(
         source=source,
@@ -590,7 +596,6 @@ def _run_once(
                 + "；停在缺口等待，不跳轮"
             ),
         )
-
     # 可读 preexisting 闸之后才排他 claim，再 stage_raw。
     claim: WorkClaim | None = None
     try:
@@ -656,7 +661,6 @@ def _run_once(
         cycle=target,
     )
 
-    # 5. 变体/率定状态 + staged input + driver.prepare + prepared 校验
     ctx.phase = "prepare"
     try:
         variants = prepare_module.variant_targets(local, config)
@@ -753,7 +757,6 @@ def _run_once(
     _validate_prepared(attempt, source, target, work_dir, variant_dir)
     canonical = _canonical_checkpoint_path(attempt=attempt, work_dir=work_dir)
 
-    # 6. 唯一构造 JobSpec；submit 前三件终态产物必须不存在
     ctx.phase = "submit"
     job_spec = _make_job_spec(
         attempt=attempt,
@@ -786,7 +789,6 @@ def _run_once(
         submission, job_spec, "submit", source=source, cycle=target
     )
 
-    # 7. 首次 poll 立即；每条非终态 poll 后恰一次 poll_wait
     ctx.phase = "poll"
     terminal: JobRecord | None = None
     previous = submission
@@ -816,7 +818,6 @@ def _run_once(
         previous = record
     assert terminal is not None
 
-    # 8. 终态三分：FAILED/TIMEOUT -> JOB_FAILED（零 collect/publish）
     if terminal.state is not JobState.SUCCEEDED:
         if failure_exit_code is None:
             return RunReport(
@@ -884,7 +885,6 @@ def _run_once(
         claim=claim,
     )
 
-    # 9. checkpoint point-of-use 重验（runner 零调用）
     try:
         captured = tracker_module.ensure_twelve_hour_checkpoint(
             tracker=products.tracker,
@@ -920,7 +920,6 @@ def _run_once(
         canonical, work_root, source, target, job_id=submission.job_id, claim=claim
     )
 
-    # publish 三态
     ctx.phase = "publish"
     publish_inputs = publish_module.PublishInputs(
         yd_root=local.yd_root,
