@@ -946,8 +946,9 @@ Review focus: finally 只捕 OSError；取消也到达 close；本次主因而�
 Required evidence:
 - 所有上述 Matrix rows MUST 落入 `test_safe_fs.py` 新公共回归：三 reader 参数化双失败/仅close/仅读失败、KI 与 SystemExit 身份及 close note；tail fstat 与 lseek 独立双失败；caller except 的原 ValueError 不添 note；两个 LocalObjectStore read wrapper 的 `ObjectStoreError.__cause__` 为模块错误且其 `__cause__ is read_error`。
 - 准入兼容与成功字节/close_count rows 同样必测；保留现有 refusals 测试不迁移。基线预期：新增故障语义回归红、既有兼容场景绿；不要求成功/准入兼容在基线变红。「finally直接close」由双失败/取消/仅close判别；「取消跳过close」由取消close_count与fd liveness判别，两种变异覆盖三 reader。
-- [ ] 基线批量红；「finally 直接 os.close」与「取消路径跳过 close」两种精确变异均被新公开回归杀死；修复后绿。
-- [ ] producer 全量 pytest/Ruff、viewer 默认矩阵、OpenSpec strict/all、stage log；high 四席与独立最终审核、CI/SHA gate。
+- [x] 基线批量红；「finally 直接 os.close」与「取消路径跳过 close」两种精确变异均被新公开回归杀死；修复后绿。
+- [x] producer 全量 pytest/Ruff、viewer 默认矩阵、OpenSpec strict/all、stage log；high 四席与独立最终审核、CI/SHA gate。
+Merge evidence: PR #184，final `6b81b87`，merge `3db6c4f`；producer 3009 passed / 3 skipped；一轮四席和独立 final clean。未改 iterator 的同类 close 因果缺陷已路由 #185；共享 change 保持 active，完成本 issue 不代表其余 M2 完成。
 
 ### 组 2 剩余任务（2.2/2.3）的 issue #5 fixture
 
