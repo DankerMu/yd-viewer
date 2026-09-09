@@ -917,8 +917,9 @@ Boundary checklist: shared walker、公开目录创建、fd 交接、拒绝/清�
 Non-goals: #122 有界读；其它 helper 的关闭故障重构；远端/NFS 实测；不放宽拒绝或以吞掉 I/O 伪装成功。
 Review focus: 深度0假阴性；fd推进失败时 next_fd 归属；禁止使用 ambient sys.exception 判断本次失败（#42 C1）；unsafe/io 主因；RLIMIT 只在子进程改变。
 Required evidence:
-- [ ] 旧源码批量红证据与删除新增清理的定向变异体均使深层拒绝/RLIMIT 判别器变红；修复后绿。
-- [ ] producer 全量 pytest/Ruff，viewer 默认矩阵、OpenSpec strict/all 与 stage log；high 四席、独立最终审核、CI 与 SHA gate。
+- [x] 旧源码批量红证据与删除新增清理的定向变异体均使深层拒绝/RLIMIT 判别器变红；修复后绿。
+- [x] producer 全量 pytest/Ruff，viewer 默认矩阵、OpenSpec strict/all 与 stage log；high 四席、独立最终审核、CI 与 SHA gate。
+Merge evidence: PR #182，final `f353ac5`，merge `7d4cf8e`；producer 2973 passed / 3 skipped；一轮四席与独立 final clean；未改兄弟 walker 的 next_fd 缺陷已路由 #183。
 
 ### 组 2 剩余任务（2.2/2.3）的 issue #5 fixture
 
