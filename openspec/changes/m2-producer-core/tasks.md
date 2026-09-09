@@ -921,6 +921,34 @@ Required evidence:
 - [x] producer 全量 pytest/Ruff，viewer 默认矩阵、OpenSpec strict/all 与 stage log；high 四席、独立最终审核、CI 与 SHA gate。
 Merge evidence: PR #182，final `f353ac5`，merge `7d4cf8e`；producer 2973 passed / 3 skipped；一轮四席与独立 final clean；未改兄弟 walker 的 next_fd 缺陷已路由 #183。
 
+### Issue #122：read helper 关闭因果 fixture
+
+Fixture level: expanded；Repair intensity: high；Upstream suggested level: absent。
+Authority: 与 #42/#55 同一 Wave0 本仓分叉；用户明确 `test_safe_fs.py` 追加回归，覆盖旧 issue 的 refusals 归属；pin 头与既有用例保留。
+Change surface: `safe_fs.py::{read_bytes_no_follow,read_bytes_limited_no_follow,read_tail_bytes_limited_no_follow}` 及必要的私有 close/note helper；`test_safe_fs.py`。不新增公共 context manager。
+Must preserve: 签名、no-follow/containment 与 open_file 准入、有限读 max_bytes+1 哨兵、tail 后 max_bytes 字节、无界读完整 bytes；取得文件 fd 前的既有 open/缺失文件分型不改；#42/#55 不回改。
+Must add: 已取得文件 fd 的读/fstat/lseek 与 close OSError 统一 SafeFilesystemError(kind=io)；双失败读错误保持 cause、close 只作确定性 note；取消 BaseException 原对象与 close note 保留；文件 fd close 一次不重试，finally 不 catch BaseException。
+Seams under test: 三个公开 reader + 真实临时文件 + 只针对本次文件 fd 的 os.read/fstat/lseek/close 注入；消费者 LocalObjectStore read wrappers 的 cause 链（不改源码）。
+Risk packs selected: Public API（错误/cause）；File IO/path safety（文件 fd）；Resource limits（原有边界不变）；Concurrency/ordering（close once/取消）；Legacy compatibility（bytes/消费者）；Error handling/rollback（primary/secondary）；Documentation/provenance（登记）。
+Risk packs not selected: Config/setup、Schema/units、Auth/secrets、Release/dependencies（不改）；Geospatial/CRS、Time series/forcing、状态链/warm-start（无领域计算）。
+Invariant Matrix:
+- Governing invariant: 读操作主因不被次级关闭错误替换，取消不变业务失败；每次取得的文件 fd 最终只尝试 close 一次。
+- Source of truth: 本次 file_fd、本次 read primary、close error；禁止 ambient sys.exception 单独判定本次失败（#42 C1）。
+- Producers/public entry/storage: 三个 reader；validators: open_file_no_follow 既有拒绝；downstream: tracker/publish/prepare/assemble/object_store 不改；read_tail 无生产调用者仍是公开 API。
+- Failure/rollback: read/fstat/lseek OSError、KeyboardInterrupt/SystemExit 与 close OSError 组合；Evidence: fd关闭计数、cause/identity/note、源文件字节、定向变异。
+- Rows（三 reader）: read EIO + close ESTALE -> SafeFilesystemError io，cause 为 read EIO，note 记录 close，close_count=1；仅 close ESTALE -> io/cause=close；仅读 EIO -> io/cause=read；KI/SystemExit + close -> 同一取消对象有 note，close_count=1；正常 -> 原 bytes/cap/tail。
+- Rows（tail）: fstat/lseek EIO + close ESTALE -> fstat/lseek 是 primary；Rows（caller except）: 调用者已处理 ValueError 时成功读+close失败仍 io，不污染该 ValueError；Rows（wrapper）: LocalObjectStore read/read_limited 双失败 cause 链仍可追到 read。
+- Admission row（三 reader）: 缺失文件仍抛 FileNotFoundError；FIFO/symlink 仍在 open_file 准入拒绝，不进入 reader 已取得 file_fd 的 close 计数，不包装这些取得 fd 前的错误。
+- Success row（三 reader）: 文件 b"abcdef"，full 返回 b"abcdef"，limited(max_bytes=3) 返回 b"abcd"，tail(max_bytes=3) 返回 b"def"；每项 close_count=1 且成功关闭后 fstat=EBADF；limited/tail 的 max_bytes=0 边界分别 b"a"/b""。
+Boundary checklist: 共享 read helper、异常/取消、文件 fd close 所有权、未改目录 fd 与 iterator；note 不新增日志/telemetry。
+Non-goals: open_file_no_follow 的目录-fd finally 全族重写；LocalObjectStore.iter_bytes；tracker._stream_digest；#183 successor fd；负 cap 新验证/新资源上限；远端 NFS 实测。裸 OSError 收敛针对本条的 read/file-close 失败，不改变取得 fd 前的缺失文件兼容契约。
+Review focus: finally 只捕 OSError；取消也到达 close；本次主因而非调用者异常状态；note 保留次级证据；close不重试；三兄弟一致且不放宽边界。
+Required evidence:
+- 所有上述 Matrix rows MUST 落入 `test_safe_fs.py` 新公共回归：三 reader 参数化双失败/仅close/仅读失败、KI 与 SystemExit 身份及 close note；tail fstat 与 lseek 独立双失败；caller except 的原 ValueError 不添 note；两个 LocalObjectStore read wrapper 的 `ObjectStoreError.__cause__` 为模块错误且其 `__cause__ is read_error`。
+- 准入兼容与成功字节/close_count rows 同样必测；保留现有 refusals 测试不迁移。基线预期：新增故障语义回归红、既有兼容场景绿；不要求成功/准入兼容在基线变红。「finally直接close」由双失败/取消/仅close判别；「取消跳过close」由取消close_count与fd liveness判别，两种变异覆盖三 reader。
+- [ ] 基线批量红；「finally 直接 os.close」与「取消路径跳过 close」两种精确变异均被新公开回归杀死；修复后绿。
+- [ ] producer 全量 pytest/Ruff、viewer 默认矩阵、OpenSpec strict/all、stage log；high 四席与独立最终审核、CI/SHA gate。
+
 ### 组 2 剩余任务（2.2/2.3）的 issue #5 fixture
 
 **M2 收尾裁决（#42/#55/#122/#63/#102/#103/#104，覆盖本 change 内更早的 pin 等价措辞）**：`producer/src/yd_producer/store/safe_fs.py`、`store/object_store.py`、`canonical/converter.py`、`state/cfg_ic.py` 仍以 `NWM@8ae9b8f2` 为溯源和差异审计基线，但 yd MAY 在本仓修复该快照的缺陷，不再要求逐字、逐字节或 AST 等价。每一处偏离 MUST 先在 `nwm-snapshot-inventory.md` 对应目标路径行的「剥离点」列登记一句“问题 + 修法”；模块头或 PR 说明只能补充，不能替代该登记。这个裁决只解锁上述四个生产模块，不自动扩大任何既有 issue 的实现范围，也不解除其它快照文件和快照测试的等价约束。

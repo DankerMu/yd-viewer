@@ -410,21 +410,62 @@ def stat_no_follow(
         os.close(parent_fd)
 
 
+def _close_acquired_file_fd(file_fd: int) -> OSError | None:
+    try:
+        os.close(file_fd)
+    except OSError as error:
+        return error
+    return None
+
+
+def _file_close_note(error: OSError) -> str:
+    return f"file descriptor close also failed: {type(error).__name__}: {error}"
+
+
+def _conclude_bounded_read(
+    path: Path,
+    *,
+    result: bytes | None,
+    primary: BaseException | None,
+    close_error: OSError | None,
+) -> bytes:
+    if isinstance(primary, OSError):
+        error = SafeFilesystemError(f"Failed to read {path}: {primary}", kind="io")
+        if close_error is not None:
+            error.add_note(_file_close_note(close_error))
+        raise error from primary
+    if primary is not None:
+        if close_error is not None:
+            primary.add_note(_file_close_note(close_error))
+        raise primary
+    if close_error is not None:
+        raise SafeFilesystemError(
+            f"Failed to read {path}: {close_error}", kind="io"
+        ) from close_error
+    assert result is not None
+    return result
+
+
 def read_bytes_no_follow(path: Path, *, containment_root: Path | None = None) -> bytes:
     """Read a file through a no-follow descriptor-bound open."""
 
     file_fd = open_file_no_follow(path, containment_root=containment_root)
+    primary: BaseException | None = None
+    result: bytes | None = None
     try:
         chunks: list[bytes] = []
         while chunk := os.read(file_fd, 1024 * 1024):
             chunks.append(chunk)
-        return b"".join(chunks)
+        result = b"".join(chunks)
     except OSError as error:
-        raise SafeFilesystemError(
-            f"Failed to read {path}: {error}", kind="io"
-        ) from error
+        primary = error
+    except BaseException as error:  # noqa: BLE001 - explicit primary, not sys.exception
+        primary = error
     finally:
-        os.close(file_fd)
+        close_error = _close_acquired_file_fd(file_fd)
+    return _conclude_bounded_read(
+        path, result=result, primary=primary, close_error=close_error
+    )
 
 
 def read_bytes_limited_no_follow(
@@ -433,6 +474,8 @@ def read_bytes_limited_no_follow(
     """Read at most max_bytes plus one sentinel byte through a no-follow open."""
 
     file_fd = open_file_no_follow(path, containment_root=containment_root)
+    primary: BaseException | None = None
+    result: bytes | None = None
     try:
         content = bytearray()
         limit = max_bytes + 1
@@ -441,13 +484,16 @@ def read_bytes_limited_no_follow(
             if not chunk:
                 break
             content.extend(chunk)
-        return bytes(content)
+        result = bytes(content)
     except OSError as error:
-        raise SafeFilesystemError(
-            f"Failed to read {path}: {error}", kind="io"
-        ) from error
+        primary = error
+    except BaseException as error:  # noqa: BLE001 - explicit primary, not sys.exception
+        primary = error
     finally:
-        os.close(file_fd)
+        close_error = _close_acquired_file_fd(file_fd)
+    return _conclude_bounded_read(
+        path, result=result, primary=primary, close_error=close_error
+    )
 
 
 def read_tail_bytes_limited_no_follow(
@@ -459,17 +505,22 @@ def read_tail_bytes_limited_no_follow(
     """Read at most the final max_bytes through a descriptor-bound no-follow open."""
 
     file_fd = open_file_no_follow(path, containment_root=containment_root)
+    primary: BaseException | None = None
+    result: bytes | None = None
     try:
         size = os.fstat(file_fd).st_size
         if size > max_bytes:
             os.lseek(file_fd, size - max_bytes, os.SEEK_SET)
-        return os.read(file_fd, max_bytes)
+        result = os.read(file_fd, max_bytes)
     except OSError as error:
-        raise SafeFilesystemError(
-            f"Failed to read {path}: {error}", kind="io"
-        ) from error
+        primary = error
+    except BaseException as error:  # noqa: BLE001 - explicit primary, not sys.exception
+        primary = error
     finally:
-        os.close(file_fd)
+        close_error = _close_acquired_file_fd(file_fd)
+    return _conclude_bounded_read(
+        path, result=result, primary=primary, close_error=close_error
+    )
 
 
 def list_directory_no_follow(
