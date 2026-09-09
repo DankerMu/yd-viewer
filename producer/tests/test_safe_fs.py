@@ -953,3 +953,43 @@ def test_atomic_write_standalone_parent_close_oserror_after_replace_is_indetermi
     assert target.read_bytes() == _ATOMIC_NEW
     assert sibling.read_bytes() == _ATOMIC_SIBLING
     assert foreign.read_bytes() == _ATOMIC_FOREIGN
+
+
+def test_atomic_write_parent_close_eio_visible_from_handled_caller_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    target = root / "payload.bin"
+    sibling, foreign = _plant_atomic_neighbors(root, target, "tmp")
+    captured = _capture_exclusive_write_fd(monkeypatch)
+    close_error = OSError(errno.EIO, "injected parent close error")
+    real_close = os.close
+
+    def closing(fd: int) -> None:
+        if fd == captured["parent_fd"]:
+            real_close(fd)
+            raise close_error
+        real_close(fd)
+
+    monkeypatch.setattr(os, "close", closing)
+
+    try:
+        raise ValueError("already handled caller error")
+    except ValueError:
+        with pytest.raises(SafeFilesystemError) as info:
+            atomic_write_bytes_no_follow(
+                target, _ATOMIC_NEW, containment_root=root, temp_suffix="tmp"
+            )
+
+    assert info.value.kind == "indeterminate"
+    assert info.value.__cause__ is close_error
+    assert captured["fd"] is not None
+    assert captured["name"] is not None
+    assert captured["parent_fd"] is not None
+    _assert_write_fd_closed(captured["fd"])
+    _assert_write_fd_closed(captured["parent_fd"])
+    owned = _owned_temp_name(root, target.name, "tmp", captured["name"])
+    assert not owned.exists()
+    assert target.read_bytes() == _ATOMIC_NEW
+    assert sibling.read_bytes() == _ATOMIC_SIBLING
+    assert foreign.read_bytes() == _ATOMIC_FOREIGN
