@@ -6129,11 +6129,13 @@ Minimal mergeable slice: 先合并严格六文件 docs-first PR；随后单一 p
 10. batched pre-change red proof：保留新测试、临时恢复产品文件至fixture parent，以`uv run --project producer python -m pytest -q <focused files>`进入test body并因缺public staged seam/ordering变红；hash恢复，禁共享stash，零red-proof残留。
 11. mutation discipline：唯一仓外scratch，rsync排除`.venv`/`__pycache__`/`.pytest_cache`，`env -u VIRTUAL_ENV uv sync --frozen`，`PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest`，assert import/module/marker落scratch；每mutant清bytecode并恢复source hash；0 survived/0 unrun，collection/import red不计kill。
 12. final matrix：focused staged/assemble/run_once/controller tests；producer full + Ruff/format/frozen sync；viewer full；OpenSpec strict/all；stage anchor；docs/product精确scope、line<1000、diff-check/oracle；merge-ref若base前进重跑。
+13. 私有 bound IO 必须作为每次调用的对象显式传入共享 kernel/所需私有 helper；禁止临时替换共享模块函数、全局保存当前 attempt 的 FD/IO 或用仅 pathname 的前置检查冒充 FD binding。两份 work 的重入/并发调用必须互不借用 FD；root 在 reload 后、copy/commit/cleanup 边界替换时不得写删 replacement，拒绝仍保留原始异常并关闭本次持有 FD；返回前再次确认 named work 指向本次冻结 root。不得削弱原 root-drift/no-model oracle。
 
 **PR Boundary**：
 
 - docs-first（本 fixture）恰六文件：`docs/compute-loop-design.md`、`docs/agent-ops.md`、`openspec/changes/m2-producer-core/design.md`、`tasks.md`、`specs/forcing-chain/spec.md`、`specs/run-controller/spec.md`。不改`docs/products-contract.md`、代码或测试；合并后#177保持OPEN、14.6保持`[ ]`、shared change不archive。
-- product恰七文件：`producer/src/yd_producer/staged_inputs.py`（新增）、`assemble.py`、`_controller_run.py`、`producer/tests/test_staged_inputs.py`（新增）、`test_assemble_run.py`、`run_once_fixtures.py`、`test_controller_run_once.py`。其它controller/assemble siblings只运行回归、不修改。不得改`controller.py`、`_work_claim.py`、`safe_fs.py`、`prepare*.py`、`assembly_fixtures.py`、`cli.py`、`nwm.py`、`slurm.py`、config、viewer、docs/spec或增加large-file豁免；需从已1000行`assemble.py`和992行`_controller_run.py`抽/删等量私有结构使每个非豁免文件<1000。
+- product恰八文件：保留 `producer/src/yd_producer/staged_inputs.py`（新增）、`assemble.py`、`_controller_run.py`、`producer/tests/test_staged_inputs.py`（新增）、`test_assemble_run.py`、`run_once_fixtures.py`、`test_controller_run_once.py` 七文件，另允许新增私有 `producer/src/yd_producer/_assemble_io.py`。该模块只承载每次调用的 descriptor-bound assembly IO 与必要私有输入结构，不新增公开 seam、第二 assembler 或 cleanup owner。其它controller/assemble siblings只运行回归、不修改；不得改`controller.py`、`_assemble_fs.py`、`_work_claim.py`、`safe_fs.py`、`prepare*.py`、`assembly_fixtures.py`、`cli.py`、`nwm.py`、`slurm.py`、config、viewer或增加large-file豁免；每个非豁免文件在标准格式化后仍须<1000行。
+- 本轮用户显式授权由七文件扩为八文件，以闭合 PR #181 INV-02 的 consumer-root identity 丢失；先以独立 docs-first 补充提交修订本文件与 `design.md`，再抽取私有 IO 模块。产品提交不夹带其它 docs/spec 改动，不重置 PR #181 review round；#177 与 shared change 在产品合并前保持未完成。
 
 **Non-goals / scope firewall**：
 
