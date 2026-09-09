@@ -1,19 +1,9 @@
-"""`controller.run_once` 主链：成功（capture / recovery / GFS/IFS）、报告、exact 调用序、
-flock。
-
-fixture（tasks.md `### Issue #26 fixture`）：
-- Required evidence 1：happy capture + exact call ledger + 首个 poll 前无 wait + DONE 在盘
-  + work 删除；
-- Required evidence 2：job-local recovery -> submissions 恰 1、job id 同一、DONE 在盘；
-- Required evidence 3：job 报告逐字段来自同一 submit/terminal record，且
-  `FakeJobExecutor.submissions[0].state is PENDING`；
-- Required evidence 20：flock 生命周期（外层 `run_with_lock`，terminal/wait/publish 窗口内
-  第二次同锁进入跳过且内层零调用，异常后可再取，锁文件保留）。
-"""
+"""`controller.run_once` 主链、staged input 顺序/lifecycle、报告与 flock。"""
 
 from __future__ import annotations
 
 import pathlib
+import shutil
 from datetime import timedelta
 
 import pytest
@@ -21,10 +11,17 @@ from run_once_fixtures import (
     CYCLE,
     IFS_JOB_NAME,
     JOB_NAME,
+    PROJECT,
+    SP_ATT,
+    STAGED_ASSET_CAP,
+    STAGED_MANIFEST_CAP,
+    STAGED_STATE_CAP,
     HookedExecutor,
     HookState,
     InProcessDriver,
+    checkpoint_payload,
     make_terminal_hook,
+    work_dir_for,
     write_config_local,
     write_raw_cycle,
     write_state,
@@ -37,9 +34,11 @@ from yd_producer import publish as publish_module
 from yd_producer import rawcopy as rawcopy_module
 from yd_producer import rawscan as rawscan_module
 from yd_producer import residue as residue_module
+from yd_producer import staged_inputs as staged_module
 from yd_producer import tracker as tracker_module
-from yd_producer.controller import RunOutcome, run_once
+from yd_producer.controller import RunError, RunOutcome, run_once
 from yd_producer.executor import FakeJobExecutor, FakeOutcome, JobState, StepClock
+from yd_producer.staged_inputs import StagedWorkInputsError
 
 T0 = CYCLE.replace(hour=0, minute=0, second=0)
 
@@ -57,13 +56,6 @@ def _success_outcome() -> dict[str, FakeOutcome]:
 
 
 class _Recorder:
-    """记录型调用账本：每项是 (label, 附加)，覆盖 run_once 全部公共 seam。
-
-    executor/driver 是注入对象（系统边界），由 `_LedgerExecutor`/`_LedgerDriver` 记录；
-    `poll_wait` 由同一账本记录（wait 只在成功返回后追加）。模块级调用（preflight、
-    frontier、residue、raw、variant、checkpoint、publish）经 monkeypatch 记录。
-    """
-
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.events: list[str] = []
         self._install(monkeypatch)
@@ -89,6 +81,7 @@ class _Recorder:
         wrap(rawscan_module, "judge", "raw-judge")
         wrap(rawcopy_module, "stage_raw", "raw-stage")
         wrap(prepare_module, "variant_targets", "variant-read")
+        wrap(staged_module, "stage_work_inputs", "stage-inputs")
         wrap(tracker_module, "ensure_twelve_hour_checkpoint", "checkpoint-recheck")
         wrap(publish_module, "publish", "publish")
 
@@ -168,9 +161,11 @@ def test_happy_capture_success_and_work_removed(tmp_path: pathlib.Path) -> None:
     assert report.published.state_path.read_bytes().startswith(b"3 6")
     assert len(fake.submissions) == 1
     assert fake.submissions[0].name == JOB_NAME
-    # work 删除：整棵 `<work_root>/gfs/<T>` 不存在，兄弟 state 树未动。
+    # 成功 publish 沿既有整树 cleanup 删除 staged input 与整个 exact work。
     work_dir = report.published.removed_work_dir
-    assert not work_dir.exists()
+    assert state.prepared_staged is not None
+    assert state.prepared_staged.work_dir == work_dir
+    assert not work_dir.exists() and not (work_dir / "input").exists()
     assert work_dir.parent.is_dir()
     # 首个 poll 即非终态 -> 恰好 2 个 wait（polls_until_terminal=2）。
     assert waits == ["wait", "wait"]
@@ -190,26 +185,15 @@ def test_ifs_happy_capture_success(tmp_path: pathlib.Path) -> None:
     assert waits == ["wait", "wait"]
 
 
-# fanout 正例在 `test_controller_run_once_fanout.py`（按 1000 行闸门语义拆分）。
-
-
 def test_call_ledger_is_exact_and_waits_follow_nonterminal_polls(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """完整有序账本（Required evidence 1 修复）：覆盖全部公共 seam 调用，逐字断言。
-
-    polls_until_terminal=2 -> poll 序列：RUNNING, RUNNING, SUCCEEDED（3 次 poll、
-    2 次 wait）；每个 wait 恰在非终态 poll 之后。driver.prepare/submit/poll 是注入
-    对象（系统边界），由 `_LedgerExecutor`/`_LedgerDriver` 记录。
-    """
     recorder = _Recorder(monkeypatch)
     report, _fake, _state, _driver, waits = _run(tmp_path, recorder=recorder)
     assert report.outcome is RunOutcome.SUCCEEDED
     assert waits == ["wait", "wait"]
     ledger = recorder.events
-    # 模块级账本（前置/管家面）：preflight -> frontier -> residue-plan ->
-    # residue-execute -> raw-judge -> raw-stage -> variant-read -> checkpoint-recheck
-    # -> publish（driver.prepare / submit / poll 由注入对象记录，见下一测试）。
+    # 模块级账本覆盖 preflight 到 publish；注入对象账本见下一测试。
     assert ledger == [
         "preflight",
         "frontier",
@@ -218,6 +202,7 @@ def test_call_ledger_is_exact_and_waits_follow_nonterminal_polls(
         "raw-judge",
         "raw-stage",
         "variant-read",
+        "stage-inputs",
         "checkpoint-recheck",
         "publish",
     ]
@@ -253,13 +238,6 @@ class _LedgerExecutor:
 def test_full_public_seam_order_with_waits_in_place(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """完整账本：preflight…publish + driver.prepare + submit/poll/wait 的精确位置。
-
-    polls_until_terminal=2 下完整序列必须逐字是：
-    preflight, frontier, residue-plan, residue-execute, raw-judge, raw-stage,
-    variant-read, driver.prepare, submit, poll, wait, poll, wait, poll, collect,
-    checkpoint-recheck, publish。
-    """
     recorder = _Recorder(monkeypatch)
     events = recorder.events
     config, local = write_config_local(tmp_path)
@@ -319,6 +297,7 @@ def test_full_public_seam_order_with_waits_in_place(
         "raw-judge",
         "raw-stage",
         "variant-read",
+        "stage-inputs",
         "driver.prepare",
         "submit",
         "poll",
@@ -334,6 +313,253 @@ def test_full_public_seam_order_with_waits_in_place(
     assert events.count("wait") == 2
     first_poll = events.index("poll")
     assert "wait" not in events[:first_poll]
+
+
+def test_staging_precedes_driver_prepare_and_submit_with_exact_inputs(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, local = write_config_local(tmp_path)
+    source_variant = write_variant(local)
+    source_state = write_state(local)
+    write_raw_cycle(local)
+    state = HookState()
+    driver = InProcessDriver(state)
+    events: list[str] = []
+    stage_calls: list[dict] = []
+    requests, staged = [], []
+    original_stage = staged_module.stage_work_inputs
+    expected_stage = {
+        "source_variant_dir": source_variant,
+        "source_state_path": source_state,
+        "source": "gfs",
+        "cycle": CYCLE,
+        "project_name": PROJECT,
+        "grid_id": "fixture-grid-gfs",
+        "max_manifest_bytes": STAGED_MANIFEST_CAP,
+        "max_asset_bytes": STAGED_ASSET_CAP,
+        "max_state_bytes": STAGED_STATE_CAP,
+    }
+
+    def recording_stage(**kwargs):
+        events.append("stage-inputs")
+        stage_calls.append(kwargs)
+        if staged:
+            return staged[0]
+        claim = kwargs["claim"]
+        assert claim.work_dir == work_dir_for(local, "gfs", CYCLE)
+        staged.append(original_stage(**{"claim": claim, **expected_stage}))
+        return staged[0]
+
+    monkeypatch.setattr(staged_module, "stage_work_inputs", recording_stage)
+    original_prepare = driver.prepare
+
+    def recording_prepare(*, request):
+        events.append("driver.prepare")
+        requests.append(request)
+        return original_prepare(request=request)
+
+    driver.prepare = recording_prepare  # type: ignore[method-assign]
+    fake = FakeJobExecutor(outcomes=_success_outcome(), clock=_clock())
+    executor = _LedgerExecutor(fake, events)
+    hook = HookedExecutor(
+        executor,
+        lambda *, job_id: make_terminal_hook(requests[0], state)(),
+    )
+    try:
+        report = run_once(
+            config=config,
+            local=local,
+            source="gfs",
+            executor=hook,
+            driver=driver,
+            poll_wait=lambda: None,
+        )
+    finally:
+        assert events.count("stage-inputs") == 1
+        assert len(stage_calls) == 1 and len(requests) == 1
+        assert events[:3] == ["stage-inputs", "driver.prepare", "submit"]
+    assert report.outcome is RunOutcome.SUCCEEDED
+    call, request = stage_calls[0], requests[0]
+    assert set(call) == {
+        "claim",
+        "source_variant_dir",
+        "source_state_path",
+        "source",
+        "cycle",
+        "project_name",
+        "grid_id",
+        "max_manifest_bytes",
+        "max_asset_bytes",
+        "max_state_bytes",
+    }
+    assert (
+        call["claim"].work_dir == request.work_dir == work_dir_for(local, "gfs", CYCLE)
+    )
+    assert call["source"] == request.source == "gfs"
+    assert call["cycle"] == request.cycle == CYCLE
+    assert call["source_variant_dir"] == request.variant_dir == source_variant
+    assert call["source_state_path"] == request.state_path == source_state
+    assert call["project_name"] == PROJECT
+    assert call["grid_id"] == "fixture-grid-gfs"
+    assert (
+        call["max_manifest_bytes"],
+        call["max_asset_bytes"],
+        call["max_state_bytes"],
+    ) == (STAGED_MANIFEST_CAP, STAGED_ASSET_CAP, STAGED_STATE_CAP)
+    assert state.worker_paths
+    assert all(path.is_relative_to(request.work_dir) for path in state.worker_paths)
+    assert all(
+        path not in {source_variant, source_state} for path in state.worker_paths
+    )
+
+
+def test_nfs_disconnect_after_prepare_uses_only_staged_capability(
+    tmp_path: pathlib.Path,
+) -> None:
+    config, local = write_config_local(tmp_path)
+    source_variant = write_variant(local)
+    source_state = write_state(local)
+    write_raw_cycle(local)
+    state = HookState()
+    driver = InProcessDriver(state)
+    request_slot = {}
+    original_prepare = driver.prepare
+
+    def capture(*, request):
+        prepared = original_prepare(request=request)
+        request_slot["request"] = request
+        return prepared
+
+    driver.prepare = capture  # type: ignore[method-assign]
+
+    def disconnect(request):
+        assert request is request_slot["request"]
+        shutil.rmtree(source_variant)
+        shutil.rmtree(source_state.parent.parent)
+
+    fake = FakeJobExecutor(outcomes=_success_outcome(), clock=_clock())
+    executor = HookedExecutor(
+        fake,
+        lambda *, job_id: make_terminal_hook(
+            request_slot["request"], state, before_worker=disconnect
+        )(),
+    )
+    report = run_once(
+        config=config,
+        local=local,
+        source="gfs",
+        executor=executor,
+        driver=driver,
+        poll_wait=lambda: None,
+    )
+    assert report.outcome is RunOutcome.SUCCEEDED and report.done_path.is_file()
+    assert not source_variant.exists() and not source_state.exists()
+    published_state = pathlib.Path(local.yd_root) / "states/gfs/2026082700.cfg.ic"
+    assert report.published.state_path == published_state
+    assert published_state.is_file() and state.prepared_staged is not None
+    worker_assets = dict(state.worker_assets)
+    expected_state = checkpoint_payload().replace(b"720.000000", b"29796480.000000", 1)
+    assert published_state.read_bytes() == expected_state
+    assert expected_state != worker_assets["input/states/gfs/2026082612.cfg.ic"]
+    assembled = dict(state.assembled_assets)
+    assert assembled["yd.binding"] == worker_assets["input/variant/yd.binding"]
+    assert (
+        assembled["gfs.sp.att"] == worker_assets["input/variant/gfs.sp.att"] == SP_ATT
+    )
+    forbidden = (source_variant.as_posix(), source_state.as_posix())
+    evidence = "\n".join(path.as_posix() for path in state.worker_paths)
+    assert all(item not in evidence for item in forbidden)
+    assert all(
+        path.is_relative_to(request_slot["request"].work_dir)
+        for path in state.worker_paths
+    )
+
+
+def test_staging_failure_retains_raw_and_partial_input_without_submission(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, local = write_config_local(tmp_path)
+    source_variant = write_variant(local)
+    source_state = write_state(local)
+    write_raw_cycle(local)
+    sibling = tmp_path / "sibling.bin"
+    sibling.write_bytes(b"sibling unchanged")
+    source_snapshot = {
+        path: path.read_bytes()
+        for path in (*source_variant.iterdir(), source_state)
+        if path.is_file()
+    }
+    state = HookState()
+    driver = InProcessDriver(state)
+    calls = dict.fromkeys(
+        ("prepare", "submit", "poll", "collect", "publish", "finalize"), 0
+    )
+
+    def fail_stage(**kwargs):
+        partial = kwargs["claim"].work_dir / "input" / "partial.member"
+        partial.parent.mkdir()
+        partial.write_bytes(b"partial staged member")
+        cause = OSError("deterministic staged source read failure")
+        raise StagedWorkInputsError("staging failed after one member") from cause
+
+    monkeypatch.setattr(staged_module, "stage_work_inputs", fail_stage)
+    original_prepare = driver.prepare
+
+    def recording_prepare(*, request):
+        calls["prepare"] += 1
+        return original_prepare(request=request)
+
+    driver.prepare = recording_prepare  # type: ignore[method-assign]
+
+    class NoExecutor:
+        def submit(self, spec):
+            calls["submit"] += 1
+            raise AssertionError("submit must not run")
+
+        def poll(self, job_id):
+            calls["poll"] += 1
+            raise AssertionError("poll must not run")
+
+    original_publish = publish_module.publish
+
+    def recording_publish(inputs):
+        calls["publish"] += 1
+        return original_publish(inputs)
+
+    monkeypatch.setattr(publish_module, "publish", recording_publish)
+    sources_module = __import__(
+        "yd_producer._controller_sources", fromlist=["finalize_failed_attempt"]
+    )
+    original_finalize = sources_module.finalize_failed_attempt
+
+    def recording_finalize(**kwargs):
+        calls["finalize"] += 1
+        return original_finalize(**kwargs)
+
+    monkeypatch.setattr(sources_module, "finalize_failed_attempt", recording_finalize)
+    with pytest.raises(RunError) as captured:
+        run_once(
+            config=config,
+            local=local,
+            source="gfs",
+            executor=NoExecutor(),
+            driver=driver,
+            poll_wait=lambda: None,
+        )
+    error = captured.value
+    assert error.phase == "prepare" and error.job_id is None
+    assert error.cycle == CYCLE and error.source == "gfs"
+    assert isinstance(error.__cause__, StagedWorkInputsError)
+    assert isinstance(error.__cause__.__cause__, OSError)
+    assert calls == dict.fromkeys(calls, 0)
+    work = work_dir_for(local, "gfs", CYCLE)
+    assert (work / "object-store/raw-manifest.json").is_file()
+    assert list((work / "object-store/raw").rglob("*"))
+    assert (work / "input/partial.member").read_bytes() == b"partial staged member"
+    assert not (work / "model").exists()
+    assert not (pathlib.Path(local.yd_root) / "output/2026082612/gfs/DONE").exists()
+    assert sibling.read_bytes() == b"sibling unchanged"
+    assert {path: path.read_bytes() for path in source_snapshot} == source_snapshot
 
 
 def test_poll_wait_sequence_is_attached_to_nonterminal_results(
@@ -436,8 +662,8 @@ def test_failed_terminal_returns_job_failed_without_collect_or_publish(
     assert report.published is None and report.done_path is None
     # 零 collect/publish：hook 未触发，run_directory/tracker 未建立。
     assert state.run_directory is None and state.tracker is None
-    # work 保留（14.1 边界；失败收尾归 #28/#47）。
-    assert work_dir.exists()
+    # 无 provider 的 terminal failure 沿现有 polarity 保留 exact work 及 staged input。
+    assert work_dir.exists() and (work_dir / "input/yd.staged-inputs.json").is_file()
     # DONE 不存在。
     assert not (
         pathlib.Path(local.yd_root) / "output" / "2026082612" / "gfs" / "DONE"

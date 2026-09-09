@@ -15,28 +15,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from assembly_fixtures import (
-    BINDING,
-    PARAMETER_TEMPLATE,
-    SP_ATT,
-    canonical_netcdf,
-    file_repository_contract,
-)
+from assembly_fixtures import BINDING, PARAMETER_TEMPLATE, SP_ATT
 from cfg_ic_fixtures import build_cfg_ic
 from dat_fixtures import build_dat_bytes
 
 from yd_producer import publish
-from yd_producer.assemble import (
-    RunDirectory,
-    WorkIdentity,
-    assemble,
-    stage_work_registry,
-)
+from yd_producer.assemble import RunDirectory, WorkIdentity, stage_work_registry
 from yd_producer.config import (
     CanonicalGridConfig,
     Config,
@@ -58,6 +49,17 @@ from yd_producer.executor import (
 )
 from yd_producer.forcing import ForcingProducer, ForcingProducerConfig
 from yd_producer.forcing.file_store import FileForcingRepository
+from yd_producer.prepare_handoff import (
+    MAX_PREPARED_VARIANT_ASSET_BYTES,
+    MAX_PREPARED_VARIANT_MANIFEST_BYTES,
+    load_prepared_variant_handoff,
+)
+from yd_producer.staged_inputs import (
+    StagedWorkInputs,
+    assemble_staged,
+    load_staged_work_inputs,
+)
+from yd_producer.state import MAX_STATE_IC_BYTES
 from yd_producer.store.object_store import LocalObjectStore, sha256_bytes
 from yd_producer.tracker import CheckpointTracker, ensure_twelve_hour_checkpoint
 
@@ -86,6 +88,10 @@ PROJECT = "yd"
 JOB_NAME = "yd-gfs-2026082612"
 #: IFS 同轮的作业名字面形态。
 IFS_JOB_NAME = "yd-ifs-2026082612"
+#: #171/#177 使用的 versioned production caps，不从 controller 私有面取值。
+STAGED_MANIFEST_CAP = MAX_PREPARED_VARIANT_MANIFEST_BYTES
+STAGED_ASSET_CAP = MAX_PREPARED_VARIANT_ASSET_BYTES
+STAGED_STATE_CAP = MAX_STATE_IC_BYTES
 
 #: 各 run_once 测试共享的确定性时钟（T0 起、每步 10s；单元面在 executor 测试）。
 T0 = CYCLE.replace(hour=0, minute=0, second=0)
@@ -247,19 +253,88 @@ def variant_dir(local: LocalConfig, source: str = "gfs") -> Path:
     )
 
 
+def _sha256_literal(content: bytes) -> str:
+    return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
+def _handoff_bytes(source: str) -> bytes:
+    grid_id = f"fixture-grid-{source}"
+    model_id = "demo_model"
+    stations = [
+        {
+            "forcing_filename": "X1.csv",
+            "grid_cell_id": "cell-one",
+            "grid_id": grid_id,
+            "latitude": 2.0,
+            "longitude": 1.0,
+            "shud_forcing_index": 1,
+            "station_id": "station-one",
+            "x": 3.0,
+            "y": 4.0,
+            "z": 5.0,
+        },
+        {
+            "forcing_filename": "X2.csv",
+            "grid_cell_id": "cell-two",
+            "grid_id": grid_id,
+            "latitude": 7.0,
+            "longitude": 6.0,
+            "shud_forcing_index": 2,
+            "station_id": "station-two",
+            "x": 8.0,
+            "y": 9.0,
+            "z": 10.0,
+        },
+    ]
+    signature = "2590e223a612804271336c8a20691d7cfcc412955c8740ea7734ba838263c11f"
+    payload = {
+        "basin_id": "basin_a",
+        "basin_version_id": "basin_v1",
+        "direct_grid_forcing_contract": {
+            "applicable_source_ids": [source],
+            "binding_checksum": _sha256_literal(BINDING),
+            "binding_uri": f"models/{model_id}/direct-grid/binding.json",
+            "forcing_mapping_mode": "direct_grid",
+            "grid_id": grid_id,
+            "grid_signature": signature,
+            "model_input_package_id": "model-input-v1",
+            "sp_att_checksum": _sha256_literal(SP_ATT),
+            "sp_att_path": f"input/{PROJECT}.sp.att",
+            "station_bindings": stations,
+        },
+        "model_id": model_id,
+        "project_name": PROJECT,
+        "river_network_version_id": "rivnet_v1",
+        "schema_version": "yd.prepare.direct-grid-handoff.v1",
+        "source_id": source,
+        "sp_att_asset_name": f"{source}.sp.att",
+    }
+    return json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def write_variant(local: LocalConfig, *, source: str = "gfs") -> Path:
-    """写 `yd.cfg.ic`（合法原生格式）+ `yd.para` + `yd.binding`。"""
+    """写合法 #171 exact-five，保留原生率定态与既有参数/opaque asset 字节。"""
     root = variant_dir(local, source)
     root.mkdir(parents=True, exist_ok=True)
-    (root / f"{PROJECT}.cfg.ic").write_bytes(
-        build_cfg_ic(
+    files = {
+        f"{PROJECT}.cfg.ic": build_cfg_ic(
             mesh_count=2,
             river_count=REACH_COUNT,
             minute=f"{ABSOLUTE_MINUTE}.000000",
-        ).payload
-    )
-    (root / f"{PROJECT}.para").write_bytes(PARAMETER_TEMPLATE)
-    (root / "yd.binding").write_bytes(BINDING)
+        ).payload,
+        f"{PROJECT}.para": PARAMETER_TEMPLATE,
+        "yd.binding": BINDING,
+        "yd.direct-grid-handoff.json": _handoff_bytes(source),
+        f"{source}.sp.att": SP_ATT,
+    }
+    for name, content in files.items():
+        (root / name).write_bytes(content)
     return root
 
 
@@ -427,6 +502,39 @@ def canonical_grid(value: WorkIdentity) -> dict[str, object]:
     }
 
 
+def canonical_netcdf(
+    variable: str, value: WorkIdentity, unit: str, number: float, lead: int
+) -> bytes:
+    """Encode the synthetic canonical row with the fixture's exact grid identity."""
+    import tempfile
+
+    import xarray as xr
+
+    grid_id = f"fixture-grid-{value.source_id}"
+    dataset = xr.Dataset(
+        data_vars={variable: ("point", [number, number + 1])},
+        coords={
+            "point": ["cell-one", "cell-two"],
+            "longitude": ("point", [1.0, 6.0]),
+            "latitude": ("point", [2.0, 7.0]),
+        },
+        attrs={
+            "cycle_time": value.cycle_time.isoformat(),
+            "valid_time": (value.cycle_time + timedelta(hours=lead)).isoformat(),
+            "lead_time_hours": lead,
+            "unit": unit,
+            "grid_id": grid_id,
+        },
+    )
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".nc") as temporary:
+            dataset.to_netcdf(temporary.name, engine="netcdf4", format="NETCDF4")
+            temporary.seek(0)
+            return temporary.read()
+    finally:
+        dataset.close()
+
+
 def write_canonical_catalog(store: LocalObjectStore, value: WorkIdentity) -> None:
     """合成 canonical catalog/NetCDF：显式 synthetic，不加 raw->canonical 数值断言。
 
@@ -435,7 +543,8 @@ def write_canonical_catalog(store: LocalObjectStore, value: WorkIdentity) -> Non
     使 GFS/IFS 两源都可用真实 `FileForcingRepository`/`ForcingProducer` 跑通。
     """
     source = value.source_id
-    grid_key = f"canonical/{source}/grid/{source}_grid/grid.json"
+    grid_id = f"fixture-grid-{source}"
+    grid_key = f"canonical/{source}/grid/{grid_id}/grid.json"
     store.write_bytes_atomic(
         grid_key, json.dumps(canonical_grid(value), separators=(",", ":")).encode()
     )
@@ -472,7 +581,7 @@ def write_canonical_catalog(store: LocalObjectStore, value: WorkIdentity) -> Non
                     "lead_time_hours": lead,
                     "variable": variable,
                     "unit": unit,
-                    "grid_id": f"{source}_grid",
+                    "grid_id": grid_id,
                     "grid_definition_uri": grid_key,
                     "native_time_resolution": "3h",
                     "native_spatial_resolution": "1deg",
@@ -499,10 +608,15 @@ def write_canonical_catalog(store: LocalObjectStore, value: WorkIdentity) -> Non
 
 @dataclass
 class HookState:
-    """hook 与 driver 之间的进程内交接槽（M2 注入；不构成跨进程 receipt）。"""
+    """hook/driver 合成交接与 worker 参数证据；不构成 #132 receipt。"""
 
     run_directory: RunDirectory | None = None
     tracker: CheckpointTracker | None = None
+    prepared_staged: StagedWorkInputs | None = None
+    worker_paths: tuple[Path, ...] = ()
+    worker_assets: tuple[tuple[str, bytes], ...] = ()
+    assembled_assets: tuple[tuple[str, bytes], ...] = ()
+    verified_project_name: str | None = None
 
 
 class InProcessDriver:
@@ -518,6 +632,53 @@ class InProcessDriver:
 
     def prepare(self, *, request):
         self._request = request
+        calibrated = request.variant_dir / f"{PROJECT}.cfg.ic"
+        project_name = calibrated.name.removesuffix(".cfg.ic")
+        source_snapshot = load_prepared_variant_handoff(
+            variant_root=request.variant_dir,
+            source_id=request.source,
+            project_name=project_name,
+            grid_id=f"fixture-grid-{request.source}",
+            max_manifest_bytes=STAGED_MANIFEST_CAP,
+            max_asset_bytes=STAGED_ASSET_CAP,
+        )
+        staged = load_staged_work_inputs(
+            work_dir=request.work_dir,
+            source=request.source,
+            cycle=request.cycle,
+            project_name=project_name,
+            grid_id=f"fixture-grid-{request.source}",
+            max_manifest_bytes=STAGED_MANIFEST_CAP,
+            max_asset_bytes=STAGED_ASSET_CAP,
+            max_state_bytes=STAGED_STATE_CAP,
+        )
+        expected = {
+            f"input/variant/{name}": (request.variant_dir / name).read_bytes()
+            for name in (
+                f"{PROJECT}.cfg.ic",
+                f"{PROJECT}.para",
+                "yd.binding",
+                "yd.direct-grid-handoff.json",
+                f"{request.source}.sp.att",
+            )
+        }
+        expected[
+            f"input/states/{request.source}/{cycle_text(request.cycle)}.cfg.ic"
+        ] = request.state_path.read_bytes()
+        expected_checksums = tuple(
+            sorted((key, _sha256_literal(content)) for key, content in expected.items())
+        )
+        if staged.prepared != source_snapshot:
+            raise RuntimeError("staged #171 snapshot differs from login-node source")
+        if staged.file_checksums != expected_checksums:
+            raise RuntimeError(
+                "staged six checksums differ from login-node source bytes"
+            )
+        for key, content in expected.items():
+            if request.work_dir.joinpath(*key.split("/")).read_bytes() != content:
+                raise RuntimeError(f"staged bytes differ from login-node source: {key}")
+        self._state.prepared_staged = staged
+        self._state.verified_project_name = project_name
         scratch_dat = request.work_dir / "output" / "yd.rivqdown.dat"
         self._log_path = request.work_dir / "job.log"
         return __import__(
@@ -579,29 +740,57 @@ def consume_raw_manifest(*, request) -> None:
             raise RuntimeError(f"staged raw 副本为空：{key}")
 
 
-def make_terminal_hook(request, state: HookState, *, recovery: bool = False):
-    """构造只在 fake 首次 SUCCEEDED 跃迁内执行一次的 terminal hook。
+def make_terminal_hook(
+    request,
+    state: HookState,
+    *,
+    recovery: bool = False,
+    before_worker: Callable[[object], None] | None = None,
+):
+    """在首次 SUCCEEDED 跃迁内，从 work-local capability 跑真实合成链。
 
-    序列：先 `consume_raw_manifest`（同根凭证），再写合成 canonical catalog，然后
-    `stage_work_registry -> FileForcingRepository -> ForcingProducer -> assemble`，
-    驱动同一 `CheckpointTracker`（`recovery=False` 主跑捕获 720；`recovery=True`
-    以 #17 recovery seam 在同一 hook 内补跑），最后写 v2 DAT 与合并日志。
-
-    `recovery=False`：主跑捕获 720（直接写 `.cfg.ic.update` 后 `capture_available`）；
-    `recovery=True`：跳过主跑捕获，hook 内以 #17 recovery seam 补跑。
+    synthetic oracle 仍只证明 raw 同 object-store、registry/forcing/tracker/publish 接线和
+    staged path/checksum/process handoff；不声称 node-22、M4 数值或 #132 argv/receipt。
     """
 
     def hook() -> None:
+        if before_worker is not None:
+            before_worker(request)
         identity = run_identity(request.source, request.cycle)
+        project_name = state.verified_project_name
+        if project_name is None:
+            raise RuntimeError(
+                "driver.prepare did not verify the calibrated-state filename"
+            )
+        staged_inputs = load_staged_work_inputs(
+            work_dir=request.work_dir,
+            source=request.source,
+            cycle=request.cycle,
+            project_name=project_name,
+            grid_id=f"fixture-grid-{request.source}",
+            max_manifest_bytes=STAGED_MANIFEST_CAP,
+            max_asset_bytes=STAGED_ASSET_CAP,
+            max_state_bytes=STAGED_STATE_CAP,
+        )
+        state.worker_paths = (
+            staged_inputs.work_dir,
+            staged_inputs.variant_dir,
+            staged_inputs.state_path,
+            staged_inputs.manifest_path,
+        )
+        state.worker_assets = tuple(
+            (key, staged_inputs.work_dir.joinpath(*key.split("/")).read_bytes())
+            for key, _checksum in staged_inputs.file_checksums
+        )
         consume_raw_manifest(request=request)
         store = LocalObjectStore(request.object_store_root)
         write_canonical_catalog(store, identity)
         registry = stage_work_registry(
             work_root=request.work_root,
             identity=identity,
-            contract=file_repository_contract(identity),
-            binding_content=BINDING,
-            sp_att_content=SP_ATT,
+            contract=staged_inputs.prepared.contract,
+            binding_content=staged_inputs.prepared.binding_content,
+            sp_att_content=staged_inputs.prepared.sp_att_content,
             max_asset_bytes=4096,
         )
         repository = FileForcingRepository(store, registry.registry_manifest)
@@ -622,13 +811,14 @@ def make_terminal_hook(request, state: HookState, *, recovery: bool = False):
             basin_version_id=identity.basin_version_id,
             river_network_version_id=identity.river_network_version_id,
         )
-        states_root = request.state_path.parent.parent
-        run_directory = assemble(
+        run_directory = assemble_staged(
             registry=registry,
-            variant_dir=request.variant_dir,
+            staged_inputs=staged_inputs,
             forcing=forcing,
-            states_root=str(states_root),
-            state_path=str(request.state_path),
+        )
+        state.assembled_assets = tuple(
+            (name, (run_directory.path / name).read_bytes())
+            for name in ("yd.binding", f"{request.source}.sp.att")
         )
         tracker = CheckpointTracker(
             run_dir=run_directory.path,
@@ -728,8 +918,9 @@ def bind_terminal_hook(
     fake: FakeJobExecutor,
     *,
     on_terminal=None,
+    before_worker=None,
 ) -> HookedExecutor:
-    """多轮可复用：每轮 prepare 刷新 request，每 job 的首次 SUCCEEDED 跑真链 hook。"""
+    """多轮可复用，并可在 worker 首读前断开测试自有 NFS 源。"""
     request_slot: dict[str, object] = {}
     original_prepare = driver.prepare
 
@@ -741,7 +932,7 @@ def bind_terminal_hook(
 
     def make_hook(*, job_id):
         request = request_slot["request"]
-        make_terminal_hook(request, state)()
+        make_terminal_hook(request, state, before_worker=before_worker)()
         if on_terminal is not None:
             on_terminal(request, job_id)
 

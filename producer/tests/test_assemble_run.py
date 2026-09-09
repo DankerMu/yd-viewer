@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+import run_once_fixtures as fixtures
 from assembly_fixtures import (
     BINDING,
     PARAMETER_EXPECTED,
@@ -22,8 +23,15 @@ from assembly_fixtures import (
     write_variant,
 )
 
+from yd_producer._work_claim import claim_exact_work
 from yd_producer.assemble import AssemblyError, assemble, stage_work_registry
+from yd_producer.staged_inputs import (
+    StagedWorkInputsError,
+    load_staged_work_inputs,
+    stage_work_inputs,
+)
 from yd_producer.state import MAX_STATE_IC_BYTES
+from yd_producer.store import safe_fs
 from yd_producer.store.object_store import MAX_OBJECT_MANIFEST_BYTES
 
 
@@ -225,13 +233,15 @@ def test_state_size_fifo_directory_and_symlinks_fail_before_commit(
 
 def test_input_roots_inside_work_are_rejected_before_staging(tmp_path: Path) -> None:
     value, work, registry, variant, states, state, forcing = _inputs(tmp_path)
-    inside_variant = write_variant(work / "inside-variant", value)
+    inside_variant = write_variant(work / "input" / "variant", value)
     _refuse(
         (value, work, registry, variant, states, state, forcing),
         phase="validate",
         variant_dir=inside_variant,
     )
-    inside_states = work / "inside-states"
+    assert not (work / "model").exists()
+
+    inside_states = work / "input" / "states"
     inside_state = write_state(inside_states, value)
     _refuse(
         (value, work, registry, variant, states, state, forcing),
@@ -239,6 +249,7 @@ def test_input_roots_inside_work_are_rejected_before_staging(tmp_path: Path) -> 
         states_root=inside_states,
         state_path=inside_state,
     )
+    assert not (work / "model").exists()
 
 
 @pytest.mark.parametrize("entry", ["demo.cfg.ic", "demo.para"])
@@ -508,3 +519,89 @@ def test_variant_has_no_invented_entry_or_depth_cap(tmp_path: Path) -> None:
     assert (
         result.path / "/".join(f"d{index}" for index in range(140)) / "leaf.dat"
     ).read_bytes() == b"deep"
+
+
+def test_staged_input_listing_stops_at_exact_five_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _config, local = fixtures.write_config_local(tmp_path)
+    source_variant = fixtures.write_variant(local)
+    source_state = fixtures.write_state(local)
+    claim = claim_exact_work(
+        work_root=Path(local.scratch_root) / "work",
+        source="gfs",
+        cycle=fixtures.CYCLE,
+        cycle_name=fixtures.cycle_text(fixtures.CYCLE),
+    )
+    staged = stage_work_inputs(
+        claim=claim,
+        source_variant_dir=source_variant,
+        source_state_path=source_state,
+        source="gfs",
+        cycle=fixtures.CYCLE,
+        project_name=fixtures.PROJECT,
+        grid_id="fixture-grid-gfs",
+        max_manifest_bytes=65_536,
+        max_asset_bytes=65_536,
+        max_state_bytes=65_536,
+    )
+    for index in range(20):
+        (staged.variant_dir / f"extra-{index:02d}").write_bytes(b"extra")
+    variant = os.stat(staged.variant_dir, follow_symlinks=False)
+    variant_id = (variant.st_dev, variant.st_ino)
+    original_scandir = safe_fs.os.scandir
+    consumed = [0]
+
+    class CountingScan:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self._wrapped)
+            consumed[0] += 1
+            return entry
+
+        def __enter__(self):
+            self._wrapped.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._wrapped.__exit__(*exc)
+
+        def close(self):
+            return self._wrapped.close()
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+    def counting_scandir(path, *args, **kwargs):
+        iterator = original_scandir(path, *args, **kwargs)
+        try:
+            info = (
+                os.fstat(path)
+                if isinstance(path, int)
+                else os.stat(path, follow_symlinks=False)
+            )
+        except OSError:
+            return iterator
+        if (info.st_dev, info.st_ino) != variant_id:
+            return iterator
+        return CountingScan(iterator)
+
+    monkeypatch.setattr(safe_fs.os, "scandir", counting_scandir)
+    with pytest.raises(StagedWorkInputsError):
+        load_staged_work_inputs(
+            work_dir=claim.work_dir,
+            source="gfs",
+            cycle=fixtures.CYCLE,
+            project_name=fixtures.PROJECT,
+            grid_id="fixture-grid-gfs",
+            max_manifest_bytes=65_536,
+            max_asset_bytes=65_536,
+            max_state_bytes=65_536,
+        )
+    assert consumed[0] <= 6
+    assert not (claim.work_dir / "model").exists()
