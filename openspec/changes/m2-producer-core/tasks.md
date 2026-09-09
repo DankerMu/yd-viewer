@@ -3348,7 +3348,7 @@ awk '/^## 1\./,/^## 2\./' openspec/changes/m2-producer-core/nwm-snapshot-invento
 
 **Known limits（round 1 verifier 裁定为 DEFER/DISCARD 的项，逐条记录归属）**：
 
-- **`run_dir` 的祖先若含符号链接则整轮零捕获**（cand-03，CONFIRMED/DEFER）：见 §B 的调用方前置条件。归作业脚本接线侧，另落 tracked issue。fail closed —— `missing_hours()` 仍诚实，漏采会驱动 #17 补跑，同一个 `run_dir` 上再失败即「整轮失败、不写 DONE」，是响亮的控制器边界失败而非静默坏数据。
+- **`run_dir` 的祖先若含符号链接则整轮零捕获**（cand-03，CONFIRMED，tracked #77）：见 §B 调用方前置条件。#77按用户裁决采用方案A：现有controller在交出AttemptRequest前解析scratch realpath，组装/run目录从该绝对work派生；本轮补公开接线回归与去resolve变异证据，不改tracker/safe_fs。直接绕过调用方给tracker传别名仍在声明域外，missing_hours诚实；CLI/worker实际接线由#132消费同一前置条件。
 - **重启后同 `run_dir` 会删掉已验证副本**（cand-04，CONFIRMED/DEFER #17）：一次性守卫只在**实例内**（`self._captured` 是内存态）。#17 落持久化半时 MUST 显式裁决 `run_dir` 能否跨 attempt 复用——要么禁止复用，要么构造时从 `state_checkpoints/` 回填 `_captured`。
 - **撕裂副本可能停在规范文件名上**（cand-08，PLAUSIBLE/DEFER #17）：`_discard` 的 unlink 失败、或作业在原子写与校验之间被 walltime 杀掉（这个窗口无条件且常规），都会把未验证字节留在 `state_checkpoints/<project>.fNNN.cfg.ic.update`。本模块 API 仍诚实（`captured` 为空）。#17 MUST NOT 把「该文件名存在」当作已验证捕获，只信 `captured` 记录与其 checksum。
 - **物理上不可能的小时必须双层拒绝**（cand-02，原 DEFER #17）：#32 现要求装载器拒绝 `checkpoint_hours` 越出 `[0, 24*forecast_days)`，因此 `[720]` 不能再穿过文件装载；`CheckpointTracker`/补跑入口仍保留自身守卫，防程序内手构 `Config` 或直接构造绕过装载器。
@@ -5428,7 +5428,7 @@ Minimal mergeable slice: 任务 14.1 单源单轮；不吸收 14.3 多轮追赶�
 - #108：post-DONE 硬杀/历史孤儿 work 由下一次 `run_sources` 启动 hygiene 清理；当前 `PublishCleanupError` 仍明确报告完成待清理，不在同一轮失败回收。
 - #106：14.4双源共享output层级竞态；单源14.1不可达。
 - #109 已关闭“继续延期”的裁决：后续实现必须补 publisher 的 DAT 分钟列内容闸；14.1 构造 `PublishInputs` 时显式传 `output_interval_minutes=config.output_interval_minutes`，不得让兼容默认代替生产接线。
-- #77：tracker run_dir符号链接祖先；controller使用resolved scratch根且products重验，但不改tracker构造合同。
+- #77采用调用方方案A：controller既有resolved scratch根在AttemptRequest前冻结，RunDirectory/tracker由同一work派生并在collect重验；#77专门验证symlink祖先正常捕获及cwd漂移不读异树。tracker构造仍无IO，不增加第二处惰性resolve；#132接线必须消费该规范路径。
 - M2 收尾任务 14.2：生产 worker command/原子 receipt/CLI 绑定、Slurm poll wait 与 #69 客户端 command-timeout policy；M4：SHUD argv/header 的现场形态、真实 Slurm 响应时延/cancel、node-22/NFS/权限与数值 oracle。14.2 落地前 CLI 保持 fail closed。
 
 **Non-goals**：
@@ -6396,3 +6396,40 @@ Invariant Matrix:
 - [x] 85.5 focused38、producer3136通过/3skip、viewer1、Ruff/format、OpenSpecstrict/all/stage通过；独立public smoke复现同inode竞争跳过、外部replacement的有限边界与退出响亮失败/哨兵保留。源码与新增测试<1000，无新豁免；后续合并仍受high四席/独立终审/CI/SHA gate。
 
 Non-goals: M4 mount探测/安装/receipt、NFS实测、外部unlink防护守护进程、lockf替换、CLI接线、其它cleanup primitive异常体系重写或lock禁区producer改造；文档/fixture既有本地哨兵与#25禁区合同保持，shared M2仍active。
+
+### Issue #77：调用方冻结规范 run_dir 的捕获回归闭环
+
+Issue type: bugfix-regression；Project profile: yd-viewer；Fixture level: expanded；effective tier: high（路径authority与checkpoint跨cwd污染）；实现预期以测试/既有注释文档闭环为主。
+Authority: 用户明确要求realpath后再传，选择原issue方案A；不是tracker构造新守卫。当前`_controller_run._run_once`已在claim/AttemptRequest前`Path(local.scratch_root).resolve()`，`work_dir`/组装RunDirectory/tracker从该绝对根派生；#177 staged handoff不得成为移除这一入口规范化的理由。
+Target: 新`producer/tests/test_controller_run_paths.py`（现有主链997行不得膨胀）；复用run_once_fixtures真实stage/assemble/tracker/publish链。源码若现有行为满足全部见证则刻意不改，不新增wrapper/第二resolve/配置策略；tracker、safe_fs、assemble/staged_inputs、CLI不改。
+Must preserve: tracker无IO构造、safe_fs逐分量nofollow、非绝对local路径preflight拒绝、当前attempt claim/收集绑定/规范checkpoint状态与DONE发布、所有配置字段与publicshape。
+
+Decision/evidence contract:
+- IFS/GFS两源分别将local.scratch_root最终字段改为**未解析的绝对alias字符串**，形如`alias-parent/scratch`且alias-parent显式symlink到real-parent，不只是run_dir叶子链接；设置后不得再经make_local/work_dir_for把传入值预解析。真实publicrun_once成功完成，checkpoint observed720/捕获12、规范绝对captured.path、正确payload/checksum、发布T+12状态与DONE、exactwork清理。别名链保持不动，外部sentinel不变。不能只断言构造函数参数或Path.resolve被调用。
+- 必须在同一真实terminal hook内驱动tracker.capture_available：先向本轮A写合法360并真实观测，随后切cwd到B，B按**相对于原cwd A的run目录布局**放入不同合法720；真实capture仍不得捕获B，A仍missing12。最后只把A改为合法720，才捕获A并发布A字节；captured绝对路径在cwd变更后仍定位A（发布前验证，发布后work按正常策略消失）。不得只在已成功run_once前后chdir；cwd切换仅同步测试，finally恢复。
+- 相对scratch_root仍在公开preflight响亮拒绝、driver/executor/文件写0；不得为了修relative tracker而接受相对部署配置。tracker直连声明域外的不安全输入不在本PR增加构造校验。
+- 第一变异精确去掉`_controller_run._run_once`当前602行（claim/AttemptRequest主路径）的`Path(local.scratch_root).resolve()`，不改565行failure_exit_code兄弟路径，symlink正向场景必须红。第二变异仅在scratch副本的既有`run_once_fixtures.make_terminal_hook`当前825行CheckpointTracker构造处，把run_directory.path改为相对于构造时cwd的路径；必须由in-hook A360→B720未捕获→A720捕获oracle杀死。生产无CheckpointTracker构造caller（#132未接线），不新增生产worker，也不以构造字段mock回声替代实际capture。
+- 当前source可能已满足全部行为：基线新测试通过应诚实记录为既有修复补回归闭环，不伪造pre-fix红；去入口resolve与相对run_dir变异的真实失败提供回归判别力。
+
+Risk packs considered:
+- Public API/CLI: selected — publicrun_once/capture/result，CLI不改。
+- Config/setup: selected — absolute scratch alias与relative拒绝，无新字段。
+- File IO/path safety/overwrite: selected — ancestor realpath、cwd重锚定、checkpointauthority、sentinel保留。
+- Schema/columns/units/fieldnames: selected — relative minute360/720、captured路径/checksum与T+12状态。
+- Auth/permissions/secrets: not selected — 无凭据/权限策略。
+- Concurrency/shared state/ordering: selected — resolve在handoff之前、cwd隔离仅同步测试、不改双源锁。
+- Resource/discovery: not selected — 无新增扫描/上限/重试。
+- Legacy compatibility/examples: selected — 无IO tracker构造/公开preflight/publish保持。
+- Error/rollback/partial output: selected — 缺T12诚实、wrongtree不能成为状态，成功后原cleanup。
+- Release/packaging/dependencies: not selected — 无新依赖。
+- Documentation/migration: selected — #16cand-03显式补#77，记录方案A与#132消费前提，不改现场部署。
+- Geospatial/CRS: not selected — 无几何。
+- Time series/forcing: selected — 360→720观测与本轮payload来源。
+- 状态链/warm-start: selected — checkpoint来自本轮canonical目录，不能借cwd另一树完成。
+- NWM/DB-free: not selected — 无新快照/DB边界。
+
+Invariant Matrix: source=controller解析后的绝对work_root；producer=AttemptRequest→staged assembly→RunDirectory；validator=既有claim/collect与tracker普通文件/分钟/checksum；consumer=捕获记录→publisher T+12状态/DONE；failure=symlink祖先或cwd漂移/relative配置；证据=真实publicrun_once两源及capture前后payload观测，不以路径字段拷贝mock作完成证明。
+- [ ] 77.1 完成symlink祖先两源正向capture/publish/cleanup回归与cwd-A/B源隔离见证，复用既有真实terminal链，不改tracker/safe_fs/CLI。
+- [ ] 77.2 保留relative配置前置拒绝；去入口resolve/接线relative-run_dir两类有效变异全部红；基线结果如实记录，不把已有规范化称新源码修复。
+- [ ] 77.3 focused/full producer/viewer/Ruff/format/OpenSpecstrict-all/stage、独立public smoke、high四席与freshfinal/CI/SHA gate；新测试<1000，无新豁免。
+Non-goals: 新生产worker/CLI、修改tracker构造或safe_fs接受symlink、对所有containment_root做全仓重构、现场scratch/NFS验证、回改#58/#59/#94/#106；sharedM2仍active。
