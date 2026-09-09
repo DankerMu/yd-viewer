@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from yd_producer._assemble_io import AssemblyInputs, bind_work_io
 from yd_producer._work_claim import (
     ClaimLostError,
     WorkClaim,
@@ -26,7 +27,6 @@ from yd_producer.assemble import (
     RunDirectory,
     WorkRegistry,
     _assemble_kernel,
-    _AssemblyInputs,
     _error,
 )
 from yd_producer.controller import STATE_SUFFIX, cycle_id
@@ -138,9 +138,11 @@ class StagedWorkInputs:
             if not isinstance(getattr(self, name), Path):
                 raise TypeError(f"{name} must be a Path.")
         identity = self.work_identity
-        if type(identity) is not tuple or len(identity) != 2:
-            raise TypeError("work_identity must be a tuple of two ints.")
-        if any(type(item) is not int for item in identity):
+        if (
+            type(identity) is not tuple
+            or len(identity) != 2
+            or any(type(item) is not int for item in identity)
+        ):
             raise TypeError("work_identity must be a tuple of two ints.")
         checksums = self.file_checksums
         if type(checksums) is not tuple:
@@ -156,8 +158,7 @@ class StagedWorkInputs:
         if type(self.prepared) is not PreparedVariantHandoff:
             raise TypeError("prepared must be a PreparedVariantHandoff.")
         for name in ("max_manifest_bytes", "max_asset_bytes", "max_state_bytes"):
-            value = getattr(self, name)
-            if type(value) is not int or value <= 0:
+            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a strict positive integer.")
 
 
@@ -305,21 +306,65 @@ def assemble_staged(
             "Invalid staged SHUD assembly input", "validate", cause=error
         ) from error
     states = reloaded.work_dir / STAGED_INPUT_DIRNAME / STAGED_STATES_DIRNAME
-    return _assemble_kernel(
-        registry,
-        forcing,
-        _AssemblyInputs(
-            reloaded.variant_dir,
-            states,
-            reloaded.state_path,
-            (Path("."),),
-            passthrough,
-            (reloaded.max_asset_bytes, parameter_checksum),
-            (reloaded.max_state_bytes, state_checksum),
-            reloaded.work_dir,
-            reloaded.prepared.contract,
-        ),
-    )
+    bound = None
+    primary: BaseException | None = None
+    result: RunDirectory | None = None
+    try:
+        bound = bind_work_io(reloaded.work_dir, reloaded.work_identity)
+        bound.require_named_root(reloaded.work_dir)
+        result = _assemble_kernel(
+            registry,
+            forcing,
+            AssemblyInputs(
+                reloaded.variant_dir,
+                states,
+                reloaded.state_path,
+                (Path("."),),
+                passthrough,
+                (reloaded.max_asset_bytes, parameter_checksum),
+                (reloaded.max_state_bytes, state_checksum),
+                reloaded.work_dir,
+                reloaded.prepared.contract,
+                bound,
+            ),
+        )
+        bound.require_named_root(reloaded.work_dir)
+    except AssemblyError as error:
+        primary = error
+    except (ClaimLostError, ValueError, OSError) as error:
+        primary = _error("Invalid staged SHUD assembly input", "validate", cause=error)
+        primary.__cause__ = error
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        if bound is not None:
+            try:
+                bound.close()
+            except BaseException as close_error:
+                if primary is None:
+                    if not isinstance(close_error, Exception):
+                        raise
+                    mapped = _error(
+                        "Invalid staged SHUD assembly input",
+                        "cleanup",
+                        cause=close_error,
+                    )
+                    mapped.__cause__ = close_error
+                    primary = mapped
+                else:
+                    primary.add_note(
+                        "file descriptor close also failed: "
+                        f"{type(close_error).__name__}: {close_error}"
+                    )
+                    notes = getattr(close_error, "__notes__", ())
+                    for note in notes:
+                        if note not in getattr(primary, "__notes__", ()):
+                            primary.add_note(note)
+    if primary is not None:
+        raise primary
+    assert result is not None
+    return result
 
 
 def _stage(
@@ -365,8 +410,7 @@ def _stage(
     )
     if len(manifest_bytes) > caller.max_manifest_bytes:
         raise ValueError(
-            "staged-inputs manifest exceeds its "
-            f"{caller.max_manifest_bytes} byte limit."
+            f"staged-inputs manifest exceeds its {caller.max_manifest_bytes} byte limit."
         )
     validate_claim(claim)
     input_dir = work / STAGED_INPUT_DIRNAME
@@ -517,14 +561,15 @@ def _preflight(
     ):
         if type(value) is not int or value <= 0:
             raise ValueError(f"{name} must be a strict positive integer.")
-    source_text = _text(source, "source")
     try:
-        normalized = normalize_source_id(source_text)
+        normalized = normalize_source_id(_text(source, "source"))
     except (AttributeError, TypeError, ValueError) as error:
         raise ValueError("source must be gfs or ifs.") from error
-    if not isinstance(cycle, datetime) or cycle.tzinfo is None:
-        raise ValueError("cycle must be timezone-aware UTC.")
-    if cycle.utcoffset() != timedelta(0):
+    if (
+        not isinstance(cycle, datetime)
+        or cycle.tzinfo is None
+        or cycle.utcoffset() != timedelta(0)
+    ):
         raise ValueError("cycle must be timezone-aware UTC.")
     cycle = cycle.astimezone(UTC)
     if cycle.hour not in {0, 12} or any(
@@ -566,8 +611,11 @@ def _admit_source_roots(
     state = _absolute(source_state_path, "source_state_path")
     _reject_dot_parts(variant, "source_variant_dir")
     _reject_dot_parts(state, "source_state_path")
-    expected_suffix = ("states", caller.source, f"{caller.cycle_name}{STATE_SUFFIX}")
-    if state.parts[-3:] != expected_suffix:
+    if state.parts[-3:] != (
+        "states",
+        caller.source,
+        f"{caller.cycle_name}{STATE_SUFFIX}",
+    ):
         raise ValueError(
             "source_state_path must end with states/<source>/<cycle>.cfg.ic."
         )
@@ -597,9 +645,11 @@ def _capture_source(
             if name == PREPARED_VARIANT_HANDOFF_FILENAME
             else caller.max_asset_bytes
         )
-        content = _read_limited(variant_root / name, cap, containment_root=variant_root)
         contents.append(
-            (f"{STAGED_INPUT_DIRNAME}/{STAGED_VARIANT_DIRNAME}/{name}", content)
+            (
+                f"{STAGED_INPUT_DIRNAME}/{STAGED_VARIANT_DIRNAME}/{name}",
+                _read_limited(variant_root / name, cap, containment_root=variant_root),
+            )
         )
     state_bytes = _read_limited(
         state_path, caller.max_state_bytes, containment_root=None
@@ -652,8 +702,7 @@ def _declared_files(files: dict[str, Any], caller: _Caller) -> _DeclaredFiles:
             f"staged variant keys are missing fixed files: {sorted(missing_fixed)!r}."
         )
     return _DeclaredFiles(
-        keys=tuple(sorted(keys)),
-        variant_names=frozenset(variant_names),
+        keys=tuple(sorted(keys)), variant_names=frozenset(variant_names)
     )
 
 
@@ -669,11 +718,9 @@ def _manifest_fields(manifest: dict[str, Any], caller: _Caller, work: Path) -> N
         raise TypeError("staged-inputs schema_version must be a string.")
     if schema != STAGED_INPUTS_SCHEMA:
         raise ValueError("staged-inputs schema_version is unsupported.")
-    declared_source = _text(manifest["source_id"], "manifest source_id")
-    if declared_source != caller.source:
+    if _text(manifest["source_id"], "manifest source_id") != caller.source:
         raise ValueError("staged-inputs source_id does not match the current source.")
-    declared_cycle = _text(manifest["cycle_id"], "manifest cycle_id")
-    if declared_cycle != caller.cycle_name:
+    if _text(manifest["cycle_id"], "manifest cycle_id") != caller.cycle_name:
         raise ValueError("staged-inputs cycle_id does not match the current cycle.")
     declared_work = manifest["work_dir"]
     if not isinstance(declared_work, str):
@@ -689,11 +736,7 @@ def _canonical_object(content: bytes, max_bytes: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError("staged-inputs manifest must be a JSON object.")
     canonical = json.dumps(
-        value,
-        allow_nan=False,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
+        value, allow_nan=False, ensure_ascii=True, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     if content != canonical:
         raise ValueError("staged-inputs manifest is not canonical JSON bytes.")
@@ -701,11 +744,7 @@ def _canonical_object(content: bytes, max_bytes: int) -> dict[str, Any]:
 
 
 def _manifest_bytes(
-    *,
-    source: str,
-    cycle_name: str,
-    work: Path,
-    checksums: tuple[tuple[str, str], ...],
+    *, source: str, cycle_name: str, work: Path, checksums: tuple[tuple[str, str], ...]
 ) -> bytes:
     payload = {
         "schema_version": STAGED_INPUTS_SCHEMA,
@@ -772,8 +811,7 @@ def _mkdir_new(claim: WorkClaim, directory: Path, expected: set[Path]) -> None:
     created = mkdir_relative_to_claim(claim, directory)
     if set(created) != expected:
         raise ValueError(
-            f"refusing to adopt preexisting or raced directories for {directory}: "
-            f"created={sorted(created)!r}, expected={sorted(expected)!r}."
+            f"refusing to adopt preexisting or raced directories for {directory}."
         )
 
 
@@ -830,10 +868,7 @@ def _read_declared(
 def _bind_prepared_assets(
     prepared: PreparedVariantHandoff, contents: dict[str, bytes]
 ) -> None:
-    binding_key = (
-        f"{STAGED_INPUT_DIRNAME}/{STAGED_VARIANT_DIRNAME}/"
-        f"{PREPARED_VARIANT_BINDING_FILENAME}"
-    )
+    binding_key = f"{STAGED_INPUT_DIRNAME}/{STAGED_VARIANT_DIRNAME}/{PREPARED_VARIANT_BINDING_FILENAME}"
     asset_key = (
         f"{STAGED_INPUT_DIRNAME}/{STAGED_VARIANT_DIRNAME}/{prepared.sp_att_asset_name}"
     )
@@ -850,21 +885,18 @@ def _list_exact(path: Path, expected: frozenset[str], *, root: Path) -> list[str
     actual = set(names)
     if len(names) > len(expected) or actual != expected:
         raise ValueError(
-            f"{path} entries must be exact; missing={sorted(expected - actual)!r}, "
-            f"unknown={sorted(actual - expected)!r}."
+            f"{path} entries must be exact; missing={sorted(expected - actual)!r}, unknown={sorted(actual - expected)!r}."
         )
     return names
 
 
 def _require_dir(path: Path, root: Path) -> None:
-    info = stat_no_follow(path, containment_root=root)
-    if not stat.S_ISDIR(info.st_mode):
+    if not stat.S_ISDIR(stat_no_follow(path, containment_root=root).st_mode):
         raise ValueError(f"{path} must be a directory.")
 
 
 def _require_file(path: Path, root: Path) -> None:
-    info = stat_no_follow(path, containment_root=root)
-    if not stat.S_ISREG(info.st_mode):
+    if not stat.S_ISREG(stat_no_follow(path, containment_root=root).st_mode):
         raise ValueError(f"{path} must be a regular file.")
 
 
@@ -878,21 +910,20 @@ def _read_limited(path: Path, maximum: int, *, containment_root: Path | None) ->
 
 
 def _cap_for(key: str, caller: _Caller) -> int:
-    if key == (
-        f"{STAGED_INPUT_DIRNAME}/{STAGED_VARIANT_DIRNAME}/"
-        f"{PREPARED_VARIANT_HANDOFF_FILENAME}"
+    if (
+        key
+        == f"{STAGED_INPUT_DIRNAME}/{STAGED_VARIANT_DIRNAME}/{PREPARED_VARIANT_HANDOFF_FILENAME}"
     ):
         return caller.max_manifest_bytes
-    if key == _state_file_key(caller):
-        return caller.max_state_bytes
-    return caller.max_asset_bytes
+    return (
+        caller.max_state_bytes
+        if key == _state_file_key(caller)
+        else caller.max_asset_bytes
+    )
 
 
 def _state_file_key(caller: _Caller) -> str:
-    return (
-        f"{STAGED_INPUT_DIRNAME}/{STAGED_STATES_DIRNAME}/"
-        f"{caller.source}/{caller.cycle_name}{STATE_SUFFIX}"
-    )
+    return f"{STAGED_INPUT_DIRNAME}/{STAGED_STATES_DIRNAME}/{caller.source}/{caller.cycle_name}{STATE_SUFFIX}"
 
 
 def _digest(content: bytes) -> str:
@@ -903,8 +934,7 @@ def _exact_keys(value: dict[str, Any], expected: frozenset[str], label: str) -> 
     actual = set(value)
     if actual != expected:
         raise ValueError(
-            f"{label} keys must be exact; missing={sorted(expected - actual)!r}, "
-            f"unknown={sorted(actual - expected)!r}."
+            f"{label} keys must be exact; missing={sorted(expected - actual)!r}, unknown={sorted(actual - expected)!r}."
         )
 
 

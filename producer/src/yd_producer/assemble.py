@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import math
 import re
-import stat
 import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, NoReturn
+from typing import Any, Literal, NoReturn
 
 from yd_producer import _assemble_fs
+from yd_producer._assemble_io import (
+    SHARED_IO,
+    AssemblyInputs,
+    AssemblyIO,
+    bind_store,
+    discover_variant_tree,
+)
 from yd_producer.forcing import DirectGridForcingContract, ForcingProductionResult
 from yd_producer.forcing.bounded_json import BoundedJSONError, load_bounded_json
 from yd_producer.forcing.direct_grid_contract import (
@@ -33,11 +39,7 @@ from yd_producer.store.object_store import (
     LocalObjectStore,
     ObjectStoreError,
 )
-from yd_producer.store.safe_fs import (
-    SafeFilesystemError,
-    list_directory_no_follow,
-    stat_no_follow,
-)
+from yd_producer.store.safe_fs import SafeFilesystemError
 
 _fs = _assemble_fs
 AssemblyPhase = Literal[
@@ -126,18 +128,6 @@ class RunDirectory:
     forcing_index_path: Path
     forcing_csv_paths: tuple[Path, ...]
     cleanup_warnings: tuple[str, ...] = ()
-
-
-class _AssemblyInputs(NamedTuple):
-    variant_root: Path
-    states_root: Path
-    state_path: Path
-    variant_dirs: Sequence[Path]
-    variant_files: Sequence[tuple[Path, Path, str | None]]
-    parameter_check: tuple[int, str | None]
-    state_check: tuple[int, str | None]
-    containment_root: Path | None
-    expected_contract: DirectGridForcingContract | None
 
 
 def rename_entry_no_follow(*args: Any, **kwargs: Any) -> None:
@@ -256,7 +246,7 @@ def assemble(
             raise ValueError("variant_dir must be outside this work tree.")
         if states.is_relative_to(work):
             raise ValueError("states_root must be outside this work tree.")
-        dirs, discovered = _tree(variant, identity.project_name)
+        dirs, discovered = discover_variant_tree(variant, identity.project_name)
     except AssemblyError:
         raise
     except (OSError, SafeFilesystemError, TypeError, ValueError) as error:
@@ -264,7 +254,7 @@ def assemble(
     return _assemble_kernel(
         registry,
         forcing,
-        _AssemblyInputs(
+        AssemblyInputs(
             variant,
             states,
             state,
@@ -274,6 +264,7 @@ def assemble(
             (MAX_STATE_IC_BYTES, None),
             None,
             None,
+            SHARED_IO,
         ),
     )
 
@@ -281,10 +272,12 @@ def assemble(
 def _assemble_kernel(
     registry: WorkRegistry,
     forcing: ForcingProductionResult,
-    inputs: _AssemblyInputs,
+    inputs: AssemblyInputs,
 ) -> RunDirectory:
+    fs = inputs.io
     try:
-        contract = _registry(registry)
+        fs.require_named_root(registry.work_dir)
+        contract = _registry(registry, fs)
         if (
             inputs.expected_contract is not None
             and contract != inputs.expected_contract
@@ -293,7 +286,7 @@ def _assemble_kernel(
         identity, work = registry.identity, registry.work_dir
         project = identity.project_name
         root = inputs.containment_root or inputs.variant_root
-        parameter = _fs.read_limited(
+        parameter = fs.read_limited(
             inputs.variant_root / f"{project}.para",
             inputs.parameter_check[0],
             root,
@@ -307,16 +300,18 @@ def _assemble_kernel(
             identity,
             inputs.state_check,
             inputs.containment_root or inputs.states_root,
+            fs,
         )
-        index, csvs = _forcing(registry, forcing)
+        index, csvs = _forcing(registry, forcing, fs)
         outputs = {_csv_path(entry["relative_path"]) for entry in csvs}
         outputs.add(f"{project}.tsd.forc")
-        roots = {path.parts[0] for path, *_ in inputs.variant_files}
+        roots = {path.parts[0] for path in inputs.variant_dirs if path != Path(".")}
+        roots.update(path.parts[0] for path, *_ in inputs.variant_files)
         if collision := sorted(roots & outputs):
             raise ValueError(
                 f"variant/output filename collision: {', '.join(collision)}"
             )
-        _fs.absent(work, "model", work)
+        fs.absent(work, "model", work)
     except AssemblyError:
         raise
     except (
@@ -333,7 +328,7 @@ def _assemble_kernel(
     final = work / "model"
     stage = work / f".model.assemble-stage-{uuid.uuid4().hex}"
     try:
-        _fs.absent(work, stage.name, work)
+        fs.absent(work, stage.name, work)
     except (OSError, SafeFilesystemError, ValueError) as error:
         raise _error(
             "Failed to stage SHUD run directory",
@@ -342,14 +337,14 @@ def _assemble_kernel(
             cause=error,
         ) from error
     try:
-        _fs.directory(stage, work, create=True)
+        fs.directory(stage, work, create=True)
         skipped = {Path(f"{project}.{suffix}") for suffix in ("cfg.ic", "para")}
         for relative in inputs.variant_dirs:
             if relative != Path("."):
-                _fs.directory(stage / relative, work, create=True)
+                fs.directory(stage / relative, work, create=True)
         for relative, source, checksum in inputs.variant_files:
             if relative not in skipped:
-                _fs.copy_regular(
+                fs.copy_regular(
                     source,
                     stage / relative,
                     root,
@@ -357,12 +352,12 @@ def _assemble_kernel(
                     expected_checksum=checksum,
                 )
         for suffix, content in (("para", parameter), ("cfg.ic", warm_state)):
-            _fs.write_new(stage / f"{project}.{suffix}", content, work)
+            fs.write_new(stage / f"{project}.{suffix}", content, work)
         store = LocalObjectStore(registry.object_store_root)
         members = [(index, f"{project}.tsd.forc")]
         members += [(entry, _csv_path(entry["relative_path"])) for entry in csvs]
         for entry, name in members:
-            _fs.copy_regular(
+            fs.copy_regular(
                 store.resolve_path(str(entry["uri"])),
                 stage / name,
                 store.root,
@@ -377,10 +372,12 @@ def _assemble_kernel(
             work,
             stage,
             error,
+            fs,
         )
     try:
-        _commit_probe(work, "model", work, "run final")
-        _fs.rename(
+        fs.require_named_root(work)
+        fs.absent(work, "model", work)
+        fs.rename(
             work,
             stage.name,
             work,
@@ -396,7 +393,9 @@ def _assemble_kernel(
             work,
             stage,
             error,
+            fs,
         )
+    fs.require_named_root(work)
     return RunDirectory(
         identity=identity,
         path=final,
@@ -407,7 +406,7 @@ def _assemble_kernel(
         forcing_csv_paths=tuple(
             final / _csv_path(entry["relative_path"]) for entry in csvs
         ),
-        cleanup_warnings=_fs.clean(stage, work),
+        cleanup_warnings=fs.clean(stage, work),
     )
 
 
@@ -493,11 +492,15 @@ def _identity(identity: WorkIdentity) -> None:
     ):
         raise ValueError("cycle_time must be timezone-aware UTC.")
     cycle = cycle.astimezone(UTC)
-    off_cycle = any((cycle.minute, cycle.second, cycle.microsecond))
-    if cycle.hour not in {0, 12} or off_cycle:
+    if cycle.hour not in {0, 12} or any(
+        (cycle.minute, cycle.second, cycle.microsecond)
+    ):
         raise ValueError("cycle_time must be a UTC 00Z or 12Z whole-hour cycle.")
-    fields = (getattr(identity, name) for name in _FIELDS.split())
-    if any(not isinstance(value, str) or not value.strip() for value in fields):
+    if any(
+        not isinstance(getattr(identity, name), str)
+        or not getattr(identity, name).strip()
+        for name in _FIELDS.split()
+    ):
         raise ValueError("WorkIdentity text fields must be non-empty strings.")
     for name in "model_id", "basin_version_id", "project_name":
         _fs.component(getattr(identity, name), name)
@@ -549,13 +552,13 @@ def _registry_layout(registry: WorkRegistry) -> None:
         raise ValueError("registry keys do not have the exact model layout.")
 
 
-def _registry(registry: WorkRegistry) -> DirectGridForcingContract:
+def _registry(registry: WorkRegistry, fs: AssemblyIO) -> DirectGridForcingContract:
     _registry_layout(registry)
     identity = registry.identity
     work, root = registry.work_dir, registry.object_store_root
-    _fs.directory(root, work, create=False)
+    fs.directory(root, work, create=False)
     model_root = root / "models" / identity.model_id
-    _fs.directory(model_root, work, create=False)
+    fs.directory(model_root, work, create=False)
     for relative in (
         "registry.json",
         "manifest.json",
@@ -563,8 +566,8 @@ def _registry(registry: WorkRegistry) -> DirectGridForcingContract:
         f"package/input/{identity.project_name}.sp.att",
         f"package/{identity.project_name}.tsd.forc",
     ):
-        _fs.regular(model_root / relative, work)
-    store = LocalObjectStore(root)
+        fs.regular(model_root / relative, work)
+    store = bind_store(LocalObjectStore(root), fs)
     registry_bytes = store.read_bytes_limited(
         registry.registry_manifest, max_bytes=MAX_OBJECT_MANIFEST_BYTES
     )
@@ -597,7 +600,7 @@ def _registry(registry: WorkRegistry) -> DirectGridForcingContract:
     model_manifest = _fs.json_object(model_bytes, "model manifest")
     if model_manifest != {"basin_slug": identity.project_name}:
         raise ValueError("model manifest differs from WorkIdentity project.")
-    contract = _repository(root, identity)
+    contract = _repository(root, identity, fs=fs)
     _contract_paths(identity, contract)
     return contract
 
@@ -608,8 +611,9 @@ def _repository(
     expected: DirectGridForcingContract | None = None,
     binding: bytes | None = None,
     sp_att: bytes | None = None,
+    fs: AssemblyIO = SHARED_IO,
 ) -> DirectGridForcingContract:
-    store = LocalObjectStore(root)
+    store = bind_store(LocalObjectStore(root), fs)
     key = f"models/{identity.model_id}/registry.json"
     repository = FileForcingRepository(store, key)
     resolved = repository.resolve_model_identity(model_id=identity.model_id)
@@ -673,7 +677,11 @@ def _repository(
                 "sp_att",
             ),
         ):
-            _fs.stream_checksum(store.iter_bytes(key), expected_checksum, label)
+            _fs.stream_checksum(
+                fs.iter_regular(store.resolve_path(key), store.root),
+                expected_checksum,
+                label,
+            )
     return contract
 
 
@@ -758,47 +766,22 @@ def _station_index(contract: DirectGridForcingContract) -> bytes:
     return "".join(rows).encode("utf-8")
 
 
-def _tree(root: Path, project: str) -> tuple[list[Path], list[tuple[Path, Path]]]:
-    _fs.directory(root, None, create=False)
-    for path in (root / f"{project}.cfg.ic", root / f"{project}.para"):
-        _fs.regular(path, None)
-    dirs: list[Path] = [Path(".")]
-    files: list[tuple[Path, Path]] = []
-    pending = [(Path("."), root)]
-    while pending:
-        relative, directory = pending.pop()
-        for name in sorted(
-            list_directory_no_follow(directory, containment_root=None), reverse=True
-        ):
-            _fs.component(name, "variant entry")
-            path = directory / name
-            child = Path(name) if relative == Path(".") else relative / name
-            mode = stat_no_follow(path, containment_root=None).st_mode
-            if stat.S_ISDIR(mode):
-                dirs.append(child)
-                pending.append((child, path))
-            elif stat.S_ISREG(mode):
-                files.append((child, path))
-            else:
-                raise ValueError(f"variant contains a non-regular entry: {path}")
-    return sorted(dirs), sorted(files)
-
-
 def _state(
     path: Path,
     states: Path,
     identity: WorkIdentity,
     check: tuple[int, str | None],
     root: Path,
+    fs: AssemblyIO,
 ) -> bytes:
-    _fs.directory(states, root, create=False)
+    fs.directory(states, root, create=False)
     expected = states / identity.source_id / f"{identity.cycle_time:%Y%m%d%H}.cfg.ic"
     if path != expected:
         raise ValueError(
             "state_path must exactly equal states_root/source/cycle.cfg.ic."
         )
-    _fs.regular(path, root)
-    content = _fs.read_limited(path, check[0], root)
+    fs.regular(path, root)
+    content = fs.read_limited(path, check[0], root)
     if check[1] is not None:
         _fs.checksum(check[1], content, "state")
     document = parse(content, max_bytes=check[0])
@@ -811,7 +794,7 @@ def _state(
 
 
 def _forcing(
-    registry: WorkRegistry, result: ForcingProductionResult
+    registry: WorkRegistry, result: ForcingProductionResult, fs: AssemblyIO
 ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
     if not isinstance(result, ForcingProductionResult):
         raise TypeError("forcing must be a ForcingProductionResult.")
@@ -824,7 +807,10 @@ def _forcing(
     manifest_uri = result.file_uris.get("package_manifest")
     if not isinstance(manifest_uri, str) or not manifest_uri:
         raise ValueError("forcing result lacks file_uris['package_manifest'].")
-    identity, store = registry.identity, LocalObjectStore(registry.object_store_root)
+    identity, store = (
+        registry.identity,
+        bind_store(LocalObjectStore(registry.object_store_root), fs),
+    )
     package = _store_key(
         store, result.forcing_package_uri, "forcing_package_uri"
     ).rstrip("/")
@@ -844,8 +830,10 @@ def _forcing(
             raise ValueError(
                 "package manifest must be within forcing_package_uri."
             ) from None
-    content = store.read_bytes_limited(
-        manifest_key, max_bytes=MAX_OBJECT_MANIFEST_BYTES
+    content = fs.read_limited(
+        store.resolve_path(manifest_key),
+        MAX_OBJECT_MANIFEST_BYTES,
+        store.root,
     )
     _fs.checksum(result.checksum, content, "forcing package manifest")
     manifest = load_bounded_json(content, max_bytes=MAX_OBJECT_MANIFEST_BYTES)
@@ -918,7 +906,7 @@ def _forcing(
             )
     if Counter(
         _fs.parse_shud_index_stream(
-            store.iter_bytes(str(indexes[0]["uri"])),
+            fs.iter_regular(store.resolve_path(str(indexes[0]["uri"])), store.root),
             str(indexes[0]["checksum"]),
             names,
         )
@@ -926,7 +914,9 @@ def _forcing(
         raise ValueError("SHUD index filenames differ from declared CSV filenames.")
     for entry in csvs:
         _fs.stream_checksum(
-            store.iter_bytes(str(entry["uri"])), str(entry["checksum"]), "SHUD CSV"
+            fs.iter_regular(store.resolve_path(str(entry["uri"])), store.root),
+            str(entry["checksum"]),
+            "SHUD CSV",
         )
     return indexes[0], tuple(csvs)
 
@@ -940,7 +930,7 @@ def _csv_path(value: Any) -> str:
     return name
 
 
-def _commit_probe(parent: Path, name: str, root: Path, label: str) -> None:
+def _commit_probe(parent: Path, name: str, root: Path, _label: str) -> None:
     _fs.absent(parent, name, root)
 
 
@@ -970,8 +960,9 @@ def _abort(
     work: Path,
     stage: Path,
     error: Exception,
+    fs: AssemblyIO = SHARED_IO,
 ) -> NoReturn:
-    warnings = _fs.clean(stage, work)
+    warnings = fs.clean(stage, work)
     if isinstance(error, AssemblyError):
         error.cleanup_warnings = error.cleanup_warnings + warnings
         for warning in warnings:

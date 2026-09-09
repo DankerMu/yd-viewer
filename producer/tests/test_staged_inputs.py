@@ -512,9 +512,12 @@ def test_stage_source_checksum_drift_after_readiness_is_rejected(
 def test_generated_manifest_cap_is_checked_before_target_creation(
     tmp_path: Path,
 ) -> None:
-    source, claim = _stage_pair(tmp_path)
-    handoff_size = len((source.variant_dir / VARIANT_HANDOFF_NAME).read_bytes())
+    source, claim = (
+        _write_source(tmp_path / "nfs-test-owned"),
+        _claim(tmp_path / ("w" * 80)),
+    )
     expected = canonical_json_bytes(_expected_manifest(claim.work_dir, source.files))
+    handoff_size = len((source.variant_dir / VARIANT_HANDOFF_NAME).read_bytes())
     cap = len(expected) - 1
     assert cap >= handoff_size
     with pytest.raises(staged_module.StagedWorkInputsError):

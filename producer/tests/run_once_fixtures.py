@@ -27,6 +27,7 @@ from cfg_ic_fixtures import build_cfg_ic
 from dat_fixtures import build_dat_bytes
 
 from yd_producer import publish
+from yd_producer._work_claim import claim_exact_work
 from yd_producer.assemble import RunDirectory, WorkIdentity, stage_work_registry
 from yd_producer.config import (
     CanonicalGridConfig,
@@ -963,3 +964,25 @@ def make_publish_inputs(
         reach_count=REACH_COUNT,
         variant_reach_count=REACH_COUNT,
     )
+
+
+def _stage_public(tmp_path: Path):
+    _config, local = write_config_local(tmp_path)
+    source_variant = write_variant(local)
+    source_state = write_state(local)
+    claim = claim_exact_work(
+        work_root=Path(local.scratch_root) / "work",
+        source="gfs",
+        cycle=CYCLE,
+        cycle_name=cycle_text(CYCLE),
+    )
+    ids = {
+        "source": "gfs",
+        "cycle": CYCLE,
+        "project_name": PROJECT,
+        "grid_id": "fixture-grid-gfs",
+        "max_manifest_bytes": 65_536,
+        "max_asset_bytes": 65_536,
+        "max_state_bytes": 65_536,
+    }
+    return local, source_variant, source_state, claim, ids

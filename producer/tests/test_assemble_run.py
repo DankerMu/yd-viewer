@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import shutil
+import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -27,6 +30,7 @@ from yd_producer._work_claim import claim_exact_work
 from yd_producer.assemble import AssemblyError, assemble, stage_work_registry
 from yd_producer.staged_inputs import (
     StagedWorkInputsError,
+    assemble_staged,
     load_staged_work_inputs,
     stage_work_inputs,
 )
@@ -135,26 +139,35 @@ def test_00z_and_12z_parameters_are_byte_identical(tmp_path: Path) -> None:
 def test_commit_adjacent_reprobe_rejects_planted_run_final_without_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from yd_producer._assemble_io import SharedAssemblyIO
+    from yd_producer.assemble import rename_entry_no_follow as original_rename_entry
+
     value, work, registry, variant, states, state, forcing = _inputs(tmp_path)
     rename_calls: list[str] = []
-    original_probe = __import__(
-        "yd_producer.assemble", fromlist=["_commit_probe"]
-    )._commit_probe
+    original_io_rename = SharedAssemblyIO.rename
     planted = {"done": False}
 
-    def planting_probe(parent, name, root, label):
-        if name == "model" and not planted["done"]:
+    def planting_rename(
+        self, source_parent, source, target_parent, target, root, *, operation=None
+    ):
+        if target == "model" and not planted["done"]:
             planted["done"] = True
-            (parent / name).write_bytes(b"planted-run-final")
-        return original_probe(parent, name, root, label)
+            (target_parent / target).write_bytes(b"planted-run-final")
+        return original_io_rename(
+            self,
+            source_parent,
+            source,
+            target_parent,
+            target,
+            root,
+            operation=operation,
+        )
 
     def spying_rename(*args, **kwargs):
         rename_calls.append("rename")
-        return __import__(
-            "yd_producer.assemble", fromlist=["rename_entry_no_follow"]
-        ).rename_entry_no_follow(*args, **kwargs)
+        return original_rename_entry(*args, **kwargs)
 
-    monkeypatch.setattr("yd_producer.assemble._commit_probe", planting_probe)
+    monkeypatch.setattr(SharedAssemblyIO, "rename", planting_rename)
     monkeypatch.setattr("yd_producer.assemble.rename_entry_no_follow", spying_rename)
     _refuse(
         (value, work, registry, variant, states, state, forcing),
@@ -162,6 +175,7 @@ def test_commit_adjacent_reprobe_rejects_planted_run_final_without_rename(
         snapshot=False,
         final_absent=False,
     )
+    assert planted["done"]
     assert rename_calls == []
     assert (work / "model").is_file()
     assert (work / "model").read_bytes() == b"planted-run-final"
@@ -310,7 +324,23 @@ def test_variant_nested_symlink_fifo_and_unsafe_component_fail(tmp_path: Path) -
 def test_variant_and_output_filename_collision_is_rejected(tmp_path: Path) -> None:
     value, work, registry, variant, states, state, forcing = _inputs(tmp_path)
     (variant / "X1.csv").write_bytes(b"collision")
-    _refuse((value, work, registry, variant, states, state, forcing), phase="validate")
+    error = _refuse(
+        (value, work, registry, variant, states, state, forcing), phase="validate"
+    )
+    assert "filename collision" in str(error)
+
+
+@pytest.mark.parametrize("name", ["X1.csv", "demo.tsd.forc"])
+def test_empty_directory_output_filename_collision_is_rejected_before_staging(
+    tmp_path: Path, name: str
+) -> None:
+    value, work, registry, variant, states, state, forcing = _inputs(tmp_path)
+    (variant / name).mkdir()
+    error = _refuse(
+        (value, work, registry, variant, states, state, forcing), phase="validate"
+    )
+    assert "filename collision" in str(error)
+    assert not list(work.glob(".model.assemble-stage-*"))
 
 
 def test_preexisting_final_forms_are_never_overwritten(tmp_path: Path) -> None:
@@ -605,3 +635,364 @@ def test_staged_input_listing_stops_at_exact_five_budget(
         )
     assert consumed[0] <= 6
     assert not (claim.work_dir / "model").exists()
+
+
+def _assert_zero_readiness(claim, source_variant, source_state) -> None:
+    assert not os.path.lexists(claim.work_dir / "input")
+    assert not (claim.work_dir / "model").exists()
+    assert source_variant.is_dir()
+    assert source_state.is_file()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "source-ancestor",
+        "source-directory",
+        "source-unreadable",
+        "source-device",
+        "staged-ancestor",
+        "staged-directory",
+        "staged-unreadable",
+        "staged-device",
+    ],
+)
+def test_public_stage_and_load_refuse_hostile_ancestors_directories_unreadable_and_devices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    _local, source_variant, source_state, claim, ids = fixtures._stage_public(tmp_path)
+    if case.startswith("staged-"):
+        stage_work_inputs(
+            claim=claim,
+            source_variant_dir=source_variant,
+            source_state_path=source_state,
+            **ids,
+        )
+    if case.endswith("ancestor"):
+        real = source_variant if case.startswith("source") else claim.work_dir / "input"
+        with pytest.raises(StagedWorkInputsError):
+            if case.startswith("source"):
+                alias = tmp_path / "alias-variant"
+                alias.symlink_to(real, target_is_directory=True)
+                stage_work_inputs(
+                    claim=claim,
+                    source_variant_dir=alias,
+                    source_state_path=source_state,
+                    **ids,
+                )
+            else:
+                os.replace(real, real.with_name("real-input"))
+                real.symlink_to(real.with_name("real-input"), target_is_directory=True)
+                load_staged_work_inputs(work_dir=claim.work_dir, **ids)
+        if case.startswith("source"):
+            _assert_zero_readiness(claim, source_variant, source_state)
+        else:
+            assert not (claim.work_dir / "model").exists()
+        return
+    if case.endswith("directory"):
+        victim = (
+            source_variant / "yd.para"
+            if case.startswith("source")
+            else claim.work_dir / "input" / "variant" / "yd.para"
+        )
+        if victim.is_file():
+            victim.unlink()
+        victim.mkdir()
+    elif case.endswith("unreadable"):
+        if os.geteuid() == 0:
+            pytest.skip("root ignores mode bits")
+        victim = (
+            source_variant
+            if case.startswith("source")
+            else claim.work_dir / "input" / "variant"
+        )
+        original = stat.S_IMODE(victim.stat().st_mode)
+        victim.chmod(0o000)
+        try:
+            with pytest.raises(StagedWorkInputsError):
+                if case.startswith("source"):
+                    stage_work_inputs(
+                        claim=claim,
+                        source_variant_dir=source_variant,
+                        source_state_path=source_state,
+                        **ids,
+                    )
+                else:
+                    load_staged_work_inputs(work_dir=claim.work_dir, **ids)
+        finally:
+            victim.chmod(original)
+        if case.startswith("source"):
+            _assert_zero_readiness(claim, source_variant, source_state)
+        else:
+            assert not (claim.work_dir / "model").exists()
+        return
+    else:
+        victim_name = "yd.para"
+        real_open = os.open
+        fired: list[str] = []
+
+        def device_open(path, flags, *args, **kwargs):
+            leaf = path if isinstance(path, str) else getattr(path, "name", None)
+            if leaf == victim_name and not fired:
+                fired.append(str(leaf))
+                return real_open(os.devnull, os.O_RDONLY)
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", device_open)
+    with pytest.raises(StagedWorkInputsError):
+        if case.startswith("source"):
+            stage_work_inputs(
+                claim=claim,
+                source_variant_dir=source_variant,
+                source_state_path=source_state,
+                **ids,
+            )
+        else:
+            load_staged_work_inputs(work_dir=claim.work_dir, **ids)
+    if case.startswith("source"):
+        _assert_zero_readiness(claim, source_variant, source_state)
+    else:
+        assert not (claim.work_dir / "model").exists()
+
+
+def _staged_assembly(tmp_path: Path):
+    _local, source_variant, source_state, claim, ids = fixtures._stage_public(tmp_path)
+    staged = stage_work_inputs(
+        claim=claim,
+        source_variant_dir=source_variant,
+        source_state_path=source_state,
+        **ids,
+    )
+    identity = fixtures.run_identity()
+    registry = stage_work_registry(
+        work_root=claim.work_root,
+        identity=identity,
+        contract=staged.prepared.contract,
+        binding_content=staged.prepared.binding_content,
+        sp_att_content=staged.prepared.sp_att_content,
+        max_asset_bytes=ids["max_asset_bytes"],
+    )
+    forcing = write_forcing_package(registry.object_store_root, identity)
+    return claim, staged, registry, forcing
+
+
+def test_assemble_staged_rejects_root_replacement_after_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yd_producer.staged_inputs as staged_module
+
+    claim, staged, registry, forcing = _staged_assembly(tmp_path)
+    original_kernel = staged_module._assemble_kernel
+    old_root = claim.work_dir.with_name(claim.work_dir.name + "-original")
+
+    def swap_before_kernel(*args, **kwargs):
+        claim.work_dir.rename(old_root)
+        shutil.copytree(old_root, claim.work_dir)
+        assert claim.work_dir.stat().st_ino != old_root.stat().st_ino
+        return original_kernel(*args, **kwargs)
+
+    monkeypatch.setattr(staged_module, "_assemble_kernel", swap_before_kernel)
+    with pytest.raises(AssemblyError) as captured:
+        assemble_staged(registry=registry, staged_inputs=staged, forcing=forcing)
+    assert captured.value.phase == "validate"
+    assert not (old_root / "model").exists()
+    assert not (claim.work_dir / "model").exists()
+    assert list(claim.work_dir.glob(".model.assemble-stage-*")) == []
+    assert list(old_root.glob(".model.assemble-stage-*")) == []
+
+
+@pytest.mark.parametrize("boundary", ["copy", "commit", "cleanup"])
+def test_assemble_staged_late_root_swap_does_not_mutate_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    from yd_producer._assemble_io import BoundAssemblyIO
+
+    claim, staged, registry, forcing = _staged_assembly(tmp_path)
+    old_root = claim.work_dir.with_name(claim.work_dir.name + "-original")
+    swapped = {"done": False}
+    cloned: dict[str, object] = {}
+
+    def _tree_snapshot(
+        root: Path,
+    ) -> dict[str, tuple[str, int, int, int, int, bytes | None]]:
+        snapshot: dict[str, tuple[str, int, int, int, int, bytes | None]] = {}
+        for path in [root, *root.rglob("*")]:
+            info = path.lstat()
+            kind = "dir" if path.is_dir() else "file"
+            payload = path.read_bytes() if path.is_file() else None
+            snapshot[str(path.relative_to(root))] = (
+                kind,
+                info.st_mode,
+                info.st_mtime_ns,
+                info.st_dev,
+                info.st_ino,
+                payload,
+            )
+        return snapshot
+
+    def swap_named_root() -> None:
+        if swapped["done"]:
+            return
+        swapped["done"] = True
+        claim.work_dir.rename(old_root)
+        shutil.copytree(old_root, claim.work_dir)
+        cloned["tree"] = _tree_snapshot(claim.work_dir)
+
+    real_copy = BoundAssemblyIO.copy_regular
+    real_rename = BoundAssemblyIO.rename
+    real_clean = BoundAssemblyIO.clean
+
+    def copying(self, *args, **kwargs):
+        if boundary == "copy":
+            swap_named_root()
+        return real_copy(self, *args, **kwargs)
+
+    def renaming(self, *args, **kwargs):
+        if boundary == "commit":
+            swap_named_root()
+        return real_rename(self, *args, **kwargs)
+
+    def cleaning(self, path, work_root):
+        if boundary == "cleanup":
+            swap_named_root()
+        return real_clean(self, path, work_root)
+
+    monkeypatch.setattr(BoundAssemblyIO, "copy_regular", copying)
+    monkeypatch.setattr(BoundAssemblyIO, "rename", renaming)
+    monkeypatch.setattr(BoundAssemblyIO, "clean", cleaning)
+    with pytest.raises(AssemblyError):
+        assemble_staged(registry=registry, staged_inputs=staged, forcing=forcing)
+    assert swapped["done"]
+    replacement_model = claim.work_dir / "model"
+    if boundary != "cleanup":
+        assert not replacement_model.exists()
+    assert (old_root / "model").is_dir() or list(
+        old_root.glob(".model.assemble-stage-*")
+    )
+    assert cloned["tree"] == _tree_snapshot(claim.work_dir)
+
+
+def test_overlapping_assemble_staged_calls_keep_distinct_root_fds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yd_producer.staged_inputs as staged_module
+    from yd_producer._assemble_io import BoundAssemblyIO
+
+    claim_a, staged_a, registry_a, forcing_a = _staged_assembly(tmp_path / "one")
+    claim_b, staged_b, registry_b, forcing_b = _staged_assembly(tmp_path / "two")
+    original_kernel = staged_module._assemble_kernel
+    original_write = BoundAssemblyIO.write_new
+    b_bound, a_held, b_done = threading.Event(), threading.Event(), threading.Event()
+    errors: dict[str, BaseException] = {}
+    results: dict[str, object] = {}
+    old_a = claim_a.work_dir.with_name(claim_a.work_dir.name + "-original")
+    swapped = {"done": False}
+
+    def tracking_kernel(*args, **kwargs):
+        inputs = args[2] if len(args) > 2 else kwargs.get("inputs")
+        if (
+            getattr(inputs, "io", None) is not None
+            and inputs.io.work == claim_b.work_dir
+        ):
+            b_bound.set()
+            assert a_held.wait(timeout=10)
+        return original_kernel(*args, **kwargs)
+
+    def holding_write(self, path, content, root):
+        if self.work == claim_a.work_dir and not a_held.is_set():
+            a_held.set()
+            assert b_done.wait(timeout=10)
+            claim_a.work_dir.rename(old_a)
+            named = claim_a.work_dir
+            named.mkdir()
+            shutil.copytree(old_a / "input", named / "input")
+            shutil.copytree(old_a / "object-store", named / "object-store")
+            swapped["done"] = True
+        return original_write(self, path, content, root)
+
+    def run_a() -> None:
+        assert b_bound.wait(timeout=10)
+        try:
+            results["a"] = assemble_staged(
+                registry=registry_a, staged_inputs=staged_a, forcing=forcing_a
+            )
+        except BaseException as error:  # noqa: BLE001 - collect worker error
+            errors["a"] = error
+
+    def run_b() -> None:
+        try:
+            results["b"] = assemble_staged(
+                registry=registry_b, staged_inputs=staged_b, forcing=forcing_b
+            )
+        except BaseException as error:  # noqa: BLE001 - collect worker error
+            errors["b"] = error
+        finally:
+            b_done.set()
+
+    monkeypatch.setattr(staged_module, "_assemble_kernel", tracking_kernel)
+    monkeypatch.setattr(BoundAssemblyIO, "write_new", holding_write)
+    thread_b = threading.Thread(target=run_b)
+    thread_a = threading.Thread(target=run_a)
+    thread_b.start()
+    thread_a.start()
+    thread_b.join(timeout=15)
+    thread_a.join(timeout=15)
+    assert not thread_b.is_alive()
+    assert not thread_a.is_alive()
+    assert swapped["done"]
+    assert "b" not in errors
+    assert isinstance(errors.get("a"), AssemblyError)
+    assert results["b"].path == claim_b.work_dir / "model"
+    assert (claim_b.work_dir / "model" / "yd.para").read_bytes() == PARAMETER_EXPECTED
+    assert not (claim_a.work_dir / "model").exists()
+    assert list(claim_a.work_dir.glob(".model.assemble-stage-*")) == []
+    assert (old_a / "model").is_dir() or list(old_a.glob(".model.assemble-stage-*"))
+    assert not any(
+        "model" in path.parts or path.name.startswith(".model.")
+        for path in claim_a.work_dir.rglob("*")
+    )
+
+
+@pytest.mark.parametrize("inject_close_error", [False, True])
+def test_assemble_staged_closes_forcing_index_fd_while_error_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inject_close_error: bool
+) -> None:
+    from yd_producer._assemble_io import BoundAssemblyIO
+
+    claim, staged, registry, forcing = _staged_assembly(tmp_path)
+    index_path = (
+        registry.object_store_root
+        / forcing.forcing_package_uri
+        / "shud"
+        / "stations.tsd.forc"
+    )
+    index_path.write_bytes(
+        b"2 20260826\nshud\nID\tLon\tLat\tX\tY\tZ\tFilename\nx\t1\t2\t3\t4\t5\tX1.csv\n"
+    )
+    expected_id = (index_path.stat().st_dev, index_path.stat().st_ino)
+    fd_root = Path("/dev/fd") if Path("/dev/fd").exists() else Path("/proc/self/fd")
+    if inject_close_error:
+        original_close = BoundAssemblyIO.close
+
+        def failing_close(self):
+            original_close(self)
+            raise OSError("unique-close-failure")
+
+        monkeypatch.setattr(BoundAssemblyIO, "close", failing_close)
+    with pytest.raises(AssemblyError) as captured:
+        assemble_staged(registry=registry, staged_inputs=staged, forcing=forcing)
+    error = captured.value
+    assert error.phase == "validate"
+    leaked = []
+    for entry in fd_root.iterdir():
+        try:
+            info = os.fstat(int(entry.name))
+        except (OSError, ValueError):
+            continue
+        if (info.st_dev, info.st_ino) == expected_id:
+            leaked.append(entry.name)
+    assert leaked == []
+    assert not (claim.work_dir / "model").exists()
+    if inject_close_error:
+        notes = getattr(error, "__notes__", [])
+        assert sum("unique-close-failure" in note for note in notes) == 1
