@@ -76,8 +76,8 @@ mode 守住），任一级不满足即在第一处 NFS 写入之前抛 `PublishE
 看作「已存在」而不动。
 
 零新增依赖：`struct`/`os`/`pathlib`/`datetime` 全在 stdlib。契约检查阶段对 DAT 只做**有界
-读**（先读定长头部拿 `nc`，再读列编号表），行数由 `st_size` 算术得出，MUST NOT 把数据区
-读进内存——`expected_rows` 是配置驱动的，检查阶段的无界读会把一处配置错误放大成 OOM。
+读**（先读定长头部拿 `nc`，再读列编号表），行数由 `st_size` 算术得出；大小等式成立后以
+同一 descriptor 按偏移读每行第 0 列恰 8 字节，MUST NOT 把流量列或整块数据区读进内存。
 步骤 3 的整读是允许且必需的（`safe_fs` 无流式写原语），其上界已由前置检查钉死的
 `st_size` 等式约束：先证明大小合法，再整读，顺序不得颠倒。
 """
@@ -95,6 +95,7 @@ from pathlib import Path
 from yd_producer._work_claim import (
     ClaimLostError,
     WorkClaim,
+    open_claimed_file,
     read_claimed_bytes,
     stat_claimed,
     validate_claim,
@@ -120,6 +121,7 @@ from yd_producer.store.safe_fs import (
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
     open_directory_no_follow,
+    open_file_no_follow,
     read_bytes_limited_no_follow,
     read_bytes_no_follow,
     remove_tree_allow_symlinks,
@@ -259,6 +261,8 @@ class PublishInputs:
     variant_reach_count: int
     #: Optional frozen exact-work claim. Controller paths pass a non-None token.
     claim: WorkClaim | None = None
+    #: DAT 第 0 列相对分钟步长。additive 默认 60 只保旧位置兼容；controller MUST 显式传入。
+    output_interval_minutes: int = 60
 
     #: `Path(yd_root).resolve()`：NFS 侧全部路径与 `containment_root` 的唯一来源。
     root: Path = field(init=False)
@@ -423,8 +427,6 @@ def _read_dat_head(inputs: PublishInputs) -> tuple[int, int]:
     try:
         head = _scratch_read_limited(inputs, dat, max_bytes=DAT_FIXED_HEADER_BYTES)
     except (SafeFilesystemError, OSError, ClaimLostError) as error:
-        # `SafeFilesystemError` 是 `RuntimeError`，两个都要列：`open_file_no_follow` 对
-        # EACCES/EIO 与 `stat` 到 open 之间被删掉的 ENOENT 竞态都是裸抛 `OSError`。
         raise PublishError(f"DAT {dat} 读取失败（{error}）") from error
     if len(head) < DAT_FIXED_HEADER_BYTES:
         raise PublishError(
@@ -463,13 +465,10 @@ def _check_v2_text_header(text_header: bytes, *, dat: Path) -> None:
 
 
 def _check_dat(inputs: PublishInputs) -> int:
-    """v2 布局 + 列数 + 行数，交回**校验通过的字节数**。行数判据是**恰好相等**：残行一律拒绝。
+    """v2 布局 + 列数 + 行数 + 第 0 列相对分钟，交回**校验通过的字节数**。
 
-    `docs/products-contract.md` §5.1 逐字「不规定残行修复」；`rSHUD/R/readout.R:41` 对残行
-    只 `message` 不报错，那份宽容不得进入 producer 的写 `DONE` 闸。
-
-    交回 `expected_size` 是给步骤 3 用的：整读是另一次独立 open，与本次 `st_size` 之间
-    scratch 上若有滞留/重投的作业写入，落地的就是一份从未被校验过的字节（裁决 12）。
+    行数判据是**恰好相等**：残行一律拒绝。交回 `expected_size` 给步骤 3 整读复核
+    （裁决 12）；分钟列在同一 descriptor 上按偏移各读 8 字节，不改变该语义。
     """
     dat = inputs.scratch_dat
     nc, size = _read_dat_head(inputs)
@@ -495,7 +494,58 @@ def _check_dat(inputs: PublishInputs) -> int:
             f"DAT {dat} 的数据区字节数不符：期望 {inputs.expected_rows} 行"
             f"（共 {expected_size} 字节），实得 {size} 字节；残行一律拒绝"
         )
+    _check_dat_minute_column(inputs, nc=nc, table_end=table_end)
     return expected_size
+
+
+def _open_scratch_dat(inputs: PublishInputs) -> int:
+    """Claim 走 `open_claimed_file`，standalone 走 `open_file_no_follow`。"""
+    if inputs.claim is not None:
+        return open_claimed_file(inputs.claim, inputs.scratch_dat)
+    return open_file_no_follow(inputs.scratch_dat)
+
+
+def _check_dat_minute_column(inputs: PublishInputs, *, nc: int, table_end: int) -> None:
+    """同一 descriptor 上按 `table_end + i*(nc+1)*8` 读每行第 0 列一个 LE float64。"""
+    dat = inputs.scratch_dat
+    stride = (nc + 1) * _FLOAT64_BYTES
+    interval = inputs.output_interval_minutes
+    fd = None
+    primary: BaseException | None = None
+    try:
+        try:
+            fd = _open_scratch_dat(inputs)
+            for row_index in range(inputs.expected_rows):
+                packed = os.pread(fd, _FLOAT64_BYTES, table_end + row_index * stride)
+                expected = float(row_index * interval)
+                if len(packed) < _FLOAT64_BYTES:
+                    raise PublishError(
+                        f"DAT {dat} 第 {row_index} 行相对分钟短读："
+                        f"期望 {expected}，需要 {_FLOAT64_BYTES} 字节，实得 {len(packed)} 字节"
+                    )
+                (actual,) = struct.unpack("<d", packed)
+                if not math.isfinite(actual) or actual != expected:
+                    raise PublishError(
+                        f"DAT {dat} 第 {row_index} 行相对分钟不符："
+                        f"期望 {expected}，实得 {actual}"
+                    )
+        except (SafeFilesystemError, OSError, ClaimLostError) as error:
+            raise PublishError(f"DAT {dat} 读取失败（{error}）") from error
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError as close_error:
+                if primary is None:
+                    raise PublishError(
+                        f"DAT {dat} 读取失败（{close_error}）"
+                    ) from close_error
+                primary.add_note(
+                    f"DAT descriptor close also failed: {type(close_error).__name__}: {close_error}"
+                )
 
 
 def _restamped_bytes(inputs: PublishInputs) -> bytes:
@@ -530,16 +580,8 @@ def _restamped_bytes(inputs: PublishInputs) -> bytes:
 def _check_restamped_state(payload: bytes, inputs: PublishInputs) -> None:
     """对**重戳后**的字节做「T+12 状态可按分段格式读取」检查。
 
-    检查对象是重戳后的文档而不是 scratch 原文件——否则一份重戳后才损坏的状态会被放行。
-    时间判据与 `controller._classify_state` 逐字同构：header 的分钟时标 `round()` 后必须
-    等于 `round((T+12).timestamp()/60)`，**相对分钟一律不接受**。写出去的那份状态，正是
-    下一轮前沿闸门要读的那份。
-
-    结构判据 MUST 传**权威计数** `expected_river_count=reach_count`：不传时
-    `state_qc._check_row_counts` 对每一类都 `if expected is None: continue`，唯一还生效的
-    只剩「分段存在」，于是一份 river 段被截断的 checkpoint（tracker 在 SHUD 非原子改写
-    `cfg.ic.update` 期间捕获，正是 `state_qc.py:474-481` 点名的形态）照样拿到 `DONE`，
-    下一轮从中毒 IC 起跑且下游无人复检。
+    时间判据与 `controller._classify_state` 同构：header 分钟 `round()` 后必须等于
+    `round((T+12).timestamp()/60)`。结构闸 MUST 传权威 `reach_count`。
     """
     if not state_ic_structure_complete(
         payload, expected_river_count=inputs.reach_count
@@ -567,6 +609,9 @@ def _check_restamped_state(payload: bytes, inputs: PublishInputs) -> None:
 
 def _check_positive_expectations(inputs: PublishInputs) -> None:
     """期望值正数闸。**先于**读文件：`expected_rows == 0` 会让「行数相等」在空数据区上恒真。"""
+    interval = inputs.output_interval_minutes
+    if type(interval) is not int or interval <= 0:
+        raise PublishError(f"output_interval_minutes 必须为正整数，实得 {interval!r}")
     if inputs.expected_rows <= 0:
         raise PublishError(f"expected_rows 必须为正，实得 {inputs.expected_rows}")
     if inputs.reach_count <= 0:
@@ -587,12 +632,12 @@ def _check_and_restamp(inputs: PublishInputs) -> tuple[bytes, int]:
 
     次序固定：期望值正数闸（不读文件）-> 重戳（步骤 1）-> DAT/状态/日志/`DONE` 前置。
     """
+    _check_positive_expectations(inputs)
     if inputs.claim is not None:
         try:
             validate_claim(inputs.claim, path=inputs.work_dir)
         except ClaimLostError as orig:
             raise PublishError(f"发布读取前精确 work identity 已漂移：{orig}") from orig
-    _check_positive_expectations(inputs)
     payload = _restamped_bytes(inputs)
     dat_size = _check_dat(inputs)
     _check_restamped_state(payload, inputs)
@@ -637,34 +682,9 @@ def _widen_publish_dir(directory: Path, *, root: Path) -> None:
 def _is_readable_and_traversable(mode: int) -> bool:
     """发布目录对 node-27 是否**既可遍历又可读**。判据由消费者契约推导，不是掩码字面值。
 
-    出处逐字（这条判据前后写坏过两次，两次都是拿上一轮的反例去调掩码，故把推导链写在
-    这里）：
-
-    * `docs/products-contract.md` §8（:120）——「node-27 `nwm` 账户只需对 `input/viewer`
-      和 `output` 有目录**遍历与读取**权限」；
-    * `docs/agent-ops.md` §10（:311）——「node-27 只需 `input/viewer` 和 `output` 的
-      **读/遍历**权限；优先使用双方共享组和目录 setgid」。
-
-    两份文档都把「遍历」与「读取」并列写着，故两者都是必需的、且必须**落在同一类主体上**：
-    目录的遍历是 `x`（`open`/`stat` 目录内的名字），目录的读取是 `r`（`readdir` 列出名字）。
-    node-27 只有一个身份，它要么走 group 要么走 other——一类只有 `x`（如 `0o710`）时它进得
-    去却列不出 cycle 目录，一类只有 `r`（如 `0o744`）时它列得出名字却 `stat` 不到任何条目，
-    两种都让 `DONE` 封在一棵 viewer 瞎眼的树上。`output/` 恰是 viewer 必须 `readdir` 才能
-    枚举 cycle 的那一级：`products-contract.md` §7.1 的枚举锚点是「最新 `DONE` cycle」而不是
-    墙钟，§7.3 又要求算停后最后一批仍可显示，两条一起堵死了按名字猜候选路径的退路。
-
-    owner 位 MUST NOT 计入：发布进程自己永远进得去，算上它这条判据即恒真（变异体 (aq)）。
-
-    判据只看低九位，`S_ISGID`/sticky 等高位经 :func:`stat.S_IMODE` 原样穿过：现场按 §10
-    首选做法设的 `0o2750` 满足 group 的 `r`+`x` 而原样通过。
-
-    **验收形式是穷举真值表，不是一组样本 mode**：
-    `tests/test_publish.py::test_traversability_predicate_matches_an_independent_oracle`
-    对 512 个低九位 × `S_ISUID`/`S_ISGID`/`S_ISVTX` 的全部 8 种组合（4096 个 mode，恰好是
-    :func:`stat.S_IMODE` 的完整值域），与一份按类循环、独立措辞（不共享本函数的组合常量）
-    的 oracle 逐值对拍。端到端那张十三格表只是**接线证据**（判据确实被 `publish()` 调用、
-    拒绝确实早于第一处 NFS 写入），它挡不住自然掩码族的变异——round 4 实测十三格下仍有 94
-    个此类变异体存活，这正是本函数被连续写坏三轮的机理。
+    `products-contract.md` §8 与 `agent-ops.md` §10 并列要求目录遍历与读取，故 group
+    或其他必须有一类同时具备 `r` 与 `x`。owner 位不计入（发布进程自己永远进得去）。
+    验收是穷举真值表（`test_traversability_predicate_matches_an_independent_oracle`）。
     """
     return (mode & _GROUP_READ_TRAVERSE) == _GROUP_READ_TRAVERSE or (
         mode & _OTHER_READ_TRAVERSE
@@ -674,25 +694,8 @@ def _is_readable_and_traversable(mode: int) -> bool:
 def _require_traversable(directory: Path, *, root: Path) -> None:
     """发布目录的**可遍历且可读断言**（裁决 8 的 fail-closed 半边）。
 
-    判据整条交给 :func:`_is_readable_and_traversable`，那里写着它从
-    `docs/products-contract.md` §8 与 `docs/agent-ops.md` §10 的推导链，以及它的验收形式
-    （穷举真值表 + 独立措辞 oracle）；本函数只负责取到 fd 绑定的 mode 并把不合格的层级变成
-    一条 pre-`DONE` 的响亮失败。本函数自己被测的是**逐级**：三级里任何一级不合格都必须在
-    `mkdir` 之前拒（前置那趟 MUST 遍历全部已存在层级，只查首级会让下面两级先被建出来）。
-
-    存在理由：「本次调用之前不存在」不是可持久化的属性。三级 stat 完成到放宽循环跑完之间
-    任何一次失败（NFS EIO/ESTALE、SIGKILL、节点重启），已 `mkdir` 的层级就以 umask 0o077
-    下的 `0o700` **永久闩死**——其后每一轮都把它看作「已存在」而不动，而
-    `residue._half_product_dirs`（`residue.py:296-311`）只删 `output/<T>/<source>/`、从不碰
-    父级，canonical 恢复路径也救不回来。任一父级不可穿越即等于 node-27 什么都看不到，同时
-    状态链照常推进、无任何信号——这直接违反治理不变量的「node-27 **可读**」半边。
-
-    现场按 `docs/agent-ops.md` §10 首选做法设的 `0o2750` 组位齐备（`r`+`x`），**原样通过、
-    不被改写**：MUST NOT 把这条断言改成「发现不可穿越就放宽已存在的层级」——那会把 round 1
-    的 cand-02（重写现场的 `2750`、清掉 setgid）原样放回来。
-
-    读法是 fd 绑定的（`open_directory_no_follow` + `os.fstat`），与 :func:`_widen_publish_dir`
-    同一高度：不跟随 symlink，且断言的正是随后会被写入的那个 inode。
+    判据交给 :func:`_is_readable_and_traversable`。读法是 fd 绑定的
+    （`open_directory_no_follow` + `os.fstat`），与 :func:`_widen_publish_dir` 同一高度。
     """
     fd = open_directory_no_follow(directory, containment_root=root)
     try:
@@ -822,46 +825,9 @@ def _create_done(inputs: PublishInputs) -> None:
 def _done_is_on_disk(inputs: PublishInputs) -> bool:
     """`DONE` 是否**已在盘上**——这是「本轮已完成」的判据，不是「`_create_done` 返回了」。
 
-    `write_bytes_no_follow_exclusive` 在 `O_EXCL` 的 `os.open` 之后还有两步会失败
-    （`fchmod`、以及真实域里的 `os.fsync` EIO/ENOSPC/EDQUOT，`store/safe_fs.py:294-301`），
-    而它的失败臂只关 fd、**不 unlink**（那是原语的既有行为，本 issue MUST NOT 改它：加
-    unlink 会改变既有 `mode=None` 调用方的失败路径）。于是文件可能已经对 node-27 可见，
-    错误却是「创建失败」。故失败后 MUST 复探：在盘即 :class:`PublishCleanupError`。
-
-    复探原语 MUST 是**裸 `os.lstat`**：成功即 `True`，任何 `OSError` 即 `False`。与姊妹模块
-    `controller.done_cycles`（`controller.py:308-317`）、`residue._half_product_dirs`
-    （`residue.py:302-310`）共享的是**原语高度**——同样绕开 `safe_fs`、直接读裸 `os.stat` /
-    `os.lstat` 的 errno；**极性则不同，且必须不同**：那两处只把 `ENOENT`/`ENOTDIR` 当「不
-    存在」，其余 `OSError` 一律抬成 `DiscoveryUnreadableError`（`controller.py:313-316`、
-    `residue.py:306-309`）——发现（discovery）里「读不出来」必须吵，静默掉出集合会让前沿倒退
-    回更旧的 cycle。此处是清理归类，方向相反：「读不出来」必须保守收敛成 `False`。
-    MUST NOT 走 `stat_no_follow`：它把 EACCES/EIO/ESTALE 一律包成
-    `SafeFilesystemError(kind="io")`（`store/safe_fs.py:369-397`），`_open_child_dir`
-    把父链上的一切非 `FileNotFoundError` 失败同样包起来（`:795-811`），于是
-    `except SafeFilesystemError: return True` 会把「测不出来」翻译成「本轮已完成」——实测
-    `output/<T>/<source>/` 被 `chmod 0o000` 且 `DONE` 不存在时得到错误的 `True`。按 `kind`
-    分支同样证伪：父级被换成普通文件时 `kind` 是默认的 `unsafe`，而 `DONE` 按构造不可能存在。
-    这与 round 1 的「`safe_fs` 把一切失败都包成 `SafeFilesystemError`」是同一条可复用错误
-    假设的反面。
-
-    任何条目（含 symlink、目录）都算「在盘」，这条**有意宽于消费者**。本函数只在
-    `_create_done` 的 `except (SafeFilesystemError, OSError)` 臂里被调用（`:905-911`），
-    回答的是**清理归类**问题——「本次调用是否已经在 `done_path` 上留下了东西，以致后续失败
-    必须按『已完成』上报」——而不是消费者的「这一轮算不算完成」。保守是对的方向：那里只要
-    有东西，本发布者就不能再声称本轮 untouched。
-
-    生产上这条臂按构造也见不到非普通文件：预先存在的条目（symlink 在内）已被
-    `_check_done_absent`（`:328-347`）拒掉，并发新建的条目让 `O_EXCL` 的 `os.open` 抛
-    `FileExistsError`，`store/safe_fs.py:313-315` 把它**原样重抛**（不包成
-    `SafeFilesystemError`），再由排在 `OSError` 臂**之前**的 `except FileExistsError`
-    （`:899-904`）收敛为 `PublishError`，根本走不到复探。消费者侧 `controller.done_cycles`
-    要求 `stat.S_ISREG`（`controller.py:308-317`，`docs/products-contract.md` §4.1「`DONE`
-    是空文件」），**严于**本探测；这个不对称是有意的，且方向安全——本探测至多多报「在盘」，
-    多报的后果是走更响的 :class:`PublishCleanupError`。
-
-    复探失败返回 `False`（收敛为 `PublishError`）：不能凭一次失败的探测宣布本轮已完成。
-    此处不需要 `safe_fs` 的 containment/no-follow 保护：只读一个 `st_mode` 都不看的存在性
-    判定，不打开、不写入、不跟随任何东西。
+    复探原语 MUST 是裸 `os.lstat`：成功即 `True`，任何 `OSError` 即 `False`。MUST NOT
+    走 `stat_no_follow`：它把 EACCES/EIO/ESTALE 包成 `SafeFilesystemError`，会把「测不
+    出来」翻译成「本轮已完成」。任何条目（含 symlink、目录）都算「在盘」。
     """
     try:
         os.lstat(inputs.done_path)

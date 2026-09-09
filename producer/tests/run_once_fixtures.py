@@ -241,6 +241,7 @@ def write_config_local(
     config = make_config(source=source)
     local = make_local(tmp_path, config=config)
     Path(local.yd_root).mkdir(parents=True, exist_ok=True)
+    (Path(local.yd_root) / "output").mkdir(exist_ok=True)
     Path(local.scratch_root).mkdir(parents=True, exist_ok=True)
     return config, local
 

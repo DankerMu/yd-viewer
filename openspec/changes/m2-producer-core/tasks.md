@@ -5638,9 +5638,9 @@ Minimal mergeable slice: 只交付任务 14.4（原 14.3）；14.1 与 14.3 已�
 **固定并发、循环、失败与恢复语义**：
 
 1. 四份 mapping 必须先完成全局快照/校验；失败时零 worker、零 #108 hygiene。随后 `ThreadPoolExecutor(max_workers=2, thread_name_prefix="yd-source")` 为 IFS/GFS 各启动一个 worker；一源启动失败不得取消兄弟。
-2. 每个 worker 先调用与 `run_once` 同源的本源纯 preflight，再恰执行一次 #108 startup hygiene，之后才进入同步循环。hygiene 必须先确认共享 `output/` 根可枚举；无法确认时零删除，ENOENT/ENOTDIR 按 #86 留给首次 `run_once` 返回 `DISCOVERY_UNREADABLE`。根确认后，`safe_fs.list_directory_no_follow` 只枚举 resolved `work_root/<source>` 的直接子项（缺失视为空）；只把 `controller.parse_cycle_id` 接受且 hour 属于配置 cycle 的名字作为候选，非法名字原样保留且不得构造 NFS 路径。不得用墙钟、mtime、最新 DONE 或状态前沿缩小候选集。
+2. 每个 worker 先调用与 `run_once` 同源的本源纯 preflight，再恰执行一次 #108 startup hygiene，之后才进入同步循环。hygiene 必须先确认共享 `output/` 根可枚举；无法确认时零删除，按 #86 复用既有 `DISCOVERY_UNREADABLE` 报告转换立即停止本源，不为重现错误再调用 `run_once` 或重扫根。根确认后，`safe_fs.list_directory_no_follow` 只枚举 resolved `work_root/<source>` 的直接子项（缺失视为空）；只把 `controller.parse_cycle_id` 接受且 hour 属于配置 cycle 的名字作为候选，非法名字原样保留且不得构造 NFS 路径。不得用墙钟、mtime、最新 DONE 或状态前沿缩小候选集。
 3. 候选按 cycle 升序处理，以既有 `safe_fs.stat_no_follow(..., containment_root=resolved YD_ROOT)` 验证同源 `output/<T>/<source>/DONE` 恰为普通文件，不改变 shared helper 合同。DONE 缺失或探测确认叶子/父链为 symlink、目录、FIFO 等不安全或非普通形态均不构成 authority；`SafeFilesystemError.kind` 为 `io`、`identity_changed`、`indeterminate` 等无法确定状态时成为 cleanup error，不能降成无 DONE。对普通文件 `DONE(T)` 与真实目录 exact work 的交集，先用 `directory_identity_no_follow` 冻结 identity，再用 `remove_tree_allow_symlinks(containment_root=resolved work_root, expected_root_identity=identity)` 删除。非目录 exact entry、identity 漂移与 discovery/delete 无法确定均保留并成为本源 `RunError(phase="cleanup")`；此前已删项不回滚。无有效 `DONE(T)` 的所有候选都先保留，不能遮住其它 DONE-backed 删除；完整扫描后以最早 cycle 复用 `STOPPED/UNVERIFIED_WORK_RESIDUE` 作为本源首报告，零 frontier/raw/driver/submit。
-4. hygiene 的有序删除清单以稳定 `startup cleanup:` 前缀加入本源首个 `RunReport.detail`，每项含 source、cycle 与绝对 exact path；首报告既可以是上述 unknown-work STOPPED，也可以来自首次 `run_once`。若首个报告前出现其它 `RunError`，对原对象 `add_note`，不得包装换对象；启动清理自身失败的错误正文列出此前已删项和失败路径。`RunSourcesError` 的单份人读消息必须按 `ifs,gfs` 渲染每个底层错误及其 notes、每项恰一次；CLI 将该完整消息输出一次且无 traceback，但其 reports/errors 快照和公共字段不扩。
+4. hygiene 的有序删除清单以稳定 `startup cleanup:` 前缀加入本源首个 `RunReport.detail`，每项含 source、cycle 与绝对 exact path；首报告既可以是上述 unknown-work STOPPED，也可以来自首次 `run_once`。若首个报告前出现其它 `RunError`，对原对象 `add_note`，不得包装换对象；启动清理自身失败的错误正文列出此前已删项和失败路径。`RunSourcesError` 的单份人读消息必须按 `ifs,gfs` 渲染每个底层错误及其 notes、每项恰一次，reports/errors 快照和公共字段不扩；CLI 的 stderr/退出码/一次输出验证归 #132，本 #108 只交付既有 #137 聚合文本的输入。
 5. 每个 worker 同步循环：调用私有 `run_once`、append report、只在 `outcome is SUCCEEDED` 时继续；STOPPED/JOB_FAILED/SUCCEEDED_CLEANUP_PENDING 立即作为末项返回 tuple。每轮重新从已落盘 `DONE`/state 发现前沿；不得外层 `T += 12h`、预扫更晚 raw、冻结调用开始时 horizon 或先批量 submit 后等待。同源上一轮完全返回后才开始下一轮，因此在途≤1；两源首轮必须可同时在途，后续追赶长度独立。
 6. 两个 worker 共享的唯一可变对象是本次调用私建的 publish lock；executor/driver 按源隔离，mapping 快照只读。每源始终使用自己的 poll wait/provider，不能串源。
 7. 组合层等待两个 future 都结束，再按固定 `ifs,gfs` 顺序汇总。一个源 STOPPED/JOB_FAILED/RunError 不取消、截断或限制另一源继续追赶；一个源异常前已 append 的成功报告必须进入聚合错误。
@@ -5674,7 +5674,7 @@ Minimal mergeable slice: 只交付任务 14.4（原 14.3）；14.1 与 14.3 已�
   - 一源 sbatch/sacct 客户端 timeout + 兄弟正常追赶 -> submit/poll phase error 与 work/partial reports 保留，零 provider/finalizer/DONE，兄弟完整序列；不与 terminal `JobState.TIMEOUT` 的 JOB_FAILED/删除路径混同。
   - 两源同 cycle SUCCEEDED -> publish overlap=1、两 DONE、预置 `output/` mode 不变。
   - 普通文件 DONE 对应多个历史目录（含越界内部 symlink）-> 首次 frontier 前按 cycle identity-bound 删除、外部目标/NFS 不变、清单进入首报告；其中一个 identity 漂移 -> replacement 保留、本源 cleanup error、此前删除列入正文且兄弟继续。
-  - 无 DONE 的历史 work 各形态 -> startup hygiene 零删除，轮到精确前沿时仍停源；非法 cycle 名和非普通文件 DONE 永不授权删除。
+  - 无 DONE 的历史 work 各形态 -> 保留这些 entry，继续清理其它 DONE-backed 候选；完整扫描后在首次前沿前以最早 unknown cycle 停源；非法 cycle 名和非普通文件 DONE 永不授权删除。
   - 无 work 的 NFS 崩溃残留 -> 精确清理重组；同场景加 work -> 停源不读不删不提交；point-of-use 插入 marker -> raw phase error、marker 保留。
   - 既有 `residue.plan_residue` 在 `DONE(T)` 存在时仍产空 NFS 清单；catch_up_source AST/public contract 与单源 run_once/cleanup/publish/executor tests 全绿。
 
@@ -5749,15 +5749,15 @@ Minimal mergeable slice: 只交付任务 14.4（原 14.3）；14.1 与 14.3 已�
 35. #108 无 DONE 极性：无有效 DONE 的 exact work 分别为真实目录、普通文件、FIFO、symlink 与断链 symlink，且另有一个更晚 raw 完整前沿 -> 所有 entry bytes/type/identity 不变，返回最早 cycle 的 `STOPPED/UNVERIFIED_WORK_RESIDUE`，零 frontier/raw/driver/submit；不得读取 work 内容、猜 mtime 或扫描 checkpoint。
 36. #108 DONE authority：DONE 缺失，或 `stat_no_follow` 确认 DONE/任一父链为目录、FIFO、symlink（即使指向普通文件）或断链等不安全/非普通形态 -> 均不授权删除对应 work，外部 symlink 目标不变，完整扫描后按 unknown-work STOP；普通文件 DONE 正控制才删除真实目录。探测返回 `kind=io/identity_changed/indeterminate`（含 EACCES/EIO/ESTALE 等不可确定状态）-> cleanup error并零该路径删除，不得 follow symlink、吞错或误降为无 DONE。
 37. #108 非目录删除边界：普通文件 DONE 对应的 exact work 分别为普通文件、FIFO、symlink/断链 -> entry 与目标保留，本源 `RunError(phase="cleanup")` 指名 source/cycle/绝对失败路径；不调用 pathname-only unlink，不新增无 identity 条件的 shared 删除原语。
-38. #108 output 根特例：`output/` 根分别 ENOENT/ENOTDIR，work 下同时预置 DONE-looking 历史目录 -> 两源均按 #86 首报告 `STOPPED/DISCOVERY_UNREADABLE`，hygiene、NFS residue 与 delete 零调用，所有 work/state bytes 不变；不得把根异常变成空 DONE 集或 cleanup error。
+38. #108 output 根特例：`output/` 根分别 ENOENT/ENOTDIR，work 下同时预置 DONE-looking 历史目录 -> public `run_sources` 两源均按 #86 首报告 `STOPPED/DISCOVERY_UNREADABLE`、cycle None；记录实际根枚举失败后 `run_once`、第二次根/DONE枚举、work枚举、NFS residue 与 delete 均零调用，所有 work/state bytes 不变；不得 fall through 重扫后再制造同一 STOP，不得把根异常变成空 DONE 集或 cleanup error。
 39. #108 identity/containment：冻结历史 exact 目录 identity 后、tree open 或最终 rmdir 前把 pathname 换成 replacement inode；另测树内 symlink 指向 work_root 外 -> replacement/外部目标/NFS 保留，本源 cleanup error；删除原目录 identity 比较、只入口比较、错用 YD_ROOT containment 或 follow 内部 symlink 的变异分别必红。
 40. #108 运行错误审计：先成功删除两个 DONE-backed 目录，再让首次 `run_once` 抛带既有 cause/note 的 `RunError` -> `RunSourcesError.errors[source] is 原对象`，原 cause/note 不丢，只追加一条按 cycle 含两项 source/cycle/绝对 path 的 startup-cleanup note；兄弟完整运行，reports/errors 公共 shape 不变。
 41. #108 清理错误审计：先成功删除一个目录、第二个在删除中 identity 漂移或 I/O 失败 -> cleanup `RunError` 正文按序同时含已删项和失败 source/cycle/绝对路径，已删目录不回滚，失败 replacement 保留；未处理的后续候选不删除，兄弟继续到自身结局。
-42. #108 CLI 审计：构造双源 `RunSourcesError`，底层错误各带互异 notes，其中一条是 startup 清单且不在 `str(error)` 中 -> `str(RunSourcesError)` 与 stderr 都按 ifs/gfs 含每个底层错误和每条 note 恰一次、无 traceback，退出码仍为 3；CLI 可把该完整聚合消息打印一次，不得再逐项重复。删除 `add_note`、恢复不含底层 notes 的旧聚合摘要、重复打印 note 或 unordered set 遍历的变异必红。
+42. #108 聚合审计：public `run_sources` 在 startup 删除后让两源首报告前抛带不同 notes/cause 的原 `RunError` -> 原对象/cause保留，各追加一次有序 startup 清单；消费已落地 #137 的 `str(RunSourcesError)`，按 ifs/gfs 含每个底层错误和每条 note 恰一次。不得修改聚合器或丢失/重复 note。CLI stderr/无 traceback/退出码3及打印次数由 #132 单独验收，不属于本 #108。
 43. #108 名字边界：work/source 顶层混入名字为非 ASCII 数字、错误长度、不存在日期、不可 `+12h`、合法日期但 hour 不在 `config.cycle.hours` 的目录与文件 -> 这些非法名字均原样保留且不构造/探测对应 `output` 路径，不进入 unknown stop 候选；任意形态的合法 cycle 名仍完整进入候选分类。work/source 根不存在是空候选；不可枚举的非缺失根成为 cleanup error。
-44. #108 幂等与单次执行：第一次 tick 删除全部 DONE-backed 历史目录并记录一次；第二次相同 tick fixture 已无候选，不重复清单/删除。某源连续成功多轮时 startup hygiene 也只在 worker 开头执行一次，不在每轮重扫；运行期间新产生的本 attempt work 仍只归 publisher/failure cleanup。
+44. #108 幂等与单次执行：第一次 tick 删除全部 DONE-backed 历史目录并记录一次；第二次相同 tick fixture 已无候选，不重复清单/删除。另以 public `run_sources` 构造所有候选都有普通 DONE 的真实目录，源随后产生首个 SUCCEEDED 与后续报告，或在已有首报告后抛 RunError：只有首报告 detail 带有序 source/cycle/绝对path 的 `startup cleanup:` 前缀，后续报告及后续错误不重复；首报告前出错的 note 路径仍按40独立验证。连续多轮也只在 worker 开头一次 hygiene，不在每轮重扫；运行期新 attempt work 只归 publisher/failure cleanup。
 45. #108 NFS 极性回归：直接调用既有 `residue.plan_residue`，`DONE(T)` 普通文件存在时状态/产物 NFS 清单仍整体为空；startup hygiene 只删 scratch exact work，retention/publisher 七步序与 DONE 后 cleanup-pending 二分逐项不变。
-46. #108 mutation closure：在 profile 规定的唯一 scratch 副本中至少杀死“mapping/preflight 前删除”“沿 output 目录反向构造任意 work 删除”“只处理 frontier/latest”“unknown 遮蔽后续 DONE-backed 候选”“follow DONE symlink”“无 DONE 也删”“非目录 pathname unlink”“不传 expected identity/错 containment”“identity 漂移删 replacement”“树内 symlink 跟随”“detail 丢 source/cycle/path或顺序”“RunError 换对象/notes 不到 CLI”“hygiene 每轮重跑”“误扩 residue NFS 清单”十四类，0 survived/0 unrun。
+46. #108 mutation closure：在 profile 规定的唯一 scratch 副本中至少杀死“mapping/preflight 前删除”“沿 output 目录反向构造任意 work 删除”“只处理 frontier/latest”“unknown 遮蔽后续 DONE-backed 候选”“follow DONE symlink”“无 DONE 也删”“非目录 pathname unlink”“不传 expected identity/错 containment”“identity 漂移删 replacement”“树内 symlink 跟随”“detail 丢 source/cycle/path或顺序”“RunError 换对象/notes 不到聚合文本”“hygiene 每轮重跑”“误扩 residue NFS 清单”十四类，0 survived/0 unrun；不包含 #132 的 CLI 输出变异。
 47. #69 客户端 timeout 极性：分别在 IFS 首轮/later-round 的 submit、普通 poll 与 terminal 后 ExitCode provider 注入 cause 为 `subprocess.TimeoutExpired` 的 `ExecutorError`，GFS 继续多轮 -> IFS 分别保留原 cause 的 `RunError(phase="submit", job_id=None)` / `RunError(phase="poll", job_id=<known>)` / `RunError(phase="cleanup", job_id=<known>)`；exact work、scratch job log（已存在时）和此前 reports 保留，submit/poll 两腿 ExitCode provider 与 `finalize_failed_job` 零调用，ExitCode 腿 provider 恰进入一次但 `finalize_failed_job`/正式失败日志提交/删除零调用，collect/publish/DONE 均为零；GFS 完整追赶。该“停本源”通过 error 聚合完成，不新增 STOPPED report/StopReason。把客户端 timeout 映成 `JobState.TIMEOUT`、JOB_FAILED、猜退出码、失败日志/work 删除、重试或取消的变异必红。
 
 **测试布局**：
@@ -6134,8 +6134,9 @@ Minimal mergeable slice: 先合并严格六文件 docs-first PR；随后单一 p
 **PR Boundary**：
 
 - docs-first（本 fixture）恰六文件：`docs/compute-loop-design.md`、`docs/agent-ops.md`、`openspec/changes/m2-producer-core/design.md`、`tasks.md`、`specs/forcing-chain/spec.md`、`specs/run-controller/spec.md`。不改`docs/products-contract.md`、代码或测试；合并后#177保持OPEN、14.6保持`[ ]`、shared change不archive。
-- product恰八文件：保留 `producer/src/yd_producer/staged_inputs.py`（新增）、`assemble.py`、`_controller_run.py`、`producer/tests/test_staged_inputs.py`（新增）、`test_assemble_run.py`、`run_once_fixtures.py`、`test_controller_run_once.py` 七文件，另允许新增私有 `producer/src/yd_producer/_assemble_io.py`。该模块只承载每次调用的 descriptor-bound assembly IO 与必要私有输入结构，不新增公开 seam、第二 assembler 或 cleanup owner。其它controller/assemble siblings只运行回归、不修改；不得改`controller.py`、`_assemble_fs.py`、`_work_claim.py`、`safe_fs.py`、`prepare*.py`、`assembly_fixtures.py`、`cli.py`、`nwm.py`、`slurm.py`、config、viewer或增加large-file豁免；每个非豁免文件在标准格式化后仍须<1000行。
+- product恰九文件：保留 `producer/src/yd_producer/staged_inputs.py`（新增）、`assemble.py`、`_controller_run.py`、`producer/tests/test_staged_inputs.py`（新增）、`test_assemble_run.py`、`run_once_fixtures.py`、`test_controller_run_once.py` 七文件，另允许新增私有 `producer/src/yd_producer/_assemble_io.py` 及专用 `producer/tests/test_assemble_bound_io.py`。私有 IO 模块只承载每次调用的 descriptor-bound assembly IO 与必要私有输入结构，不新增公开 seam、第二 assembler 或 cleanup owner；专用测试文件承载 bound IO 回归及必要测试 helper，允许从原 assemble 测试迁移对应测试/fixture，但必须保持全部既有场景、断言和 public-seam 证据。其它controller/assemble siblings只运行回归、不修改；不得改`controller.py`、`_assemble_fs.py`、`_work_claim.py`、`safe_fs.py`、`prepare*.py`、`assembly_fixtures.py`、`cli.py`、`nwm.py`、`slurm.py`、config、viewer或增加large-file豁免；每个非豁免文件在标准格式化后仍须<1000行，不得压行或删弱断言凑数。
 - 本轮用户显式授权由七文件扩为八文件，以闭合 PR #181 INV-02 的 consumer-root identity 丢失；先以独立 docs-first 补充提交修订本文件与 `design.md`，再抽取私有 IO 模块。产品提交不夹带其它 docs/spec 改动，不重置 PR #181 review round；#177 与 shared change 在产品合并前保持未完成。
+- 后续用户明确选择新增专用测试文件，将八文件边界扩为九文件：Round 2 的 successor FD ownership / point-of-use nonregular 拒绝修复需要回归，而原测试文件标准格式化后已达1147行。先独立 docs-first 合并本文件与 `design.md` 的边界补充，再迁移测试；不放宽行为 oracle 或行数限制，不重置 PR #181 的轮次，shared change 保持 active。
 
 **Non-goals / scope firewall**：
 
@@ -6151,3 +6152,201 @@ Minimal mergeable slice: 先合并严格六文件 docs-first PR；随后单一 p
 - source/staged读写是否descriptor-bound、bounded、exact-set、manifest-last且关闭swap；assemble copy/parse是否同bytes校验。
 - legacy assemble是否真正保持签名/递归输入/inside-work拒绝，是否只有一个参数/state/forcing/commit内核。
 - 任一失败/timeout/crash/success的input residue是否只遵循现有exact-work owner，未建立第二删除协议。
+
+### Issue #112：ResiduePlan source 身份绑定
+
+Issue type: bugfix；Project profile: yd-viewer；Blast radius: critical。
+Fixture level: expanded；Repair intensity / effective tier: high；Upstream suggested level: absent（legacy issue）。
+Minimal mergeable slice: `residue.py` 的共享绑定函数、构造/执行双重调用与对应测试；`safe_fs.py` 零改动。
+Must preserve: planner 零写入与 DONE(T) 整份空清单；合法计划先半成品后状态；safe_fs no-follow、missing_ok 幂等、原错误传播；controller 包装为 RunError(phase="residue")。
+Seams under test: issue 声明的 `ResiduePlan` 构造、`execute_residue_plan`、`plan_residue`；不新增 seam。
+Contract: root resolve 写回；source 非空单分量且非点名/NUL；retained 为可由现有 cycle 编解码往返的 UTC 整点身份；state 路径必须词法等于 root/states/source/合法cycle.cfg.ic 且 cycle > retained；half-product 必须词法等于 root/output/retained/source。禁止用 target.resolve 把越界/遍历路径洗成合法身份。
+Binding: 构造与执行共用完整绑定；先验证全部字段和全部路径，再执行任何删除。合法 tuple 按路径排序去重；执行消费复验后的 tuple。绕过构造或 frozen 篡改同样被拒。
+Error contract: 身份拒绝使用既有 `SafeFilesystemError(kind="unsafe")`，消息指名字段/路径；本模块无 phase 字段，不新增 phase 协议；planner 原 source ValueError 与 discovery ResidueError 不变。
+Boundary: 整份零删除承诺针对身份非法计划；合法计划中的文件系统 no-follow/IO 拒绝仍可能出现在先前合法删除之后，不新增事务回滚，也不在 executor 新增 DONE 发现。
+Compatibility migration: 本节覆盖 #23 手搓越界 plan 延后到执行才拒的旧用例要求；改为构造拒绝并独立验证执行前绕过构造的拒绝。#23 合法状态 symlink 的执行顺序用例保持。
+
+Risk packs considered:
+- Public API / CLI / script entry: selected — 公开清单与执行器的直接调用及 controller 消费。
+- Config / project setup: not selected — 无配置变化。
+- File IO / path safety / overwrite: selected — 跨根/源/lane/cycle 删除拒绝，保留 no-follow。
+- Schema / columns / units / field names: selected — 路径/状态文件名的身份结构；不改产品格式。
+- Auth / permissions / secrets: not selected — 不改权限、凭证；路径权限沿用 safe_fs。
+- Concurrency / shared state / ordering: selected — frozen 绕过后的 point-of-use 复验与先验整份校验；不防敌意并发 Python 内存改写。
+- Resource limits / large input / discovery: not selected — 仅遍历显式 tuple，无新发现或文件读取。
+- Legacy compatibility / examples: selected — planner/controller 既有消费与旧手构测试适配。
+- Error handling / rollback / partial outputs: selected — unsafe 类型、整份身份拒绝零删除、合法计划 IO 错误保持。
+- Release / packaging / dependency compatibility: not selected — 无依赖或打包改动。
+- Documentation / migration notes: selected — 本 fixture/spec 记录公开构造收紧。
+- Geospatial / CRS / shapefile sidecars: not selected — 无几何。
+- Time series / forcing / temporal boundaries: selected — retained 与 later cycle 严格边界。
+- 状态链 / warm-start 定戳一致性: selected — retained 状态及兄弟源状态永不进入删除集合；不解析状态内容。
+- NWM 快照溯源与 DB-free 隔离: not selected — residue 为本仓代码，无 NWM 改动。
+
+Invariant Matrix:
+- Governing invariant: 每份可执行计划的全部删除目标与其 root/source/retained/lane 身份一致；任一身份错误必须在第一笔删除之前拒绝。
+- Source of truth: resolved yd_root、单分量 source、retained_cycle 与现有 cycle parser。
+- Producers: ResiduePlan.__post_init__、plan_residue；Validators/preflight: 唯一 binder、execute_residue_plan 入口。
+- Storage/cache/query: state_files/half_product_dirs 的不可变快照；Public entrypoints: 三个声明 seam。
+- Write/delete surfaces: executor 的两个 safe_fs 调用；Failure/stale surfaces: 手构、篡改、root 解析与非法 path；不缓存验证。
+- Downstream: _controller_run.py 的 residue plan/execute 调用段（566–577）、failure/publish tests；viewer 格式不变。
+- Unchanged shared helpers: cleanup.RetentionPlan 仅作参考、safe_fs 零改动；DONE 判定只在 planner。
+- Evidence: 以下递归快照/实际删除/回归命令，非仅 spy 调用。
+- Regression rows — valid: 自洽 IFS 手构/规划清单 → 仅删词法点名目标，retained/GFS 保留，重复执行无副作用。
+- Regression rows — mismatch: GFS DONE output/GFS state、跨根/lane、错 cycle/非 later、错后缀/遍历/塌缩 source → SafeFilesystemError(kind="unsafe")，构造及执行复验均先于任何删除，完整树快照不变。
+- Regression rows — compatibility: DONE(T) → planner 整份空清单；合法 state symlink → safe_fs 原拒绝且先半成品后状态；missing_ok 幂等；controller 错误仍 RunError(phase="residue")；旧手构用例改为构造拒绝并增加独立执行绕过用例。
+
+- [x] 112.1 在构造与执行前绑定完整 source 身份，保留合法计划消费行为。
+- [x] 112.2 构造输入为 sibling GFS output（含 DONE）/GFS state、跨根、lane 交换、非 retained 的 output cycle、state cycle <= retained、非 `.cfg.ic` 后缀、`..` 或 source `["", ".", "..", "a/b", "ifs/", NUL]` → SafeFilesystemError(kind="unsafe") 且递归快照不变；planner 既有 ValueError/ResidueError 不变。
+- [x] 112.3 先构造自洽 plan，再用 `object.__setattr__` 篡改 state_files（合法 half-product 在前、非法 state 在后）或 half_product_dirs → execute 先拒绝整份计划，异常 kind="unsafe"，包括合法目标在内的完整树快照不变；另用 object.__new__ 绕过构造验证同一出口。
+- [x] 112.4 自洽手构（含乱序/重复合法路径及 root alias）与 planner 产物 → 规范化后可执行且幂等，仅点名目标删除，retained/GFS/外部 symlink 目标保留；DONE(T) → planner 整份空清单；合法 plan 的 state symlink → 原 safe_fs 拒绝，半成品已先删除。
+- [x] 112.5 执行 focused residue/controller/publish 回归、producer pytest+Ruff/format、viewer pytest+Ruff/format、OpenSpec strict/all 与 stage anchor；新行为在旧 source 上有批量 red proof。
+
+Non-goals: #109/#86/#108/#85/#77 后续独立 PR；#58/#59/#94/#106 已关闭不重开；不改 safe_fs/cleanup、运行期 DONE 重新发现、事务删除、部署与真实 Slurm。
+Shared-change lifecycle: m2-producer-core 仍含未完成 issue；本 PR 仅关闭本节，不整体 archive。
+
+### Issue #109：DAT 第 0 列相对分钟校验
+
+Issue type: bugfix；Project profile: yd-viewer；Fixture level: expanded；effective tier/repair intensity: high。
+Upstream suggested level: absent（legacy）；docs-first authority: Wave 0 裁决16，compute-loop §11.1、run-controller「NFS 提交顺序与 DONE 语义」和本文件 #24 裁决4/12 已合并；本节只登记独立 PR，不重裁。
+Minimal mergeable slice: publish.py 与 _controller_run.py 的既有 PublishInputs 构造点、对应 publish/controller/DAT fixtures 测试；safe_fs/_work_claim/config/产品格式不改。
+Contract and seams: 消费 #24 裁决1/4/12/15 及 Required evidence 的 #109 两行；最高公开 seam 为 check_publish_contract、publish 与 run_once。尾部字段 output_interval_minutes 默认60保持旧调用，controller 显式传配置；strict positive int（拒 bool）在文件 IO 前校验；每行用同一个 descriptor-bound fd 定位读8字节并 finally close，保留既有两趟头部读及 expected_size。
+Must preserve: 七步序、DONE前零NFS写、DONE后错误极性、mode/no-follow/claim边界、既有行列/表完整性闸、合法168行；不读取流量列，不在publisher写死或反推间隔。
+Oracle: 合法bytes的独立固定偏移修改首/中/末值、非有限及整体偏移；非60显式37分钟的小fixture作为硬编码60/复制writer算式的killer，不把DAT writer生成表达式当expected oracle。
+
+Risk packs considered:
+- Public API / CLI / script entry: selected — PublishInputs/check/publish/run_once消费。
+- Config / project setup: selected — config.output_interval_minutes显式投影，无新配置。
+- File IO / path safety / overwrite: selected — descriptor-bound定位读，拒绝先于NFS写入。
+- Schema / columns / units / field names: selected — 第0列little-endian float64分钟。
+- Auth / permissions / secrets: not selected — mode与权限策略不改，沿用既有回归。
+- Concurrency / shared state / ordering: selected — same-fd行间绑定与finally close；不改变publish顺序。
+- Resource limits / large input / discovery: selected — 分钟增量读取恰N*8、零流量、无发现。
+- Legacy compatibility / examples: selected — 尾部默认字段与原168行/claim消费者兼容。
+- Error handling / rollback / partial outputs: selected — 非法/短读/IO映射PublishError且零NFS变更，work保留。
+- Release / packaging / dependency compatibility: not selected — stdlib，无依赖变更。
+- Documentation / migration notes: selected — 已合并#24检查清单及Known limit收口，本节记录实现证据。
+- Geospatial / CRS / shapefile sidecars: not selected — 无几何。
+- Time series / forcing / temporal boundaries: selected — relative_minutes = row_index * 显式配置间隔。
+- 状态链 / warm-start 定戳一致性: not selected — checkpoint语义不改，只跑既有回归。
+- NWM 快照溯源与 DB-free 隔离: not selected — 无快照/DB变化。
+
+Invariant Matrix:
+- Governing invariant: 写DONE前每行分钟值满足外部配置定义的时间轴，检查只额外读取N个float64且任何失败不写NFS。
+- Source of truth: Config.output_interval_minutes → PublishInputs字段；products-contract §5.2独立分钟oracle。
+- Producers: _controller_run.py既有PublishInputs构造、standalone callers；Validators: _check_positive_expectations/_check_dat/check_publish_contract。
+- Storage/read: scratch DAT，同一descriptor的逐行offset；Write/delete: publish七步既有，不改；Stale/error: 短读、非有限、IO、claim拒绝与finally close。
+- Downstream: publish expected_size整读长度复核、DONE消费者controller/viewer；共享safe_fs/_work_claim仅消费不改。
+- Regression rows — valid: 168行生产时间轴及显式37分钟小DAT → check通过且零写，publish正常DONE；旧调用/default及controller配置投影兼容。
+- Regression rows — mismatch: 首/中/末错值、整列+60、NaN/inf、非法interval、短读/IO → PublishError，row/expected/actual可定位，NFS快照不变且work保留，fd关闭。
+- Regression rows — resource/compatibility: standalone与claim读取合法N行 → 每行8字节、累计N*8，不读流量，fd同一且关闭；原expected_size与七步序不变。
+
+- [x] 109.1 添加显式分钟间隔输入/前置域闸、定位读校验和controller配置投影，不改公共旧参数位置。
+- [x] 109.2 实现上述valid/mismatch矩阵；独立offset/字面分钟oracle，记录构造方式，旧源码批量red proof。
+- [x] 109.3 实现两条fd腿的有界/关闭/错误回归；parent逐个运行wrong-stride、missing-table-end、first-last-only、whole-data-read、missing-close、hardcoded-writer60变异且test-body红，核对原expected_size。
+- [x] 109.4 focused publish/controller与producer/viewer完整验证、Ruff/format、OpenSpec strict/all、stage anchor通过；#24既有分钟Known limit已收口，不再声明延期。
+
+Non-goals: 流量值合理性、st绝对日期头、DAT复制与检查间内容事务、publish七步/根/原语语义变更、其他排队issue及真实SHUD/NFS/Slurm；shared change未完成，不整体archive。
+
+### Issue #86：output 根不可见时停止本源
+
+Issue type: bugfix；Project profile: yd-viewer；Fixture level: expanded；effective tier/repair intensity: high。
+Upstream suggested level: absent（legacy裁决issue）；已由用户Wave0裁决9与已合并#22/#23 fixture修订定案：不采用按状态数猜测或隔离改名，根不可枚举即STOP；不重新协商旧issue候选。
+Minimal mergeable slice: controller.py同次根枚举的严格缺席语义，residue共享消费与对应frontier/residue/run_once测试和合法根fixture适配；不改变其它路径的缺席语义。
+Authority: compute-loop§10步骤1、run-controller严格前沿/根异常零清理Scenario、本文件#22收尾裁决及#23裁决3均已push；本节仅实现结账。
+Seams under test: decide_frontier、plan_residue、run_once；共享done_cycles仅施加output根严格模式，visible_state_cycles的缺席空集合保持。
+Must preserve: 可枚举空output+多份状态仍取最早T并按原规则清首轮残留；下层cycle/source/DONE缺失或非目录仍不计完成；状态根缺席仍NO_INITIAL_STATE；DONE/可见cycle/状态header/symlink/原错误分型不改。
+Decision: 严格语义落在实际iterdir调用与其整个迭代窗口；不得exists预检，不新增第二次扫描。done_cycles在output根ENOENT/ENOTDIR抛DiscoveryUnreadableError，既有decide/run_once收敛DISCOVERY_UNREADABLE；plan_residue接到停止decision仍返回None，接到手交可跑T则独立重查根并收敛ResidueError，两者都不交出plan。
+
+Risk packs considered:
+- Public API / CLI / script entry: selected — done_cycles/decide/plan/run_once共同消费。
+- Config / project setup: not selected — 无新配置。
+- File IO / path safety / overwrite: selected — 根不可见不得触发危险残留删除。
+- Schema / columns / units / field names: not selected — cycle/state格式不改。
+- Auth / permissions / secrets: not selected — 不改权限策略；既有EACCES分类保持。
+- Concurrency / shared state / ordering: selected — 同次枚举捕获根消失，STOP先于raw/plan/work。
+- Resource limits / large input / discovery: selected — 不加预检/额外扫描，区分根和下层缺席。
+- Legacy compatibility / examples: selected — 合法新链fixture明确创建可枚举output，旧state/downstream行为保持。
+- Error handling / rollback / partial outputs: selected — 稳定停止原因与plan直调错误，零删除/提交。
+- Release / packaging / dependency compatibility: not selected — 无依赖变化。
+- Documentation / migration notes: selected — 更新旧根缺席注释及fixture调用前提，不改已裁决产品文档。
+- Geospatial / CRS / shapefile sidecars: not selected — 无几何。
+- Time series / forcing / temporal boundaries: selected — 不让根故障造成前沿回退。
+- 状态链 / warm-start 定戳一致性: selected — 多份状态在根故障时逐项保留。
+- NWM 快照溯源与 DB-free 隔离: not selected — 无快照变化。
+
+Invariant Matrix:
+- Governing invariant: 未可靠枚举output根时没有可授权的前沿T或残留清单；本源在任何raw/残留/work/submit前停止，状态与产物不变。
+- Source of truth: 实际output根iterdir结果，不是状态数量或exists。
+- Producers/validators: controller._iter_entry_names的根严格模式、done_cycles、_target_and_state；Storage/read: output根/下层DONE与states可见集。
+- Public consumers: decide_frontier、residue.plan_residue、_controller_run已有DiscoveryUnreadableError转换；Write/delete: 不达residue executor/work/submit；其它cleanup自己的发现器不改。
+- Failure/stale: output缺失、普通文件、枚举窗口内根消失、EACCES/EIO；Evidence: 两源真实树快照与raw/plan/submit零调用。
+- Regression rows — failure: root ENOENT/ENOTDIR+1或多份状态 → 两源分别DISCOVERY_UNREADABLE/cycleNone/raw0；将该停止decision交给plan_residue → None、executor0；手交FrontierDecision(cycle=T,stop_reason=None) → ResidueError、executor0；两种路径完整树快照均不变。
+- Regression rows — run_once: 同一根故障在shared done_cycles实际枚举处触发 → 既有DiscoveryUnreadableError catch返回STOPPED/DISCOVERY_UNREADABLE/cycleNone，driver/rawscan/plan/submit零调用；不得迟到residue阶段才变成RunError(phase="residue")。
+- Regression rows — race: output起初为真实可枚举目录，令实际iterdir调用或其lazy迭代窗口抛ENOENT/ENOTDIR（入口时root仍存在）→ decide STOP/cycleNone/raw0、手交T的plan抛ResidueError、run_once STOP且plan/submit0、树快照不变；exists/isdir预检后loose扫描和第二次loose扫描均须被该用例击中。
+- Regression rows — valid: 可枚举空output+单状态 → 取最早T且raw被调用；可枚举空output+T/T+12 → 最早T且later残留照常删除。
+- Regression rows — compatibility: output可枚举但states根缺失 → NO_INITIAL_STATE；下层cycle/source/DONE缺失/非目录 → 不计完成，兄弟源不受影响。
+
+- [x] 86.1 在共享实际枚举边界施加output根严格模式；保持states与下层缺席规则及现有错误消费者。
+- [x] 86.2 建立两种根故障、枚举窗口消失和两源/直调plan/run_once零副作用回归；基线red证明。
+- [x] 86.3 适配真正新链fixture为显式可枚举output；合法多状态残留、states根缺席、下层DONE缺席/非目录和既有source隔离仍绿。
+- Fixture migration: test_absent_directories_still_mean_empty_sets的旧“output缺失即新链”断言必须翻转为DISCOVERY_UNREADABLE或由86.2替代，不得mkdir掩盖；test_fresh_chain_takes_the_earliest_state_file_name、test_fresh_chain_with_several_states_still_takes_the_earliest及其它真正write_state-only新链fixture则显式创建空output，保持其原业务oracle。
+- [x] 86.4 focused frontier/residue及producer/viewer完整矩阵、Ruff/format/OpenSpec/stage通过；删除严格根分流的变异须使根故障用例red。
+
+Non-goals: 隔离改名/状态数量阈值、执行器重新发现DONE或事务删除、init产品行为、其它发现器/safe_fs、#108启动scratch清理、真实NFS/Slurm；shared change仍active。
+
+### Issue #108：run_sources 启动时清理 DONE-backed 历史 work
+
+Issue type: bugfix；Project profile: yd-viewer；Fixture level: expanded；effective tier/repair intensity: high。
+Upstream suggested level: absent（legacy）；Wave0裁决11已合并，选择run_sources每源启动hygiene，不扩publisher/residue/retention，不重开#58/#59/#94/#106。
+Minimal mergeable slice: `_controller_sources.py` 单一启动清理owner及对应sources/startup/crash tests；既有RunSourcesError已由#137携带notes，CLI渲染归#132，不改CLI。
+Authority: docs compute-loop§10/§12、run-controller启动hygiene Requirement、#28固定语义2–4及Required evidence32–46。原“轮到前沿才停unknown”旧概括按细化Requirement纠正；根发现失败直接复用#86 STOP转换，不再重扫来重现同一错误。
+Seams under test: 公开run_sources及其RunSourcesReport/Error；系统边界注入safe_fs故障/identity替换，startup私有helper不另立public API。
+Must preserve: mapping全局快照/校验、两源独立追赶/publish-only锁、run_once/catch_up公开合同、RunReport八字段/outcome/phase闭合词表、#137原error/cause/notes；DONE的NFS residue空清单与publisher七步不变。
+
+Implementation contract:
+- 四mapping先全局校验；每个worker先复用本源纯preflight，之后恰一次startup，首次frontier之前。output根无法枚举→既有STOPPED/DISCOVERY_UNREADABLE、cycleNone、work/state零删除。
+- resolved scratch/work/source以safe_fs.list_directory_no_follow只列直接子项；根缺失为空，非缺失不可枚举/非目录/不安全根为cleanup error。只处理parse_cycle_id接受且hour在config.cycle.hours的名字；非法名不映射NFS，不按mtime/墙钟/frontier/DONE截断候选。
+- 候选按cycle升序。safe_fs.stat_no_follow(DONE,containment_root=resolvedYDROOT)且S_ISREG才授权；缺失或kind=unsafe/明确非普通形态为无有效DONE，io/identity_changed/indeterminate等不可确定错误不得吞成unknown。
+- 无有效DONE的所有候选保留，不读work内容；记录最早unknown但继续清理其它合法DONE目录。扫描完有unknown→UNVERIFIED_WORK_RESIDUE首报告，cycle最早unknown，frontier/raw/driver/submit0。
+- 普通DONE+真实目录work：directory_identity_no_follow冻结dev/ino，再remove_tree_allow_symlinks(parent,name,containment_root=resolvedwork_root,expected_root_identity=identity)；不得吞掉候选消失后伪报本次删除成功。内部symlink仅删链接，root/source/exact symlink不得跟随。
+- 普通DONE+非目录exact（file/FIFO/symlink/断链）、identity漂移、list/stat/delete IO → RunError(cleanup)指名source/cycle/绝对失败路径与此前已删清单；当前replacement和后续候选保留，已成功删除不回滚，兄弟继续。
+- `startup cleanup:` 后逐项source/cycle/绝对path有序前缀到本源首报告detail（无论unknown STOP还是run_once报告）；首报告前其它RunError用原对象add_note一次，保留cause/旧notes。已有RunSourcesError渲染原note，无重复追加；后续报告/后续错误不重复同一审计。
+
+Risk packs considered:
+- Public API / CLI / script entry: selected — run_sources/report/error；CLI只消费既有聚合消息，#132实现边界不扩。
+- Config / project setup: selected — 复用preflight与配置cycle hours，无新字段。
+- File IO / path safety / overwrite: selected — 历史目录危险删除、no-follow与identity。
+- Schema / columns / units / field names: selected — 合法cycle名字与审计detail/note格式；报告字段不扩。
+- Auth / permissions / secrets: not selected — 无凭据/权限变更，权限错误只作为fail-closedIO。
+- Concurrency / shared state / ordering: selected — per-source先preflight/startup再frontier，独立线程及identity点-of-use。
+- Resource limits / large input / discovery: selected — 顶层候选全集不递归发现、不扫output推导work、无时间窗口截断。
+- Legacy compatibility / examples: selected — directrun_once/catch_up/publish/residue行为保持，post-DONE已完成极性不改。
+- Error handling / rollback / partial outputs: selected — cleanup失败保留后续、原error/cause/notes、已删审计；不回滚。
+- Release / packaging / dependency compatibility: not selected — stdlib+既有helper，无依赖变更。
+- Documentation / migration notes: selected — shared#28两处旧措辞纠正，本节登记唯一owner与证据。
+- Geospatial / CRS / shapefile sidecars: not selected — 无几何。
+- Time series / forcing / temporal boundaries: selected — cycle解析与配置hour、排序/非frontier截断。
+- 状态链 / warm-start 定戳一致性: selected — DONE只授权scratch删除，NFS output/states逐字保留。
+- NWM 快照溯源与 DB-free 隔离: not selected — 无快照/DB调用。
+
+Invariant Matrix:
+- Governing invariant: 只有同源普通DONE+当前identity匹配的真实exact历史work目录可在首次frontier前删除；清理证据不丢、不重复，不使已完成cycle成为失败，兄弟独立。
+- Source of truth: source mapping、合法cycle、no-follow普通DONE、冻结work dev/ino；Source producer: run_sources worker startup。
+- Validators/read: 全局mapping、本源preflight、controller严格output枚举、safe_fs list/stat/directoryidentity；Storage: 仅本worker有序deleted/earliestunknown，不持久cache。
+- Write/delete: 唯一startup helper消费expected-identity tree delete；无NFS写与原语变化；Failure/stale: unknown/非目录/IO/identityswap/首报告前error。
+- Consumers/evidence: 首报告detail或原RunError.note → #137既有RunSourcesError文本；CLI只读该文本，CLI接线本issue不实现。
+- Regression rows — gates: invalidmapping→全局零discovery/delete；IFSpreflight失败→IFS零startup/GFS删历史并正常结束；outputmissing/file→两源DISCOVERY_UNREADABLE且树不变，首次根失败后run_once/第二次root或DONE枚举/work扫描均0。
+- Regression rows — valid/order: 乱序多个DONE目录含外部sentinel链接+更早unknown→全部DONE目录按cycle删，NFS/sentinel/unknown保留，首报告STOP earliestunknown带有序完整audit；再次tick不重复删除。
+- Regression rows — negative/type: 无有效DONE×work目录/file/FIFO/link/dangling保留且早停；DONE不安全/非普通不授权，io/identity_changed/indeterminate报cleanup；普通DONE×非目录exact报cleanup并保留目标。
+- Regression rows — identity/error: 删除一项后下一项在open前或finalrmdir前换inode→replacement及后续候选/NFS保留、之前删除记入错误、兄弟继续；错误不回滚已删。
+- Regression rows — audit/compat: startup删两项后首run_once抛原cause/note RunError→原对象保留追加一note、聚合消息每项一次；全DONE候选清完后首报告SUCCEEDED带完整有序audit，后续报告和已有首报告后的RunError不带重复audit；多轮仅startup一次；residue DONE时空NFS清单/directrun_once/catch_up不变。
+- Regression rows — names/root: 非ASCII/长度/日期/+12h溢出/hour不允许名字保留且零相应NFS探测；work/source缺失为空，非缺失不可读根cleanup失败。
+
+- [x] 108.1 实现单一startup owner、全局/本源前置和完整候选分类/identity删除/unknown阻塞。
+- [x] 108.2 实现首报告detail、原error note、清理自身partial audit以及兄弟隔离；不改#137聚合/CLI合同。
+- [x] 108.3 以public run_sources完成上述矩阵和#28 Required evidence32–45中本owner行；CLI直接stderr属#132，复用已落地#137字符串notes回归，不另接线。
+- [x] 108.4 parent批量旧源码28失败/2通过；21个有效变异覆盖#28 Required evidence46全部14类及root/config/uncertain guard，全部被杀死、0有效存活/未跑。另2个只去掉重复source/cycle标签但保留完整绝对路径的格式变异，经独立verifier判定信息等价排除，不新增措辞锁定测试；sharedhelpers只在临时副本变异。
+- [x] 108.5 focused sources/startup/legacy77、producer3105通过/3skip、viewer1通过，Ruff/format、OpenSpecstrict/all/stage通过；公开run_sources独立smoke确认排序删除/unknown零提交/NFS与外部目标保留/GFS成功。源码653行、新增测试各<1000，无新豁免。
+
+Non-goals: 修改当前attempt ownership、publisher/failure/retention/residue合同、自动删unknown或查杀孤儿Slurm、CLI/worker新接线、真实NFS/SHUD、任意非协作同inode内容写者；shared M2仍active。

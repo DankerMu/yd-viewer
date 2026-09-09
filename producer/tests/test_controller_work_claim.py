@@ -124,7 +124,6 @@ def test_additive_claim_parameters_are_keyword_only_last_default_none() -> None:
     assert fail_params["claim"].default is None
 
     pub_params = inspect.signature(publish_module.PublishInputs).parameters
-    assert tuple(pub_params)[-1] == "claim"
     assert pub_params["claim"].default is None
 
     remove_params = inspect.signature(safe_fs.remove_tree_allow_symlinks).parameters

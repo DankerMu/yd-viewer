@@ -540,6 +540,46 @@ def plant_unknown_work(local, source: str, *, shape: str) -> Path:
     return path
 
 
+def plant_historical_work(
+    local,
+    source: str,
+    cycle: str,
+    *,
+    marker: bytes = OLD_WORK_MARKER,
+    outside: Path | None = None,
+) -> Path:
+    path = work_dir(local, source, cycle)
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "old.bin").write_bytes(marker)
+    if outside is not None:
+        (path / "outside.link").symlink_to(outside)
+    return path
+
+
+def plant_regular_done(local, source: str, cycle: str) -> Path:
+    path = done_path(local, source, cycle)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"")
+    return path
+
+
+def dual_run_kwargs(config, local, *, ifs, gfs, waits=None, providers=None):
+    ifs_driver, ifs_exec = ifs
+    gfs_driver, gfs_exec = gfs
+    return {
+        "config": config,
+        "local": local,
+        "executors": {"ifs": ifs_exec, "gfs": gfs_exec},
+        "drivers": {"ifs": ifs_driver, "gfs": gfs_driver},
+        "poll_waits": waits or {"ifs": noop_wait, "gfs": noop_wait},
+        "failure_exit_codes": providers
+        or {
+            "ifs": RecordingProvider("ifs", IFS_EXIT),
+            "gfs": RecordingProvider("gfs", GFS_EXIT),
+        },
+    }
+
+
 def work_snapshot(path: Path) -> tuple[str, int, bytes | str]:
     info = path.lstat()
     mode = info.st_mode

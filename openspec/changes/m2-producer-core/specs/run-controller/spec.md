@@ -54,6 +54,21 @@
 - **WHEN** IFS 有无 `DONE(T)` 的半成品与比 T 更晚的状态，GFS 在同一 cycle 上也有更晚状态
 - **THEN** 只删除 IFS 侧的残留，GFS 的状态与产物不受影响
 
+### Requirement: 残留清单绑定声明身份
+公开 `ResiduePlan` MUST 在构造时将 yd_root resolve 并绑定非空单分量 source、合法 retained cycle 及每条删除路径。state_files MUST 词法等于该根的 `states/<source>/<cycle>.cfg.ic` 且 cycle 严格晚于 retained；half_product_dirs MUST 词法等于该根的 `output/<retained>/<source>`。执行器 MUST 在任何删除之前复验全部字段与全部条目；任一身份越界以 `SafeFilesystemError(kind="unsafe")` 拒绝整份清单且零删除。合法 tuple 规范化排序去重。不得用目标 realpath 消除词法越界；既有 safe_fs no-follow 继续负责文件系统使用点安全，合法清单的 IO 拒绝不承诺回滚。
+
+#### Scenario: 手构清单不能删除兄弟源
+- **WHEN** source=ifs 的手构计划带有 GFS output（含 DONE）或 GFS state，或跨根/lane/retained cycle 的条目
+- **THEN** 构造即拒绝，所有根内外文件递归快照不变
+
+#### Scenario: 执行期拒绝整份身份非法计划
+- **WHEN** 绕过构造或篡改后的计划先列合法半成品，后列其它源、错误后缀、带遍历或不晚于 retained 的状态
+- **THEN** execute_residue_plan 在第一笔删除前拒绝，合法半成品与所有状态也全部保留
+
+#### Scenario: 自洽计划保持既有行为
+- **WHEN** planner 或手工构造的完整计划满足 root/source/lane/cycle 身份，含重复或乱序合法路径
+- **THEN** 规范化后只删除点名目标，保留 retained 与兄弟源；重复执行无副作用，DONE 判定仍仅由 planner 承担
+
 ### Requirement: run 启动时清理 DONE 已证明完成的历史 work
 `run_sources` MUST 先完成四份依赖 mapping 的全局快照与校验，随后让每个 source worker 先完成该源既有纯 preflight，再恰执行一次 startup hygiene；任何前置失败都不得触发该范围内的 discovery 或删除。hygiene MUST 位于本源首次前沿发现之前，先确认共享 `output/` 根可枚举，再只枚举 resolved scratch `work_root/<source>` 的直接子项。只有现有公开 `parse_cycle_id` 接受且 hour 属于 `config.cycle.hours` 的名字是候选；其它名字 MUST 原样保留且不得映射成 `output` 路径。候选集合不得按墙钟、mtime、最新 DONE 或当前 frontier 截断。
 

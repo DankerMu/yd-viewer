@@ -80,9 +80,9 @@ def test_discovery_unreadable_is_stopped_not_typed_error(
     write_state(local)
     root = pathlib.Path(local.yd_root)
     # `output/` 不可枚举：`_iter_entry_names` 抬 DiscoveryUnreadableError。
+    # write_config_local 已铺可枚举空 output/；消费该目录再 chmod，不得再 mkdir。
     output = root / "output"
-    output.mkdir(parents=True)
-    original = stat.S_IMODE(output.stat().st_mode) if False else 0o700
+    original = stat.S_IMODE(output.stat().st_mode)
     output.chmod(0o000)
     try:
         # rawscan.judge/residue 的探针（会因 output 不可读被调用的面）全部给零调用

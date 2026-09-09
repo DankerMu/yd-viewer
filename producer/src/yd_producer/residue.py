@@ -29,11 +29,12 @@
    「Unsafe directory entry name」拒绝，但那是一条误导消息的永久停源，且判定被任务 13.2
    单独消费（不执行），错的是**清单**本身。`Path(".").name` 是空串，只是顺带被单分量判据
    挡住——依赖 pathlib 的这个性质会让本条契约随实现细节静默失效。
-3. **裁决 3（全新链同样适用）**：T 一律取 `FrontierDecision.cycle`——该值在无任何
-   `DONE` 时就是 `states/<source>/` 里**最早**的合法状态（`controller._decide` 的
-   `min(state_cycles)`）。本模块因此不自己算 T：多出来的状态份数只可能来自一次中断的
-   首轮发布，按同一条规则删除后重跑 T，MUST NOT 判为异常停源（那会让首轮崩溃永久
-   砖化该源）。
+3. **裁决 3（全新链只在 `output/` 根可枚举时适用，#86）**：T 一律取
+   `FrontierDecision.cycle`——该值只在共享 `output/` 根已确认为可枚举目录、且该源
+   `DONE` 集合被可靠确定为空时，才是 `states/<source>/` 里最早的合法状态。根
+   `ENOENT`/`ENOTDIR` 时前沿已停源；本模块接到停止 decision 返回 `None`，接到手交
+   可跑 T 则独立重查同一根并抛 `ResidueError`，两者都不交出清单、零删除。合法定义域
+   内多出来的状态份数仍按同一规则删除后重跑 T，不单独停源。
 4. **裁决 4（`DONE` 是删除前置，粒度是 source 子目录）**：半成品判据复用
    `controller.done_cycles`（`os.stat` + `stat.S_ISREG`，products-contract §4：`DONE`
    是唯一完成标志），MUST NOT 以「目录非空」或「有 `yd.rivqdown.dat`」代替；空目录
@@ -103,8 +104,8 @@
 们撑不起「顺序无关」。本条由
 `tests/test_controller_residue.py::test_half_products_are_removed_before_state_files` 钉死。
 
-探测层的「无法确定」（`ENOENT`/`ENOTDIR` 之外的 `OSError`，即
-`controller.DiscoveryUnreadableError`）收敛成 `ResidueError`：与裁决 7 同向，不可确定
+探测层的「无法确定」（含共享 `output/` 根的 `ENOENT`/`ENOTDIR`，以及其它 `OSError`，
+即 `controller.DiscoveryUnreadableError`）收敛成 `ResidueError`：与裁决 7 同向，不可确定
 一律停该源，MUST NOT fail-open 成「空清单」而让残留留在树上被下一轮当成正常产物。
 
 本模块 stdlib-only：零新增依赖（裁决 12）。零 `cli.py` 改动（裁决 10，接线归 14.1）。
@@ -115,7 +116,7 @@ from __future__ import annotations
 import os
 import stat
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from yd_producer.controller import (
@@ -124,9 +125,11 @@ from yd_producer.controller import (
     FrontierDecision,
     cycle_id,
     done_cycles,
+    parse_cycle_id,
     visible_state_cycles,
 )
 from yd_producer.store.safe_fs import (
+    SafeFilesystemError,
     remove_tree_allow_symlinks,
     unlink_no_follow,
 )
@@ -142,10 +145,120 @@ __all__ = [
 class ResidueError(RuntimeError):
     """残留**判定**无法完成：本源本次停止，不清理、不重跑。
 
-    只覆盖判定期的「不可确定」（目录列不出、条目元数据探测遇到 `ENOENT`/`ENOTDIR`
-    之外的 `OSError`）。**执行期**的拒绝不走这里：`safe_fs.SafeFilesystemError` 原样
-    上抛（裁决 7），它自带指名路径的消息与 `kind` 分类。
+    只覆盖判定期的「不可确定」（含 `output/` 根 `ENOENT`/`ENOTDIR`，以及目录列不出、
+    条目元数据探测遇到其它 `OSError`）。**执行期**的拒绝不走这里：
+    `safe_fs.SafeFilesystemError` 原样上抛（裁决 7），它自带指名路径的消息与 `kind` 分类。
     """
+
+
+def _require_source_component(source: str) -> None:
+    """构造/执行共用的单分量闸：任何路径绑定之前 fail closed。"""
+
+    separators = {"/", os.sep}
+    if os.altsep:
+        separators.add(os.altsep)
+    if (
+        not source
+        or source in {".", ".."}
+        or any(sep in source for sep in separators)
+        or "\x00" in source
+        or source != Path(source).name
+    ):
+        raise SafeFilesystemError(
+            "source 必须是单个非空路径分量"
+            "（不得为 ''、'.'、'..'、含 '/' 或 NUL），"
+            f"实得 {source!r}"
+        )
+
+
+def _require_representable_cycle(value: datetime) -> datetime:
+    try:
+        normalized = (
+            value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        )
+    except (OSError, TypeError, ValueError) as error:
+        raise SafeFilesystemError(
+            "retained_cycle 必须是可由 parse_cycle_id 认回的 UTC 整点 cycle，"
+            f"实得 {value!r}"
+        ) from error
+    parsed = parse_cycle_id(cycle_id(normalized))
+    if parsed != normalized:
+        raise SafeFilesystemError(
+            "retained_cycle 必须是可由 parse_cycle_id 认回的 UTC 整点 cycle，"
+            f"实得 {value!r}"
+        )
+    return normalized
+
+
+def _require_state_identity(
+    path: Path, root: Path, source: str, retained: datetime
+) -> None:
+    path = Path(path)
+    expected_parent = root / "states" / source
+    if path.parent != expected_parent or not path.name.endswith(STATE_SUFFIX):
+        raise SafeFilesystemError(
+            f"state 删除目标必须词法精确等于 {expected_parent}/<cycle>{STATE_SUFFIX}，"
+            f"实得 {path}"
+        )
+    cycle_name = path.name[: -len(STATE_SUFFIX)]
+    cycle = parse_cycle_id(cycle_name)
+    if cycle is None:
+        raise SafeFilesystemError(f"state 删除目标的 cycle 名不可解析：{path}")
+    expected = expected_parent / f"{cycle_name}{STATE_SUFFIX}"
+    if path != expected:
+        raise SafeFilesystemError(
+            f"state 删除目标必须词法精确等于 {expected}，实得 {path}"
+        )
+    if cycle <= retained:
+        raise SafeFilesystemError(
+            f"state 删除目标 cycle 必须严格晚于 retained {cycle_id(retained)}：{path}"
+        )
+
+
+def _require_half_product_identity(
+    path: Path, root: Path, source: str, retained: datetime
+) -> None:
+    path = Path(path)
+    expected = root / "output" / cycle_id(retained) / source
+    if path != expected:
+        raise SafeFilesystemError(
+            f"half-product 删除目标必须词法精确等于 {expected}，实得 {path}"
+        )
+
+
+def _normalized_unique(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    return tuple(sorted({Path(path) for path in paths}))
+
+
+def _bind_residue_plan(plan: ResiduePlan) -> None:
+    """把公开 ResiduePlan 的每一个字段绑定到 (root, source, retained) 身份。
+
+    构造与执行共用：先验证全部字段和全部路径，再写回 resolve 后的根、可往返
+    的 retained cycle，以及按路径排序去重后的不可变 tuple。不得对删除目标
+    做 ``resolve``——词法越界必须保持为越界。
+    """
+
+    try:
+        _require_source_component(plan.source)
+        try:
+            resolved = Path(plan.yd_root).resolve()
+        except (OSError, ValueError) as error:
+            raise SafeFilesystemError(f"yd_root 无法 resolve：{error}") from error
+        object.__setattr__(plan, "yd_root", resolved)
+        retained = _require_representable_cycle(plan.retained_cycle)
+        object.__setattr__(plan, "retained_cycle", retained)
+        for path in plan.state_files:
+            _require_state_identity(path, resolved, plan.source, retained)
+        for path in plan.half_product_dirs:
+            _require_half_product_identity(path, resolved, plan.source, retained)
+        object.__setattr__(plan, "state_files", _normalized_unique(plan.state_files))
+        object.__setattr__(
+            plan, "half_product_dirs", _normalized_unique(plan.half_product_dirs)
+        )
+    except SafeFilesystemError:
+        raise
+    except (TypeError, ValueError, OSError) as error:
+        raise SafeFilesystemError(f"残留清单身份无法绑定：{error}") from error
 
 
 @dataclass(frozen=True)
@@ -174,6 +287,9 @@ class ResiduePlan:
     @property
     def empty(self) -> bool:
         return not (self.state_files or self.half_product_dirs)
+
+    def __post_init__(self) -> None:
+        _bind_residue_plan(self)
 
 
 def plan_residue(
@@ -250,10 +366,12 @@ def plan_residue(
 def execute_residue_plan(plan: ResiduePlan) -> None:
     """删除清单逐字列出的路径，且只删这些路径（裁决 1/6/7）。
 
+    任何删除之前复验完整身份绑定；绕过构造或篡改 frozen 字段与手构越界同一出口。
     删除全部经 `store/safe_fs.py` 且带 `containment_root=plan.yd_root`。
     `SafeFilesystemError` 原样上抛：该源本次停止（不重跑、不提交），错误消息自带失败的
     路径。两个调用都带 `missing_ok=True`，所以重复执行同一份清单是 no-op（裁决 7）。
     """
+    _bind_residue_plan(plan)
     for directory in plan.half_product_dirs:
         remove_tree_allow_symlinks(
             directory.parent,
