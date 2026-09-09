@@ -6342,10 +6342,10 @@ Invariant Matrix:
 - Regression rows — audit/compat: startup删两项后首run_once抛原cause/note RunError→原对象保留追加一note、聚合消息每项一次；全DONE候选清完后首报告SUCCEEDED带完整有序audit，后续报告和已有首报告后的RunError不带重复audit；多轮仅startup一次；residue DONE时空NFS清单/directrun_once/catch_up不变。
 - Regression rows — names/root: 非ASCII/长度/日期/+12h溢出/hour不允许名字保留且零相应NFS探测；work/source缺失为空，非缺失不可读根cleanup失败。
 
-- [ ] 108.1 实现单一startup owner、全局/本源前置和完整候选分类/identity删除/unknown阻塞。
-- [ ] 108.2 实现首报告detail、原error note、清理自身partial audit以及兄弟隔离；不改#137聚合/CLI合同。
-- [ ] 108.3 以public run_sources完成上述矩阵和#28 Required evidence32–45中本owner行；CLI直接stderr属#132，复用已落地#137字符串notes回归，不另接线。
-- [ ] 108.4 parent批量旧源码red；按#28 Required evidence46覆盖mapping/preflight提前删除、只frontier/latest、unknown早返、followDONE/无DONE删除、非目录unlink、漏identity/错root、replacement/内部link误删、audit缺字段顺序/换error丢notes、每轮重复startup变异，0存活/未跑；不修改sharedhelpers原件。
-- [ ] 108.5 focused sources/startup/legacy compatibility、producer/viewer全套、Ruff/format、OpenSpecstrict/all/stage通过；源码/新增测试各<1000，无新豁免。
+- [x] 108.1 实现单一startup owner、全局/本源前置和完整候选分类/identity删除/unknown阻塞。
+- [x] 108.2 实现首报告detail、原error note、清理自身partial audit以及兄弟隔离；不改#137聚合/CLI合同。
+- [x] 108.3 以public run_sources完成上述矩阵和#28 Required evidence32–45中本owner行；CLI直接stderr属#132，复用已落地#137字符串notes回归，不另接线。
+- [x] 108.4 parent批量旧源码28失败/2通过；21个有效变异覆盖#28 Required evidence46全部14类及root/config/uncertain guard，全部被杀死、0有效存活/未跑。另2个只去掉重复source/cycle标签但保留完整绝对路径的格式变异，经独立verifier判定信息等价排除，不新增措辞锁定测试；sharedhelpers只在临时副本变异。
+- [x] 108.5 focused sources/startup/legacy77、producer3105通过/3skip、viewer1通过，Ruff/format、OpenSpecstrict/all/stage通过；公开run_sources独立smoke确认排序删除/unknown零提交/NFS与外部目标保留/GFS成功。源码653行、新增测试各<1000，无新豁免。
 
 Non-goals: 修改当前attempt ownership、publisher/failure/retention/residue合同、自动删unknown或查杀孤儿Slurm、CLI/worker新接线、真实NFS/SHUD、任意非协作同inode内容写者；shared M2仍active。

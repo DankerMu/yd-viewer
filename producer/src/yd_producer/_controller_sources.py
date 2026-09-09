@@ -1,13 +1,15 @@
-"""Private dual-source combiner for `controller.run_sources` (issue #28).
+"""Private dual-source combiner for `controller.run_sources` (issues #28/#108).
 
 Public types `RunSourcesReport` / `RunSourcesError` and the `run_sources` entry
 are re-exported from `yd_producer.controller`. This module has no `__all__` and
-is not a second public seam.
+is not a second public seam. Startup hygiene lives only on the worker path.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import os
+import stat
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
@@ -19,12 +21,251 @@ from typing import TYPE_CHECKING
 
 from yd_producer.controller import AttemptDriver, RunError, RunOutcome, RunReport
 from yd_producer.executor import JobExecutor, JobRecord, JobSpec
+from yd_producer.store import safe_fs
 
 if TYPE_CHECKING:
     from yd_producer.config import Config, LocalConfig
 
 _SOURCE_ORDER: tuple[str, ...] = ("ifs", "gfs")
 _SOURCE_KEYS = frozenset(_SOURCE_ORDER)
+_STARTUP_CLEANUP_PREFIX = "startup cleanup:"
+_UNCERTAIN_DONE_KINDS = frozenset({"io", "identity_changed", "indeterminate"})
+
+
+def _startup_item(source: str, cycle: datetime, path: Path) -> str:
+    from yd_producer import controller
+
+    return f"{source}/{controller.cycle_id(cycle)} {path}"
+
+
+def _startup_audit_text(deleted: tuple[str, ...]) -> str:
+    return _STARTUP_CLEANUP_PREFIX + " " + ", ".join(deleted)
+
+
+def _attach_startup_audit(report: RunReport, deleted: tuple[str, ...]) -> RunReport:
+    if not deleted:
+        return report
+    return dataclasses.replace(
+        report, detail=_startup_audit_text(deleted) + "\n" + report.detail
+    )
+
+
+def _cleanup_run_error(
+    message: str,
+    *,
+    source: str,
+    cycle: datetime | None,
+    orig: BaseException | None = None,
+) -> RunError:
+    error = RunError(message, phase="cleanup", source=source, cycle=cycle)
+    if orig is not None:
+        error.__cause__ = orig
+    return error
+
+
+def _list_work_entries(source_work: Path, *, source: str) -> list[str]:
+    try:
+        return safe_fs.list_directory_no_follow(source_work)
+    except FileNotFoundError:
+        return []
+    except (OSError, safe_fs.SafeFilesystemError) as orig:
+        raise _cleanup_run_error(
+            f"{source}: 无法枚举 work 根 {source_work}（{orig}）",
+            source=source,
+            cycle=None,
+            orig=orig,
+        ) from orig
+
+
+def _classify_done_authority(
+    done: Path, *, yd_root: Path, source: str, cycle: datetime
+) -> bool:
+    try:
+        info = safe_fs.stat_no_follow(done, containment_root=yd_root)
+    except FileNotFoundError:
+        return False
+    except safe_fs.SafeFilesystemError as orig:
+        if orig.kind in _UNCERTAIN_DONE_KINDS:
+            raise _cleanup_run_error(
+                f"{source}: DONE {done} 状态无法确定（{orig}）",
+                source=source,
+                cycle=cycle,
+                orig=orig,
+            ) from orig
+        return False
+    except OSError as orig:
+        raise _cleanup_run_error(
+            f"{source}: DONE {done} 状态无法确定（{orig}）",
+            source=source,
+            cycle=cycle,
+            orig=orig,
+        ) from orig
+    return stat.S_ISREG(info.st_mode)
+
+
+def _delete_done_backed_directory(
+    work_path: Path,
+    *,
+    work_root: Path,
+    source: str,
+    cycle: datetime,
+) -> None:
+    try:
+        identity = safe_fs.directory_identity_no_follow(work_path)
+    except (OSError, safe_fs.SafeFilesystemError) as orig:
+        raise _cleanup_run_error(
+            f"{source}: 无法冻结历史 work {work_path} 的 identity（{orig}）",
+            source=source,
+            cycle=cycle,
+            orig=orig,
+        ) from orig
+    try:
+        safe_fs.remove_tree_allow_symlinks(
+            work_path.parent,
+            work_path.name,
+            containment_root=work_root,
+            missing_ok=False,
+            expected_root_identity=identity,
+        )
+    except (OSError, safe_fs.SafeFilesystemError) as orig:
+        raise _cleanup_run_error(
+            f"{source}: 删除历史 work {work_path} 失败（{orig}）",
+            source=source,
+            cycle=cycle,
+            orig=orig,
+        ) from orig
+
+
+def _hygiene_failure_message(
+    *,
+    source: str,
+    cycle: datetime,
+    path: Path,
+    deleted: list[str],
+    reason: str,
+) -> str:
+    failed = _startup_item(source, cycle, path)
+    if deleted:
+        return f"{_startup_audit_text(tuple(deleted))}; failed {failed}: {reason}"
+    return f"{source}: {reason}（{path}）"
+
+
+def _run_startup_hygiene(
+    *,
+    config: Config,
+    local: LocalConfig,
+    source: str,
+) -> tuple[tuple[str, ...], RunReport | None]:
+    from yd_producer import controller
+    from yd_producer._controller_run import (
+        _discovery_unreadable_stop,
+        _stopped_report,
+    )
+
+    yd_root = Path(local.yd_root).resolve()
+    work_root = Path(local.scratch_root).resolve() / "work"
+    output_root = Path(local.yd_root) / "output"
+    try:
+        controller._iter_entry_names(output_root, missing_is_empty=False)
+    except controller.DiscoveryUnreadableError as orig:
+        return (), _discovery_unreadable_stop(source, orig)
+
+    source_work = work_root / source
+    names = _list_work_entries(source_work, source=source)
+    candidates: list[tuple[datetime, str]] = []
+    for name in names:
+        cycle = controller.parse_cycle_id(name)
+        if cycle is None or cycle.hour not in config.cycle.hours:
+            continue
+        candidates.append((cycle, name))
+    candidates.sort(key=lambda item: item[0])
+
+    deleted: list[str] = []
+    unknown: datetime | None = None
+    for cycle, name in candidates:
+        work_path = source_work / name
+        done = yd_root / "output" / name / source / "DONE"
+        try:
+            authorized = _classify_done_authority(
+                done, yd_root=yd_root, source=source, cycle=cycle
+            )
+        except RunError as orig:
+            raise _cleanup_run_error(
+                _hygiene_failure_message(
+                    source=source,
+                    cycle=cycle,
+                    path=work_path,
+                    deleted=deleted,
+                    reason=str(orig),
+                ),
+                source=source,
+                cycle=cycle,
+                orig=orig.__cause__ if orig.__cause__ is not None else orig,
+            ) from orig
+        if not authorized:
+            if unknown is None:
+                unknown = cycle
+            continue
+        try:
+            info = os.lstat(work_path)
+        except FileNotFoundError:
+            continue
+        except OSError as orig:
+            raise _cleanup_run_error(
+                _hygiene_failure_message(
+                    source=source,
+                    cycle=cycle,
+                    path=work_path,
+                    deleted=deleted,
+                    reason=f"无法判定 exact work 形态（{orig}）",
+                ),
+                source=source,
+                cycle=cycle,
+                orig=orig,
+            ) from orig
+        if not stat.S_ISDIR(info.st_mode):
+            raise _cleanup_run_error(
+                _hygiene_failure_message(
+                    source=source,
+                    cycle=cycle,
+                    path=work_path,
+                    deleted=deleted,
+                    reason="普通文件 DONE 不授权删除非目录 exact work",
+                ),
+                source=source,
+                cycle=cycle,
+            )
+        try:
+            _delete_done_backed_directory(
+                work_path, work_root=work_root, source=source, cycle=cycle
+            )
+        except RunError as orig:
+            raise _cleanup_run_error(
+                _hygiene_failure_message(
+                    source=source,
+                    cycle=cycle,
+                    path=work_path,
+                    deleted=deleted,
+                    reason=str(orig),
+                ),
+                source=source,
+                cycle=cycle,
+                orig=orig.__cause__ if orig.__cause__ is not None else orig,
+            ) from orig
+        deleted.append(_startup_item(source, cycle, work_path))
+
+    if unknown is not None:
+        work_path = source_work / controller.cycle_id(unknown)
+        return tuple(deleted), _stopped_report(
+            source,
+            cycle=unknown,
+            stop_reason=controller.StopReason.UNVERIFIED_WORK_RESIDUE,
+            detail=(
+                f"{source}: 待跑 T={controller.cycle_id(unknown)} 的精确 work {work_path} "
+                "仍存在（未验证跨进程残留）；保留证据，不读、不删、不提交"
+            ),
+        )
+    return tuple(deleted), None
 
 
 def classify_unverified_work(
@@ -312,6 +553,7 @@ def run_sources(
     failure_exit_codes: Mapping[str, Callable[[JobRecord], str]],
 ) -> RunSourcesReport:
     """双源独立追赶：每源逐轮私有 `run_once`，仅 SUCCEEDED 继续。全部 keyword-only、无默认值。"""
+    from yd_producer import controller
     from yd_producer._controller_run import run_once as run_one
 
     exec_snap, driver_snap, wait_snap, provider_snap = _snapshot_inputs(
@@ -348,6 +590,18 @@ def run_sources(
         executor = ExecutorView()
         driver = DriverView()
         reports: list[RunReport] = []
+        try:
+            controller._preflight(config=config, local=local, source=source)
+            deleted, stop = _run_startup_hygiene(
+                config=config, local=local, source=source
+            )
+        except RunError as orig:
+            return _SourceWorkerResult(reports=(), error=orig)
+        if stop is not None:
+            return _SourceWorkerResult(
+                reports=(_attach_startup_audit(stop, deleted),), error=None
+            )
+        audit_pending = bool(deleted)
         while True:
             try:
                 report = run_one(
@@ -361,7 +615,12 @@ def run_sources(
                     publish_lock=publish_lock,
                 )
             except RunError as orig:
+                if audit_pending:
+                    orig.add_note(_startup_audit_text(deleted))
                 return _SourceWorkerResult(reports=tuple(reports), error=orig)
+            if audit_pending:
+                report = _attach_startup_audit(report, deleted)
+                audit_pending = False
             reports.append(report)
             if report.outcome is not RunOutcome.SUCCEEDED:
                 return _SourceWorkerResult(reports=tuple(reports), error=None)

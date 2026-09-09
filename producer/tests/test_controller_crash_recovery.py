@@ -298,12 +298,18 @@ def test_nfs_crash_residue_rebuilds_without_work_and_stops_when_work_present(
     nwm_raw = pathlib.Path(local.nwm.raw_root)
     assert nwm_raw.exists()
 
-    # Counter-example: same crash plus unknown work -> STOPPED, no deletion of work.
+    # Counter-example: same crash plus unknown work -> STOPPED before frontier.
+    # NFS residue is preserved with the unverified work until operators remove it.
     config, local = write_dual_tree(tmp_path / "counter")
     plant_nfs_crash(local, "ifs")
     planted = plant_unknown_work(local, "ifs", shape="dir")
     before = work_snapshot(planted)
     plus = state_path(local, "ifs", T_PLUS_12_TEXT)
+    half = pathlib.Path(local.yd_root) / "output" / T_TEXT / "ifs" / "yd.rivqdown.dat"
+    residue_plus = plus.read_bytes()
+    residue_dat = half.read_bytes()
+    t_state = state_path(local, "ifs", T_TEXT)
+    t_state_bytes = t_state.read_bytes()
     ifs_driver, _, _ = success_driver()
     gfs_driver, gfs_exec = _success_gfs()
     report = run_sources(
@@ -325,8 +331,11 @@ def test_nfs_crash_residue_rebuilds_without_work_and_stops_when_work_present(
     assert ifs[0].stop_reason is StopReason.UNVERIFIED_WORK_RESIDUE
     assert work_snapshot(planted) == before
     assert not done_path(local, "ifs").exists()
-    # NFS residue is still cleaned first.
-    assert not plus.exists()
+    assert plus.exists()
+    assert plus.read_bytes() == residue_plus
+    assert half.exists()
+    assert half.read_bytes() == residue_dat
+    assert t_state.read_bytes() == t_state_bytes
 
 
 def test_operator_removal_allows_next_tick_to_submit_once(
