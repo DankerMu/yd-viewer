@@ -1,4 +1,4 @@
-r"""`yd_producer.runlock` 的行为测试（非阻塞 flock 封装，任务 12.3）。
+r"""`yd_producer.runlock` 的行为测试（非阻塞 flock 封装，任务 12.3 / #85）。
 
 判别器纪律（issue #23 裁决 11，fixture 复核实测 darwin 24.6.0）：进程内「持有即跳过」
 用例的**第一持有者也必须经同一个封装**取锁，MUST NOT 由测试自己直接 `fcntl.flock`。
@@ -7,12 +7,15 @@ XNU 把 `flock` 与 `lockf` 并进同一条 lock list，测试自持 `flock` 时
 则该变异体让两把锁都变成同进程不冲突的 `lockf`，第二次进入会**真执行**，用例变红。
 
 `fcntl.flock` 的锁挂在 open file description 上，故同一进程内两次独立 `open()` 互相
-冲突——进程内用例因此是有效判别器。spec 的 Scenario 写的是「另一进程」，另有一条子进程
-用例正面覆盖那条字面 WHEN。
+冲突——进程内用例因此是有效判别器。该前提只在**本地文件系统**成立；Linux NFS 把
+`flock` 仿真为整文件 byte-range lock，本项目依赖的 per-OFD 判别在那里不成立。spec 的
+Scenario 写的是「另一进程」，另有一条子进程用例正面覆盖那条字面 WHEN。本文件的 tmp
+目录只证明本地盘 OFD 行为，不是 node-22/M4 挂载 receipt。
 
 每一条可能阻塞的用例都自带 `_deadline` 超时（`SIGALRM`）：去掉 `LOCK_NB` 的变异体会让
 `flock` 永久阻塞，没有超时的话挂死的是测试自身而不是变异体。信号处理函数**抛异常**，
-故 PEP 475 的自动重启不适用，阻塞中的 `flock` 会被打断成 `TimeoutError`。
+故 PEP 475 的自动重启不适用，阻塞中的 `flock` 会被打断成 `TimeoutError`。第三次
+`open` 在 identity 矩阵里硬失败，防止无界重取挂死。
 """
 
 from __future__ import annotations

@@ -6350,3 +6350,49 @@ Invariant Matrix:
 - [x] 108.5 focused sources/startup/legacy77、producer3105通过/3skip、viewer1通过，Ruff/format、OpenSpecstrict/all/stage通过；公开run_sources独立smoke确认排序删除/unknown零提交/NFS与外部目标保留/GFS成功。源码653行、新增测试各<1000，无新豁免。
 
 Non-goals: 修改当前attempt ownership、publisher/failure/retention/residue合同、自动删unknown或查杀孤儿Slurm、CLI/worker新接线、真实NFS/SHUD、任意非协作同inode内容写者；shared M2仍active。
+
+### Issue #85：runlock 持锁 fd 与命名路径 identity 边界复核
+
+Issue type: bugfix；Project profile: yd-viewer；Fixture level: expanded；effective tier/repair intensity: high。
+Authority: Wave0裁决17、上文#23第13条与run-controller「并发与锁」195–199已合并；本次按用户范围只交付代码半边及对应测试/头部平台前提，不重选锁原语，不猜mount，不重做M4部署或#25清理owner。
+Target: `producer/src/yd_producer/runlock.py`、`producer/tests/test_controller_lock.py`（必要时独立identity测试文件）；公开`run_with_lock(*, lock_path, action)`及`RunLockResult`字段/返回值保持，CLI不接线。
+Must preserve: 绝对路径闸最先、配置路径逐字使用不expanduser/resolve/mkdir、初次O_CREAT但不truncate、仅flock真实竞争成功跳过、LOCK_EX|LOCK_NB、长期哨兵从不unlink/rename/replace、action最多一次、所有本调用fd释放。
+
+Implementation contract:
+- 每次成功flock后fstat冻结普通文件(dev,ino)，再nofollow path stat确认同一普通文件，核对前action0。不能只比ino、只exists或follow后只比identity。
+- 首次持锁身份核对不稳定（fd/path stat错误、非普通、缺失或identity不等）时完整unlock/close旧fd，再从open/flock重取至多一次；不在旧fd上循环，不在action后重取。第二次缺失/类型异常/不可确定时RunLockError并指名cron.lock_path，action0。
+- 重取不得O_CREAT修补缺失哨兵，也不得跟随dangling symlink创建目标；第二次open/flock的非竞争失败收敛为RunLockError并保留cause。初次open/flock真错误保持既有OSError分流；重取真实BlockingIOError竞争仍返回acquired=False。nofollow且非阻塞的open准入应避免对symlink/FIFO造副作用或阻塞；Darwin实测FIFO可O_RDWR打开但flock报EOPNOTSUPP，不能假定每个非普通fd都能走到fstat。
+- action正常返回或抛BaseException后，在unlock前以同一冻结identity再核对普通命名路径；正常action+退出失败→RunLockError；已有action异常+退出失败→原对象/cause/旧notes保持，只加一条cron.lock_path、expected/actual identity或不可确定原因的note。action不重跑，replacement保留。
+- entry与exit checks只是边界检测：不能承诺阻止两点间外部unlink造成双持有者；外部永不替换锁及专属run目录仍是必要部署不变量。模块与测试头部明确本地文件系统/per-OFD前提；不将tmp_path冒充node-22/M4 receipt。
+
+Risk packs considered:
+- Public API / CLI / script entry: selected — result/异常及action gate；CLI无改动。
+- Config / project setup: selected — 绝对路径与既有本地盘部署前提，禁止业务猜mount。
+- File IO / path safety / overwrite: selected — held-fd/path identity、nofollow、重取不修补、哨兵不删除。
+- Schema / columns / units / field names: selected — dev+ino双字段与RunLockResult shape不变。
+- Auth / permissions / secrets: selected — 权限/IO真错不得竞争跳过，无凭据变更。
+- Concurrency / shared state / ordering: selected — per-OFD flock、至多一次完整重取、action/exit/unlock顺序。
+- Resource limits / large input / discovery: selected — fd关闭、LOCK_NB、重试上限；不加新资源旋钮。
+- Legacy compatibility / examples: selected — #23双进程/同进程判别器、None成功、路径文本与返回值。
+- Error handling / rollback / partial outputs: selected — 原action异常优先、exit note、旧fd释放/当前路径保留。
+- Release / packaging / dependency compatibility: not selected — 既有POSIX/stdlb，无新依赖或平台支持。
+- Documentation / migration notes: selected — 两处per-OFD头部限定、fixture记录；现有docs/spec为现场owner。
+- Geospatial / CRS / shapefile sidecars: not selected — 无几何。
+- Time series / forcing / temporal boundaries: not selected — 不改cycle/time。
+- 状态链 / warm-start 定戳一致性: selected — lock包住唯一writer全生命周期；无有效entry authority时action0。
+- NWM 快照溯源与 DB-free 隔离: not selected — 无快照/DB调用。
+
+Invariant Matrix:
+- Governing invariant: action只在普通命名哨兵与本次持锁fd identity一致时至多执行一次；失配可检测且不修补路径、不泄漏旧锁；action自身失败不被身份检查覆盖。
+- Source of truth/producer: 原样绝对cron.lock_path、成功open/flock的fd；validator: fstat+nofollow path stat；storage: 每attempt冻结(dev,ino)。
+- Consumers: entry gate→action→exit gate→RunLockResult/原异常note；release: 只本次fd的unlock/close，无删除producer。
+- Failure/stale surfaces: 第一次/第二次替换、相同ino不同dev、symlink指向原inode、缺失/FIFO/目录/IO、竞争、action期间替换、action异常/取消。
+- Evidence: public run_with_lock、真实文件/同进程独立OFD/子进程；只在实际OS边界注入替换或stat错误，fd事件/EBADF证明完整重取与释放，不写源码/私有helper接线断言。
+
+- [x] 85.1 实现两个identity边界、一次完整重取、no-create retry及错误/原异常note合同；更新本地盘前提头部，不改公共shape/CLI/清理owner。
+- [x] 85.2 公开回归覆盖首次替换后稳定成功、连续替换至多两次后错误、重取真竞争跳过；首次成功flock后fstat/path-stat IO或一次缺失探测→第二次稳定完整重取（旧fd释放/EBADF、open/flock上限、action恰一次）。第二次missing/symlink/目录/FIFO/IO不修补/action0/fd释放；目录open失败与FIFO flock故障分别覆盖。初次open/flock真错保持原OSError；重取open/flock真错为指名cron.lock_path且cause原样的RunLockError。初次dangling symlink不造target。
+- [x] 85.3 覆盖相同ino不同dev、symlink指向原inode/其它普通文件、fstat/path-stat真错；action实际unlink/new-inode后正常返回响亮失败，replacement(dev,ino)不同于冻结pair。action异常/KeyboardInterrupt/SystemExit与exit漂移并存时原对象/__cause__/原notes保持，恰加一条带实际cron.lock_path和expected/actual或不可确定/type/error的note；稳定None/value/异常与既有本地OFD判别器保持。
+- [x] 85.4 parent批量旧源码27失败/11通过；(ag)–(am)及no-create/dev/退出持锁/首次stat统一重取/重取错误域共13个有效变异在独立scratch的定向公开判别器全部被杀死，0存活/未跑。完整fd生命周期/有限重取以行为证明；广矩阵extra-retry变异曾超时，改以已有第三次open硬失败的专属用例在0.26秒稳定杀死，未收窄产品合同。
+- [x] 85.5 focused38、producer3136通过/3skip、viewer1、Ruff/format、OpenSpecstrict/all/stage通过；独立public smoke复现同inode竞争跳过、外部replacement的有限边界与退出响亮失败/哨兵保留。源码与新增测试<1000，无新豁免；后续合并仍受high四席/独立终审/CI/SHA gate。
+
+Non-goals: M4 mount探测/安装/receipt、NFS实测、外部unlink防护守护进程、lockf替换、CLI接线、其它cleanup primitive异常体系重写或lock禁区producer改造；文档/fixture既有本地哨兵与#25禁区合同保持，shared M2仍active。
