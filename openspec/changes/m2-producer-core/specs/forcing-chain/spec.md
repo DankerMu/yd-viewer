@@ -4,6 +4,17 @@
 
 ## ADDED Requirements
 
+### Requirement: 原子写失败的资源清理
+`atomic_write_bytes_no_follow` MUST 在非 OSError（含 BaseException）退出时关闭本次写 fd，并只清理尚未 replace 的本次临时文件；MUST 保留原异常，不能把中断改为业务错误。此本仓分叉按快照清单登记，不要求重新 pin。
+
+#### Scenario: 原子写被中断
+- **WHEN** 默认 tmp 或 part 后缀的原子写在 replace 前遭遇 TypeError、MemoryError 或 KeyboardInterrupt
+- **THEN** 本次写 fd 关闭、本次点前缀临时文件删除，旧目标和外来文件保持不变，原异常传播
+
+#### Scenario: 发布后出现中断
+- **WHEN** replace 完成后的目录 fsync 遭遇 KeyboardInterrupt
+- **THEN** 原中断传播，已发布目标保留，清理不得删除目标
+
 ### Requirement: DB-free canonical 转换（NWM 快照）
 canonical converter MUST 以同一 `LocalObjectStore` 根内的本轮临时 raw manifest 与 `raw/` 副本为输入，并在该根内生成 canonical NetCDF 与 catalog；任务 14.1 的根逐字为 `<attempt-work>/object-store`。IFS 网格定义对象的唯一 URI MUST 为 `canonical/ifs/grid/ifs_0p25/grid.json`，converter 的写入/存在性/签名检查与每条 catalog 行 MUST 共用该值；MUST NOT 保留 `canonical/IFS/...` 别名或大小写 fallback。converter MUST NOT 依赖 PostgreSQL、NWM registry 服务或 NWM checkout import。
 
