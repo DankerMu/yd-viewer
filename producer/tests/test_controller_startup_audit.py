@@ -12,6 +12,7 @@ from controller_sources_fixtures import (
     CYCLE_T12,
     FOREIGN_MARKER_BYTES,
     FOREIGN_MARKER_NAME,
+    TerminalHookGate,
     dual_run_kwargs,
     fake_for,
     hooked_success,
@@ -43,19 +44,19 @@ HIST_LATER = "2026082612"
 CYCLE_LATE = datetime(2026, 8, 26, 0, tzinfo=UTC)
 
 
-def _gfs_success(local, extra=()):
+def _gfs_success(local, extra=(), *, gate):
     if extra:
         plant_raw_cycles(local, "gfs", extra)
-        return hooked_success_cycles("gfs", (CYCLE_T, *extra))
-    return hooked_success("gfs")
+        return hooked_success_cycles("gfs", (CYCLE_T, *extra), gate=gate)
+    return hooked_success("gfs", gate=gate)
 
 
-def _idle_ifs():
-    return hooked_success("ifs")
+def _idle_ifs(*, gate):
+    return hooked_success("ifs", gate=gate)
 
 
-def _idle_gfs():
-    return hooked_success("gfs")
+def _idle_gfs(*, gate):
+    return hooked_success("gfs", gate=gate)
 
 
 def _plant_done_work(local, source: str, cycle: str, *, outside=None, marker=b"done\n"):
@@ -88,10 +89,17 @@ def test_identity_swap_before_tree_open_keeps_replacement_and_records_prior_dele
         return identity
 
     monkeypatch.setattr(safe_fs, "directory_identity_no_follow", swap_after_freeze)
+    gate = TerminalHookGate()
     with pytest.raises(RunSourcesError) as info:
         run_sources(
-            **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+            **dual_run_kwargs(
+                config,
+                local,
+                ifs=_idle_ifs(gate=gate),
+                gfs=_gfs_success(local, gate=gate),
+            )
         )
+
     error = info.value.errors["ifs"]
     assert error.phase == "cleanup"
     assert error.cycle == CYCLE_LATE
@@ -134,10 +142,17 @@ def test_identity_swap_before_final_rmdir_keeps_replacement(
         return result
 
     monkeypatch.setattr(os, "unlink", swap_after_last_payload)
+    gate = TerminalHookGate()
     with pytest.raises(RunSourcesError) as info:
         run_sources(
-            **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+            **dual_run_kwargs(
+                config,
+                local,
+                ifs=_idle_ifs(gate=gate),
+                gfs=_gfs_success(local, gate=gate),
+            )
         )
+
     error = info.value.errors["ifs"]
     assert injected["ran"] is True
     assert error.phase == "cleanup"
@@ -161,9 +176,13 @@ def test_internal_symlink_unlinks_link_not_external_target(
     planted = _plant_done_work(
         local, "ifs", HIST_LATE, outside=target, marker=b"inner\n"
     )
+    gate = TerminalHookGate()
     report = run_sources(
-        **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+        **dual_run_kwargs(
+            config, local, ifs=_idle_ifs(gate=gate), gfs=_gfs_success(local, gate=gate)
+        )
     )
+
     ifs = require_source_tuple(report.ifs, "ifs")
     assert ifs[0].outcome is RunOutcome.SUCCEEDED
     assert not planted.exists()
@@ -189,10 +208,17 @@ def test_pre_report_run_error_keeps_original_object_and_one_audit_note(
         return real_run_once(**kwargs)
 
     monkeypatch.setattr("yd_producer._controller_run.run_once", boom)
+    gate = TerminalHookGate()
     with pytest.raises(RunSourcesError) as info:
         run_sources(
-            **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+            **dual_run_kwargs(
+                config,
+                local,
+                ifs=_idle_ifs(gate=gate),
+                gfs=_gfs_success(local, gate=gate),
+            )
         )
+
     caught = info.value.errors["ifs"]
     assert caught is original
     assert caught.__cause__ is cause
@@ -230,15 +256,17 @@ def test_first_succeeded_carries_audit_later_report_and_error_do_not(
         raise boom
 
     monkeypatch.setattr("yd_producer._controller_run.run_once", maybe_boom)
+    gate = TerminalHookGate()
     with pytest.raises(RunSourcesError) as info:
         run_sources(
             **dual_run_kwargs(
                 config,
                 local,
-                ifs=hooked_success_cycles("ifs", (CYCLE_T,)),
-                gfs=_gfs_success(local),
+                ifs=hooked_success_cycles("ifs", (CYCLE_T,), gate=gate),
+                gfs=_gfs_success(local, gate=gate),
             )
         )
+
     reports = require_source_tuple(info.value.reports["ifs"], "ifs", terminal=False)
     assert reports[0].outcome is RunOutcome.SUCCEEDED
     assert reports[0].detail.startswith("startup cleanup:")
@@ -257,15 +285,28 @@ def test_second_tick_does_not_repeat_audit_or_delete(
 ) -> None:
     config, local = write_dual_tree(tmp_path)
     planted = _plant_done_work(local, "ifs", HIST_LATE)
+    first_gate = TerminalHookGate()
     first = run_sources(
-        **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+        **dual_run_kwargs(
+            config,
+            local,
+            ifs=_idle_ifs(gate=first_gate),
+            gfs=_gfs_success(local, gate=first_gate),
+        )
     )
     ifs_first = require_source_tuple(first.ifs, "ifs")
     assert ifs_first[0].detail.startswith("startup cleanup:")
     assert not planted.exists()
+    second_gate = TerminalHookGate()
     second = run_sources(
-        **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_idle_gfs())
+        **dual_run_kwargs(
+            config,
+            local,
+            ifs=_idle_ifs(gate=second_gate),
+            gfs=_idle_gfs(gate=second_gate),
+        )
     )
+
     ifs_second = require_source_tuple(second.ifs, "ifs")
     assert "startup cleanup:" not in ifs_second[0].detail
 
@@ -287,15 +328,20 @@ def test_hygiene_runs_once_not_per_iteration(
         plant_historical_work(local, "ifs", HIST_EARLY, marker=b"mid-tick\n")
         plant_regular_done(local, "ifs", HIST_EARLY)
 
+    first_gate = TerminalHookGate()
     ifs = hooked_success_cycles(
-        "ifs", (CYCLE_T, CYCLE_T12), on_terminal=plant_during_first_attempt
+        "ifs",
+        (CYCLE_T, CYCLE_T12),
+        gate=first_gate,
+        on_terminal=plant_during_first_attempt,
     )
+
     report = run_sources(
         **dual_run_kwargs(
             config,
             local,
             ifs=ifs,
-            gfs=_gfs_success(local, extra=(CYCLE_T12,)),
+            gfs=_gfs_success(local, extra=(CYCLE_T12,), gate=first_gate),
         )
     )
     ifs_reports = require_source_tuple(report.ifs, "ifs")
@@ -306,9 +352,16 @@ def test_hygiene_runs_once_not_per_iteration(
     assert not planted.exists()
     assert mid_tick.exists()
     assert (mid_tick / "old.bin").read_bytes() == b"mid-tick\n"
+    second_gate = TerminalHookGate()
     second = run_sources(
-        **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_idle_gfs())
+        **dual_run_kwargs(
+            config,
+            local,
+            ifs=_idle_ifs(gate=second_gate),
+            gfs=_idle_gfs(gate=second_gate),
+        )
     )
+
     ifs_second = require_source_tuple(second.ifs, "ifs")
     assert ifs_second[0].detail.startswith("startup cleanup:")
     assert str(mid_tick) in ifs_second[0].detail
@@ -367,8 +420,14 @@ def test_aggregate_notes_render_each_item_once(
         raise gfs_error
 
     monkeypatch.setattr("yd_producer._controller_run.run_once", boom)
+    gate = TerminalHookGate()
     with pytest.raises(RunSourcesError) as info:
-        run_sources(**dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_idle_gfs()))
+        run_sources(
+            **dual_run_kwargs(
+                config, local, ifs=_idle_ifs(gate=gate), gfs=_idle_gfs(gate=gate)
+            )
+        )
+
     text = str(info.value)
     assert info.value.errors["ifs"] is ifs_error
     assert info.value.errors["gfs"] is gfs_error

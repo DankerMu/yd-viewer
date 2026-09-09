@@ -15,6 +15,7 @@ from controller_sources_fixtures import (
     OLD_WORK_MARKER,
     T_PLUS_12_TEXT,
     T_TEXT,
+    TerminalHookGate,
     cycle_outcomes,
     done_path,
     dual_run_kwargs,
@@ -47,19 +48,19 @@ CYCLE_UNKNOWN = datetime(2026, 8, 24, 0, tzinfo=UTC)
 CYCLE_EARLY = datetime(2026, 8, 25, 0, tzinfo=UTC)
 
 
-def _gfs_success(local, extra=()):
+def _gfs_success(local, extra=(), *, gate):
     if extra:
         plant_raw_cycles(local, "gfs", extra)
-        return hooked_success_cycles("gfs", (CYCLE_T, *extra))
-    return hooked_success("gfs")
+        return hooked_success_cycles("gfs", (CYCLE_T, *extra), gate=gate)
+    return hooked_success("gfs", gate=gate)
 
 
-def _idle_ifs():
-    return hooked_success("ifs")
+def _idle_ifs(*, gate):
+    return hooked_success("ifs", gate=gate)
 
 
-def _idle_gfs():
-    return hooked_success("gfs")
+def _idle_gfs(*, gate):
+    return hooked_success("gfs", gate=gate)
 
 
 def _plant_done_work(local, source: str, cycle: str = HIST_LATE):
@@ -83,8 +84,11 @@ def test_invalid_mapping_prevents_all_startup_scans_and_deletes(
         list_calls.append(str(path))
         return original_list(path, *args, **kwargs)
 
-    monkeypatch.setattr(safe_fs, "list_directory_no_follow", counting_list)
-    kwargs = dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+    gate = TerminalHookGate()
+    kwargs = dual_run_kwargs(
+        config, local, ifs=_idle_ifs(gate=gate), gfs=_gfs_success(local, gate=gate)
+    )
+
     kwargs["executors"] = {"ifs": kwargs["executors"]["ifs"]}
     with pytest.raises(ValueError):
         run_sources(**kwargs)
@@ -112,10 +116,17 @@ def test_ifs_preflight_failure_leaves_work_while_gfs_cleans(
         return original(config=config, local=local, source=source)
 
     monkeypatch.setattr(controller, "_preflight", ifs_only)
+    gate = TerminalHookGate()
     with pytest.raises(RunSourcesError) as info:
         run_sources(
-            **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+            **dual_run_kwargs(
+                config,
+                local,
+                ifs=_idle_ifs(gate=gate),
+                gfs=_gfs_success(local, gate=gate),
+            )
         )
+
     assert "ifs" in info.value.errors
     assert "gfs" not in info.value.errors
     assert info.value.errors["ifs"].phase == "preflight"
@@ -176,9 +187,13 @@ def test_output_root_failure_stops_without_second_scan_or_delete(
     monkeypatch.setattr(safe_fs, "list_directory_no_follow", counting_list)
     monkeypatch.setattr("yd_producer._controller_run.run_once", counting_run_once)
     monkeypatch.setattr(residue_module, "plan_residue", counting_plan)
+    gate = TerminalHookGate()
     report = run_sources(
-        **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_idle_gfs())
+        **dual_run_kwargs(
+            config, local, ifs=_idle_ifs(gate=gate), gfs=_idle_gfs(gate=gate)
+        )
     )
+
     for source, reports in (("ifs", report.ifs), ("gfs", report.gfs)):
         items = require_source_tuple(reports, source)
         assert cycle_outcomes(items) == [(None, RunOutcome.STOPPED)]
@@ -239,12 +254,13 @@ def test_out_of_order_done_directories_delete_then_earliest_unknown_stops(
 
     monkeypatch.setattr(controller, "_target_and_state", counting_target)
     monkeypatch.setattr(rawscan_module, "judge", counting_judge)
+    gate = TerminalHookGate()
     report = run_sources(
         **dual_run_kwargs(
             config,
             local,
-            ifs=_idle_ifs(),
-            gfs=_gfs_success(local, extra=(CYCLE_T12,)),
+            ifs=_idle_ifs(gate=gate),
+            gfs=_gfs_success(local, extra=(CYCLE_T12,), gate=gate),
         )
     )
 
@@ -321,9 +337,13 @@ def test_unknown_work_shapes_stop_at_earliest_without_reading(
         return original_read(self)
 
     monkeypatch.setattr(pathlib.Path, "read_bytes", counting_read)
+    gate = TerminalHookGate()
     report = run_sources(
-        **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+        **dual_run_kwargs(
+            config, local, ifs=_idle_ifs(gate=gate), gfs=_gfs_success(local, gate=gate)
+        )
     )
+
     ifs = require_source_tuple(report.ifs, "ifs")
     assert ifs[0].cycle == CYCLE_UNKNOWN
     assert ifs[0].stop_reason is StopReason.UNVERIFIED_WORK_RESIDUE
@@ -365,9 +385,13 @@ def test_nonregular_or_missing_done_is_unknown_not_delete(
         (real_parent / "DONE").write_bytes(b"")
         done.parent.rmdir()
         done.parent.symlink_to(real_parent)
+    gate = TerminalHookGate()
     report = run_sources(
-        **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+        **dual_run_kwargs(
+            config, local, ifs=_idle_ifs(gate=gate), gfs=_gfs_success(local, gate=gate)
+        )
     )
+
     ifs = require_source_tuple(report.ifs, "ifs")
     assert ifs[0].stop_reason is StopReason.UNVERIFIED_WORK_RESIDUE
     assert ifs[0].cycle == CYCLE_EARLY
@@ -389,10 +413,17 @@ def test_uncertain_done_stat_is_cleanup_error(
         return original(path, containment_root=containment_root)
 
     monkeypatch.setattr(safe_fs, "stat_no_follow", boom)
+    gate = TerminalHookGate()
     with pytest.raises(RunSourcesError) as info:
         run_sources(
-            **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+            **dual_run_kwargs(
+                config,
+                local,
+                ifs=_idle_ifs(gate=gate),
+                gfs=_gfs_success(local, gate=gate),
+            )
         )
+
     error = info.value.errors["ifs"]
     assert error.phase == "cleanup"
     assert planted.exists()
@@ -422,10 +453,17 @@ def test_regular_done_does_not_unlink_nondirectory_work(
     plant_regular_done(local, "ifs", HIST_EARLY)
     before = work_snapshot(path)
     identity = path.lstat()
+    gate = TerminalHookGate()
     with pytest.raises(RunSourcesError) as info:
         run_sources(
-            **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+            **dual_run_kwargs(
+                config,
+                local,
+                ifs=_idle_ifs(gate=gate),
+                gfs=_gfs_success(local, gate=gate),
+            )
         )
+
     error = info.value.errors["ifs"]
     assert error.phase == "cleanup"
     assert error.cycle == CYCLE_EARLY
@@ -472,9 +510,13 @@ def test_illegal_names_are_ignored_without_nfs_probe(
         return original(path, containment_root=containment_root)
 
     monkeypatch.setattr(safe_fs, "stat_no_follow", counting)
+    gate = TerminalHookGate()
     report = run_sources(
-        **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+        **dual_run_kwargs(
+            config, local, ifs=_idle_ifs(gate=gate), gfs=_gfs_success(local, gate=gate)
+        )
     )
+
     ifs = require_source_tuple(report.ifs, "ifs")
     assert ifs[0].outcome is RunOutcome.SUCCEEDED
     assert not legal.exists()
@@ -489,8 +531,11 @@ def test_missing_work_root_is_empty_unreadable_root_is_cleanup_error(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config, local = write_dual_tree(tmp_path)
+    gate = TerminalHookGate()
     report = run_sources(
-        **dual_run_kwargs(config, local, ifs=_idle_ifs(), gfs=_gfs_success(local))
+        **dual_run_kwargs(
+            config, local, ifs=_idle_ifs(gate=gate), gfs=_gfs_success(local, gate=gate)
+        )
     )
     ifs = require_source_tuple(report.ifs, "ifs")
     assert ifs[0].outcome is RunOutcome.SUCCEEDED
@@ -507,11 +552,16 @@ def test_missing_work_root_is_empty_unreadable_root_is_cleanup_error(
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(safe_fs, "list_directory_no_follow", boom)
+    blocked_gate = TerminalHookGate()
     with pytest.raises(RunSourcesError) as info:
         run_sources(
             **dual_run_kwargs(
-                config2, local2, ifs=_idle_ifs(), gfs=_gfs_success(local2)
+                config2,
+                local2,
+                ifs=_idle_ifs(gate=blocked_gate),
+                gfs=_gfs_success(local2, gate=blocked_gate),
             )
         )
+
     assert info.value.errors["ifs"].phase == "cleanup"
     require_source_tuple(info.value.reports["gfs"], "gfs")
