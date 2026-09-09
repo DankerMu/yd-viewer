@@ -19,6 +19,7 @@ from yd_producer import publish as publish_module
 from yd_producer import rawcopy as rawcopy_module
 from yd_producer import rawscan as rawscan_module
 from yd_producer import residue as residue_module
+from yd_producer import staged_inputs as staged_inputs_module
 from yd_producer import state as state_module
 from yd_producer import tracker as tracker_module
 from yd_producer._work_claim import (
@@ -42,11 +43,15 @@ from yd_producer.controller import (
     RunReport,
 )
 from yd_producer.executor import JobExecutor, JobRecord, JobSpec, JobState
+from yd_producer.prepare_handoff import (
+    MAX_PREPARED_VARIANT_ASSET_BYTES,
+    MAX_PREPARED_VARIANT_MANIFEST_BYTES,
+)
+from yd_producer.state import MAX_STATE_IC_BYTES
 from yd_producer.store import safe_fs
 from yd_producer.store.object_store import LocalObjectStore
 from yd_producer.tracker import CheckpointTracker
 
-_SOURCES = ("ifs", "gfs")  # rawscan.SOURCES 同源
 RUN_DIRECTORY_NAME = "model"  # assemble 自有字面量
 JOB_LOG_NAME = "job.log"  # compute-loop §3.3
 CHECKPOINT_DIR_NAME = "state_checkpoints"  # tracker.CHECKPOINT_DIR_NAME 同源
@@ -111,13 +116,7 @@ def _verify_raw_fanout(
     source: str,
     cycle: datetime,
 ) -> None:
-    """逐变量扇出的集合/成员关系校验（raw-scan spec「逐变量扇出」）。
-
-    `entries` 按 `(lead, variable)` 扇出（同一 bundle 副本被多变量 entry 共享），
-    `copied_files` 按 lead/bundle 复制、无顺序保证；只允许：每 entry 解析到恰好一个
-    copied 成员，每副本至少被一 entry 引用。位置/等基数 `zip` 是 contract-1 已确认
-    缺陷，禁止恢复。
-    """
+    """验证每个 entry 指向唯一 copied member，且 copied member 无孤儿。"""
     raw_error = lambda message: _phase_error(message, "raw", source, cycle)
     copied_set = set(staged.copied_files)
     repeats = len(staged.copied_files) - len(copied_set)
@@ -165,36 +164,28 @@ def _variant_reach_count(*, source: str, cycle: datetime, variant_dir: Path) -> 
             cycle=cycle,
         ) from exc
     if document.river is None:
-        raise RunError(
+        _phase_error(
             f"率定状态 {calibrated} 缺 river 段（不是 0 条河段，是缺段）",
-            phase="prepare",
-            source=source,
-            cycle=cycle,
+            "prepare",
+            source,
+            cycle,
         )
     count = document.river.row_count
     if not isinstance(count, int):
-        raise RunError(
+        _phase_error(
             f"率定状态 {calibrated} 的 river 行数不是 int：{count!r}",
-            phase="prepare",
-            source=source,
-            cycle=cycle,
+            "prepare",
+            source,
+            cycle,
         )
     return count
 
 
 def _canonical_checkpoint_path(*, attempt: PreparedAttempt, work_dir: Path) -> Path:
-    """canonical 未来终名：`<work>/model/state_checkpoints/<project>.f012.cfg.ic.update`。
-
-    由 tracker 的 `checkpoint_dir / f"{project}.f{12:03d}.cfg.ic.update"` 唯一确定性推导；
-    controller 自己推导并点用重验，不靠扫描规范文件名寻找 authority。"""
-    return (
-        work_dir
-        / RUN_DIRECTORY_NAME
-        / CHECKPOINT_DIR_NAME
-        / (
-            f"{attempt.identity.project_name}.f{CHECKPOINT_TARGET_HOUR:03d}.cfg.ic.update"
-        )
-    )
+    """推导 `<work>/model/state_checkpoints/<project>.f012.cfg.ic.update`。"""
+    project = attempt.identity.project_name
+    name = f"{project}.f{CHECKPOINT_TARGET_HOUR:03d}.cfg.ic.update"
+    return work_dir / RUN_DIRECTORY_NAME / CHECKPOINT_DIR_NAME / name
 
 
 def _claimed_stat(path: Path, *, work_root: Path, claim: WorkClaim | None):
@@ -514,15 +505,11 @@ def _run_once(
     failure_exit_code: Callable[[JobRecord], str] | None,
     publish_lock: Lock | None,
 ) -> RunReport:
-    # 1. preflight（私有校验面在 controller）
     controller._preflight(config=config, local=local, source=source)
-
-    # 2. 前沿前半段（DONE/状态 -> T；不含 raw 判定）
     ctx.phase = "frontier"
     try:
         gathered = controller._target_and_state(Path(local.yd_root), source)
     except controller.DiscoveryUnreadableError as exc:
-        # 探测「无法确定」= 该源 STOPPED，不与 `decide_frontier` 既有契约分叉。
         return _discovery_unreadable_stop(source, exc)
     except Exception as exc:
         raise RunError(
@@ -537,10 +524,9 @@ def _run_once(
             stop_reason=gathered.stop_reason,
             detail=gathered.detail,
         )
-    target, origin, _state_path = gathered
+    target, origin, state_path = gathered
     ctx.cycle = target
 
-    # 越域小时：residue/raw/work/submit 前收敛 RAW_INCOMPLETE（ownership 2）。
     if target.hour not in config.cycle.hours:
         return _stopped_report(
             source,
@@ -554,7 +540,6 @@ def _run_once(
             ),
         )
 
-    # 3. 合法 T：residue plan/execute，然后 rawscan.judge
     ctx.phase = "residue"
     decision = controller.FrontierDecision(
         source=source,
@@ -611,8 +596,7 @@ def _run_once(
                 + "；停在缺口等待，不跳轮"
             ),
         )
-
-    # --- 4. work 派生：可读 preexisting 闸之后才排他 claim，再 stage_raw ---
+    # 可读 preexisting 闸之后才排他 claim，再 stage_raw。
     claim: WorkClaim | None = None
     try:
         work_root = Path(local.scratch_root).resolve() / "work"
@@ -677,7 +661,6 @@ def _run_once(
         cycle=target,
     )
 
-    # 5. 变体/率定状态 + driver.prepare + prepared 校验
     ctx.phase = "prepare"
     try:
         variants = prepare_module.variant_targets(local, config)
@@ -693,19 +676,53 @@ def _run_once(
         source=source, cycle=target, variant_dir=variant_dir
     )
     if config.reach_count != variant_reach_count:
-        raise RunError(
+        _phase_error(
             f"reach_count {config.reach_count} 与模型变体 reach 数 "
             f"{variant_reach_count} 不相等",
+            "prepare",
+            source,
+            target,
+        )
+    calibrated_name = prepare_module.calibrated_state_path(variant_dir).name
+    project_name = calibrated_name.removesuffix(controller.STATE_SUFFIX)
+    if (
+        calibrated_name != f"{project_name}{controller.STATE_SUFFIX}"
+        or not project_name
+    ):
+        _phase_error(
+            f"率定状态文件名不是 <project>{controller.STATE_SUFFIX}：{calibrated_name}",
+            "prepare",
+            source,
+            target,
+        )
+    if claim is None:  # pragma: no cover - claim 成功后唯一顺序路径
+        _phase_error(
+            "stage_work_inputs 前缺少 exact work claim", "prepare", source, target
+        )
+    try:
+        staged_inputs_module.stage_work_inputs(
+            claim=claim,
+            source_variant_dir=variant_dir,
+            source_state_path=state_path,
+            source=source,
+            cycle=target,
+            project_name=project_name,
+            grid_id=getattr(config.nwm_canonical_grid_id, source),
+            max_manifest_bytes=MAX_PREPARED_VARIANT_MANIFEST_BYTES,
+            max_asset_bytes=MAX_PREPARED_VARIANT_ASSET_BYTES,
+            max_state_bytes=MAX_STATE_IC_BYTES,
+        )
+    except Exception as orig:
+        error = RunError(
+            f"work 输入 staging 失败：{orig}",
             phase="prepare",
             source=source,
             cycle=target,
+            job_id=None,
         )
-    state_path = (
-        Path(local.yd_root)
-        / "states"
-        / source
-        / (f"{controller.cycle_id(target)}{controller.STATE_SUFFIX}")
-    )
+        for note in getattr(orig, "__notes__", ()):
+            error.add_note(note)
+        raise error from orig
     request = AttemptRequest(
         source=source,
         cycle=target,
@@ -731,16 +748,15 @@ def _run_once(
             cycle=target,
         ) from exc
     if not isinstance(attempt, PreparedAttempt):
-        raise RunError(
+        _phase_error(
             f"driver.prepare 返回类型错误：{type(attempt).__name__}",
-            phase="prepare",
-            source=source,
-            cycle=target,
+            "prepare",
+            source,
+            target,
         )
     _validate_prepared(attempt, source, target, work_dir, variant_dir)
     canonical = _canonical_checkpoint_path(attempt=attempt, work_dir=work_dir)
 
-    # 6. 唯一构造 JobSpec；submit 前三件终态产物必须不存在
     ctx.phase = "submit"
     job_spec = _make_job_spec(
         attempt=attempt,
@@ -773,7 +789,6 @@ def _run_once(
         submission, job_spec, "submit", source=source, cycle=target
     )
 
-    # 7. 首次 poll 立即；每条非终态 poll 后恰一次 poll_wait
     ctx.phase = "poll"
     terminal: JobRecord | None = None
     previous = submission
@@ -803,7 +818,6 @@ def _run_once(
         previous = record
     assert terminal is not None
 
-    # 8. 终态三分：FAILED/TIMEOUT -> JOB_FAILED（零 collect/publish）
     if terminal.state is not JobState.SUCCEEDED:
         if failure_exit_code is None:
             return RunReport(
@@ -871,7 +885,6 @@ def _run_once(
         claim=claim,
     )
 
-    # 9. checkpoint point-of-use 重验（runner 零调用）
     try:
         captured = tracker_module.ensure_twelve_hour_checkpoint(
             tracker=products.tracker,
@@ -888,26 +901,25 @@ def _run_once(
         ) from exc
     record = products.tracker.captured.get(12)
     if record is None or captured is not record:
-        raise RunError(
+        _phase_error(
             "checkpoint 重验结果必须逐字是 tracker.captured[12] 的同一对象/path/checksum",
-            phase="collect",
-            source=source,
-            cycle=target,
-            job_id=submission.job_id,
+            "collect",
+            source,
+            target,
+            submission.job_id,
         )
     if record.path != canonical:
-        raise RunError(
+        _phase_error(
             f"checkpoint 记录路径 {record.path} 必须逐字等于控制器推导终名 {canonical}",
-            phase="collect",
-            source=source,
-            cycle=target,
-            job_id=submission.job_id,
+            "collect",
+            source,
+            target,
+            submission.job_id,
         )
     _verify_canonical_is_regular(
         canonical, work_root, source, target, job_id=submission.job_id, claim=claim
     )
 
-    # 10. publish 三态
     ctx.phase = "publish"
     publish_inputs = publish_module.PublishInputs(
         yd_root=local.yd_root,
@@ -950,7 +962,6 @@ def _run_once(
             job_id=submission.job_id,
         ) from exc
 
-    # 11. 正常成功：SUCCEEDED，work 已删除
     return RunReport(
         source=source,
         cycle=target,
@@ -972,12 +983,7 @@ def catch_up_source(
     driver: AttemptDriver,
     poll_wait: Callable[[], None],
 ) -> tuple[RunReport, ...]:
-    """单源多轮追赶：每轮只调用公开 `controller.run_once`，仅 SUCCEEDED 继续。
-
-    不取锁、不预扫 raw、不自增 cycle、不复制 14.1 内部逻辑。STOPPED /
-    JOB_FAILED / SUCCEEDED_CLEANUP_PENDING 把当前报告作为末项后立即返回；
-    RunError 与 BaseException 原样外传。
-    """
+    """每轮只调用公开 `controller.run_once`；仅 SUCCEEDED 继续追赶。"""
     reports: list[RunReport] = []
     while True:
         report = controller.run_once(
