@@ -865,6 +865,29 @@ Review focus:
 Suggested fixture level: compact - 结构与路径函数用内存对象与 tmp 目录即可
 Minimal mergeable slice: 勘察清单（2.1）——纯文档产物独立合并，快照代码为后继
 
+### Issue #42：atomic write 异常清理 fixture
+
+Fixture level: expanded；Repair intensity: high；Upstream suggested level: absent。
+Authority: Wave 0 裁决 1 / 本文件 M2 收尾裁决授权本仓分叉，取代 issue 原三选一；保留 NWM pin 作溯源，不重新 pin。
+Change surface: `producer/src/yd_producer/store/safe_fs.py::atomic_write_bytes_no_follow`、`producer/tests/test_safe_fs.py`；inventory safe_fs 行已登记。
+Must preserve: no-follow 与 containment、mode、原子 replace、durable replace 的 io/indeterminate 分型、既有目标/兄弟文件；不改变函数签名。
+Exception boundary: 非 OSError（TypeError、MemoryError、KeyboardInterrupt 等）仍以原异常传播，`LocalObjectStore.write_bytes_atomic` 不扩大捕获面；只修清理归属，不把中断包装成业务错误。
+Seams under test: 公共 atomic writer（默认 tmp 和 store 使用的 part 后缀），os.write/fsync 故障注入，真实临时目录与 fd 存活检查。
+Risk packs selected: Public API（原返回/异常）；File IO/path safety/overwrite（本次临时文件所有权）；Concurrency/shared state/ordering（replace 前后清理边界）；Legacy compatibility/examples（既有调用者）；Error handling/rollback/partial outputs（BaseException）；Documentation/migration notes（inventory）；NWM snapshot provenance（保留头与登记）。
+Risk packs not selected: Config/project setup、Schema/columns/units、Auth/permissions/secrets、Resource limits/large input、Release/packaging/dependencies（均不改对应行为）；Geospatial/CRS、Time series/forcing、状态链/warm-start（无领域语义变更）。
+Invariant Matrix:
+- Governing invariant: 本次打开的写 fd 在所有退出路径关闭；replace 前失败清理本次临时文件，replace 后不得删除目标；主异常保持原义。
+- Source of truth: parent dir fd、本次 temp_name、replaced 状态。
+- Producers/public entrypoint/storage: atomic writer；validator: 既有 no-follow 与 parent identity 检查不变。
+- Downstream: LocalObjectStore 与 durable registry 调用不变；frontend/cache/query 无直接变更。
+- Failure/rollback: 非 OSError 和 BaseException 进入统一清理；Evidence: test_safe_fs 与 inventory。
+- Regression rows: invalid content TypeError / injected MemoryError / KeyboardInterrupt before replace -> fd 关闭、无本次点文件、旧目标和兄弟文件不变；post-replace exception -> 已发布目标保留；成功 -> 完整 bytes、无临时残留；既有 OSError -> 原模块分型。
+Boundary checklist: shared helper root、write/staging/replace/rollback、unchanged downstream；#55 directory cleanup 与 #122 bounded read 保持后续独立 PR，不在本条扩修。
+Required evidence:
+- [ ] 新回归在旧源码红、修复后绿；覆盖上述异常与 tmp/part，fd 以 fstat/EBADF 验证而非 /proc。
+- [ ] `cd producer && uv run pytest && uv run ruff check . && uv run ruff format --check .`；viewer 默认矩阵；`openspec validate --all` 与 stage-pipeline log check。
+- [ ] 四席 high-risk cross-review、独立 final review、CI 与 SHA 匹配证据完成后合并。
+
 ### 组 2 剩余任务（2.2/2.3）的 issue #5 fixture
 
 **M2 收尾裁决（#42/#55/#122/#63/#102/#103/#104，覆盖本 change 内更早的 pin 等价措辞）**：`producer/src/yd_producer/store/safe_fs.py`、`store/object_store.py`、`canonical/converter.py`、`state/cfg_ic.py` 仍以 `NWM@8ae9b8f2` 为溯源和差异审计基线，但 yd MAY 在本仓修复该快照的缺陷，不再要求逐字、逐字节或 AST 等价。每一处偏离 MUST 先在 `nwm-snapshot-inventory.md` 对应目标路径行的「剥离点」列登记一句“问题 + 修法”；模块头或 PR 说明只能补充，不能替代该登记。这个裁决只解锁上述四个生产模块，不自动扩大任何既有 issue 的实现范围，也不解除其它快照文件和快照测试的等价约束。
