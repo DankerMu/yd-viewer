@@ -4,6 +4,17 @@
 
 ## ADDED Requirements
 
+### Requirement: 目录创建拒绝保持资源与错误分型
+`ensure_directory_no_follow` MUST 在成功与拒绝退出时释放本次 walk 持有的目录 fd；MUST 保留 no-follow 与 containment，永久几何拒绝的 unsafe 与操作失败的 io 不得因自身 fd 泄漏或次生关闭错误互相翻转。
+
+#### Scenario: 深层永久拒绝反复发生
+- **WHEN** 在根下第二层或更深位置遇到普通文件或符号链接，并在隔离进程的 soft RLIMIT_NOFILE=64 下重复尝试 200 次
+- **THEN** 每次返回 unsafe，所有本次目录 fd 关闭，不因 EMFILE 变成 io
+
+#### Scenario: I/O 主因与清理错误并发
+- **WHEN** walk 遇到真实或注入的 I/O 失败，清理目录 fd 又报告关闭错误
+- **THEN** 返回 io 并保留操作主因；若主因是几何拒绝，则仍返回 unsafe，且继续尝试释放其它本次目录 fd
+
 ### Requirement: 原子写失败的资源清理
 `atomic_write_bytes_no_follow` MUST 在非 OSError（含 BaseException）退出时关闭本次写 fd，并只清理尚未 replace 的本次临时文件；MUST 保留原异常，不能把中断改为业务错误。此本仓分叉按快照清单登记，不要求重新 pin。
 
