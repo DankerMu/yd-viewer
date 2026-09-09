@@ -1139,3 +1139,12 @@ PR #178 的 fixture review PASS、独立 Gap Sweep CLEAN，无候选、无综合
 **决策不变：keep。** 保留 pinned core、major/repeat 信号触发的 unused free-slot rotation 与独立终审。
 本次 DECIDABLE 是累计样本阈值提醒，既有 rotated 收益未消失，没有新的 cut 依据。
 #177 产品及 #132 接线尚未完成；task 14.6/14.2 保持未勾，shared change 不 archive。
+
+---
+
+## 第 37 次复议（issue #177 / PR #186 私有 IO 边界文档补充合并后，2026-09-09）
+
+追加后审计为 50 行（49 merged、1 terminal）；none 桶 9 个 merged PR、2 个 net catches。
+多轮样本 32，later core=125 / rotated=96，历史 non-compliant 排除 9 条；脚本再次输出 lens-rotation DECIDABLE。
+本次是用户授权的两文件 docs-only 补充，fixture review PASS、CI 四项成功，无产品综合轮次或 rotation 样本。
+记录复议延期：本次没有新增轮换收益/损失数据，不据此自动改变维护者已有 keep 决策；保持现有审核配置，后续 keep/cut 由维护者结合产品 #181 闭环决定。#181 round1 计数不重置，#177/shared change 仍未完成。
