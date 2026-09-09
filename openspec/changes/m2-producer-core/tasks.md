@@ -938,10 +938,14 @@ Invariant Matrix:
 - Failure/rollback: read/fstat/lseek OSError、KeyboardInterrupt/SystemExit 与 close OSError 组合；Evidence: fd关闭计数、cause/identity/note、源文件字节、定向变异。
 - Rows（三 reader）: read EIO + close ESTALE -> SafeFilesystemError io，cause 为 read EIO，note 记录 close，close_count=1；仅 close ESTALE -> io/cause=close；仅读 EIO -> io/cause=read；KI/SystemExit + close -> 同一取消对象有 note，close_count=1；正常 -> 原 bytes/cap/tail。
 - Rows（tail）: fstat/lseek EIO + close ESTALE -> fstat/lseek 是 primary；Rows（caller except）: 调用者已处理 ValueError 时成功读+close失败仍 io，不污染该 ValueError；Rows（wrapper）: LocalObjectStore read/read_limited 双失败 cause 链仍可追到 read。
+- Admission row（三 reader）: 缺失文件仍抛 FileNotFoundError；FIFO/symlink 仍在 open_file 准入拒绝，不进入 reader 已取得 file_fd 的 close 计数，不包装这些取得 fd 前的错误。
+- Success row（三 reader）: 文件 b"abcdef"，full 返回 b"abcdef"，limited(max_bytes=3) 返回 b"abcd"，tail(max_bytes=3) 返回 b"def"；每项 close_count=1 且成功关闭后 fstat=EBADF；limited/tail 的 max_bytes=0 边界分别 b"a"/b""。
 Boundary checklist: 共享 read helper、异常/取消、文件 fd close 所有权、未改目录 fd 与 iterator；note 不新增日志/telemetry。
 Non-goals: open_file_no_follow 的目录-fd finally 全族重写；LocalObjectStore.iter_bytes；tracker._stream_digest；#183 successor fd；负 cap 新验证/新资源上限；远端 NFS 实测。裸 OSError 收敛针对本条的 read/file-close 失败，不改变取得 fd 前的缺失文件兼容契约。
 Review focus: finally 只捕 OSError；取消也到达 close；本次主因而非调用者异常状态；note 保留次级证据；close不重试；三兄弟一致且不放宽边界。
 Required evidence:
+- 所有上述 Matrix rows MUST 落入 `test_safe_fs.py` 新公共回归：三 reader 参数化双失败/仅close/仅读失败、KI 与 SystemExit 身份及 close note；tail fstat 与 lseek 独立双失败；caller except 的原 ValueError 不添 note；两个 LocalObjectStore read wrapper 的 `ObjectStoreError.__cause__` 为模块错误且其 `__cause__ is read_error`。
+- 准入兼容与成功字节/close_count rows 同样必测；保留现有 refusals 测试不迁移。基线预期：新增故障语义回归红、既有兼容场景绿；不要求成功/准入兼容在基线变红。「finally直接close」由双失败/取消/仅close判别；「取消跳过close」由取消close_count与fd liveness判别，两种变异覆盖三 reader。
 - [ ] 基线批量红；「finally 直接 os.close」与「取消路径跳过 close」两种精确变异均被新公开回归杀死；修复后绿。
 - [ ] producer 全量 pytest/Ruff、viewer 默认矩阵、OpenSpec strict/all、stage log；high 四席与独立最终审核、CI/SHA gate。
 
