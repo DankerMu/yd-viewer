@@ -161,6 +161,7 @@ def atomic_write_bytes_no_follow(
     temp_name = f".{target.name}.{uuid.uuid4().hex}.{temp_suffix}"
     file_fd: int | None = None
     replaced = False
+    write_failed = False
     try:
         _verify_fd_matches_path(parent_fd, parent_path)
         _reject_existing_symlink(parent_fd, target.name, target)
@@ -174,8 +175,9 @@ def atomic_write_bytes_no_follow(
             written = os.write(file_fd, view)
             view = view[written:]
         os.fsync(file_fd)
-        os.close(file_fd)
+        pending_fd = file_fd
         file_fd = None
+        os.close(pending_fd)
         _verify_fd_matches_path(parent_fd, parent_path)
         os.replace(temp_name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         replaced = True
@@ -199,21 +201,27 @@ def atomic_write_bytes_no_follow(
                 os.fsync(parent_fd)
             except OSError:
                 pass
-    except SafeFilesystemError:
-        _close_file_fd(file_fd)
-        if not replaced:
-            _unlink_temp(parent_fd, temp_name)
-        raise
     except OSError as error:
-        _close_file_fd(file_fd)
-        if not replaced:
-            _unlink_temp(parent_fd, temp_name)
+        write_failed = True
         kind = "indeterminate" if replaced else "io"
         raise SafeFilesystemError(
             f"Failed to write {target}: {error}", kind=kind
         ) from error
+    except BaseException:
+        write_failed = True
+        raise
     finally:
-        os.close(parent_fd)
+        _close_file_fd(file_fd)
+        if not replaced:
+            _unlink_temp(parent_fd, temp_name)
+        try:
+            os.close(parent_fd)
+        except OSError as error:
+            if not write_failed:
+                kind = "indeterminate" if replaced else "io"
+                raise SafeFilesystemError(
+                    f"Failed to write {target}: {error}", kind=kind
+                ) from error
     return target
 
 
