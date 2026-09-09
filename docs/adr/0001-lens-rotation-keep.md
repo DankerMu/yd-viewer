@@ -1148,3 +1148,8 @@ PR #178 的 fixture review PASS、独立 Gap Sweep CLEAN，无候选、无综合
 多轮样本 32，later core=125 / rotated=96，历史 non-compliant 排除 9 条；脚本再次输出 lens-rotation DECIDABLE。
 本次是用户授权的两文件 docs-only 补充，fixture review PASS、CI 四项成功，无产品综合轮次或 rotation 样本。
 记录复议延期：本次没有新增轮换收益/损失数据，不据此自动改变维护者已有 keep 决策；保持现有审核配置，后续 keep/cut 由维护者结合产品 #181 闭环决定。#181 round1 计数不重置，#177/shared change 仍未完成。
+
+## 第 38 次复议（issue #177 / PR #191 专用测试文件边界补充合并后，2026-09-09）
+
+追加后审计为55行（54 merged、1 terminal），多轮样本32，later core=125 / rotated=96，历史排除9条。脚本再次输出 lens-rotation DECIDABLE。
+本次仅用户授权的两文件 docs-first 补充，fixture review PASS、四项 CI 成功，没有新增产品轮换样本。记录复议延期：没有新的轮换收益/损失依据，不自动改变已有 keep 决策；维持现有配置，待产品 #181 闭环后由维护者复议。#181 当前为 Round 2 not-clean，计数不重置；#177 与 shared change 继续未完成。
