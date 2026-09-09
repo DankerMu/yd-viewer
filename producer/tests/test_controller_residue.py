@@ -490,27 +490,26 @@ def test_symlink_inside_half_product_tree_is_unlinked_not_followed(
 # --- containment ---
 
 
-def test_execute_refuses_targets_outside_the_containment_root(
+def test_constructor_refuses_targets_outside_the_containment_root(
     tmp_path: pathlib.Path,
 ) -> None:
-    """`containment_root` 就是 `YD_ROOT`：以越界路径构造的执行被 `safe_fs` 拒绝。"""
+    """跨根半成品/状态手构清单在构造点拒绝，真实树递归快照不变。"""
     root = _yd_root(tmp_path)
     other_root = tmp_path.resolve() / "other"
     other_root.mkdir()
     builder = _crash_residue_tree(root)
     before = snapshot_tree(root)
 
-    trespassing = residue.ResiduePlan(
-        yd_root=other_root,
-        source="ifs",
-        retained_cycle=parse_cycle(T),
-        state_files=(builder.state_path(T_PLUS_12, "ifs"),),
-        half_product_dirs=(builder.source_output_dir(T, "ifs"),),
-    )
+    with pytest.raises(SafeFilesystemError) as error:
+        residue.ResiduePlan(
+            yd_root=other_root,
+            source="ifs",
+            retained_cycle=parse_cycle(T),
+            state_files=(builder.state_path(T_PLUS_12, "ifs"),),
+            half_product_dirs=(builder.source_output_dir(T, "ifs"),),
+        )
 
-    with pytest.raises(SafeFilesystemError):
-        residue.execute_residue_plan(trespassing)
-
+    assert error.value.kind == "unsafe"
     assert snapshot_tree(root) == before
 
 
@@ -531,32 +530,26 @@ def test_plan_carries_the_yd_root_as_containment_root(tmp_path: pathlib.Path) ->
     assert plan.yd_root != root.parent
 
 
-def test_execute_refuses_a_state_file_outside_the_containment_root(
+def test_constructor_refuses_a_state_file_outside_the_containment_root(
     tmp_path: pathlib.Path,
 ) -> None:
-    """判别器之二：清单**只带状态文件**时越界仍被拒（状态那条臂也传 `containment_root`）。
-
-    上面的越界用例的清单两臂俱全，而执行顺序是「先半成品树、后状态文件」——它在第一臂
-    就抛了，状态那条臂的 `containment_root` 单独掉了也走不到、也不会红。故这一条把半成品
-    臂清空，逼执行走到 `unlink_no_follow`。
-    """
+    """只带越界状态文件的手构清单同样在构造点拒绝，状态文件仍在。"""
     root = _yd_root(tmp_path)
     other_root = tmp_path.resolve() / "other"
     other_root.mkdir()
     builder = _crash_residue_tree(root)
     before = snapshot_tree(root)
 
-    trespassing = residue.ResiduePlan(
-        yd_root=other_root,
-        source="ifs",
-        retained_cycle=parse_cycle(T),
-        state_files=(builder.state_path(T_PLUS_12, "ifs"),),
-        half_product_dirs=(),
-    )
+    with pytest.raises(SafeFilesystemError) as error:
+        residue.ResiduePlan(
+            yd_root=other_root,
+            source="ifs",
+            retained_cycle=parse_cycle(T),
+            state_files=(builder.state_path(T_PLUS_12, "ifs"),),
+            half_product_dirs=(),
+        )
 
-    with pytest.raises(SafeFilesystemError):
-        residue.execute_residue_plan(trespassing)
-
+    assert error.value.kind == "unsafe"
     assert builder.state_path(T_PLUS_12, "ifs").is_file()
     assert snapshot_tree(root) == before
 
@@ -600,31 +593,22 @@ def test_symlinked_yd_root_is_resolved_before_use(tmp_path: pathlib.Path) -> Non
     assert builder.source_output_dir(D, "ifs").joinpath("DONE").is_file()
 
 
-def test_execute_refuses_a_dotdot_entry_name(tmp_path: pathlib.Path) -> None:
-    """清单里带 `..` 的半成品条目 -> `SafeFilesystemError(kind="unsafe")`，树逐字不变。
-
-    这是**消费者侧**的钉子：`safe_fs.remove_tree_allow_symlinks` 第一行的
-    `_reject_unsafe_entry_name` 是「`output/<T>/..` 不会真被删」这条保证的唯一承载物，
-    而仓内没有任何用例钉住它（round 2 实测：把该行删掉，全套仍绿，随后 `..` 清单会真的
-    删掉另一源已提交的 `DONE` 产物）。`store/safe_fs.py` 在本 issue 零改动，故义务落在
-    这里：本模块交出去的清单形态一旦退化，拒绝行为 MUST 仍然可观测。
-    """
+def test_constructor_refuses_a_dotdot_entry_name(tmp_path: pathlib.Path) -> None:
+    """清单里带 `..` 的半成品条目在构造点拒绝，树与兄弟源 DONE 逐字不变。"""
     root = _yd_root(tmp_path)
     builder = _crash_residue_tree(root)
     builder.write_done(T, "gfs")
     builder.write_output_dat(T, "gfs")
     before = snapshot_tree(root)
 
-    degenerate = residue.ResiduePlan(
-        yd_root=root,
-        source="ifs",
-        retained_cycle=parse_cycle(T),
-        state_files=(),
-        half_product_dirs=(root / "output" / T / "..",),
-    )
-
     with pytest.raises(SafeFilesystemError) as error:
-        residue.execute_residue_plan(degenerate)
+        residue.ResiduePlan(
+            yd_root=root,
+            source="ifs",
+            retained_cycle=parse_cycle(T),
+            state_files=(),
+            half_product_dirs=(root / "output" / T / "..",),
+        )
 
     assert error.value.kind == "unsafe"
     assert snapshot_tree(root) == before

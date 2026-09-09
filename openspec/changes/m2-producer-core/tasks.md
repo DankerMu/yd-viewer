@@ -6151,3 +6151,55 @@ Minimal mergeable slice: 先合并严格六文件 docs-first PR；随后单一 p
 - source/staged读写是否descriptor-bound、bounded、exact-set、manifest-last且关闭swap；assemble copy/parse是否同bytes校验。
 - legacy assemble是否真正保持签名/递归输入/inside-work拒绝，是否只有一个参数/state/forcing/commit内核。
 - 任一失败/timeout/crash/success的input residue是否只遵循现有exact-work owner，未建立第二删除协议。
+
+### Issue #112：ResiduePlan source 身份绑定
+
+Issue type: bugfix；Project profile: yd-viewer；Blast radius: critical。
+Fixture level: expanded；Repair intensity / effective tier: high；Upstream suggested level: absent（legacy issue）。
+Minimal mergeable slice: `residue.py` 的共享绑定函数、构造/执行双重调用与对应测试；`safe_fs.py` 零改动。
+Must preserve: planner 零写入与 DONE(T) 整份空清单；合法计划先半成品后状态；safe_fs no-follow、missing_ok 幂等、原错误传播；controller 包装为 RunError(phase="residue")。
+Seams under test: issue 声明的 `ResiduePlan` 构造、`execute_residue_plan`、`plan_residue`；不新增 seam。
+Contract: root resolve 写回；source 非空单分量且非点名/NUL；retained 为可由现有 cycle 编解码往返的 UTC 整点身份；state 路径必须词法等于 root/states/source/合法cycle.cfg.ic 且 cycle > retained；half-product 必须词法等于 root/output/retained/source。禁止用 target.resolve 把越界/遍历路径洗成合法身份。
+Binding: 构造与执行共用完整绑定；先验证全部字段和全部路径，再执行任何删除。合法 tuple 按路径排序去重；执行消费复验后的 tuple。绕过构造或 frozen 篡改同样被拒。
+Error contract: 身份拒绝使用既有 `SafeFilesystemError(kind="unsafe")`，消息指名字段/路径；本模块无 phase 字段，不新增 phase 协议；planner 原 source ValueError 与 discovery ResidueError 不变。
+Boundary: 整份零删除承诺针对身份非法计划；合法计划中的文件系统 no-follow/IO 拒绝仍可能出现在先前合法删除之后，不新增事务回滚，也不在 executor 新增 DONE 发现。
+Compatibility migration: 本节覆盖 #23 手搓越界 plan 延后到执行才拒的旧用例要求；改为构造拒绝并独立验证执行前绕过构造的拒绝。#23 合法状态 symlink 的执行顺序用例保持。
+
+Risk packs considered:
+- Public API / CLI / script entry: selected — 公开清单与执行器的直接调用及 controller 消费。
+- Config / project setup: not selected — 无配置变化。
+- File IO / path safety / overwrite: selected — 跨根/源/lane/cycle 删除拒绝，保留 no-follow。
+- Schema / columns / units / field names: selected — 路径/状态文件名的身份结构；不改产品格式。
+- Auth / permissions / secrets: not selected — 不改权限、凭证；路径权限沿用 safe_fs。
+- Concurrency / shared state / ordering: selected — frozen 绕过后的 point-of-use 复验与先验整份校验；不防敌意并发 Python 内存改写。
+- Resource limits / large input / discovery: not selected — 仅遍历显式 tuple，无新发现或文件读取。
+- Legacy compatibility / examples: selected — planner/controller 既有消费与旧手构测试适配。
+- Error handling / rollback / partial outputs: selected — unsafe 类型、整份身份拒绝零删除、合法计划 IO 错误保持。
+- Release / packaging / dependency compatibility: not selected — 无依赖或打包改动。
+- Documentation / migration notes: selected — 本 fixture/spec 记录公开构造收紧。
+- Geospatial / CRS / shapefile sidecars: not selected — 无几何。
+- Time series / forcing / temporal boundaries: selected — retained 与 later cycle 严格边界。
+- 状态链 / warm-start 定戳一致性: selected — retained 状态及兄弟源状态永不进入删除集合；不解析状态内容。
+- NWM 快照溯源与 DB-free 隔离: not selected — residue 为本仓代码，无 NWM 改动。
+
+Invariant Matrix:
+- Governing invariant: 每份可执行计划的全部删除目标与其 root/source/retained/lane 身份一致；任一身份错误必须在第一笔删除之前拒绝。
+- Source of truth: resolved yd_root、单分量 source、retained_cycle 与现有 cycle parser。
+- Producers: ResiduePlan.__post_init__、plan_residue；Validators/preflight: 唯一 binder、execute_residue_plan 入口。
+- Storage/cache/query: state_files/half_product_dirs 的不可变快照；Public entrypoints: 三个声明 seam。
+- Write/delete surfaces: executor 的两个 safe_fs 调用；Failure/stale surfaces: 手构、篡改、root 解析与非法 path；不缓存验证。
+- Downstream: _controller_run.py 的 residue plan/execute 调用段（566–577）、failure/publish tests；viewer 格式不变。
+- Unchanged shared helpers: cleanup.RetentionPlan 仅作参考、safe_fs 零改动；DONE 判定只在 planner。
+- Evidence: 以下递归快照/实际删除/回归命令，非仅 spy 调用。
+- Regression rows — valid: 自洽 IFS 手构/规划清单 → 仅删词法点名目标，retained/GFS 保留，重复执行无副作用。
+- Regression rows — mismatch: GFS DONE output/GFS state、跨根/lane、错 cycle/非 later、错后缀/遍历/塌缩 source → SafeFilesystemError(kind="unsafe")，构造及执行复验均先于任何删除，完整树快照不变。
+- Regression rows — compatibility: DONE(T) → planner 整份空清单；合法 state symlink → safe_fs 原拒绝且先半成品后状态；missing_ok 幂等；controller 错误仍 RunError(phase="residue")；旧手构用例改为构造拒绝并增加独立执行绕过用例。
+
+- [x] 112.1 在构造与执行前绑定完整 source 身份，保留合法计划消费行为。
+- [x] 112.2 构造输入为 sibling GFS output（含 DONE）/GFS state、跨根、lane 交换、非 retained 的 output cycle、state cycle <= retained、非 `.cfg.ic` 后缀、`..` 或 source `["", ".", "..", "a/b", "ifs/", NUL]` → SafeFilesystemError(kind="unsafe") 且递归快照不变；planner 既有 ValueError/ResidueError 不变。
+- [x] 112.3 先构造自洽 plan，再用 `object.__setattr__` 篡改 state_files（合法 half-product 在前、非法 state 在后）或 half_product_dirs → execute 先拒绝整份计划，异常 kind="unsafe"，包括合法目标在内的完整树快照不变；另用 object.__new__ 绕过构造验证同一出口。
+- [x] 112.4 自洽手构（含乱序/重复合法路径及 root alias）与 planner 产物 → 规范化后可执行且幂等，仅点名目标删除，retained/GFS/外部 symlink 目标保留；DONE(T) → planner 整份空清单；合法 plan 的 state symlink → 原 safe_fs 拒绝，半成品已先删除。
+- [x] 112.5 执行 focused residue/controller/publish 回归、producer pytest+Ruff/format、viewer pytest+Ruff/format、OpenSpec strict/all 与 stage anchor；新行为在旧 source 上有批量 red proof。
+
+Non-goals: #109/#86/#108/#85/#77 后续独立 PR；#58/#59/#94/#106 已关闭不重开；不改 safe_fs/cleanup、运行期 DONE 重新发现、事务删除、部署与真实 Slurm。
+Shared-change lifecycle: m2-producer-core 仍含未完成 issue；本 PR 仅关闭本节，不整体 archive。
