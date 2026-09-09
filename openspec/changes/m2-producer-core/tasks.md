@@ -897,6 +897,29 @@ Required evidence:
 Merge evidence: PR #180，final `741456b`，merge `9c2fd72`；producer 2962 passed / 3 skipped，C1 caller exception context 经独立 verifier 确认并关闭。共享 change 尚有未完成 M2 任务，保留 active，不按单 issue 整体 archive。
 Review-loop audit deferral: 2026-09-09 lens-rotation 达到 DECIDABLE（32 multi-round，later core=125/rotated=96）；保持当前 reviewer 席位，不自动削减；keep/cut 是人工政策决定，本次授权仅含三项修复，延后人工裁决。
 
+### Issue #55：directory walk 拒绝清理 fixture
+
+Fixture level: expanded；Repair intensity: high；Upstream suggested level: absent。
+Authority: 同 #42 的 Wave 0 本仓分叉，不重新 pin；用户明确指定 `test_safe_fs.py` 追加回归，覆盖 issue 旧测试归属要求，既有 pin 用例不改写。
+Change surface / seams: `safe_fs.py::ensure_directory_no_follow` 与 `test_safe_fs.py`；真实目录 walk、公有函数抛出 kind、os.open/close 故障边界。
+Must preserve: no-follow/containment、创建 mode=0755 与 umask、返回配置路径；unsafe（几何拒绝）与 io（操作失败）互不翻转；#42 writer 语义不变。
+Must add: 深度 >=1 拒绝时释放中间目录 fd 和 root fd；迭代推进/关闭报错也不遗失新旧 fd 所有权；次生 close OSError 不替换主拒绝或 I/O 主因。
+Risk packs selected: Public API（kind/返回）；File IO/path safety（目录 fd）；Concurrency/shared state/ordering（逐层交接）；Resource limits（低 RLIMIT_NOFILE）；Legacy compatibility（原调用者）；Error handling/rollback（主因与清理）；Documentation/provenance（登记 NWM 分叉）。
+Risk packs not selected: Config/setup、Schema/units、Auth/secrets、Release/dependencies（不改对应契约）；Geospatial/CRS、Time series/forcing、状态链/warm-start（无领域计算）。
+Invariant Matrix:
+- Governing invariant: 本次 walk 退出释放其持有目录 fd，拒绝种类只由本次操作主因决定，不受自身泄漏或次生清理故障改变。
+- Source of truth: root_fd、当前子目录 fd、刚打开下一层 fd 的唯一所有权。
+- Producer/public entry: ensure_directory_no_follow；validator: no-follow walk 与 containment；storage: 真实嵌套目录；downstream: LocalObjectStore/atomic writer 不改。
+- Failure/rollback: 普通文件/符号链接/注入 EIO 与关闭失败；只关闭本次 fd，不删除既有或已创建目录。
+- Evidence: test_safe_fs 的 fd liveness 与隔离子进程 RLIMIT_NOFILE；inventory safe_fs 行。
+- Rows: 深度 >=1 的 regular-file/symlink 拒绝重复 200 次 -> 每次 unsafe、所有本次 fd fstat=EBADF；depth0 控制同样不泄漏；独立子进程 soft limit=64 下重复 200 次 -> 恒 unsafe，无 EMFILE 翻转；注入 open/mkdir EIO -> io 且 close 故障不掩盖主因；成功多层创建 -> 路径与 mode/umask 不变、fd 关闭。
+Boundary checklist: shared walker、公开目录创建、fd 交接、拒绝/清理、未改动兄弟 walker 与 writer；检查 `_open_parent_dir`/`_open_directory_no_follow` 的现有清理形态，不扩修。
+Non-goals: #122 有界读；其它 helper 的关闭故障重构；远端/NFS 实测；不放宽拒绝或以吞掉 I/O 伪装成功。
+Review focus: 深度0假阴性；fd推进失败时 next_fd 归属；禁止使用 ambient sys.exception 判断本次失败（#42 C1）；unsafe/io 主因；RLIMIT 只在子进程改变。
+Required evidence:
+- [ ] 旧源码批量红证据与删除新增清理的定向变异体均使深层拒绝/RLIMIT 判别器变红；修复后绿。
+- [ ] producer 全量 pytest/Ruff，viewer 默认矩阵、OpenSpec strict/all 与 stage log；high 四席、独立最终审核、CI 与 SHA gate。
+
 ### 组 2 剩余任务（2.2/2.3）的 issue #5 fixture
 
 **M2 收尾裁决（#42/#55/#122/#63/#102/#103/#104，覆盖本 change 内更早的 pin 等价措辞）**：`producer/src/yd_producer/store/safe_fs.py`、`store/object_store.py`、`canonical/converter.py`、`state/cfg_ic.py` 仍以 `NWM@8ae9b8f2` 为溯源和差异审计基线，但 yd MAY 在本仓修复该快照的缺陷，不再要求逐字、逐字节或 AST 等价。每一处偏离 MUST 先在 `nwm-snapshot-inventory.md` 对应目标路径行的「剥离点」列登记一句“问题 + 修法”；模块头或 PR 说明只能补充，不能替代该登记。这个裁决只解锁上述四个生产模块，不自动扩大任何既有 issue 的实现范围，也不解除其它快照文件和快照测试的等价约束。
