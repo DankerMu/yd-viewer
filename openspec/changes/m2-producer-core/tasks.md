@@ -6134,8 +6134,9 @@ Minimal mergeable slice: 先合并严格六文件 docs-first PR；随后单一 p
 **PR Boundary**：
 
 - docs-first（本 fixture）恰六文件：`docs/compute-loop-design.md`、`docs/agent-ops.md`、`openspec/changes/m2-producer-core/design.md`、`tasks.md`、`specs/forcing-chain/spec.md`、`specs/run-controller/spec.md`。不改`docs/products-contract.md`、代码或测试；合并后#177保持OPEN、14.6保持`[ ]`、shared change不archive。
-- product恰八文件：保留 `producer/src/yd_producer/staged_inputs.py`（新增）、`assemble.py`、`_controller_run.py`、`producer/tests/test_staged_inputs.py`（新增）、`test_assemble_run.py`、`run_once_fixtures.py`、`test_controller_run_once.py` 七文件，另允许新增私有 `producer/src/yd_producer/_assemble_io.py`。该模块只承载每次调用的 descriptor-bound assembly IO 与必要私有输入结构，不新增公开 seam、第二 assembler 或 cleanup owner。其它controller/assemble siblings只运行回归、不修改；不得改`controller.py`、`_assemble_fs.py`、`_work_claim.py`、`safe_fs.py`、`prepare*.py`、`assembly_fixtures.py`、`cli.py`、`nwm.py`、`slurm.py`、config、viewer或增加large-file豁免；每个非豁免文件在标准格式化后仍须<1000行。
+- product恰九文件：保留 `producer/src/yd_producer/staged_inputs.py`（新增）、`assemble.py`、`_controller_run.py`、`producer/tests/test_staged_inputs.py`（新增）、`test_assemble_run.py`、`run_once_fixtures.py`、`test_controller_run_once.py` 七文件，另允许新增私有 `producer/src/yd_producer/_assemble_io.py` 及专用 `producer/tests/test_assemble_bound_io.py`。私有 IO 模块只承载每次调用的 descriptor-bound assembly IO 与必要私有输入结构，不新增公开 seam、第二 assembler 或 cleanup owner；专用测试文件承载 bound IO 回归及必要测试 helper，允许从原 assemble 测试迁移对应测试/fixture，但必须保持全部既有场景、断言和 public-seam 证据。其它controller/assemble siblings只运行回归、不修改；不得改`controller.py`、`_assemble_fs.py`、`_work_claim.py`、`safe_fs.py`、`prepare*.py`、`assembly_fixtures.py`、`cli.py`、`nwm.py`、`slurm.py`、config、viewer或增加large-file豁免；每个非豁免文件在标准格式化后仍须<1000行，不得压行或删弱断言凑数。
 - 本轮用户显式授权由七文件扩为八文件，以闭合 PR #181 INV-02 的 consumer-root identity 丢失；先以独立 docs-first 补充提交修订本文件与 `design.md`，再抽取私有 IO 模块。产品提交不夹带其它 docs/spec 改动，不重置 PR #181 review round；#177 与 shared change 在产品合并前保持未完成。
+- 后续用户明确选择新增专用测试文件，将八文件边界扩为九文件：Round 2 的 successor FD ownership / point-of-use nonregular 拒绝修复需要回归，而原测试文件标准格式化后已达1147行。先独立 docs-first 合并本文件与 `design.md` 的边界补充，再迁移测试；不放宽行为 oracle 或行数限制，不重置 PR #181 的轮次，shared change 保持 active。
 
 **Non-goals / scope firewall**：
 
