@@ -21,6 +21,8 @@ r"""合成 SHUD v2 `yd.rivqdown.dat` 生成器（程序化，零二进制入库�
 
 from __future__ import annotations
 
+import mmap
+import os
 import struct
 from pathlib import Path
 
@@ -59,6 +61,7 @@ def build_dat_bytes(
     layout: str = "v2",
     column_ids: list[float] | None = None,
     truncate_column_table: int = 0,
+    minute_step: int = MINUTE_STEP,
 ) -> bytes:
     """合成一份 DAT 的字节。
 
@@ -76,7 +79,7 @@ def build_dat_bytes(
 
     data = bytearray()
     for row in range(rows):
-        values = [float(row * MINUTE_STEP)]
+        values = [float(row * minute_step)]
         values.extend(float(row + 1) for _ in range(nc))
         data.extend(_pack(values))
     data.extend(b"\x00" * extra_bytes)
@@ -99,20 +102,40 @@ def expected_v2_size(*, nc: int, rows: int) -> int:
 
 
 def write_sparse_dat(
-    path: Path, *, nc: int, rows: int, header_text: str = DEFAULT_HEADER_TEXT
+    path: Path,
+    *,
+    nc: int,
+    rows: int,
+    header_text: str = DEFAULT_HEADER_TEXT,
+    minute_step: int = MINUTE_STEP,
 ) -> Path:
-    """写一份**稀疏**的合法 v2 DAT：只落真实头部，数据区靠 `truncate` 撑到合法大小。
+    """写一份**稀疏**的合法 v2 DAT：只落真实头部与每行第 0 列分钟槽。
 
-    用于「契约检查阶段的读是有界的」这条断言：一个 `st_size` 巨大但头部合法的 DAT，
-    检查阶段若整读就会把峰值内存抬到文件大小量级。
+    流量列仍靠 `truncate` 保持空洞，供有界读/tracemalloc 断言：检查阶段若整读数据区
+    就会把峰值内存抬到文件大小量级。
     """
     head = (
         build_text_header(header_text)
         + _pack([20260826.0, float(nc)])
         + _pack([float(i + 1) for i in range(nc)])
     )
+    table_end = len(head)
+    stride = (nc + 1) * FLOAT64_BYTES
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(head)
-    with path.open("r+b") as handle:
-        handle.truncate(expected_v2_size(nc=nc, rows=rows))
+    size = expected_v2_size(nc=nc, rows=rows)
+    fd = os.open(path, os.O_RDWR)
+    try:
+        os.ftruncate(fd, size)
+        mapped = mmap.mmap(fd, size)
+        try:
+            for row in range(rows):
+                start = table_end + row * stride
+                mapped[start : start + FLOAT64_BYTES] = _pack(
+                    [float(row * minute_step)]
+                )
+        finally:
+            mapped.close()
+    finally:
+        os.close(fd)
     return path

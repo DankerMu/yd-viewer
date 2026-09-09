@@ -6203,3 +6203,46 @@ Invariant Matrix:
 
 Non-goals: #109/#86/#108/#85/#77 后续独立 PR；#58/#59/#94/#106 已关闭不重开；不改 safe_fs/cleanup、运行期 DONE 重新发现、事务删除、部署与真实 Slurm。
 Shared-change lifecycle: m2-producer-core 仍含未完成 issue；本 PR 仅关闭本节，不整体 archive。
+
+### Issue #109：DAT 第 0 列相对分钟校验
+
+Issue type: bugfix；Project profile: yd-viewer；Fixture level: expanded；effective tier/repair intensity: high。
+Upstream suggested level: absent（legacy）；docs-first authority: Wave 0 裁决16，compute-loop §11.1、run-controller「NFS 提交顺序与 DONE 语义」和本文件 #24 裁决4/12 已合并；本节只登记独立 PR，不重裁。
+Minimal mergeable slice: publish.py 与 _controller_run.py 的既有 PublishInputs 构造点、对应 publish/controller/DAT fixtures 测试；safe_fs/_work_claim/config/产品格式不改。
+Contract and seams: 消费 #24 裁决1/4/12/15 及 Required evidence 的 #109 两行；最高公开 seam 为 check_publish_contract、publish 与 run_once。尾部字段 output_interval_minutes 默认60保持旧调用，controller 显式传配置；strict positive int（拒 bool）在文件 IO 前校验；每行用同一个 descriptor-bound fd 定位读8字节并 finally close，保留既有两趟头部读及 expected_size。
+Must preserve: 七步序、DONE前零NFS写、DONE后错误极性、mode/no-follow/claim边界、既有行列/表完整性闸、合法168行；不读取流量列，不在publisher写死或反推间隔。
+Oracle: 合法bytes的独立固定偏移修改首/中/末值、非有限及整体偏移；非60显式37分钟的小fixture作为硬编码60/复制writer算式的killer，不把DAT writer生成表达式当expected oracle。
+
+Risk packs considered:
+- Public API / CLI / script entry: selected — PublishInputs/check/publish/run_once消费。
+- Config / project setup: selected — config.output_interval_minutes显式投影，无新配置。
+- File IO / path safety / overwrite: selected — descriptor-bound定位读，拒绝先于NFS写入。
+- Schema / columns / units / field names: selected — 第0列little-endian float64分钟。
+- Auth / permissions / secrets: not selected — mode与权限策略不改，沿用既有回归。
+- Concurrency / shared state / ordering: selected — same-fd行间绑定与finally close；不改变publish顺序。
+- Resource limits / large input / discovery: selected — 分钟增量读取恰N*8、零流量、无发现。
+- Legacy compatibility / examples: selected — 尾部默认字段与原168行/claim消费者兼容。
+- Error handling / rollback / partial outputs: selected — 非法/短读/IO映射PublishError且零NFS变更，work保留。
+- Release / packaging / dependency compatibility: not selected — stdlib，无依赖变更。
+- Documentation / migration notes: selected — 已合并#24检查清单及Known limit收口，本节记录实现证据。
+- Geospatial / CRS / shapefile sidecars: not selected — 无几何。
+- Time series / forcing / temporal boundaries: selected — relative_minutes = row_index * 显式配置间隔。
+- 状态链 / warm-start 定戳一致性: not selected — checkpoint语义不改，只跑既有回归。
+- NWM 快照溯源与 DB-free 隔离: not selected — 无快照/DB变化。
+
+Invariant Matrix:
+- Governing invariant: 写DONE前每行分钟值满足外部配置定义的时间轴，检查只额外读取N个float64且任何失败不写NFS。
+- Source of truth: Config.output_interval_minutes → PublishInputs字段；products-contract §5.2独立分钟oracle。
+- Producers: _controller_run.py既有PublishInputs构造、standalone callers；Validators: _check_positive_expectations/_check_dat/check_publish_contract。
+- Storage/read: scratch DAT，同一descriptor的逐行offset；Write/delete: publish七步既有，不改；Stale/error: 短读、非有限、IO、claim拒绝与finally close。
+- Downstream: publish expected_size整读长度复核、DONE消费者controller/viewer；共享safe_fs/_work_claim仅消费不改。
+- Regression rows — valid: 168行生产时间轴及显式37分钟小DAT → check通过且零写，publish正常DONE；旧调用/default及controller配置投影兼容。
+- Regression rows — mismatch: 首/中/末错值、整列+60、NaN/inf、非法interval、短读/IO → PublishError，row/expected/actual可定位，NFS快照不变且work保留，fd关闭。
+- Regression rows — resource/compatibility: standalone与claim读取合法N行 → 每行8字节、累计N*8，不读流量，fd同一且关闭；原expected_size与七步序不变。
+
+- [x] 109.1 添加显式分钟间隔输入/前置域闸、定位读校验和controller配置投影，不改公共旧参数位置。
+- [x] 109.2 实现上述valid/mismatch矩阵；独立offset/字面分钟oracle，记录构造方式，旧源码批量red proof。
+- [x] 109.3 实现两条fd腿的有界/关闭/错误回归；parent逐个运行wrong-stride、missing-table-end、first-last-only、whole-data-read、missing-close、hardcoded-writer60变异且test-body红，核对原expected_size。
+- [x] 109.4 focused publish/controller与producer/viewer完整验证、Ruff/format、OpenSpec strict/all、stage anchor通过；#24既有分钟Known limit已收口，不再声明延期。
+
+Non-goals: 流量值合理性、st绝对日期头、DAT复制与检查间内容事务、publish七步/根/原语语义变更、其他排队issue及真实SHUD/NFS/Slurm；shared change未完成，不整体archive。

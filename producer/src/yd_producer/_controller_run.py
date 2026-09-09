@@ -922,6 +922,7 @@ def _run_once(
         reach_count=config.reach_count,
         variant_reach_count=variant_reach_count,
         claim=claim,
+        output_interval_minutes=config.output_interval_minutes,
     )
     try:
         if publish_lock is None:
