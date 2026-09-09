@@ -10,8 +10,8 @@ cycle」与「raw 缺口阻塞不跳轮」两条 Requirement。
 判定顺序固定（compute-loop §10 逐条），一步不得提前：
 
 1. 该源的 `DONE` 集合（`output/<cycle_id>/<source>/DONE`，MUST 是普通文件）定 D；
-   无 `DONE` 时待跑 T 取 `states/<source>/` 里**最早**的合法状态文件名（全新链）；
-   两者皆空即 `NO_INITIAL_STATE`。
+   仅当共享 `output/` 根可枚举且 DONE 为空时，T 取最早合法状态名（全新链）；
+   状态根空即 `NO_INITIAL_STATE`；`output/` 根 ENOENT/ENOTDIR 是根异常。
 2. 有 `DONE` 时 T 固定为 `max(D) + 12h`。前沿**只由 `DONE` 推进**：状态目录里存在比 T
    更晚的文件（上次发布中断的残留）MUST NOT 让 T 前进。
 3. `states/<source>/<T>.cfg.ic` 必须存在、可读、且 header 的分钟时标对应**绝对** T。
@@ -34,16 +34,14 @@ cycle」与「raw 缺口阻塞不跳轮」两条 Requirement。
 `states/<source>/` 目录内 rename，若对不可解析文件名 fail-closed，一次崩溃的发布会把该源
 永久砖化。残留的**清理**归 issue #23。
 
-**「不存在」与「不可确定」严格分流**（裁决 9）：文件系统探测里**只有**
-`FileNotFoundError` / `NotADirectoryError` 等价于「空集合 / 该条目不算数」；其余任何
-`OSError`（`EACCES`/`EPERM`/`EIO`/`ESTALE`/`ELOOP`…）都是「无法确定」，一律停该源并返回
-`DISCOVERY_UNREADABLE`。因此本模块 MUST NOT 使用裸 `Path.exists()` / `Path.is_file()` /
-`Path.is_symlink()` 去判定需要被分类的路径：`pathlib` 只吞 `ENOENT/ENOTDIR/EBADF/ELOOP/
-EINVAL`，`EACCES`/`EIO` 会穿透。方向性理由：`states/` 侧判空是 fail-closed
-（`NO_INITIAL_STATE`），`output/` 侧判空却会让链看起来是**全新链**，把前沿**倒退**到已发布
-的 cycle——发布侧的「见 `DONE` 不覆盖」守卫归 #24 尚未落地，本函数当前是唯一闸门。
-集合无法枚举 / 条目无法判定归 `DISCOVERY_UNREADABLE`；状态文件**自身**读不出来仍归
-`STATE_UNREADABLE`。
+**「不存在」与「不可确定」严格分流**（裁决 9 / #86）：`states/<source>/` 列目录与下层
+`DONE`/状态路径上，`FileNotFoundError` / `NotADirectoryError` 仍是「空集合 / 该条目不算数」；
+共享 `output/` 根的同两项是根异常，MUST 停源。其余任何 `OSError`（`EACCES`/`EPERM`/`EIO`/
+`ESTALE`/`ELOOP`…）一律 `DISCOVERY_UNREADABLE`。MUST NOT 用裸 `Path.exists()` /
+`Path.is_file()` / `Path.is_symlink()` 预检：`pathlib` 只吞部分 errno，且预检与枚举之间
+会重开根消失窗口。方向性：`states/` 判空是 fail-closed；`output/` 判空会把链看成全新链、
+前沿倒退到已发布 cycle。集合无法枚举 / 条目无法判定归 `DISCOVERY_UNREADABLE`；状态文件
+**自身**读不出来仍归 `STATE_UNREADABLE`。
 
 **状态文件可读性跟随 symlink**（与 `state/cfg_ic.py` 的有界读同一理由：macOS `/tmp` 本身
 是 symlink，no-follow 会误拒合法测试树）。no-follow 的越界拒绝属删除/发布面，归 #24/#25。
@@ -129,9 +127,9 @@ class StopReason(enum.Enum):
 
     #: 该源既无任何 `DONE`，也没有任何合法命名的状态文件（链尚未由 init 建立）。
     NO_INITIAL_STATE = "no_initial_state"
-    #: 集合**无法枚举**或条目**无法判定**：目录列不出、`DONE` 或状态路径的元数据探测
-    #: 遇到 `ENOENT`/`ENOTDIR` 之外的 `OSError`。与「路径不存在」严格分流：不存在是空
-    #: 集合，不可确定一律停源，MUST NOT fail-open 成「全新链」让前沿倒退。
+    #: 集合**无法枚举**或条目**无法判定**：`output/` 根 `ENOENT`/`ENOTDIR`、以及其它
+    #: `OSError`（`EACCES`/`EIO`/…）。`states/` 根与下层 cycle/source/`DONE` 缺席仍是
+    #: 空集合；不可确定一律停源，MUST NOT fail-open 成「全新链」让前沿倒退。
     DISCOVERY_UNREADABLE = "discovery_unreadable"
     #: 待跑 T 的状态文件不存在（MUST NOT 回退到更旧状态或互借另一源）。
     STATE_MISSING = "state_missing"
@@ -198,14 +196,13 @@ def decide_frontier(
 
 
 class DiscoveryUnreadableError(Exception):
-    """探测信号：某处文件系统探测**无法确定**（`ENOENT`/`ENOTDIR` 之外的 `OSError`）。
+    """探测信号：文件系统探测**无法确定**。
 
     原名 `_DiscoveryUnreadable`，随 `done_cycles` / `visible_state_cycles` /
-    `parse_cycle_id` / `cycle_id` 一并**提升为公开符号**（issue #23 裁决 5：残留清理
-    MUST 复用本模块的 cycle 可见集与 `DONE` 判据而不是重写一份三道门，那两份判据一旦
-    分叉，「更晚」的定义就会与前沿的定义不一致）。捕获点因此从「只允许在
-    `decide_frontier` 内」扩为「`decide_frontier` 与 `residue.plan_residue`」——两处都
-    把它收敛成本源的停止语义，MUST NOT 被吞成「空集合」。行为逐字未变。
+    `parse_cycle_id` / `cycle_id` 一并**提升为公开符号**（issue #23 裁决 5）。
+    捕获点是 `decide_frontier` 与 `residue.plan_residue`，MUST NOT 被吞成空集合。
+    共享 `output/` 根的 `ENOENT`/`ENOTDIR` 也走本信号（#86）；`states/` 根与下层
+    cycle/source/`DONE` 缺席仍是空集合。
     """
 
     def __init__(self, detail: str) -> None:
@@ -321,13 +318,15 @@ def parse_cycle_id(name: str) -> datetime | None:
     return cycle
 
 
-def _iter_entry_names(directory: Path) -> list[str]:
-    """列目录。目录**不存在**才视为空集合；列不出来一律 `DiscoveryUnreadableError`。"""
+def _iter_entry_names(directory: Path, *, missing_is_empty: bool) -> list[str]:
+    """列目录。`missing_is_empty` 时 ENOENT/ENOTDIR 为空集；否则与其它 OSError 一律停。"""
     try:
         return [entry.name for entry in directory.iterdir()]
-    except (FileNotFoundError, NotADirectoryError):
-        return []
     except OSError as error:
+        if missing_is_empty and isinstance(
+            error, (FileNotFoundError, NotADirectoryError)
+        ):
+            return []
         raise DiscoveryUnreadableError(
             f"目录 {directory} 无法枚举（{error}）"
         ) from error
@@ -337,13 +336,12 @@ def done_cycles(output_root: Path, source: str) -> set[datetime]:
     """该源已完成的 cycle 集合。
 
     `DONE` MUST 是**普通文件**（products-contract §4.1）：目录、断链 symlink、FIFO 都不
-    算完成。判定用 `os.stat`（跟随 symlink）而非 `Path.is_file()`：后者把 `EACCES`/`EIO`
-    直接向外抛，而在旧实现里被 `except OSError: continue` 吞掉时会让该 cycle **静默掉出**
-    DONE 集合，前沿倒退回更旧的已发布 cycle。不存在/断链（`ENOENT`）才是「不算完成」。
-    逐源独立：`output/<cycle>/gfs/DONE` 不为 `ifs` 计数。
+    算完成。判定用 `os.stat`（跟随 symlink）而非 `Path.is_file()`。根级 `ENOENT`/`ENOTDIR`
+    由 `_iter_entry_names(..., missing_is_empty=False)` 停源；下层 cycle/source/`DONE`
+    缺席仍 `continue`。逐源独立：`output/<cycle>/gfs/DONE` 不为 `ifs` 计数。
     """
     cycles: set[datetime] = set()
-    for name in _iter_entry_names(output_root):
+    for name in _iter_entry_names(output_root, missing_is_empty=False):
         cycle = parse_cycle_id(name)
         if cycle is None:
             continue
@@ -364,7 +362,7 @@ def done_cycles(output_root: Path, source: str) -> set[datetime]:
 def visible_state_cycles(states_dir: Path) -> set[datetime]:
     """`states/<source>/` 下**文件名可见**的 cycle 集合（形态门，不判内容）。"""
     cycles: set[datetime] = set()
-    for name in _iter_entry_names(states_dir):
+    for name in _iter_entry_names(states_dir, missing_is_empty=True):
         if not name.endswith(STATE_SUFFIX):
             continue
         cycle = parse_cycle_id(name[: -len(STATE_SUFFIX)])

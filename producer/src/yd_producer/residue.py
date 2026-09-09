@@ -29,11 +29,12 @@
    「Unsafe directory entry name」拒绝，但那是一条误导消息的永久停源，且判定被任务 13.2
    单独消费（不执行），错的是**清单**本身。`Path(".").name` 是空串，只是顺带被单分量判据
    挡住——依赖 pathlib 的这个性质会让本条契约随实现细节静默失效。
-3. **裁决 3（全新链同样适用）**：T 一律取 `FrontierDecision.cycle`——该值在无任何
-   `DONE` 时就是 `states/<source>/` 里**最早**的合法状态（`controller._decide` 的
-   `min(state_cycles)`）。本模块因此不自己算 T：多出来的状态份数只可能来自一次中断的
-   首轮发布，按同一条规则删除后重跑 T，MUST NOT 判为异常停源（那会让首轮崩溃永久
-   砖化该源）。
+3. **裁决 3（全新链只在 `output/` 根可枚举时适用，#86）**：T 一律取
+   `FrontierDecision.cycle`——该值只在共享 `output/` 根已确认为可枚举目录、且该源
+   `DONE` 集合被可靠确定为空时，才是 `states/<source>/` 里最早的合法状态。根
+   `ENOENT`/`ENOTDIR` 时前沿已停源；本模块接到停止 decision 返回 `None`，接到手交
+   可跑 T 则独立重查同一根并抛 `ResidueError`，两者都不交出清单、零删除。合法定义域
+   内多出来的状态份数仍按同一规则删除后重跑 T，不单独停源。
 4. **裁决 4（`DONE` 是删除前置，粒度是 source 子目录）**：半成品判据复用
    `controller.done_cycles`（`os.stat` + `stat.S_ISREG`，products-contract §4：`DONE`
    是唯一完成标志），MUST NOT 以「目录非空」或「有 `yd.rivqdown.dat`」代替；空目录
@@ -103,8 +104,8 @@
 们撑不起「顺序无关」。本条由
 `tests/test_controller_residue.py::test_half_products_are_removed_before_state_files` 钉死。
 
-探测层的「无法确定」（`ENOENT`/`ENOTDIR` 之外的 `OSError`，即
-`controller.DiscoveryUnreadableError`）收敛成 `ResidueError`：与裁决 7 同向，不可确定
+探测层的「无法确定」（含共享 `output/` 根的 `ENOENT`/`ENOTDIR`，以及其它 `OSError`，
+即 `controller.DiscoveryUnreadableError`）收敛成 `ResidueError`：与裁决 7 同向，不可确定
 一律停该源，MUST NOT fail-open 成「空清单」而让残留留在树上被下一轮当成正常产物。
 
 本模块 stdlib-only：零新增依赖（裁决 12）。零 `cli.py` 改动（裁决 10，接线归 14.1）。
@@ -144,9 +145,9 @@ __all__ = [
 class ResidueError(RuntimeError):
     """残留**判定**无法完成：本源本次停止，不清理、不重跑。
 
-    只覆盖判定期的「不可确定」（目录列不出、条目元数据探测遇到 `ENOENT`/`ENOTDIR`
-    之外的 `OSError`）。**执行期**的拒绝不走这里：`safe_fs.SafeFilesystemError` 原样
-    上抛（裁决 7），它自带指名路径的消息与 `kind` 分类。
+    只覆盖判定期的「不可确定」（含 `output/` 根 `ENOENT`/`ENOTDIR`，以及目录列不出、
+    条目元数据探测遇到其它 `OSError`）。**执行期**的拒绝不走这里：
+    `safe_fs.SafeFilesystemError` 原样上抛（裁决 7），它自带指名路径的消息与 `kind` 分类。
     """
 
 

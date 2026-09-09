@@ -6246,3 +6246,50 @@ Invariant Matrix:
 - [x] 109.4 focused publish/controller与producer/viewer完整验证、Ruff/format、OpenSpec strict/all、stage anchor通过；#24既有分钟Known limit已收口，不再声明延期。
 
 Non-goals: 流量值合理性、st绝对日期头、DAT复制与检查间内容事务、publish七步/根/原语语义变更、其他排队issue及真实SHUD/NFS/Slurm；shared change未完成，不整体archive。
+
+### Issue #86：output 根不可见时停止本源
+
+Issue type: bugfix；Project profile: yd-viewer；Fixture level: expanded；effective tier/repair intensity: high。
+Upstream suggested level: absent（legacy裁决issue）；已由用户Wave0裁决9与已合并#22/#23 fixture修订定案：不采用按状态数猜测或隔离改名，根不可枚举即STOP；不重新协商旧issue候选。
+Minimal mergeable slice: controller.py同次根枚举的严格缺席语义，residue共享消费与对应frontier/residue/run_once测试和合法根fixture适配；不改变其它路径的缺席语义。
+Authority: compute-loop§10步骤1、run-controller严格前沿/根异常零清理Scenario、本文件#22收尾裁决及#23裁决3均已push；本节仅实现结账。
+Seams under test: decide_frontier、plan_residue、run_once；共享done_cycles仅施加output根严格模式，visible_state_cycles的缺席空集合保持。
+Must preserve: 可枚举空output+多份状态仍取最早T并按原规则清首轮残留；下层cycle/source/DONE缺失或非目录仍不计完成；状态根缺席仍NO_INITIAL_STATE；DONE/可见cycle/状态header/symlink/原错误分型不改。
+Decision: 严格语义落在实际iterdir调用与其整个迭代窗口；不得exists预检，不新增第二次扫描。done_cycles在output根ENOENT/ENOTDIR抛DiscoveryUnreadableError，既有decide/run_once收敛DISCOVERY_UNREADABLE；plan_residue接到停止decision仍返回None，接到手交可跑T则独立重查根并收敛ResidueError，两者都不交出plan。
+
+Risk packs considered:
+- Public API / CLI / script entry: selected — done_cycles/decide/plan/run_once共同消费。
+- Config / project setup: not selected — 无新配置。
+- File IO / path safety / overwrite: selected — 根不可见不得触发危险残留删除。
+- Schema / columns / units / field names: not selected — cycle/state格式不改。
+- Auth / permissions / secrets: not selected — 不改权限策略；既有EACCES分类保持。
+- Concurrency / shared state / ordering: selected — 同次枚举捕获根消失，STOP先于raw/plan/work。
+- Resource limits / large input / discovery: selected — 不加预检/额外扫描，区分根和下层缺席。
+- Legacy compatibility / examples: selected — 合法新链fixture明确创建可枚举output，旧state/downstream行为保持。
+- Error handling / rollback / partial outputs: selected — 稳定停止原因与plan直调错误，零删除/提交。
+- Release / packaging / dependency compatibility: not selected — 无依赖变化。
+- Documentation / migration notes: selected — 更新旧根缺席注释及fixture调用前提，不改已裁决产品文档。
+- Geospatial / CRS / shapefile sidecars: not selected — 无几何。
+- Time series / forcing / temporal boundaries: selected — 不让根故障造成前沿回退。
+- 状态链 / warm-start 定戳一致性: selected — 多份状态在根故障时逐项保留。
+- NWM 快照溯源与 DB-free 隔离: not selected — 无快照变化。
+
+Invariant Matrix:
+- Governing invariant: 未可靠枚举output根时没有可授权的前沿T或残留清单；本源在任何raw/残留/work/submit前停止，状态与产物不变。
+- Source of truth: 实际output根iterdir结果，不是状态数量或exists。
+- Producers/validators: controller._iter_entry_names的根严格模式、done_cycles、_target_and_state；Storage/read: output根/下层DONE与states可见集。
+- Public consumers: decide_frontier、residue.plan_residue、_controller_run已有DiscoveryUnreadableError转换；Write/delete: 不达residue executor/work/submit；其它cleanup自己的发现器不改。
+- Failure/stale: output缺失、普通文件、枚举窗口内根消失、EACCES/EIO；Evidence: 两源真实树快照与raw/plan/submit零调用。
+- Regression rows — failure: root ENOENT/ENOTDIR+1或多份状态 → 两源分别DISCOVERY_UNREADABLE/cycleNone/raw0；将该停止decision交给plan_residue → None、executor0；手交FrontierDecision(cycle=T,stop_reason=None) → ResidueError、executor0；两种路径完整树快照均不变。
+- Regression rows — run_once: 同一根故障在shared done_cycles实际枚举处触发 → 既有DiscoveryUnreadableError catch返回STOPPED/DISCOVERY_UNREADABLE/cycleNone，driver/rawscan/plan/submit零调用；不得迟到residue阶段才变成RunError(phase="residue")。
+- Regression rows — race: output起初为真实可枚举目录，令实际iterdir调用或其lazy迭代窗口抛ENOENT/ENOTDIR（入口时root仍存在）→ decide STOP/cycleNone/raw0、手交T的plan抛ResidueError、run_once STOP且plan/submit0、树快照不变；exists/isdir预检后loose扫描和第二次loose扫描均须被该用例击中。
+- Regression rows — valid: 可枚举空output+单状态 → 取最早T且raw被调用；可枚举空output+T/T+12 → 最早T且later残留照常删除。
+- Regression rows — compatibility: output可枚举但states根缺失 → NO_INITIAL_STATE；下层cycle/source/DONE缺失/非目录 → 不计完成，兄弟源不受影响。
+
+- [x] 86.1 在共享实际枚举边界施加output根严格模式；保持states与下层缺席规则及现有错误消费者。
+- [x] 86.2 建立两种根故障、枚举窗口消失和两源/直调plan/run_once零副作用回归；基线red证明。
+- [x] 86.3 适配真正新链fixture为显式可枚举output；合法多状态残留、states根缺席、下层DONE缺席/非目录和既有source隔离仍绿。
+- Fixture migration: test_absent_directories_still_mean_empty_sets的旧“output缺失即新链”断言必须翻转为DISCOVERY_UNREADABLE或由86.2替代，不得mkdir掩盖；test_fresh_chain_takes_the_earliest_state_file_name、test_fresh_chain_with_several_states_still_takes_the_earliest及其它真正write_state-only新链fixture则显式创建空output，保持其原业务oracle。
+- [x] 86.4 focused frontier/residue及producer/viewer完整矩阵、Ruff/format/OpenSpec/stage通过；删除严格根分流的变异须使根故障用例red。
+
+Non-goals: 隔离改名/状态数量阈值、执行器重新发现DONE或事务删除、init产品行为、其它发现器/safe_fs、#108启动scratch清理、真实NFS/Slurm；shared change仍active。
