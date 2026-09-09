@@ -95,8 +95,9 @@ def ensure_directory_no_follow(
     target = _expand_path(path)
     root, parts = _anchor_for(target, containment_root=containment_root)
     root_fd = _open_directory_no_follow(root)
+    fd = root_fd
+    walk_failed = False
     try:
-        fd = root_fd
         for part in parts:
             if part in {"", ".", ".."}:
                 raise SafeFilesystemError(f"Unsafe directory component: {part!r}")
@@ -128,13 +129,36 @@ def ensure_directory_no_follow(
                 raise SafeFilesystemError(
                     f"Failed to open directory component {target}: {error}", kind="io"
                 ) from error
-            if fd != root_fd:
-                os.close(fd)
+            previous = fd
             fd = next_fd
+            if previous != root_fd:
+                try:
+                    os.close(previous)
+                except OSError:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    fd = root_fd
+                    raise
         if fd != root_fd:
-            os.close(fd)
+            pending = fd
+            fd = root_fd
+            os.close(pending)
+    except BaseException:
+        walk_failed = True
+        raise
     finally:
-        os.close(root_fd)
+        if fd != root_fd:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.close(root_fd)
+        except OSError:
+            if not walk_failed:
+                raise
     return target
 
 

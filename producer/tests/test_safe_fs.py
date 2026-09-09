@@ -26,8 +26,12 @@ safe_fs snapshot.
 from __future__ import annotations
 
 import errno
+import json
 import os
+import resource
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -993,3 +997,378 @@ def test_atomic_write_parent_close_eio_visible_from_handled_caller_exception(
     assert target.read_bytes() == _ATOMIC_NEW
     assert sibling.read_bytes() == _ATOMIC_SIBLING
     assert foreign.read_bytes() == _ATOMIC_FOREIGN
+
+
+# Directory-walk fd cleanup on deep refusals (#55).
+#
+# `ensure_directory_no_follow` used to leak the current child directory fd
+# (and, on a close error after a successful next open, the newly opened
+# next fd) whenever a later component was a regular file or a symlink.
+# Repeating that refusal under a low RLIMIT_NOFILE then flipped `unsafe`
+# into `io` via EMFILE. Discriminators below are the leaked fds
+# (`fstat` -> EBADF, not /proc), the public `kind`, and an isolated child
+# with a soft limit of 64.
+
+_ENSURE_ATTEMPTS = 200
+_ENSURE_CHILD_SOFT_NOFILE = 64
+
+
+def _assert_fd_closed(file_fd: int) -> None:
+    with pytest.raises(OSError) as info:
+        os.fstat(file_fd)
+    assert info.value.errno == errno.EBADF
+
+
+def _capture_directory_open_fds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[int]:
+    real_open = os.open
+    captured: list[int] = []
+
+    def opening(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if flags & os.O_DIRECTORY:
+            captured.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", opening)
+    return captured
+
+
+def _plant_deep_blocker(root: Path, *, kind: str) -> Path:
+    lane = root / "lane"
+    lane.mkdir()
+    blocker = lane / "blocker"
+    if kind == "file":
+        blocker.write_bytes(b"not-a-directory")
+    else:
+        blocker.symlink_to(root / "missing-target")
+    return lane / "blocker" / "leaf"
+
+
+def _name_of_open_path(path: object) -> str:
+    if isinstance(path, bytes):
+        return os.fsdecode(path)
+    return os.fspath(path)
+
+
+_ENSURE_RLIMIT_CHILD = r"""
+import json
+import os
+import resource
+import sys
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+from pathlib import Path
+
+
+def main() -> int:
+    payload = json.loads(sys.stdin.read())
+    source_path = Path(payload["source_path"])
+    target = Path(payload["target"])
+    containment_root = Path(payload["containment_root"])
+    attempts = int(payload["attempts"])
+    soft_limit = int(payload["soft_limit"])
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (soft_limit, hard))
+    loader = SourceFileLoader("issue55_safe_fs", str(source_path))
+    spec = spec_from_loader(loader.name, loader)
+    module = module_from_spec(spec)
+    loader.exec_module(module)
+    kinds = []
+    for _ in range(attempts):
+        try:
+            module.ensure_directory_no_follow(
+                target, containment_root=containment_root
+            )
+        except module.SafeFilesystemError as error:
+            kinds.append(error.kind)
+        except OSError as error:
+            kinds.append(f"oserror:{error.errno}")
+    json.dump({"kinds": kinds, "parent_soft": soft}, sys.stdout)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+
+
+def _run_ensure_rlimit_child(
+    *,
+    source_path: Path,
+    target: Path,
+    containment_root: Path,
+    attempts: int = _ENSURE_ATTEMPTS,
+    soft_limit: int = _ENSURE_CHILD_SOFT_NOFILE,
+) -> dict[str, object]:
+    completed = subprocess.run(
+        [sys.executable, "-c", _ENSURE_RLIMIT_CHILD],
+        input=json.dumps(
+            {
+                "source_path": str(source_path),
+                "target": str(target),
+                "containment_root": str(containment_root),
+                "attempts": attempts,
+                "soft_limit": soft_limit,
+            }
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return json.loads(completed.stdout)
+
+
+@pytest.mark.parametrize("blocker", ["file", "symlink"])
+def test_ensure_directory_repeated_deep_refusal_closes_walk_fds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocker: str
+) -> None:
+    root = tmp_path.resolve()
+    target = _plant_deep_blocker(root, kind=blocker)
+    opened = _capture_directory_open_fds(monkeypatch)
+
+    for _ in range(_ENSURE_ATTEMPTS):
+        opened.clear()
+        with pytest.raises(SafeFilesystemError) as info:
+            ensure_directory_no_follow(target, containment_root=root)
+        assert info.value.kind == "unsafe"
+        assert opened
+        for fd in opened:
+            _assert_fd_closed(fd)
+
+
+def test_ensure_directory_depth0_control_closes_root_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    opened = _capture_directory_open_fds(monkeypatch)
+
+    for _ in range(_ENSURE_ATTEMPTS):
+        opened.clear()
+        returned = ensure_directory_no_follow(root, containment_root=root)
+        assert returned == root
+        assert opened
+        for fd in opened:
+            _assert_fd_closed(fd)
+
+
+@pytest.mark.parametrize("blocker", ["file", "symlink"])
+def test_ensure_directory_isolated_rlimit_keeps_deep_refusal_unsafe(
+    tmp_path: Path, blocker: str
+) -> None:
+    root = tmp_path.resolve()
+    target = _plant_deep_blocker(root, kind=blocker)
+    import yd_producer.store.safe_fs as safe_fs_module
+
+    parent_soft, _parent_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    payload = _run_ensure_rlimit_child(
+        source_path=Path(safe_fs_module.__file__),
+        target=target,
+        containment_root=root,
+    )
+
+    kinds = payload["kinds"]
+    assert kinds == ["unsafe"] * _ENSURE_ATTEMPTS
+    assert payload["parent_soft"] == parent_soft
+    after_soft, _after_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    assert after_soft == parent_soft
+
+
+def test_ensure_directory_injected_open_eio_retains_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    lane = root / "lane"
+    lane.mkdir()
+    target = lane / "child"
+    opened = _capture_directory_open_fds(monkeypatch)
+    injected = OSError(errno.EIO, "injected open EIO")
+    real_open = os.open
+
+    def opening(path, flags, mode=0o777, *, dir_fd=None):
+        name = path if isinstance(path, str) else os.fsdecode(path)
+        if name == "child" and dir_fd is not None:
+            raise injected
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", opening)
+
+    with pytest.raises(SafeFilesystemError) as info:
+        ensure_directory_no_follow(target, containment_root=root)
+
+    assert info.value.kind == "io"
+    assert info.value.__cause__ is injected
+    assert not target.exists()
+    for fd in opened:
+        _assert_fd_closed(fd)
+
+
+def test_ensure_directory_injected_mkdir_eio_retains_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    lane = root / "lane"
+    lane.mkdir()
+    target = lane / "child"
+    opened = _capture_directory_open_fds(monkeypatch)
+    injected = OSError(errno.EIO, "injected mkdir EIO")
+
+    def making(path, mode=0o777, *, dir_fd=None):
+        raise injected
+
+    monkeypatch.setattr(os, "mkdir", making)
+
+    with pytest.raises(SafeFilesystemError) as info:
+        ensure_directory_no_follow(target, containment_root=root)
+
+    assert info.value.kind == "io"
+    assert info.value.__cause__ is injected
+    assert not target.exists()
+    for fd in opened:
+        _assert_fd_closed(fd)
+
+
+def test_ensure_directory_unsafe_cleanup_close_preserves_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    target = _plant_deep_blocker(root, kind="file")
+    opened = _capture_directory_open_fds(monkeypatch)
+    close_error = OSError(errno.EIO, "injected walk close failure")
+    real_close = os.close
+    real_open = os.open
+    walk_root: dict[str, int | None] = {"fd": None}
+
+    def opening(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if _name_of_open_path(path) == "lane" and dir_fd is not None:
+            walk_root["fd"] = dir_fd
+        return fd
+
+    def closing(fd: int) -> None:
+        if walk_root["fd"] is not None and fd == walk_root["fd"]:
+            real_close(fd)
+            raise close_error
+        real_close(fd)
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "close", closing)
+
+    with pytest.raises(SafeFilesystemError) as info:
+        ensure_directory_no_follow(target, containment_root=root)
+
+    assert info.value.kind == "unsafe"
+    assert info.value.__cause__ is not close_error
+    assert opened
+    for fd in opened:
+        _assert_fd_closed(fd)
+    assert walk_root["fd"] is not None
+    _assert_fd_closed(walk_root["fd"])
+    assert target.parent.is_file()
+
+
+def test_ensure_directory_io_cleanup_close_preserves_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    lane = root / "lane"
+    lane.mkdir()
+    target = lane / "child"
+    opened = _capture_directory_open_fds(monkeypatch)
+    injected = OSError(errno.EIO, "injected open EIO")
+    close_error = OSError(errno.EBADF, "injected walk close failure")
+    real_open = os.open
+    real_close = os.close
+    walk_root: dict[str, int | None] = {"fd": None}
+
+    def opening(path, flags, mode=0o777, *, dir_fd=None):
+        name = _name_of_open_path(path)
+        if name == "child" and dir_fd is not None:
+            raise injected
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if name == "lane" and dir_fd is not None:
+            walk_root["fd"] = dir_fd
+        return fd
+
+    def closing(fd: int) -> None:
+        if walk_root["fd"] is not None and fd == walk_root["fd"]:
+            real_close(fd)
+            raise close_error
+        real_close(fd)
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "close", closing)
+
+    with pytest.raises(SafeFilesystemError) as info:
+        ensure_directory_no_follow(target, containment_root=root)
+
+    assert info.value.kind == "io"
+    assert info.value.__cause__ is injected
+    assert info.value.__cause__ is not close_error
+    for fd in opened:
+        _assert_fd_closed(fd)
+    assert walk_root["fd"] is not None
+    _assert_fd_closed(walk_root["fd"])
+    assert not target.exists()
+
+
+def test_ensure_directory_advancement_close_error_closes_newly_opened_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    nested = root / "lane" / "nested"
+    nested.mkdir(parents=True)
+    target = nested / "leaf"
+    opened = _capture_directory_open_fds(monkeypatch)
+    close_error = OSError(errno.EIO, "injected advancement close failure")
+    real_open = os.open
+    real_close = os.close
+    owned: dict[str, int | None] = {"lane": None, "nested": None}
+
+    def opening(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        name = _name_of_open_path(path)
+        if name in owned and dir_fd is not None:
+            owned[name] = fd
+        return fd
+
+    def closing(fd: int) -> None:
+        if owned["lane"] is not None and fd == owned["lane"]:
+            real_close(fd)
+            raise close_error
+        real_close(fd)
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "close", closing)
+
+    with pytest.raises(OSError) as info:
+        ensure_directory_no_follow(target, containment_root=root)
+
+    assert info.value is close_error
+    assert owned["lane"] is not None
+    assert owned["nested"] is not None
+    _assert_fd_closed(owned["lane"])
+    _assert_fd_closed(owned["nested"])
+    for fd in opened:
+        _assert_fd_closed(fd)
+    assert nested.is_dir()
+    assert not target.exists()
+
+
+def test_ensure_directory_success_still_returns_path_and_closes_fds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    target = root / "lane" / "child"
+    opened = _capture_directory_open_fds(monkeypatch)
+
+    returned = ensure_directory_no_follow(target, containment_root=root)
+
+    assert returned == target
+    assert target.is_dir()
+    assert stat.S_IMODE(target.stat().st_mode) & 0o022 == 0
+    assert opened
+    for fd in opened:
+        _assert_fd_closed(fd)
