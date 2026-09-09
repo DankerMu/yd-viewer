@@ -4,6 +4,17 @@
 
 ## ADDED Requirements
 
+### Requirement: 共享文件读取保留主因与取消
+三条 read helper（`read_bytes_no_follow`、`read_bytes_limited_no_follow`、`read_tail_bytes_limited_no_follow`）MUST 对取得的文件 fd 在 finally 中恰好尝试 close 一次，不重试；read/fstat/lseek 与文件 close 的 OSError MUST 收敛为 SafeFilesystemError(kind=io)，读主因不得被次级 close 替换；取消 MUST 保持原对象，close 只作 note。取得 fd 前的既有缺失文件/准入分型与 no-follow 契约不变。
+
+#### Scenario: 读取与关闭双失败
+- **WHEN** 任一 reader 的读取失败，随后文件 close 又报告 OSError
+- **THEN** 外层是 io 模块错误，cause 保留读取主因，close 记为次级 note；若仅读取成功而 close 失败，close 成为 io 模块错误的 cause
+
+#### Scenario: 取消与关闭失败
+- **WHEN** 任一 reader 在读循环抛出 KeyboardInterrupt 或 SystemExit，随后 close 失败
+- **THEN** 原取消对象继续传播并携带 close note，fd 只尝试关闭一次；finally 不捕获 BaseException
+
 ### Requirement: 目录创建拒绝保持资源与错误分型
 `ensure_directory_no_follow` MUST 在成功与拒绝退出时释放本次 walk 持有的目录 fd；MUST 保留 no-follow 与 containment，永久几何拒绝的 unsafe 与操作失败的 io 不得因自身 fd 泄漏或次生关闭错误互相翻转。
 
