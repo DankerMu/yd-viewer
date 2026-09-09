@@ -4,6 +4,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
+import sys
 import uuid
 from pathlib import Path
 
@@ -174,8 +175,9 @@ def atomic_write_bytes_no_follow(
             written = os.write(file_fd, view)
             view = view[written:]
         os.fsync(file_fd)
-        os.close(file_fd)
+        pending_fd = file_fd
         file_fd = None
+        os.close(pending_fd)
         _verify_fd_matches_path(parent_fd, parent_path)
         os.replace(temp_name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         replaced = True
@@ -199,21 +201,24 @@ def atomic_write_bytes_no_follow(
                 os.fsync(parent_fd)
             except OSError:
                 pass
-    except SafeFilesystemError:
-        _close_file_fd(file_fd)
-        if not replaced:
-            _unlink_temp(parent_fd, temp_name)
-        raise
     except OSError as error:
-        _close_file_fd(file_fd)
-        if not replaced:
-            _unlink_temp(parent_fd, temp_name)
         kind = "indeterminate" if replaced else "io"
         raise SafeFilesystemError(
             f"Failed to write {target}: {error}", kind=kind
         ) from error
     finally:
-        os.close(parent_fd)
+        _close_file_fd(file_fd)
+        if not replaced:
+            _unlink_temp(parent_fd, temp_name)
+        active = sys.exception()
+        try:
+            os.close(parent_fd)
+        except OSError as error:
+            if active is None:
+                kind = "indeterminate" if replaced else "io"
+                raise SafeFilesystemError(
+                    f"Failed to write {target}: {error}", kind=kind
+                ) from error
     return target
 
 
