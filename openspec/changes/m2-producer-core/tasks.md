@@ -6388,10 +6388,10 @@ Invariant Matrix:
 - Failure/stale surfaces: 第一次/第二次替换、相同ino不同dev、symlink指向原inode、缺失/FIFO/目录/IO、竞争、action期间替换、action异常/取消。
 - Evidence: public run_with_lock、真实文件/同进程独立OFD/子进程；只在实际OS边界注入替换或stat错误，fd事件/EBADF证明完整重取与释放，不写源码/私有helper接线断言。
 
-- [ ] 85.1 实现两个identity边界、一次完整重取、no-create retry及错误/原异常note合同；更新本地盘前提头部，不改公共shape/CLI/清理owner。
-- [ ] 85.2 公开回归覆盖首次替换后稳定成功、连续替换至多两次后错误、重取真竞争跳过；另以首次成功flock后fstat/path-stat IO或一次缺失探测→第二次稳定，证明不只tuple失配才完整重取（旧fd释放/EBADF、open/flock上限、action恰一次）。第二次missing/symlink/目录/FIFO/IO不修补/action0/fd释放；分别容许目录在open、Darwin FIFO在flock(EOPNOTSUPP)而非fstat失败，均RunLockError。初次open/flock EACCES保持原OSError；重取open/flock EACCES/EOPNOTSUPP为指名cron.lock_path且cause原样的RunLockError，不能裸漏OSError或acquired=False。初次dangling symlink不造target。
-- [ ] 85.3 覆盖相同ino不同dev、symlink指向原inode/其它普通文件、fstat/path-stat真错；action期间实际unlink/new-inode后正常返回响亮失败，明确replacement(dev,ino)不同于冻结pair。action异常/KeyboardInterrupt/SystemExit与exit漂移并存时，断言原对象、同__cause__、原notes保持，恰加一条带cron.lock_path和expected/actual或不可确定/type/error的note；稳定None/value/异常与既有本地OFD判别器保持。
-- [ ] 85.4 parent批量旧源码red与(ag)–(am)七类有效变异全灭；补重取O_CREAT、只比ino、check晚于unlock、只对tuple失配而不对首次stat不稳定重取、重取open/flock真错裸漏等真实边界变异，0有效存活/未跑；完整fd生命周期/有限重取以行为证明，沿用deadline/第三次attempt硬失败防止变异挂死。
-- [ ] 85.5 focused/full producer/viewer、Ruff/format、OpenSpecstrict/all/stage、独立public smoke、high四席/独立终审/CI/SHA gate通过；源码与新增测试<1000，无新豁免。
+- [x] 85.1 实现两个identity边界、一次完整重取、no-create retry及错误/原异常note合同；更新本地盘前提头部，不改公共shape/CLI/清理owner。
+- [x] 85.2 公开回归覆盖首次替换后稳定成功、连续替换至多两次后错误、重取真竞争跳过；首次成功flock后fstat/path-stat IO或一次缺失探测→第二次稳定完整重取（旧fd释放/EBADF、open/flock上限、action恰一次）。第二次missing/symlink/目录/FIFO/IO不修补/action0/fd释放；目录open失败与FIFO flock故障分别覆盖。初次open/flock真错保持原OSError；重取open/flock真错为指名cron.lock_path且cause原样的RunLockError。初次dangling symlink不造target。
+- [x] 85.3 覆盖相同ino不同dev、symlink指向原inode/其它普通文件、fstat/path-stat真错；action实际unlink/new-inode后正常返回响亮失败，replacement(dev,ino)不同于冻结pair。action异常/KeyboardInterrupt/SystemExit与exit漂移并存时原对象/__cause__/原notes保持，恰加一条带实际cron.lock_path和expected/actual或不可确定/type/error的note；稳定None/value/异常与既有本地OFD判别器保持。
+- [x] 85.4 parent批量旧源码27失败/11通过；(ag)–(am)及no-create/dev/退出持锁/首次stat统一重取/重取错误域共13个有效变异在独立scratch的定向公开判别器全部被杀死，0存活/未跑。完整fd生命周期/有限重取以行为证明；广矩阵extra-retry变异曾超时，改以已有第三次open硬失败的专属用例在0.26秒稳定杀死，未收窄产品合同。
+- [x] 85.5 focused38、producer3136通过/3skip、viewer1、Ruff/format、OpenSpecstrict/all/stage通过；独立public smoke复现同inode竞争跳过、外部replacement的有限边界与退出响亮失败/哨兵保留。源码与新增测试<1000，无新豁免；后续合并仍受high四席/独立终审/CI/SHA gate。
 
 Non-goals: M4 mount探测/安装/receipt、NFS实测、外部unlink防护守护进程、lockf替换、CLI接线、其它cleanup primitive异常体系重写或lock禁区producer改造；文档/fixture既有本地哨兵与#25禁区合同保持，shared M2仍active。
