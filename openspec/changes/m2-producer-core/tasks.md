@@ -865,6 +865,91 @@ Review focus:
 Suggested fixture level: compact - 结构与路径函数用内存对象与 tmp 目录即可
 Minimal mergeable slice: 勘察清单（2.1）——纯文档产物独立合并，快照代码为后继
 
+### Issue #42：atomic write 异常清理 fixture
+
+Fixture level: expanded；Repair intensity: high；Upstream suggested level: absent。
+User scope override: 本次用户明确指定 `producer/tests/test_safe_fs.py` 为 #42/#55/#122 的测试归属，允许在该文件追加本仓回归；覆盖旧「不得追加 yd 测试」限制，既有 pin 用例不改写、不删除，不迁移至 refusals 文件。
+Authority: Wave 0 裁决 1 / 本文件 M2 收尾裁决授权本仓分叉，取代 issue 原三选一；保留 NWM pin 作溯源，不重新 pin。
+Change surface: `producer/src/yd_producer/store/safe_fs.py::atomic_write_bytes_no_follow`、`producer/tests/test_safe_fs.py`；inventory safe_fs 行已登记。
+Must preserve: no-follow 与 containment、mode、原子 replace、durable replace 的 io/indeterminate 分型、既有目标/兄弟文件；不改变函数签名。
+Exception boundary: 非 OSError（TypeError、MemoryError、KeyboardInterrupt 等）仍以原异常传播，`LocalObjectStore.write_bytes_atomic` 不扩大捕获面；只修清理归属，不把中断包装成业务错误。
+Seams under test: 公共 atomic writer（默认 tmp 和 store 使用的 part 后缀），os.write/fsync 故障注入，真实临时目录与 fd 存活检查。
+Risk packs selected: Public API（原返回/异常）；File IO/path safety/overwrite（本次临时文件所有权）；Concurrency/shared state/ordering（replace 前后清理边界）；Legacy compatibility/examples（既有调用者）；Error handling/rollback/partial outputs（BaseException）；Documentation/migration notes（inventory）；NWM snapshot provenance（保留头与登记）。
+Risk packs not selected: Config/project setup、Schema/columns/units、Auth/permissions/secrets、Resource limits/large input、Release/packaging/dependencies（均不改对应行为）；Geospatial/CRS、Time series/forcing、状态链/warm-start（无领域语义变更）。
+Invariant Matrix:
+- Governing invariant: 本次打开的写 fd 在所有退出路径关闭；replace 前失败清理本次临时文件，replace 后不得删除目标；主异常保持原义。
+Must add: 统一 finally 清理本次写 fd 与未发布临时文件，包含 BaseException；cleanup OSError 不掩盖原始异常。
+Non-goals: 不修 #55/#122，不改 object_store，不重新 pin，不扫描/回收其它调用遗留的点文件，不扩修其它 helper。
+Review focus: finally 覆盖中断；replaced 后不删除目标；按本次 temp_name 清理而非 glob；原异常身份；新增回归与 pin 原有用例保持可区分。
+- Source of truth: parent dir fd、本次 temp_name、replaced 状态。
+- Producers/public entrypoint/storage: atomic writer；validator: 既有 no-follow 与 parent identity 检查不变。
+- Downstream: LocalObjectStore 与 durable registry 调用不变；frontend/cache/query 无直接变更。
+- Failure/rollback: 非 OSError 和 BaseException 进入统一清理；Evidence: test_safe_fs 与 inventory。
+- Regression rows: invalid content TypeError / injected MemoryError / KeyboardInterrupt before replace -> fd 关闭、无本次点文件、旧目标和兄弟文件不变；post-replace exception -> 已发布目标保留；成功 -> 完整 bytes、无临时残留；既有 OSError -> 原模块分型。
+Boundary checklist: shared helper root、write/staging/replace/rollback、unchanged downstream；#55 directory cleanup 与 #122 bounded read 保持后续独立 PR，不在本条扩修。
+Required evidence:
+- Unchanged sibling row: `LocalObjectStore.write_bytes_atomic` 原捕获 OSError/SafeFilesystemError，part 后缀写失败 TypeError/KeyboardInterrupt 仍裸穿，不修改调用者。
+- Fault rows (tmp/part): non-bytes 在 temp create 后触发 TypeError；write/fsync 注入 MemoryError/KeyboardInterrupt（同一对象）-> 写 fd fstat 为 EBADF，无本次点文件，旧目标、兄弟与外来点文件字节不变；cleanup close 注入 OSError 时仍保留主异常。
+- Post-replace row: directory fsync 注入 KeyboardInterrupt -> 原对象传播且新目标保留；成功 -> 完整字节与无本次临时文件；pre-replace OSError -> kind=io、旧目标不变；strict post-replace OSError -> kind=indeterminate、新目标保留。
+- [x] 新回归在旧源码红、修复后绿；覆盖上述异常与 tmp/part，fd 以 fstat/EBADF 验证而非 /proc。
+- [x] `cd producer && uv run pytest && uv run ruff check . && uv run ruff format --check .`；viewer 默认矩阵；`openspec validate --all` 与 stage-pipeline log check。
+- [x] 四席 high-risk cross-review、独立 final review、CI 与 SHA 匹配证据完成后合并。
+Merge evidence: PR #180，final `741456b`，merge `9c2fd72`；producer 2962 passed / 3 skipped，C1 caller exception context 经独立 verifier 确认并关闭。共享 change 尚有未完成 M2 任务，保留 active，不按单 issue 整体 archive。
+Review-loop audit deferral: 2026-09-09 lens-rotation 达到 DECIDABLE（32 multi-round，later core=125/rotated=96）；保持当前 reviewer 席位，不自动削减；keep/cut 是人工政策决定，本次授权仅含三项修复，延后人工裁决。
+
+### Issue #55：directory walk 拒绝清理 fixture
+
+Fixture level: expanded；Repair intensity: high；Upstream suggested level: absent。
+Authority: 同 #42 的 Wave 0 本仓分叉，不重新 pin；用户明确指定 `test_safe_fs.py` 追加回归，覆盖 issue 旧测试归属要求，既有 pin 用例不改写。
+Change surface / seams: `safe_fs.py::ensure_directory_no_follow` 与 `test_safe_fs.py`；真实目录 walk、公有函数抛出 kind、os.open/close 故障边界。
+Must preserve: no-follow/containment、创建 mode=0755 与 umask、返回配置路径；unsafe（几何拒绝）与 io（操作失败）互不翻转；#42 writer 语义不变。
+Must add: 深度 >=1 拒绝时释放中间目录 fd 和 root fd；迭代推进/关闭报错也不遗失新旧 fd 所有权；次生 close OSError 不替换主拒绝或 I/O 主因。
+Risk packs selected: Public API（kind/返回）；File IO/path safety（目录 fd）；Concurrency/shared state/ordering（逐层交接）；Resource limits（低 RLIMIT_NOFILE）；Legacy compatibility（原调用者）；Error handling/rollback（主因与清理）；Documentation/provenance（登记 NWM 分叉）。
+Risk packs not selected: Config/setup、Schema/units、Auth/secrets、Release/dependencies（不改对应契约）；Geospatial/CRS、Time series/forcing、状态链/warm-start（无领域计算）。
+Invariant Matrix:
+- Governing invariant: 本次 walk 退出释放其持有目录 fd，拒绝种类只由本次操作主因决定，不受自身泄漏或次生清理故障改变。
+- Source of truth: root_fd、当前子目录 fd、刚打开下一层 fd 的唯一所有权。
+- Producer/public entry: ensure_directory_no_follow；validator: no-follow walk 与 containment；storage: 真实嵌套目录；downstream: LocalObjectStore/atomic writer 不改。
+- Failure/rollback: 普通文件/符号链接/注入 EIO 与关闭失败；只关闭本次 fd，不删除既有或已创建目录。
+- Evidence: test_safe_fs 的 fd liveness 与隔离子进程 RLIMIT_NOFILE；inventory safe_fs 行。
+- Rows: 深度 >=1 的 regular-file/symlink 拒绝重复 200 次 -> 每次 unsafe、所有本次 fd fstat=EBADF；depth0 控制同样不泄漏；独立子进程 soft limit=64 下重复 200 次 -> 恒 unsafe，无 EMFILE 翻转；注入 open/mkdir EIO -> io 且 close 故障不掩盖主因；成功多层创建 -> 路径与 mode/umask 不变、fd 关闭。
+Boundary checklist: shared walker、公开目录创建、fd 交接、拒绝/清理、未改动兄弟 walker 与 writer；检查 `_open_parent_dir`/`_open_directory_no_follow` 的现有清理形态，不扩修。
+Non-goals: #122 有界读；其它 helper 的关闭故障重构；远端/NFS 实测；不放宽拒绝或以吞掉 I/O 伪装成功。
+Review focus: 深度0假阴性；fd推进失败时 next_fd 归属；禁止使用 ambient sys.exception 判断本次失败（#42 C1）；unsafe/io 主因；RLIMIT 只在子进程改变。
+Required evidence:
+- [x] 旧源码批量红证据与删除新增清理的定向变异体均使深层拒绝/RLIMIT 判别器变红；修复后绿。
+- [x] producer 全量 pytest/Ruff，viewer 默认矩阵、OpenSpec strict/all 与 stage log；high 四席、独立最终审核、CI 与 SHA gate。
+Merge evidence: PR #182，final `f353ac5`，merge `7d4cf8e`；producer 2973 passed / 3 skipped；一轮四席与独立 final clean；未改兄弟 walker 的 next_fd 缺陷已路由 #183。
+
+### Issue #122：read helper 关闭因果 fixture
+
+Fixture level: expanded；Repair intensity: high；Upstream suggested level: absent。
+Authority: 与 #42/#55 同一 Wave0 本仓分叉；用户明确 `test_safe_fs.py` 追加回归，覆盖旧 issue 的 refusals 归属；pin 头与既有用例保留。
+Change surface: `safe_fs.py::{read_bytes_no_follow,read_bytes_limited_no_follow,read_tail_bytes_limited_no_follow}` 及必要的私有 close/note helper；`test_safe_fs.py`。不新增公共 context manager。
+Must preserve: 签名、no-follow/containment 与 open_file 准入、有限读 max_bytes+1 哨兵、tail 后 max_bytes 字节、无界读完整 bytes；取得文件 fd 前的既有 open/缺失文件分型不改；#42/#55 不回改。
+Must add: 已取得文件 fd 的读/fstat/lseek 与 close OSError 统一 SafeFilesystemError(kind=io)；双失败读错误保持 cause、close 只作确定性 note；取消 BaseException 原对象与 close note 保留；文件 fd close 一次不重试，finally 不 catch BaseException。
+Seams under test: 三个公开 reader + 真实临时文件 + 只针对本次文件 fd 的 os.read/fstat/lseek/close 注入；消费者 LocalObjectStore read wrappers 的 cause 链（不改源码）。
+Risk packs selected: Public API（错误/cause）；File IO/path safety（文件 fd）；Resource limits（原有边界不变）；Concurrency/ordering（close once/取消）；Legacy compatibility（bytes/消费者）；Error handling/rollback（primary/secondary）；Documentation/provenance（登记）。
+Risk packs not selected: Config/setup、Schema/units、Auth/secrets、Release/dependencies（不改）；Geospatial/CRS、Time series/forcing、状态链/warm-start（无领域计算）。
+Invariant Matrix:
+- Governing invariant: 读操作主因不被次级关闭错误替换，取消不变业务失败；每次取得的文件 fd 最终只尝试 close 一次。
+- Source of truth: 本次 file_fd、本次 read primary、close error；禁止 ambient sys.exception 单独判定本次失败（#42 C1）。
+- Producers/public entry/storage: 三个 reader；validators: open_file_no_follow 既有拒绝；downstream: tracker/publish/prepare/assemble/object_store 不改；read_tail 无生产调用者仍是公开 API。
+- Failure/rollback: read/fstat/lseek OSError、KeyboardInterrupt/SystemExit 与 close OSError 组合；Evidence: fd关闭计数、cause/identity/note、源文件字节、定向变异。
+- Rows（三 reader）: read EIO + close ESTALE -> SafeFilesystemError io，cause 为 read EIO，note 记录 close，close_count=1；仅 close ESTALE -> io/cause=close；仅读 EIO -> io/cause=read；KI/SystemExit + close -> 同一取消对象有 note，close_count=1；正常 -> 原 bytes/cap/tail。
+- Rows（tail）: fstat/lseek EIO + close ESTALE -> fstat/lseek 是 primary；Rows（caller except）: 调用者已处理 ValueError 时成功读+close失败仍 io，不污染该 ValueError；Rows（wrapper）: LocalObjectStore read/read_limited 双失败 cause 链仍可追到 read。
+- Admission row（三 reader）: 缺失文件仍抛 FileNotFoundError；FIFO/symlink 仍在 open_file 准入拒绝，不进入 reader 已取得 file_fd 的 close 计数，不包装这些取得 fd 前的错误。
+- Success row（三 reader）: 文件 b"abcdef"，full 返回 b"abcdef"，limited(max_bytes=3) 返回 b"abcd"，tail(max_bytes=3) 返回 b"def"；每项 close_count=1 且成功关闭后 fstat=EBADF；limited/tail 的 max_bytes=0 边界分别 b"a"/b""。
+Boundary checklist: 共享 read helper、异常/取消、文件 fd close 所有权、未改目录 fd 与 iterator；note 不新增日志/telemetry。
+Non-goals: open_file_no_follow 的目录-fd finally 全族重写；LocalObjectStore.iter_bytes；tracker._stream_digest；#183 successor fd；负 cap 新验证/新资源上限；远端 NFS 实测。裸 OSError 收敛针对本条的 read/file-close 失败，不改变取得 fd 前的缺失文件兼容契约。
+Review focus: finally 只捕 OSError；取消也到达 close；本次主因而非调用者异常状态；note 保留次级证据；close不重试；三兄弟一致且不放宽边界。
+Required evidence:
+- 所有上述 Matrix rows MUST 落入 `test_safe_fs.py` 新公共回归：三 reader 参数化双失败/仅close/仅读失败、KI 与 SystemExit 身份及 close note；tail fstat 与 lseek 独立双失败；caller except 的原 ValueError 不添 note；两个 LocalObjectStore read wrapper 的 `ObjectStoreError.__cause__` 为模块错误且其 `__cause__ is read_error`。
+- 准入兼容与成功字节/close_count rows 同样必测；保留现有 refusals 测试不迁移。基线预期：新增故障语义回归红、既有兼容场景绿；不要求成功/准入兼容在基线变红。「finally直接close」由双失败/取消/仅close判别；「取消跳过close」由取消close_count与fd liveness判别，两种变异覆盖三 reader。
+- [x] 基线批量红；「finally 直接 os.close」与「取消路径跳过 close」两种精确变异均被新公开回归杀死；修复后绿。
+- [x] producer 全量 pytest/Ruff、viewer 默认矩阵、OpenSpec strict/all、stage log；high 四席与独立最终审核、CI/SHA gate。
+Merge evidence: PR #184，final `6b81b87`，merge `3db6c4f`；producer 3009 passed / 3 skipped；一轮四席和独立 final clean。未改 iterator 的同类 close 因果缺陷已路由 #185；共享 change 保持 active，完成本 issue 不代表其余 M2 完成。
+
 ### 组 2 剩余任务（2.2/2.3）的 issue #5 fixture
 
 **M2 收尾裁决（#42/#55/#122/#63/#102/#103/#104，覆盖本 change 内更早的 pin 等价措辞）**：`producer/src/yd_producer/store/safe_fs.py`、`store/object_store.py`、`canonical/converter.py`、`state/cfg_ic.py` 仍以 `NWM@8ae9b8f2` 为溯源和差异审计基线，但 yd MAY 在本仓修复该快照的缺陷，不再要求逐字、逐字节或 AST 等价。每一处偏离 MUST 先在 `nwm-snapshot-inventory.md` 对应目标路径行的「剥离点」列登记一句“问题 + 修法”；模块头或 PR 说明只能补充，不能替代该登记。这个裁决只解锁上述四个生产模块，不自动扩大任何既有 issue 的实现范围，也不解除其它快照文件和快照测试的等价约束。
@@ -6044,11 +6129,13 @@ Minimal mergeable slice: 先合并严格六文件 docs-first PR；随后单一 p
 10. batched pre-change red proof：保留新测试、临时恢复产品文件至fixture parent，以`uv run --project producer python -m pytest -q <focused files>`进入test body并因缺public staged seam/ordering变红；hash恢复，禁共享stash，零red-proof残留。
 11. mutation discipline：唯一仓外scratch，rsync排除`.venv`/`__pycache__`/`.pytest_cache`，`env -u VIRTUAL_ENV uv sync --frozen`，`PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest`，assert import/module/marker落scratch；每mutant清bytecode并恢复source hash；0 survived/0 unrun，collection/import red不计kill。
 12. final matrix：focused staged/assemble/run_once/controller tests；producer full + Ruff/format/frozen sync；viewer full；OpenSpec strict/all；stage anchor；docs/product精确scope、line<1000、diff-check/oracle；merge-ref若base前进重跑。
+13. 私有 bound IO 必须作为每次调用的对象显式传入共享 kernel/所需私有 helper；禁止临时替换共享模块函数、全局保存当前 attempt 的 FD/IO 或用仅 pathname 的前置检查冒充 FD binding。两份 work 的重入/并发调用必须互不借用 FD；root 在 reload 后、copy/commit/cleanup 边界替换时不得写删 replacement，拒绝仍保留原始异常并关闭本次持有 FD；返回前再次确认 named work 指向本次冻结 root。不得削弱原 root-drift/no-model oracle。
 
 **PR Boundary**：
 
 - docs-first（本 fixture）恰六文件：`docs/compute-loop-design.md`、`docs/agent-ops.md`、`openspec/changes/m2-producer-core/design.md`、`tasks.md`、`specs/forcing-chain/spec.md`、`specs/run-controller/spec.md`。不改`docs/products-contract.md`、代码或测试；合并后#177保持OPEN、14.6保持`[ ]`、shared change不archive。
-- product恰七文件：`producer/src/yd_producer/staged_inputs.py`（新增）、`assemble.py`、`_controller_run.py`、`producer/tests/test_staged_inputs.py`（新增）、`test_assemble_run.py`、`run_once_fixtures.py`、`test_controller_run_once.py`。其它controller/assemble siblings只运行回归、不修改。不得改`controller.py`、`_work_claim.py`、`safe_fs.py`、`prepare*.py`、`assembly_fixtures.py`、`cli.py`、`nwm.py`、`slurm.py`、config、viewer、docs/spec或增加large-file豁免；需从已1000行`assemble.py`和992行`_controller_run.py`抽/删等量私有结构使每个非豁免文件<1000。
+- product恰八文件：保留 `producer/src/yd_producer/staged_inputs.py`（新增）、`assemble.py`、`_controller_run.py`、`producer/tests/test_staged_inputs.py`（新增）、`test_assemble_run.py`、`run_once_fixtures.py`、`test_controller_run_once.py` 七文件，另允许新增私有 `producer/src/yd_producer/_assemble_io.py`。该模块只承载每次调用的 descriptor-bound assembly IO 与必要私有输入结构，不新增公开 seam、第二 assembler 或 cleanup owner。其它controller/assemble siblings只运行回归、不修改；不得改`controller.py`、`_assemble_fs.py`、`_work_claim.py`、`safe_fs.py`、`prepare*.py`、`assembly_fixtures.py`、`cli.py`、`nwm.py`、`slurm.py`、config、viewer或增加large-file豁免；每个非豁免文件在标准格式化后仍须<1000行。
+- 本轮用户显式授权由七文件扩为八文件，以闭合 PR #181 INV-02 的 consumer-root identity 丢失；先以独立 docs-first 补充提交修订本文件与 `design.md`，再抽取私有 IO 模块。产品提交不夹带其它 docs/spec 改动，不重置 PR #181 review round；#177 与 shared change 在产品合并前保持未完成。
 
 **Non-goals / scope firewall**：
 

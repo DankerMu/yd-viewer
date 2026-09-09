@@ -4,6 +4,39 @@
 
 ## ADDED Requirements
 
+### Requirement: 共享文件读取保留主因与取消
+三条 read helper（`read_bytes_no_follow`、`read_bytes_limited_no_follow`、`read_tail_bytes_limited_no_follow`）MUST 对取得的文件 fd 在 finally 中恰好尝试 close 一次，不重试；read/fstat/lseek 与文件 close 的 OSError MUST 收敛为 SafeFilesystemError(kind=io)，读主因不得被次级 close 替换；取消 MUST 保持原对象，close 只作 note。取得 fd 前的既有缺失文件/准入分型与 no-follow 契约不变。
+
+#### Scenario: 读取与关闭双失败
+- **WHEN** 任一 reader 的读取失败，随后文件 close 又报告 OSError
+- **THEN** 外层是 io 模块错误，cause 保留读取主因，close 记为次级 note；若仅读取成功而 close 失败，close 成为 io 模块错误的 cause
+
+#### Scenario: 取消与关闭失败
+- **WHEN** 任一 reader 在读循环抛出 KeyboardInterrupt 或 SystemExit，随后 close 失败
+- **THEN** 原取消对象继续传播并携带 close note，fd 只尝试关闭一次；finally 不捕获 BaseException
+
+### Requirement: 目录创建拒绝保持资源与错误分型
+`ensure_directory_no_follow` MUST 在成功与拒绝退出时释放本次 walk 持有的目录 fd；MUST 保留 no-follow 与 containment，永久几何拒绝的 unsafe 与操作失败的 io 不得因自身 fd 泄漏或次生关闭错误互相翻转。
+
+#### Scenario: 深层永久拒绝反复发生
+- **WHEN** 在根下第二层或更深位置遇到普通文件或符号链接，并在隔离进程的 soft RLIMIT_NOFILE=64 下重复尝试 200 次
+- **THEN** 每次返回 unsafe，所有本次目录 fd 关闭，不因 EMFILE 变成 io
+
+#### Scenario: I/O 主因与清理错误并发
+- **WHEN** walk 遇到真实或注入的 I/O 失败，清理目录 fd 又报告关闭错误
+- **THEN** 返回 io 并保留操作主因；若主因是几何拒绝，则仍返回 unsafe，且继续尝试释放其它本次目录 fd
+
+### Requirement: 原子写失败的资源清理
+`atomic_write_bytes_no_follow` MUST 在非 OSError（含 BaseException）退出时关闭本次写 fd，并只清理尚未 replace 的本次临时文件；MUST 保留原异常，不能把中断改为业务错误。此本仓分叉按快照清单登记，不要求重新 pin。
+
+#### Scenario: 原子写被中断
+- **WHEN** 默认 tmp 或 part 后缀的原子写在 replace 前遭遇 TypeError、MemoryError 或 KeyboardInterrupt
+- **THEN** 本次写 fd 关闭、本次点前缀临时文件删除，旧目标和外来文件保持不变，原异常传播
+
+#### Scenario: 发布后出现中断
+- **WHEN** replace 完成后的目录 fsync 遭遇 KeyboardInterrupt
+- **THEN** 原中断传播，已发布目标保留，清理不得删除目标
+
 ### Requirement: DB-free canonical 转换（NWM 快照）
 canonical converter MUST 以同一 `LocalObjectStore` 根内的本轮临时 raw manifest 与 `raw/` 副本为输入，并在该根内生成 canonical NetCDF 与 catalog；任务 14.1 的根逐字为 `<attempt-work>/object-store`。IFS 网格定义对象的唯一 URI MUST 为 `canonical/ifs/grid/ifs_0p25/grid.json`，converter 的写入/存在性/签名检查与每条 catalog 行 MUST 共用该值；MUST NOT 保留 `canonical/IFS/...` 别名或大小写 fallback。converter MUST NOT 依赖 PostgreSQL、NWM registry 服务或 NWM checkout import。
 
