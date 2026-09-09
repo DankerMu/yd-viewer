@@ -1153,3 +1153,8 @@ PR #178 的 fixture review PASS、独立 Gap Sweep CLEAN，无候选、无综合
 
 追加后审计为55行（54 merged、1 terminal），多轮样本32，later core=125 / rotated=96，历史排除9条。脚本再次输出 lens-rotation DECIDABLE。
 本次仅用户授权的两文件 docs-first 补充，fixture review PASS、四项 CI 成功，没有新增产品轮换样本。记录复议延期：没有新的轮换收益/损失依据，不自动改变已有 keep 决策；维持现有配置，待产品 #181 闭环后由维护者复议。#181 当前为 Round 2 not-clean，计数不重置；#177 与 shared change 继续未完成。
+
+## 第 39 次复议（issue #177 / PR #181 产品合并后，2026-09-09）
+
+追加后审计为56行（55 merged、1 terminal），high桶26个PR、58个net catches；多轮样本33，later core=127 / rotated=96，历史排除9条。PR #181三轮为not-clean/not-clean/clean，最终独立审核approve；6个CONFIRMED中5个为net catches，另1个已由CI暴露。Round 2两项P1由固定security-perf面捕获，没有未使用lens可轮入。
+记录复议延期：本次没有新的rotated对照样本，不能凭两个core catches自动撤销已有keep决策；保持当前pinned core及信号触发轮换配置，后续keep/cut由维护者作明确记录。#177已关闭，14.6完成；#132仍未完成，shared m2-producer-core继续active，不整体archive。

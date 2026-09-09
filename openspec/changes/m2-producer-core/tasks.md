@@ -5263,7 +5263,7 @@ Review focus:
 - [x] 14.3 多轮追赶与缺口停等：raw 一次补齐 T/T+12h/T+24h 时序推进、每源在途提交计数 ≤1、缺轮停在缺口（原任务 14.2；§13.1：同源顺序/raw 缺口）
 - [x] 14.4 双源并行、单源失败隔离与崩溃恢复端到端：IFS 失败 GFS 继续、失败日志与 work 清理、无 DONE 残留下次重跑（原任务 14.3；§13.1：双源并行/单源失败/无 DONE 崩溃恢复）
 - [x] 14.5 `RunSourcesError` 按固定源顺序保留每个底层 `RunError` 正文与 `__notes__`（14.2 前置；issue #137）
-- [ ] 14.6 controller 将 #171 exact-five variant 与精确 cycle state 有界提交为 claimed-work capability，并新增不放宽 legacy guard 的 staged assemble seam（14.2 前置；issue #177）
+- [x] 14.6 controller 将 #171 exact-five variant 与精确 cycle state 有界提交为 claimed-work capability，并新增不放宽 legacy guard 的 staged assemble seam（14.2 前置；issue #177，产品 PR #181 已合并）
 
 依赖：组 5、组 8、组 9、组 12、组 13；14.2 是后补的 M2 收尾接线，按实现依赖位于 14.4、窄前置 14.5 与 14.6 之后
 §13.1 归属：控制器/发布（逐 task 标注场景）
