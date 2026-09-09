@@ -6429,7 +6429,7 @@ Risk packs considered:
 - NWM/DB-free: not selected — 无新快照/DB边界。
 
 Invariant Matrix: source=controller解析后的绝对work_root；producer=AttemptRequest→staged assembly→RunDirectory；validator=既有claim/collect与tracker普通文件/分钟/checksum；consumer=捕获记录→publisher T+12状态/DONE；failure=symlink祖先或cwd漂移/relative配置；证据=真实publicrun_once两源及capture前后payload观测，不以路径字段拷贝mock作完成证明。
-- [ ] 77.1 完成symlink祖先两源正向capture/publish/cleanup回归与cwd-A/B源隔离见证，复用既有真实terminal链，不改tracker/safe_fs/CLI。
-- [ ] 77.2 保留relative配置前置拒绝；去入口resolve/接线relative-run_dir两类有效变异全部红；基线结果如实记录，不把已有规范化称新源码修复。
-- [ ] 77.3 focused/full producer/viewer/Ruff/format/OpenSpecstrict-all/stage、独立public smoke、high四席与freshfinal/CI/SHA gate；新测试<1000，无新豁免。
+- [x] 77.1 完成symlink祖先IFS/GFS正向capture/publish/cleanup回归与cwd-A/B源隔离见证，复用既有真实terminal链；cwdB仍生效时验证captured绝对路径/字节/checksum，不改tracker/safe_fs/CLI。
+- [x] 77.2 既有relative配置前置拒绝保持；当前production基线3项通过（既有规范化补回归，不称新源码修复）。去602入口resolve变异2失败/1通过；fixture tracker接线relative-run_dir变异3失败，其中cwdB阶段实际错误观测到720而非保持360；两类有效变异全部被杀死。
+- [x] 77.3 producer3241通过/3skip、viewer1、Ruff/format152producer+2viewer、OpenSpecstrict-all/stage、独立publicrun_once alias→规范capture/T12/DONE/cleanup smoke通过；新测试410行，无新豁免。合并仍受high四席与freshfinal/CI/SHA gate。
 Non-goals: 新生产worker/CLI、修改tracker构造或safe_fs接受symlink、对所有containment_root做全仓重构、现场scratch/NFS验证、回改#58/#59/#94/#106；sharedM2仍active。
