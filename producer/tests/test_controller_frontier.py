@@ -102,15 +102,18 @@ def test_absolute_minute_matches_hand_computed_epoch_arithmetic() -> None:
 
 def test_fresh_chain_takes_the_earliest_state_file_name(tmp_path: pathlib.Path) -> None:
     builder = YdRootBuilder(tmp_path)
+    (tmp_path / "output").mkdir()
     builder.write_state(FRESH, "ifs")
     raw = _all_complete()
     _assert_runnable(_decide(builder, "ifs", raw), FRESH)
+    assert raw.asked == [FRESH]
 
 
 def test_fresh_chain_with_several_states_still_takes_the_earliest(
     tmp_path: pathlib.Path,
 ) -> None:
     builder = YdRootBuilder(tmp_path)
+    (tmp_path / "output").mkdir()
     # 逆序写入：结论 MUST 取最早的 cycle，不是最后写入的那份
     builder.write_state(FRESH_NEXT, "ifs")
     builder.write_state(FRESH, "ifs")
@@ -122,6 +125,7 @@ def test_no_done_and_no_legal_state_stops_with_no_initial_state(
     tmp_path: pathlib.Path, layout: str
 ) -> None:
     builder = YdRootBuilder(tmp_path)
+    (tmp_path / "output").mkdir()
     if layout == "empty_dir":
         builder.states_dir("ifs").mkdir(parents=True)
     elif layout == "illegal_names_only":
@@ -569,6 +573,7 @@ def test_unlistable_states_dir_stops_with_discovery_unreadable(
     """不再是 `NO_INITIAL_STATE`：列不出来与「一份状态都没有」不是同一件事。"""
     _skip_if_root()
     builder = YdRootBuilder(tmp_path)
+    (tmp_path / "output").mkdir()
     builder.write_state(FRESH, "ifs")
 
     raw = _all_complete()
@@ -631,11 +636,15 @@ def test_discovery_unreadable_is_isolated_per_source(tmp_path: pathlib.Path) -> 
 
 
 def test_absent_directories_still_mean_empty_sets(tmp_path: pathlib.Path) -> None:
-    """errno 分流没有把「不存在」一起判成不可读：`output/` 缺 -> 全新链。"""
+    """#86：`output/` 缺是根异常，不得当成全新链；不得 mkdir 掩盖本条。"""
     builder = YdRootBuilder(tmp_path)
     builder.write_state(FRESH, "ifs")
     assert not (tmp_path / "output").exists()
-    _assert_runnable(_decide(builder, "ifs", _all_complete()), FRESH)
+    raw = _all_complete()
+    decision = _decide(builder, "ifs", raw)
+    _assert_stopped(decision, controller.StopReason.DISCOVERY_UNREADABLE)
+    assert str(tmp_path / "output") in decision.detail
+    assert raw.asked == []
 
 
 def test_absent_states_dir_still_means_no_initial_state(
@@ -674,6 +683,7 @@ def test_unrepresentable_done_cycle_is_invisible(tmp_path: pathlib.Path) -> None
 def test_unrepresentable_state_name_is_invisible(tmp_path: pathlib.Path) -> None:
     """`states/` 侧对称：唯一的状态名不可表示 -> 该源没有合法首态。"""
     builder = YdRootBuilder(tmp_path)
+    (tmp_path / "output").mkdir()
     builder.write_state(UNREPRESENTABLE, "ifs")
     _assert_stopped(
         _decide(builder, "ifs", _all_complete()),
@@ -840,6 +850,7 @@ def test_decision_requires_exactly_one_of_cycle_and_stop_reason(
 
 def test_returned_cycle_is_utc_aware(tmp_path: pathlib.Path) -> None:
     builder = YdRootBuilder(tmp_path)
+    (tmp_path / "output").mkdir()
     builder.write_state(FRESH, "ifs")
     decision = _decide(builder, "ifs", _all_complete())
     assert decision.cycle is not None
