@@ -5,7 +5,7 @@
 ## 2. Evidence
 - [x] 2.1 Compare baseline .workplans/issue-100/baseline-inventory.json:144 definitions,292 assertions, module data declarations and assertion source text unchanged. Compare the Counter of item.name (including parameter IDs) from baseline-collection.json:156 moved+4 claim cases, ignoring module-path prefixes rather than comparing full nodeids/JSON. Diff test_rawcopy_claim_admission.py separately: only its helper import line may change; all its function/assert AST must remain unchanged.
 - [x] 2.2 Prove test_admission_phase_is_structurally_enclosed_by_one_floor green, then red when scratch stage_raw gains an executable statement immediately before its admission try (after any docstring), not inside the existing write-phase try. Assert imported rawcopy_module is the scratch module; no permanent runner/source changes.
-- [ ] 2.3 Run full producer/viewer pytest and Ruff, OpenSpec strict/all, stage log, guard line/exclusion check and final Ubuntu CI.
+- [x] 2.3 Run full producer/viewer pytest and Ruff, OpenSpec strict/all, stage log, guard line/exclusion check and final Ubuntu CI.
 ## Risk packs
 - Public API / CLI / script entry: not selected — no product entrypoint change.
 - Config / project setup: selected — remove one guard exclusion only.
