@@ -34,7 +34,7 @@
 
 **D5 依赖策略**：骨架 `dependencies = []` 为刻意留空；numpy/xarray/cfgrib 随 forcing-chain 依赖任务加入并 `uv lock`；cfgrib 的 eccodes 运行时库经 `eccodeslib`（ECMWF 官方二进制 wheel，含 manylinux_2_28）显式引入，不依赖系统 `libeccodes`（组 6 已落地）。几何选轻量组合 pyshp + pyproj + shapely（读 shp/dbf、重投影、合并边界），不引入 GDAL/geopandas——viewer 契约本就禁 GDAL 运行时，producer 侧同样够用且 CI 安装面小；随 prepare-variants 任务加入。CLI 用 stdlib `argparse`，零框架依赖（KISS；三个子命令不值 click/typer）。
 
-**D6 NWM 解释器薄外壳 fail-closed**：`prepare` 中 mapping-builder 调用封装为独立函数——接受 `local.toml` 的解释器路径与 NWM checkout 上下文（cwd/`PYTHONPATH`）、以及 `config.toml` 的 `nwm_mapping_builder_module` 作为 module 名（module 名是版本化快照事实而非现场值，归属裁决见 #32；原文笼统写作"接受 `local.toml` 的解释器路径与 module 名"，其中 module 名的出处经 #32 更正 5 裁定为 `config.toml`，issue #3 按文档优先原则同步），路径不存在或非可执行即报错退出；绝不回退到 `uv run`、`--active` 或系统 Python（agent-ops §7.2）。本地测试用假解释器脚本验证调用形态与 fail-closed 分支。
+**D6 NWM 解释器薄外壳（#202 真实 driver cutover）**：`prepare` 通过既有 `invoke_mapping_builder` 入口，以 `local.nwm.python` 的精确 venv 路径执行 yd 随包分发的 driver 脚本绝对路径。cwd/PYTHONPATH 只来自明确 NWM checkout，去掉 DATABASE_URL/PYTHONHOME 与继承 PYTHONPATH；不 resolve venv symlink，不做其它解释器 fallback。移除 obsolete `nwm_mapping_builder_module` 及仅为它传入的 Config 参数，迁移调用者；不保留未实现的 module CLI 分支。脚本只复用 NWM mapping 库，实际 prepare 事务及本地验证见 native-yd-model-input。
 
 **D7 init 的测试归属**：compute-loop §13.1 表无 init 行——init 的"已有状态/DONE 即拒绝"“7 天窗最早完整 cycle”“率定末态重戳到首轮 T"场景由 `init-bootstrap` spec 自带 Scenario 覆盖；重戳纯函数复用 state 行测试。此处显式声明以免被读作测试缺口。
 
@@ -182,7 +182,7 @@ run staging 完整后，先在commit紧前复探终名，再以同父目录 no-f
 5. `CheckpointTracker.capture_available()`（模拟 `cfg.ic.update` 覆写序列）与 `ensure_twelve_hour_checkpoint(*, tracker, run_directory, runner) -> CapturedCheckpoint`（注入同步假 SHUD runner）——前者确定性重放轮询竞态，后者在同一 attempt 内闭合漏采补跑、输入一致性与失败传导；#16/#17 fixture 记录从早期 `tracker.capture(shud_dir, target_minute)` 草图到这两个有状态 seam 的适配理由。
 
 6. `cli.main(argv, env) -> int`（进程内调用，不起子进程）——入口层**自身的契约**（三入口枚举、未知子命令拒绝、`DATABASE_URL` 守卫、`run` 状态目录守卫）由 spec cli-config 的 Scenario 逐条钉死，必须在此边界行使；委托目标以注入的假实现替换，故不牵连业务模块。
-7. `nwm.invoke_mapping_builder(local, config, args, runner) -> CompletedProcess`（假解释器脚本 + 注入 runner）——D6 薄外壳的调用形态（精确解释器路径、module 名、cwd/`PYTHONPATH`）与 fail-closed 只能在此边界断言。
+7. `nwm.invoke_mapping_builder(local, args, runner) -> CompletedProcess`（假解释器脚本 + 注入 runner）——D6 薄外壳的精确 venv、yd driver 绝对脚本路径、固定 cwd/PYTHONPATH 与既有失败分类；实际 NWM 库输出另由 native-yd-model-input 的 prepare 路径 smoke 证明，不能以参数转发测试代替。
 8. 既有 `AttemptDriver.prepare` / `collect` 协议与 `nwm.py` 私有worker进程入口（#132/14.2 实现）——独立子进程只收到work-local handoff，重验#177并提交同job的原子receipt；collect经tracker公开import恢复authority。provider→真实run_sources→finalize_failed_job验证日志先于删除，入口/依赖工厂在cli.main同锁内验证，不新增业务facade。
 
 CLI 入口层**不做业务行为测试**（薄委托）：`prepare`/`init`/`run` 的业务行为经各自模块 seam（1–5）验证。这不豁免 seam 6——入口层自己的枚举/拒绝/守卫契约是 spec 明文 Scenario，属入口层而非业务模块，必须在入口层测。（原文写作"CLI 入口层不做行为测试"，与 spec cli-config 的 `--help`/未知子命令/`DATABASE_URL`/`run` 守卫四条 Scenario 直接冲突，issue #3 按文档优先原则更正。）

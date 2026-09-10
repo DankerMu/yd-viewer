@@ -126,8 +126,8 @@ worker 只可消费由 prepare 同一 loader 验证、再由 controller `stage_w
 `prepare` 收集到的清理/回滚失败是总不变量被破坏时的**唯一证据**（agent-ops §8.1 要求每次 `prepare` 调用留 receipt）。CLI MUST 把它们打到 stderr：失败路径上 MUST 渲染在途异常的 `__notes__`（`str(exc)` 不含 notes），成功路径上 MUST 渲染报告的 `cleanup_warnings`。退出码 MUST NOT 因此改变，且 MUST NOT 打印 traceback。
 
 #### Scenario: 失败路径的清理失败随错误一并打印
-- **WHEN** `main(["prepare", ...])` 走生产 builder 绑定且清理原语注入失败
-- **THEN** 退出码仍为 `3`，stderr 同时含 `BuilderUnavailableError` 消息与该清理失败文本，且不含 `Traceback`
+- **WHEN** `main(["prepare", ...])` 的真实 builder 路径出现已分类的 `PrepareError`，并且本次清理原语也失败
+- **THEN** 退出码保持该 prepare 错误的 `1`，stderr 同时包含实际错误消息与清理失败 note，且不含 `Traceback`；不得恢复 BuilderUnavailableError/分阶段未实现退出码来满足此场景
 
 #### Scenario: 成功路径的清理告警打印且不改退出码
 - **WHEN** 注入的 `run_prepare` fake 返回带非空 `cleanup_warnings` 的报告

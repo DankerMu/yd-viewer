@@ -123,7 +123,7 @@ forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` �
 - **THEN** stable output-config identity 不匹配，producer 重算或 fail closed，不得返回旧 `already_done`
 
 ### Requirement: prepared-variant handoff 是临时 registry 的唯一生产输入
-`prepare` 与后续独立 `run` 进程之间的 direct-grid 模型事实 MUST 只由 prepared variant 顶层固定 v1 handoff manifest 交接。唯一 loader 以调用方已知的 exact variant root/current source/project/grid 和显式 byte limits，返回深冻结 contract、四个 prepared-variant 版本标识与 exact opaque binding/UTF-8 `.sp.att` bytes；它 MUST 复用现有 direct-grid parser/semantic validator，不得在 prepare、driver 或组装层复制第二套 contract parser。manifest 中 `binding_uri`/`sp_att_path` 继续只表示 work-local registry keys；prepared asset 读取只使用固定 binding 名与 manifest 明示的安全单层 `.sp.att` 名，不得反向用这些 keys 扫描变体。
+`prepare` 与后续独立 `run` 的 direct-grid 模型事实 MUST 只通过完整 native 十四文件变体的 `yd.prepare.direct-grid-handoff.v2` 交接。唯一 loader 沿用既有 source/project/grid、limits、parser/semantic validator 与深冻结结果；不在 prepare/driver/assembly 复制 parser。manifest 的 binding_uri/sp_att_path 仍是 D11 work registry keys，prepared sp.att 固定为 `yd.sp.att`，不得把 registry key 当作候选发现路径。v1 只作为需要重新 prepare 的旧输入，不是另一条生产路径。
 
 #### Scenario: prepared handoff 可直接驱动既有 registry seam
 - **WHEN** 对已由 prepare 验证并提交的 source-specific native v2 variant 调用唯一 loader，再把其四个版本标识、contract 与 exact bytes 与当前 `AttemptRequest.source/cycle` 组成 `WorkIdentity` 并交给 `stage_work_registry`

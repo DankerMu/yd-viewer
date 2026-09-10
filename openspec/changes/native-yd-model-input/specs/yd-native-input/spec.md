@@ -30,6 +30,8 @@ The producer MUST extend the existing staged file transfer and checksum map to t
 
 Native parameter output MUST use the stock reader's `KEY<whitespace>numeric-value` syntax without a leading space, not `KEY = value`. The shared writer MUST recognize the baseline's native whitespace syntax and case-insensitive runtime keys, writing exactly one native-readable occurrence of each of the six existing runtime parameters. Native recovery MUST use the same syntax with END=0.5. Legacy template rendering remains a separate explicit mode of the shared writer; it MUST NOT dictate native serialization.
 
+This runtime format-cutover slice MUST migrate the existing tracker consumer, including its private RunDirectory layout check and recovery renderer call. It MUST accept the specified native field combination and preserve the separately supported legacy flat combination, not drop layout validation or accept arbitrary paths. This work MUST NOT be deferred to #132's six-file PR, which excludes tracker files.
+
 #### Scenario: Native reader resolves current run inputs
 - **WHEN** assembly receives a current T state and a valid forcing package
 - **THEN** every fixed native path needed by the supported yd model exists under `input/yd/`, the returned state is T rather than the prepared initial state, and resolving every forcing CSV as the stock reader does from model cwd reaches the actual current CSV bytes.
@@ -37,6 +39,10 @@ Native parameter output MUST use the stock reader's `KEY<whitespace>numeric-valu
 #### Scenario: Stock parameter parser reads the intended values
 - **WHEN** native assembly renders an actual whitespace-separated cfg.para with old END/output interval and then renders a recovery version
 - **THEN** the stock `%s %lf` grammar reads exactly one numeric value per runtime key, including END=7/0.5, DT_QR_DOWN=60 and Update_IC_STEP=720; no old duplicate or equals-sign value remains.
+
+#### Scenario: Native tracker consumer accepts captured and recovered checkpoints
+- **WHEN** ensure_twelve_hour_checkpoint consumes a native RunDirectory, first with an existing captured checkpoint and then in a genuine-miss recovery scenario
+- **THEN** the captured path passes native layout validation without invoking the runner; the recovery path renders END=0.5 in the actual nested parameter file and restores its original bytes, preserving the primary output destination.
 
 #### Scenario: Primary and recovery retain distinct outputs
 - **WHEN** the primary or twelve-hour recovery invocation is constructed from the native RunDirectory

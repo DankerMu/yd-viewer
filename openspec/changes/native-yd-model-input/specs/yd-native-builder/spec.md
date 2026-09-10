@@ -16,9 +16,17 @@
 
 The driver MUST use existing NWM checkout grid.json and metadata files for the configured source/grid, materialized through the existing DB-free `read_input_record`/`prepare_snapshot` functions. Any source-to-physical-path mapping MUST be explicit; NWM's `canonical/IFS` input path MUST NOT change yd's existing lowercase `canonical/ifs` daily object key. The adapter MUST NOT connect to DB, register a snapshot, create a new snapshot UUID field or pretend to hold NWM DB registration evidence. It MUST NOT import NWM Approvals, EvidencePackage, CapacityReport or RollbackTarget lifecycle into the yd workflow merely to satisfy the high-level builder API.
 
+The pin-level call/argument recipe in design D4 MUST be followed: explicit grid_definition_uri; a source-normalizing in-memory GridSnapshotLoader retaining snapshot ID None; nearest/used-cell/index with no small-basin override; native sp.att rewrite; real MeshNode elevations through the pinned private mesh helper and Z sampler; and emitter D11 URIs with lowercase yd applicable_source_ids. Transitive imports of platform record types are permitted; constructing those records or executing their lifecycle is not.
+
+The adapter MUST copy BindingArtifact.bytes unchanged and project manifest.to_contract_section_dict() to the existing ten yd contract fields. NWM's bare-hex binding/sp.att checksums MUST be represented with the existing `sha256:` prefix without altering bytes; extra resource_profile/provenance keys MUST NOT be passed into that fixed envelope. Grid signature, station order and numerical values MUST remain unchanged.
+
 #### Scenario: DB-free prepare derives real mapping
 - **WHEN** prepare runs with no database credentials using its file grid inputs
 - **THEN** real library mapping and binding emission complete without any database connection, registry export or placeholder platform approvals/QA records.
+
+#### Scenario: Emitted NWM binding is accepted by yd
+- **WHEN** the real driver emits both source variants through the D4 recipe
+- **THEN** the existing yd loader accepts their lowercase source singleton, exact D11 URIs and prefixed checksums, while yd.binding remains byte-identical to the library output and all station Z values come from actual mesh elevations.
 
 #### Scenario: Daily canonical grid differs
 - **WHEN** later raw conversion produces a grid incompatible with the prepared binding
@@ -35,6 +43,8 @@ The builder MUST declare the existing model/basin/basin-version/river-network-ve
 ### Requirement: Minimal fixed interpreter cutover
 
 The existing mapping-builder invocation boundary MUST execute the packaged yd driver by absolute script path using `local.nwm.python`. It MUST preserve the venv interpreter path rather than resolving its symlink or falling back through PATH. The child MUST use only the explicit NWM checkout as PYTHONPATH, with DATABASE_URL and PYTHONHOME removed; missing interpreter/checkout remains a classified error. The obsolete `nwm_mapping_builder_module` configuration and the builder-unavailable production branch MUST be removed along with their callers. Daily run MUST continue to use yd's environment without importing NWM.
+
+`invoke_mapping_builder` MUST retain its existing name but remove the Config argument used only by the obsolete module field. `run_prepare` MUST bind local configuration explicitly for the real default builder while preserving the injected `Callable[[VariantBuildRequest], None]` seam; the driver MUST NOT discover that context through globals or ambient environment.
 
 #### Scenario: Fixed environment reaches the real driver
 - **WHEN** prepare launches from an arbitrary caller cwd with unrelated inherited Python environment entries

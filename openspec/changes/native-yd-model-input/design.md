@@ -68,35 +68,41 @@ stock SHUD 的 forcing reader 从 `yd.tsd.forc` 第二行的 path 相对进程 c
 
 外部-root legacy `assemble` 在旧合同中还有独立使用者：不以兼容别名调用 native loader，不新增 v1 native fallback。保留它现有的外部-root API/安全语义，native staged 路径复用同一 assembly kernel，通过内部明确的输入/输出位置传入，不复制整个 kernel。native 生产 worker 只消费完整 staged v2。
 
+上述 tracker 迁移明确归 native runtime 切片（组 1），包括 `tracker/checkpoint_tracker.py` 的 `_validate_run_directory` 和恢复调用参数模式，以及对应 tracker/recovery tests。不能路由给 #132，因为它的六文件边界明确不含 tracker。接受 native 的真实字段组合，同时保留独立 legacy assembly 的平铺组合与既有 containment/state 检查；不是删除旧校验后接受任意路径。组 1 的同一 native 路径验证已捕获 checkpoint 时零 runner 调用，以及真正漏采时 native END=0.5 可读且原参数逐字恢复。#132 之后只消费这个已完成的接口迁移。
+
 ### D4 薄 driver 复用算法，不移植 NWM 平台
 
 当前 `build_direct_grid_variant` 除算法外还要求 Approvals、RollbackTarget、CapacityReport 等 NWM 平台 evidence 输入。本项目不为凑齐它们生成假审批/假 QA/假 UUID；不调用 resolution-only CLI 假装完成 build。
 
 yd 维护一个 prepare-only Python driver，由 `local.nwm.python` 执行；它直接复用 NWM pin 的库：
 
-1. `workers.grid_registry.input_record.read_input_record` + `registry.prepare_snapshot` 从 NWM checkout 已有的 source grid.json/metadata 构造文件内存快照。后者不读写 registry；adapter 只实现算法需要的 source/grid 查找，不登记 DB snapshot、不生成 UUID。IFS 的 NWM 物理文件路径为 `canonical/IFS/...`，yd 日常对象键仍保持现有小写 `canonical/ifs/...`；显式 source 对照不是大小写搜索/fallback。
-2. 复用 `mapping_builder.algorithm` 的 nearest-cell mapping、used-cell subset 和 forcing index 顺序；不重新实现空间算法或裁剪完整网格来迎合 binding。小于四个 used cells 维持库的明确拒绝，不新增审批流程。
-3. 复用 NWM sp.att FORC 重写与 Z-policy/sampler（现有固定 verdict/nearest mesh elevation），再使用 binding emitter。只消费其真实 manifest/binding 输出转换为 D2 的已有 direct-grid contract，不生成 NWM EvidencePackage。
-4. 固定复制 D1 文件，替换 rewritten sp.att，写出 handoff。原有四个版本标识由 prepare builder 一次声明并存入 handoff，不在 run 推导；不引入新的 UUID 字段。版本值以实际 baseline native 内容与 source/grid/mapping 版本的稳定摘要命名，按各自对象区分 basin/native-baseline/river/model；controller 仍只逐字消费，不承担命名逻辑。
+1. 网格文件路径由明确 source 对照组成：`gfs → canonical/gfs/grid/<grid_id>/`，`ifs → canonical/IFS/grid/<grid_id>/`，读取其中 `grid.json` 与 `grid_snapshot_metadata.json`。调用 `read_input_record(source, grid_path, metadata_path, grid_definition_uri=<该 checkout-relative grid.json key>)`，再 `prepare_snapshot(record, source_id=source)`。返回的 `grid_snapshot_id=None` 原样保留。一个仅持有该 snapshot/cells 的 `GridSnapshotLoader.find_snapshot_by_identity(source_id, grid_id)` 用 NWM `normalize_source_id` 匹配（IFS 在库内为大写），返回这对对象或 None；不读写 DB，不生成 UUID。yd 日常 source/object key 仍为小写，不复用 NWM 的物理目录大小写作为日常身份。
+2. 调用 `nearest_cell_barycenter_geodesic_v1(baseline_root, source, grid_id, loader)`、`derive_used_cell_subset(ownerships, cells)`、`assign_shud_forcing_index(used_cells)`、`verify_small_basin_gate(used_cells, approval=None)`。固定复制 D1 文件，再调用 `copy_and_rewrite_sp_att_forc`，显式传 baseline/variant 的 `yd.sp.att` 路径、ownership、index map 与 used-cell count。保留完整 grid cells；不裁剪/重编号 canonical 网格，不复制算法。
+3. Z 直接接现有实现：`resolve_verdict()` → `build_z_policy(...)`；`verify_package_crs(baseline_root).wkt` → `PackageProjection.from_prj_wkt(...)`；将 used cells 的 cell_id/longitude/latitude 转为 `UsedCell`，用固定 pin 的 `cli._parse_mesh_nodes(baseline_root)` 取得包含真实 elevation 的 `MeshNode`，传给 `sample_per_cell_z`，最后以 `dataclasses.replace(..., per_cell_z=...)` 填入 policy。允许这个已明确的 private helper import，不复制解析器、不修改 NWM、不以 Z=0 代替。它的传递性类型 import 不等于执行平台审批/evidence 流程；禁止的是构造那些平台记录或调用生命周期来凑输入。
+4. 调用 `emit_direct_grid_manifest_and_binding` 时，显式传 used_cells、完整 snapshot_cells、shud_forcing_index、`mapping_asset_identity=model_id`、`model_input_package_id=model_id`、`binding_uri=f"models/{model_id}/direct-grid/binding.json"`、`sp_att_path="input/yd.sp.att"`、重写后的 sp_att_bytes、`applicable_source_ids=(yd_source,)`（小写 gfs/ifs）、grid_id、snapshot.grid_signature、上一步 z_policy 与 model_crs_wkt。这两个 URI 是 D11 key，绝不是 prepared 文件名；prepared leaf 仍为 `yd.sp.att`。绑定器逐字复制 source/URI，不会替 yd 归一。
+
+输出适配也是薄投影：将 `BindingArtifact.bytes` 原样写成 `yd.binding`；从 `manifest.to_contract_section_dict()` 取现有十个字段（forcing_mapping_mode、binding_uri、binding_checksum、model_input_package_id、sp_att_path、sp_att_checksum、applicable_source_ids、grid_id、grid_signature、station_bindings），作为 handoff 的 direct_grid_forcing_contract。NWM emitter 的两项文件 checksum 是裸 64 位 hex，适配时仅增加 `sha256:` 前缀；不修改 binding bytes、grid_signature、站点顺序/值。额外 coordinate_reference_system/z_policy 不加入现有十字段 envelope，它们仍保存在 opaque binding 的原始 provenance 中。不得直接塞入含额外字段的 NWM resource_profile，也不得重写 caller schema 来绕过兼容问题。
+
+现有四个模型标识由 builder 在 prepare 一次声明：basin_id 固定为 `yd`；basin_version_id 使用 `yd-` 加原始十二 native 文件 checksum map 的稳定摘要；river_network_version_id 使用 `yd-river-` 加 mesh/riv/rivseg 三文件 checksum map 的稳定摘要；model_id 使用 `yd-<source>-` 加 baseline/river 版本、完整 grid_signature、NWM pin、mapping algorithm ID 和 sampler rule ID 的稳定摘要。摘要使用既有 canonical JSON 编码与 SHA-256，不取时间/随机数；同一输入只计算一次并复用于 handoff/emitter。run 仍只逐字消费这些现有字段，不引入新身份体系或 registry。
 
 网格文件和 NWM 算法与 checkout pin 一起固定，供 prepare 一次读取；记录使用的现有 grid signature 即可，不新建 registry 导出/有效性审批系统。真实 raw 转换后仍由既有 forcing 边界发现 grid 不匹配，禁止覆盖 canonical grid 来凑结果。
 
-执行器保留现有 `invoke_mapping_builder` 公共入口，改为调用 yd 随包提供的 driver 脚本绝对路径；移除不再使用的 `nwm_mapping_builder_module` 配置和调用者，不保留一个无效开关。脚本使用标准库接收既有 source/grid/baseline/output 参数，在 NWM 环境 import NWM；yd 日常 worker 绝不 import NWM。fixed interpreter 不 resolve venv symlink、不做 PATH 回退；子进程 `PYTHONPATH` 仅为明确的 NWM checkout，移除 `DATABASE_URL`/`PYTHONHOME`。这是 #45 的 exec 现场义务与明确 prepend→固定路径 cutover，不扩展成环境白名单平台。
+执行器保留 `invoke_mapping_builder` 名称，移除只为旧 module 名传入的 Config 参数，改为 `invoke_mapping_builder(local, args, runner)` 调用随 yd 提供的 driver 绝对脚本路径。移除 `nwm_mapping_builder_module` 配置及全部调用者。driver 只收 source/grid/baseline/output 四类现有参数；`default_builder` 显式接收绑定的 local 上下文，`run_prepare` 为默认生产 builder 绑定它，注入式 `Callable[[VariantBuildRequest], None]` seam 保留，不靠 global/env 找配置。脚本在 NWM 环境 import 库，日常 worker 绝不 import NWM。固定解释器不 resolve venv symlink、不做 PATH fallback；child PYTHONPATH 仅为明确 NWM checkout，并去掉 DATABASE_URL/PYTHONHOME。这是 #45 的已有 exec 现场义务，不是新的环境策略平台。
 
 `prepare.default_builder` 不再抛 builder-unavailable；删去相关未实现分支与文字型测试。真实 GIS 使用 river.shp；保留原有 prepare 拒绝覆盖、四终名事务和失败分类。
 
 ## Sketch seams under test
 
-- `stage_work_inputs → assemble_staged`：一个代表性固定 native 变体，断开 source 后仍在 work 内组装；核对 warm state、原生参数、CSV 实际解析位置与未改变的输出根。
+- `stage_work_inputs → assemble_staged → ensure_twelve_hour_checkpoint`：一个代表性完整 native 变体贯通到实际 tracker consumer；核对当前 state、stock 参数/CSV 语法、已捕获零 runner 与 genuine-miss 恢复/还原，不另开一套 helper 防御矩阵。
 - `yd-producer prepare --baseline`：在固定 NWM 运行环境真正调用库生成两变体/GeoJSON；测试只替换进程/环境边界时不得将合成 builder 计为真实 driver 证明。M2 可使用小型合法 native 几何和网格，另运行 pin 库 smoke；真实 yd 数值仍归 M4。
 
 不新增为证明字段转发、源码字符串、默认值或每个 helper 的重复测试。保留现有真实错误/状态转换测试，迁移格式变化破坏的 fixtures；新增回归只覆盖原生路径、FORC 重写与单个真实失败路径。
 
 ## Phases / Verification
 
-1. Native runtime cutover：固定 handoff + staged 搬运 + native assembly，作为同一格式迁移切片；existing prepare 的 builder seam 消费新格式，但实际 driver 随下一切片接入。一个 native staged→assembly 路径验证格式闭环。不同层不能先后独立改变同一个生产格式，因此该 PR 是耦合边界，不按文件拆成中间损坏版本。
+1. Native runtime cutover：固定 handoff、staged 搬运、native assembly 和 tracker 私有布局/恢复模式消费点作为同一格式迁移切片；existing prepare 的 builder seam 消费新格式，实际 driver 随下一切片接入。一个 staged→assembly→tracker 路径验证格式闭环；legacy 独立路径继续有效，不按文件拆成中间损坏版本。
 2. Real prepare driver：依赖切片 1，接入固定 NWM 库调用与 GIS/CLI，移除 unavailable/无效 module 开关。一个 CLI prepare 路径验证两 source 和事务。不开 NWM 平台 evidence 子项目。
-3. #132 集成：吸收两前置，复核 worker/recovery 使用新的 RunDirectory 路径并完成原 PR 审核；现有 Round 1 计数与 finding 记录不重置。
+3. #132 集成：吸收两前置，worker/receipt 消费真实 RunDirectory 字段与组 1 已迁移的 tracker，完成原 PR 审核；不在 #132 修改 tracker，Round 1 计数与 finding 记录不重置。
 4. M4：真实 baseline/binary，IFS/GFS 的 00Z/12Z、7 日 DAT、T+12/下一轮与 NFS receipt。此步骤不再补业务代码，也不由本地 smoke 替代。
 
 每个实现切片运行 project-profile 的 producer/lint/OpenSpec 门禁；文档 PR 不运行 native/Slurm。runtime 与 builder 各自有单一路径验收，避免每个 helper 再跑一套全包防御矩阵。

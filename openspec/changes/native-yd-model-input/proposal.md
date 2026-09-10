@@ -26,7 +26,7 @@
 
 ## Impact
 
-- runtime 切片：`prepare_handoff.py`、`prepare.py` 的变体文件合同、`staged_inputs.py`、`assemble.py` / `_assemble_io.py` 及相关 fixtures；#132 的 worker/receipt 按真实 `RunDirectory` 路径消费，不加新 controller API。
+- runtime 切片：`prepare_handoff.py`、`prepare.py` 的变体文件合同、`staged_inputs.py`、`assemble.py` / `_assemble_io.py`，以及 `tracker/checkpoint_tracker.py` 的 native RunDirectory 接受/恢复模式调用点和相关 fixtures。#132 的 worker/receipt 只消费已迁移的 tracker，不加新 controller API，不扩大其六文件边界。
 - builder 切片：`prepare.default_builder`、`nwm.invoke_mapping_builder`、一个 prepare-only driver、必要的版本化配置与 CLI 接线。顺带完成 #45 在真实调用处的既有解释器/env 义务，不增设新配置平台。
-- docs：`compute-loop-design.md`、`agent-ops.md`、active M2 design/tasks 的优先级与阶段归属说明。
+- docs：`products-contract.md`、`compute-loop-design.md`、`agent-ops.md`、active M2 design/tasks/specs 的优先级与阶段归属说明。
 - 不修改 NWM checkout、环境或服务；不提交真实模型/节点配置。#202 作为父项按真实模块依赖拆分，全部完成前 #132 不合并。
