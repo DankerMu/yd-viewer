@@ -1453,7 +1453,7 @@ def stage_raw(
 
 pin 在 raw cycle 目录内落盘 `manifest.json`（GFS `_persist_manifest_metadata` L1599-1609 调用点 L774；IFS 于 `ifs_adapter.py:667` 构建期一次性写入）。yd MUST **读取** `<raw_root>/<存储身份>/<YYYYMMDDHH>/manifest.json` 并从中承接 entry 级语义，MUST NOT 在 yd 侧发明：
 
-- `grib_short_name`、`cfgrib_filter_by_keys`、`logical_remote_url`、`cycle_time`、`valid_time`、`bundle` —— pin 构建期写的 6 键，逐条承接
+- `grib_short_name`、`cfgrib_filter_by_keys`、`logical_remote_url`、`cycle_time`、`valid_time`、`bundle` —— pin 构建期写的 6 键，逐条承接。**#99 内部一致性**：`cfgrib_filter_by_keys` MUST 是含 `shortName` 的 Mapping，且该值 MUST 等于同 entry 的 `grib_short_name`；形态、缺键或不相等均在复制前以 `RawStagingError(kind="source-manifest")` 拒绝，不得用任一方覆写另一方或自行推导别名。相等时仍逐字承接；不相等的错误须包含 lead、variable 与两个实际值。
 - **累积语义**：pin 下载期把 `IdxSelection.as_metadata()`（键 `step_range`/`accumulation_type`/`idx_record_number`/`selector_warning`）按变量收进**复数** `idx_selectors`（`gfs_adapter.py:1070`），**只有单变量 bundle 才另写单数 `idx_selector`**（L1071-1072）。消费端 `_apcp_selector_metadata`(converter L677) **只读单数键**。yd 的扇出是逐变量的，故每条 entry 的单数键有唯一定义：`idx_selector = 源 manifest 的 idx_selectors[variable]`。两个键都落盘（复数保持与 pin 同形），MUST NOT 只落复数键。
 
 源 manifest 缺失/不可解析/其 entry 集合无法覆盖本轮 (lead, variable) 全集 —— 一律 fail closed，不得以空值或推导补齐。
@@ -1584,7 +1584,7 @@ Regression rows:
 - **目标侧 symlink containment 的 inode 判据在 CI 上无判别器**：唯一支撑用例在大小写敏感卷（CI 的 ubuntu-latest/ext4）上必然自跳过，而无特权的无条件 seam 级判别器不可构造。补救属 CI 作业面或 fixture 作用域，不是「补一个用例」。follow-up：**issue #89**
 - **九项闭合 kind 词表本身无判别器**：九个 kind 各有具名用例与杀手变异体，但测试从不 import `ERROR_KINDS`，加入第十项的变异体在 747 passed 全绿下存活（round 2 实测，同环境控制变异体 13 failed，harness 已校准）。今日无运行期影响故判 DEFER，但本模块最强的 oracle 锚（逐字钉死的闭合集）目前不设防。follow-up：**issue #76**
 - **#75 严格 JSON 输出裁决**：`_render_manifest` MUST 使用 `json.dumps(..., allow_nan=False)`；承接值含 `NaN`/`Infinity`/`-Infinity` 时沿既有序列化错误分支抛 `RawStagingError(kind="source-manifest")`，且复制前零写入。有限值产物须可由拒绝非标准常量的严格解析器读取。源 JSON 读取策略及 `idx_selectors` 畸形值策略不在本次实参修复范围。
-- **六键逐字承接后无内部一致性核对**：`grib_short_name` 与 `cfgrib_filter_by_keys["shortName"]` 在 pin 上同源同值（`nwm-snapshot-inventory.md:109`），yd 两者都逐字承接却从不核对二者相等，故源侧改动其一即产出一份自相矛盾的 `raw-manifest.json` 而 staging 照常成功（round 5 实测复现）。消费端 `_cfgrib_backend_kwargs` 优先取 `cfgrib_filter_by_keys`（`:110`），converter 会静默读错 GRIB 变量——该后果由 §3.1 转录**推理**得出、未实跑（converter 属任务 7.1，不在本 PR）。判 DEFER 的依据：两个操作数均逐字承接，治理不变式的「承接」合取项**未破**，矛盾是继承而非 yd 制造，弱于 round 5 修掉的 entry 时间闸门（那一处矛盾的是 yd **自算**的字段）；且该承接循环先于本轮存在，`d6a8733` 未改动它。follow-up：**issue #99**
+- **#99 承接身份一致性裁决**：六键逐字承接之外，必须核对 `cfgrib_filter_by_keys.shortName == grib_short_name`，先判 Mapping 与子键存在；不符沿既有 `source-manifest` 分支零写入拒绝。不新增 GRIB 别名表，不规范化、不互相覆写；其它承接键及 converter 防御仍在原边界。
 - **entry 时间闸门依赖「pin 侧 `valid_time` = cycle + forecast_hour」这一算法**：§3.1 只记录了六键的存在与注入时机，未记录该算法；支撑证据是本仓逐字副本 `raw/manifest.py:51-52` 的 `valid_time_for`（§3.1:45 将该文件登记为转录）。若 pin 对**区间累积**变量另按区间端点写 `valid_time`，本闸门会对每一个 cycle 硬拒；而按上方「地板兜底 kind」一条，组 12 无法凭 kind 把它与「yd 自身出错」区分开。不落 issue 的理由：该形态在 pin 当前源码上不成立，属 pin 演进时才需重估的假设，本条即其登记点。
 
 #### Review focus

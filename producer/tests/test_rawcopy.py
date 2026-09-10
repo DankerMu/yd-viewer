@@ -910,6 +910,125 @@ def test_entry_times_written_in_another_offset_stage_normally(tmp_path: Path) ->
         )
 
 
+# --- Row：承接来的 grib_short_name 与 cfgrib_filter_by_keys.shortName 一致性 --
+#
+# 六键逐字承接之后，这两个值按 pin 是同一身份的两次书写。源侧若写成互斥的两个
+# shortName，产出 manifest 会在同一条 entry 上同时声明两个 GRIB 变量。核对的是
+# 两个已承接值之间的关系，不是按变量名查别名表。
+
+
+APCP_WRONG_FILTER_SHORT_NAME = "2t-WRONG"
+CUSTOM_EQUAL_SHORT_NAME = "custom-tp-not-an-alias"
+CUSTOM_EXTRA_FILTER_KEY = "typeOfLevel"
+CUSTOM_EXTRA_FILTER_VALUE = "surface"
+
+
+def _apcp_metadata_at_leads(
+    payload: dict[str, Any],
+) -> list[tuple[int, dict[str, Any]]]:
+    """本轮会消费的 apcp entry 及其 lead；源侧多出的 lead/变量不在此列。"""
+    return [(lead, source_entry(payload, lead, "apcp")["metadata"]) for lead in LEADS]
+
+
+def _expect_grib_identity_refusal(tmp_path: Path, payload: dict[str, Any]):
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    before_work = snapshot(work_dir)
+    before_source = snapshot(raw_root)
+    before_source_content = content_snapshot(raw_root)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert snapshot(work_dir) == before_work == {}
+    assert snapshot(raw_root) == before_source
+    assert content_snapshot(raw_root) == before_source_content
+    return excinfo
+
+
+def test_apcp_filter_short_name_2t_wrong_is_refused(tmp_path: Path) -> None:
+    """issue #99 复现：apcp 的 filter shortName 改成 2t-WRONG，grib_short_name 不动。"""
+    payload = source_manifest_payload("gfs")
+    originals: list[tuple[int, str]] = []
+    for lead, metadata in _apcp_metadata_at_leads(payload):
+        originals.append((lead, metadata["grib_short_name"]))
+        metadata["cfgrib_filter_by_keys"]["shortName"] = APCP_WRONG_FILTER_SHORT_NAME
+    excinfo = _expect_grib_identity_refusal(tmp_path, payload)
+    message = str(excinfo.value)
+    lead, original = originals[0]
+    assert f"(lead={lead}, variable='apcp')" in message
+    assert original in message
+    assert APCP_WRONG_FILTER_SHORT_NAME in message
+
+
+def test_apcp_grib_short_name_alone_changed_is_refused(tmp_path: Path) -> None:
+    """反向分量：只改 grib_short_name，filter shortName 仍是源侧原值。"""
+    payload = source_manifest_payload("gfs")
+    originals: list[tuple[int, str]] = []
+    for lead, metadata in _apcp_metadata_at_leads(payload):
+        originals.append((lead, metadata["cfgrib_filter_by_keys"]["shortName"]))
+        metadata["grib_short_name"] = APCP_WRONG_FILTER_SHORT_NAME
+    excinfo = _expect_grib_identity_refusal(tmp_path, payload)
+    message = str(excinfo.value)
+    lead, original = originals[0]
+    assert f"(lead={lead}, variable='apcp')" in message
+    assert original in message
+    assert APCP_WRONG_FILTER_SHORT_NAME in message
+
+
+def test_non_mapping_cfgrib_filter_is_refused_without_bare_exception(
+    tmp_path: Path,
+) -> None:
+    payload = source_manifest_payload("gfs")
+    source_entry(payload, LEADS[0], "apcp")["metadata"]["cfgrib_filter_by_keys"] = [
+        "shortName"
+    ]
+    excinfo = _expect_grib_identity_refusal(tmp_path, payload)
+    message = str(excinfo.value)
+    assert f"(lead={LEADS[0]}, variable='apcp')" in message
+    assert "cfgrib_filter_by_keys" in message
+
+
+def test_missing_filter_short_name_is_refused_even_when_peer_is_none(
+    tmp_path: Path,
+) -> None:
+    """缺 shortName 子键即使对端 grib_short_name 是 None 也无效。"""
+    payload = source_manifest_payload("gfs")
+    metadata = source_entry(payload, LEADS[0], "apcp")["metadata"]
+    metadata["grib_short_name"] = None
+    metadata["cfgrib_filter_by_keys"].pop("shortName")
+    excinfo = _expect_grib_identity_refusal(tmp_path, payload)
+    message = str(excinfo.value)
+    assert f"(lead={LEADS[0]}, variable='apcp')" in message
+    assert "shortName" in message
+
+
+def test_equal_custom_short_names_and_extra_filter_keys_are_carried_verbatim(
+    tmp_path: Path,
+) -> None:
+    """两边同为非规范化自定义名、且 filter 另有无关键 -> 成功，落盘仍是源侧原值。"""
+    payload = source_manifest_payload("gfs")
+    for _, metadata in _apcp_metadata_at_leads(payload):
+        metadata["grib_short_name"] = CUSTOM_EQUAL_SHORT_NAME
+        metadata["cfgrib_filter_by_keys"]["shortName"] = CUSTOM_EQUAL_SHORT_NAME
+        metadata["cfgrib_filter_by_keys"][CUSTOM_EXTRA_FILTER_KEY] = (
+            CUSTOM_EXTRA_FILTER_VALUE
+        )
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    result = staged(raw_root, work_dir)
+    produced = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    for lead in LEADS:
+        origin = source_entry(payload, lead, "apcp")["metadata"]
+        written = source_entry(produced, lead, "apcp")["metadata"]
+        assert written["grib_short_name"] == CUSTOM_EQUAL_SHORT_NAME
+        assert written["grib_short_name"] == origin["grib_short_name"]
+        assert written["cfgrib_filter_by_keys"] == origin["cfgrib_filter_by_keys"]
+        assert written["cfgrib_filter_by_keys"]["shortName"] == CUSTOM_EQUAL_SHORT_NAME
+        assert (
+            written["cfgrib_filter_by_keys"][CUSTOM_EXTRA_FILTER_KEY]
+            == CUSTOM_EXTRA_FILTER_VALUE
+        )
+        assert written["cfgrib_filter_by_keys"]["filterToken"] == SOURCE_CFGRIB_TOKEN
+
+
 # --- Row：verdict-mismatch 与其相对路径对照 ----------------------------------
 
 
@@ -1372,9 +1491,9 @@ def test_non_utf8_encodable_carried_value_is_refused_before_any_write(
     判别的是「承接值能否编码」。
     """
     payload = source_manifest_payload("gfs")
-    source_entry(payload, LEADS[0], GFS_VARIABLES[0])["metadata"]["grib_short_name"] = (
-        "2t\ud800"
-    )
+    metadata = source_entry(payload, LEADS[0], GFS_VARIABLES[0])["metadata"]
+    metadata["grib_short_name"] = "2t\ud800"
+    metadata["cfgrib_filter_by_keys"]["shortName"] = "2t\ud800"
     raw_root, work_dir = build_tree(tmp_path, manifest=payload)
     on_disk = (cycle_dir(raw_root, "gfs") / SOURCE_MANIFEST_NAME).read_text(
         encoding="utf-8"

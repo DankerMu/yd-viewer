@@ -66,12 +66,15 @@ SOURCE_MANIFEST_FILENAME = "manifest.json"
 # fail closed——本仓 MUST NOT 发明其中任何一个的值。
 ENTRY_CYCLE_TIME_KEY = "cycle_time"
 ENTRY_VALID_TIME_KEY = "valid_time"
+ENTRY_GRIB_SHORT_NAME_KEY = "grib_short_name"
+ENTRY_CFGRIB_FILTER_KEY = "cfgrib_filter_by_keys"
+ENTRY_CFGRIB_SHORT_NAME_KEY = "shortName"
 ENTRY_METADATA_KEYS: tuple[str, ...] = (
     ENTRY_CYCLE_TIME_KEY,
     ENTRY_VALID_TIME_KEY,
     "bundle",
-    "grib_short_name",
-    "cfgrib_filter_by_keys",
+    ENTRY_GRIB_SHORT_NAME_KEY,
+    ENTRY_CFGRIB_FILTER_KEY,
     "logical_remote_url",
 )
 
@@ -678,13 +681,55 @@ def _check_carried_times(
         )
 
 
+def _check_carried_grib_short_names(
+    carried: Mapping[str, Any], *, lead: int, variable: str
+) -> None:
+    """承接来的两个 GRIB 身份 MUST 是同一值的两次书写。
+
+    `grib_short_name` 与 `cfgrib_filter_by_keys["shortName"]` 按 pin 同源；yd 不持有
+    别名表，核对的是两个已承接值之间的关系，不是按变量名推导。形态先于取值：
+    `cfgrib_filter_by_keys` 是外部 JSON，可能不是 Mapping 或缺 `shortName` 子键。
+    缺键即使对端是 `None` 也无效——键缺席与「两边同为 null」不是一回事。
+    落盘的仍是源侧原值，本函数只核对、不改写、不互相覆写。
+    """
+    filters = carried[ENTRY_CFGRIB_FILTER_KEY]
+    if not isinstance(filters, Mapping):
+        raise RawStagingError(
+            f"源 manifest 的 (lead={lead}, variable={variable!r}) entry 的 "
+            f"`{ENTRY_CFGRIB_FILTER_KEY}` 不是 Mapping，"
+            f"实际 {type(filters).__name__} {_safe_repr(filters)}",
+            "source-manifest",
+        )
+    if ENTRY_CFGRIB_SHORT_NAME_KEY not in filters:
+        raise RawStagingError(
+            f"源 manifest 的 (lead={lead}, variable={variable!r}) entry 的 "
+            f"`{ENTRY_CFGRIB_FILTER_KEY}` 缺 `{ENTRY_CFGRIB_SHORT_NAME_KEY}`；"
+            f"对端 `{ENTRY_GRIB_SHORT_NAME_KEY}` 为 "
+            f"{_safe_repr(carried[ENTRY_GRIB_SHORT_NAME_KEY])}",
+            "source-manifest",
+        )
+    declared = filters[ENTRY_CFGRIB_SHORT_NAME_KEY]
+    expected = carried[ENTRY_GRIB_SHORT_NAME_KEY]
+    if declared != expected:
+        raise RawStagingError(
+            f"源 manifest 的 (lead={lead}, variable={variable!r}) entry 的 "
+            f"`{ENTRY_GRIB_SHORT_NAME_KEY}` {_safe_repr(expected)} 与 "
+            f"`{ENTRY_CFGRIB_FILTER_KEY}.{ENTRY_CFGRIB_SHORT_NAME_KEY}` "
+            f"{_safe_repr(declared)} 不一致；承接两个不同的 GRIB 身份会让产出 "
+            "manifest 在同一条 entry 上声明两个变量",
+            "source-manifest",
+        )
+
+
 def _carried_metadata(
     source_entry: ManifestEntry, lead: int, variable: str, cycle: datetime
 ) -> dict[str, Any]:
     """从源 entry 逐条承接语义键；本仓 MUST NOT 发明其中任何一个。
 
     「不发明」不等于「不核对」：两个时间键另由 `_check_carried_times` 与本 entry 被
-    归档到的 (cycle, lead) 槽位对账，落盘的仍是源侧原值。
+    归档到的 (cycle, lead) 槽位对账；`grib_short_name` 与
+    `cfgrib_filter_by_keys["shortName"]` 另由 `_check_carried_grib_short_names`
+    对账二者相等。落盘的仍是源侧原值。
     """
     metadata = source_entry.metadata
     if not isinstance(metadata, Mapping):
@@ -702,6 +747,7 @@ def _carried_metadata(
             )
         carried[key] = metadata[key]
     _check_carried_times(carried, cycle=cycle, lead=lead, variable=variable)
+    _check_carried_grib_short_names(carried, lead=lead, variable=variable)
 
     selectors = metadata.get(IDX_SELECTORS_KEY)
     if isinstance(selectors, Mapping):
