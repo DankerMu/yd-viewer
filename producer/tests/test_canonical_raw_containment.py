@@ -29,7 +29,7 @@ from yd_producer.canonical.converter import CanonicalConversionError, CanonicalC
 from yd_producer.store.safe_fs import open_file_no_follow
 
 GFS_GRID_KEY = "canonical/gfs/grid/gfs_0p25/grid.json"
-IFS_GRID_KEY = "canonical/IFS/grid/ifs_0p25/grid.json"
+IFS_GRID_KEY = "canonical/ifs/grid/ifs_0p25/grid.json"
 _STAGING_PREFIX = "yd-canonical-raw-"
 
 
