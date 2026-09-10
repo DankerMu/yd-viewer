@@ -414,6 +414,47 @@ def _reject_symlinks(raw_root: Path, source_path: Path) -> None:
             )
 
 
+def _reject_target_symlinks(work_dir: Path, dest_path: Path) -> None:
+    """Refuse any symlink component of `dest_path` below `work_dir`, without following.
+
+    Mirrors `_reject_symlinks` on the destination side so a pre-existing
+    descendant link cannot redirect copies or rollback outside the caller's
+    disposable work root. `work_dir` itself is not inspected: production NFS
+    mounts and test `/tmp` aliases may be the root, matching the `raw_root`
+    exemption. Missing components end the walk; other `lstat` failures fail
+    closed as `copy-failed`. A descendant symlink is also `copy-failed` — the
+    nine-kind vocabulary is closed, and `source-symlink` stays source-side.
+    Leaf `target-exists` is the later no-clobber check on an ordinary name
+    that already exists; this walk runs first so a leaf link is never treated
+    as a clobber of a regular file.
+    """
+    try:
+        segments = dest_path.relative_to(work_dir).parts
+    except ValueError as exc:  # 构造路径恒在 work_dir 之下，此支属防御性
+        raise RawStagingError(
+            f"目标路径 {dest_path} 不在 work_dir {work_dir} 之下",
+            "copy-failed",
+        ) from exc
+    current = work_dir
+    for segment in segments:
+        current = current / segment
+        try:
+            mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise RawStagingError(
+                f"无法检查目标路径段 {current} 的链接形态：{exc}",
+                "copy-failed",
+            ) from exc
+        if stat_module.S_ISLNK(mode):
+            raise RawStagingError(
+                f"目标路径段 {current} 是 symlink；work 树内的 symlink 一律拒绝写入"
+                "（不跟随、不改写目标路径）",
+                "copy-failed",
+            )
+
+
 # --- 2. 源 manifest 承接 ------------------------------------------------------
 
 
@@ -1093,9 +1134,11 @@ def stage_raw(
     顺序逐段短路，且**任何写入之前**全部准入检查已过：完整性 → 形参守卫 → 单 bundle
     约束 → `raw_root`/`work_dir` 不相互包含 → 源路径重构与 containment（纯路径运算）
     → 源侧 symlink 拒绝 → 源 manifest 承接与覆盖检查 → R4B2 → **本轮 manifest 序列化**
-    → 目标不存在预检 → 复制 → 落 manifest。symlink 拒绝排在读源 manifest **之前**：
-    读源 manifest 会穿过 cycle 目录段，若该段是 symlink 而先读了它，就等于跟随了 spec
-    说「不跟随」的那条链。序列化排在复制**之前**：见 `_render_manifest`。
+    → 目标侧逐段 symlink 拒绝 → 目标不存在预检 → 复制 → 落 manifest。源侧 symlink
+    拒绝排在读源 manifest **之前**：读源 manifest 会穿过 cycle 目录段，若该段是
+    symlink 而先读了它，就等于跟随了 spec 说「不跟随」的那条链。目标侧拒绝排在
+    `lexists` 与任何 mkdir/copy/manifest 写入 **之前**：中间目录段不在叶子预检里，
+    `Path.exists()` 跟随 symlink。序列化排在复制**之前**：见 `_render_manifest`。
 
     失败一律抛 `RawStagingError`（`kind` 取自 `ERROR_KINDS`），形参写错抛 `ConfigError`；
     这条**无前提**的保证由两段收口共同兑现，判据取**位置**而不是异常类型：准入段整体
@@ -1218,6 +1261,8 @@ def stage_raw(
             for _, path in rebuilt
         )
         manifest_path = work_path / MANIFEST_FILENAME
+        for candidate in (*targets, manifest_path):
+            _reject_target_symlinks(work_path, candidate)
         for candidate in (*targets, manifest_path):
             if os.path.lexists(candidate):
                 raise RawStagingError(
