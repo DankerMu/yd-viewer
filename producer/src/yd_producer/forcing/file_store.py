@@ -5,6 +5,9 @@ Deviations from the NWM pin (inventory §1 row 37 / issue #14):
 - no registry/bbox projection, no env factory, no DB backend
 - registry_manifest is an explicit object-store relative key
 - all JSON reads are bounded and no-follow
+- #104 (inventory §1 row 38): `_grid_definition_uri_for_source` IFS
+  literal is canonical/ifs/grid/ifs_0p25/grid.json; GFS/ERA5, catalog
+  exact-URI consumption, fallback, and parser logic stay unchanged
 """
 
 from __future__ import annotations
@@ -1499,7 +1502,7 @@ def _grid_definition_uri_for_source(source_id: str) -> str:
     return {
         "gfs": "canonical/gfs/grid/gfs_0p25/grid.json",
         "era5": "canonical/ERA5/grid/era5_0p25/grid.json",
-        "ifs": "canonical/IFS/grid/ifs_0p25/grid.json",
+        "ifs": "canonical/ifs/grid/ifs_0p25/grid.json",
     }[normalized]
 
 

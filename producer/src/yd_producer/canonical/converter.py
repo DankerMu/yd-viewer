@@ -11,7 +11,10 @@
 # CanonicalConversionError 明示 input size、key、observed size、limit，且不写
 # overflow chunk、不调用解码器。解码 RawRecord.values 为
 # np.asarray(..., dtype=np.float64).ravel()，不经 .tolist()/Python float 元组。
-# 不改算法、坐标元组、URI、错误类型或已接受产物字节。
+# 不改算法、坐标元组、错误类型或已接受产物字节。
+# 偏离（#104）：IFSCanonicalConverterConfig.grid_definition_uri 唯一值改为
+# canonical/ifs/grid/ifs_0p25/grid.json；写入、存在/签名守卫与全部 catalog
+# 发出点继续共用该 config 字段，不另建 URI 常量、大小写 fallback 或迁移别名。
 from __future__ import annotations
 
 import json
@@ -223,7 +226,7 @@ class IFSCanonicalConverterConfig(CanonicalConverterConfig):
     source_id: str = "IFS"
     converter_version: str = "m4.1"
     grid_id: str = "ifs_0p25"
-    grid_definition_uri: str = "canonical/IFS/grid/ifs_0p25/grid.json"
+    grid_definition_uri: str = "canonical/ifs/grid/ifs_0p25/grid.json"
     native_time_resolution: str = "3h"
     native_spatial_resolution: str = "0.25deg"
     variable_mapping: Mapping[str, str] = field(
@@ -1254,8 +1257,7 @@ class CanonicalConverter:
         # 归一后产物对象键、catalog 键与行 source_id、canonical_product_id、readiness 行
         # 与过滤同用一个小写身份。权威是裁决 12 本身（canonical 命名空间归 yd 所有）加上
         # 这个真实缺陷，不是 products-contract §3.2——§3.2 管的是发布布局，canonical/ 键
-        # 是 work 内 scratch 工件，不受其约束。例外：grid_definition_uri 是 :206 的 pin
-        # 常量、不由 source_id 派生，按裁决 1/16 不改，网格键仍是 canonical/IFS/…。
+        # 是 work 内 scratch 工件，不受其约束。
         source_id = normalize_source_id(source_id)
 
         try:
@@ -2122,8 +2124,7 @@ class IFSCanonicalConverter(CanonicalConverter):
         # 归一后产物对象键、catalog 键与行 source_id、canonical_product_id、readiness 行
         # 与过滤同用一个小写身份。权威是裁决 12 本身（canonical 命名空间归 yd 所有）加上
         # 这个真实缺陷，不是 products-contract §3.2——§3.2 管的是发布布局，canonical/ 键
-        # 是 work 内 scratch 工件，不受其约束。例外：grid_definition_uri 是 :206 的 pin
-        # 常量、不由 source_id 派生，按裁决 1/16 不改，网格键仍是 canonical/IFS/…。
+        # 是 work 内 scratch 工件，不受其约束。
         source_id = normalize_source_id(source_id)
 
         try:
