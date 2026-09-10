@@ -84,10 +84,11 @@
       forcing/
       models/                    # 本轮临时 file registry/model package
     input/                       # controller 提交、Slurm worker 只读
-      variant/                   # #171 exact-five prepared variant 副本
+      variant/                   # 完整 yd native v2 变体（固定 14 文件）
       states/<source>/<cycle>.cfg.ic
       yd.staged-inputs.json
     model/
+      input/yd/                  # stock SHUD 原生输入；当前状态/参数/forcing
       state_checkpoints/
     output/
     job.log
@@ -95,7 +96,7 @@
 
 每轮 work 目录是一次性隔离单元。`input/` 与 `object-store/raw/` 都由 node-22 控制器在提交前从 NFS 只读源生成。`AttemptRequest.variant_dir`/`state_path` 继续只把 NFS source 路径交给运行在登录节点的 `driver.prepare` 做独立源快照对账，字段集合与语义不变；driver 生成的 worker argv/环境/attempt handoff、后续 receipt 与 assemble 入参不得含这些 `YD_ROOT` 路径，只能引用同一 exact work 内已对账的 staged-input capability。
 
-`input/yd.staged-inputs.json` 是 pre-submit staged-input readiness manifest，不是 job receipt：它固定使用 schema `yd.run.staged-inputs.v1`，绑定当前 source/cycle 与 exact work 绝对路径，并以 `sha256:<64 lowercase hex>` 分别绑定 `variant/` 的 exact five files 与唯一 `states/<source>/<cycle>.cfg.ic`；它不含 job ID、`WorkIdentity` 四个模型版本标识、forcing/RunDirectory/checkpoint/DAT，也不形成第二个 registry。controller 的 `WorkClaim` `(st_dev, st_ino)` 只作为当前节点/进程的写入 authority，绝不序列化成跨节点相等判据；登录节点 driver 与计算节点 worker 各自以 no-follow open/fstat 冻结当前所见 work root identity，并在本进程加载/点用期间复验。跨进程绑定只依赖 canonical manifest digest、source/cycle/work path 与六份内容 checksum，不能假定不同节点的 `st_dev` 相同。
+`input/yd.staged-inputs.json` 是 pre-submit staged-input readiness manifest，不是 job receipt：schema 为 `yd.run.staged-inputs.v2`，沿用既有 source/cycle/work path 与 file-checksum map，文件集合扩展为完整固定变体及当前 cycle state。它不增加 job、模型身份或另一套 registry。`WorkClaim` 的设备号/inode 仍只作为本进程 owner，绝不序列化为跨节点相等判据；既有 no-follow copy/loader 与清理语义不改，不另加一层全包验证。
 
 成功发布或明确失败收尾删除整棵 exact work 时，`input/` 随既有 publish/cleanup owner 一并删除。submit/poll 客户端 timeout、worker 未知崩溃或其它按契约须留证的路径仍保留整棵 exact work，`input/` 不单独删除；后续只走既有 DONE-backed hygiene 或人工确认，不建立 work 外 sibling staging 或第二套清理协议。下次运行从零组装，不复用失败残留。
 
@@ -154,7 +155,7 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 - cycle 固定 00/12；
 - IFS/GFS 0–168h raw 完整性规则、变量和 bundle 文件模式；
 - 两个模型变体相对路径（相对 `yd_root`，不得为绝对路径）；
-- 每个 source 的 NWM canonical grid 标识（`prepare` 传给 mapping-builder 的 `grid_id`）；它随 NWM 快照固定、不随现场变化，与 `nwm_mapping_builder_module` 同属版本化快照事实，故与后者一同落 `config.toml` 而非 `local.toml`；
+- 每个 source 的 NWM canonical grid 标识（`prepare` 的 `grid_id`），作为版本化快照事实保存；prepare driver 脚本随 yd 分发，不再需要 `nwm_mapping_builder_module` 配置；
 - `forecast_days=7`；
 - `output_interval_minutes=60`；
 - `checkpoint_hours=[12]`；
@@ -180,15 +181,15 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 
 `model_id`、`basin_id`、`basin_version_id`、`river_network_version_id` 是 mapping-builder 声明并随同一 prepared variant 稳定提交的四项版本化属性；production driver 只能从该变体的已验证 handoff 逐字取得并复制到每次 attempt 的 `WorkIdentity`，不得逐 attempt 随机生成或从资产内容反推。四值只作为同一 scratch registry → forcing → assemble → receipt 链的 join key，不形成跨变体动态 registry；M4 以 node-22 的真实 builder/site artifact 对账其现场值，不能把 M2 合成值或测试字面量升格为现场值。
 
-direct-grid 的跨 `prepare` → `run` 生产交接固定为每个 source 变体顶层的 `yd.direct-grid-handoff.json`（schema `yd.prepare.direct-grid-handoff.v1`）与该 manifest 逐字指名的一个单层 `*.sp.att` 普通文件。manifest 只承载模型级稳定事实：source、project、四个版本标识、完整 `DirectGridForcingContract` 与 `.sp.att` 资产名；它不承载 cycle/work/job。`yd.binding` 仍是同一变体内的 opaque 精确 bytes，不能被扩写或解析为 metadata carrier。prepare 在任何 `YD_ROOT` 写入前验证 manifest 与两份资产，并在复制到本次 `YD_ROOT` staging 后再次用同一 loader 重验且与首次快照相等，随后才允许既有四终名提交。
+生产交接使用每个 source 变体顶层的 `yd.direct-grid-handoff.json`（`yd.prepare.direct-grid-handoff.v2`），保持既有 source/project、四个版本标识、DirectGridForcingContract 与 opaque `yd.binding`。`.sp.att` 固定为 `yd.sp.att`；一个 `file_checksums` map 绑定 §6.1 的 12 个 native 文件及 binding，不增加通用资产角色/任意目标路径。既有 prepare 读取、复制与四终名提交检查沿用；旧 five-only 变体必须重新 prepare，不自动兼容。
 
 node-22 控制器在取得 exact-work ownership token 后、调用 `driver.prepare` 前，才从 NFS source variant 调用 `prepare_handoff.load_prepared_variant_handoff`：只把 caller 已知的精确 source `variant_dir`、`AttemptRequest.source`、由上述率定态文件名取得的 `project_name`、本 source 的 canonical grid ID，以及两项显式 manifest/asset byte cap 交给 loader。该 loader 以固定 manifest 名和 manifest 明示 asset 名作有界、逐分量 no-follow 普通文件读取，严格验证 schema/key/type、current source/project/grid、逐字段 identity value domain、contract singleton-source 语义与 binding/`.sp.att` SHA-256，并返回深冻结 contract 与两份 immutable bytes。
 
-同一 controller staging 边界另对 `yd.cfg.ic`、`yd.para` 与 exact cycle state 作各自上限内的 descriptor-bound no-follow 读取，把 source variant exact five 与 cycle state以 O_EXCL 写入 §3.3 固定 `input/`，再用 public staged-input loader 从目标根重验 exact paths、root identity、entry set、manifest canonical bytes、六份 checksum、prepared handoff 全对象相等与 cycle-state 原生结构/绝对 T 时间头。只有 source snapshot、staged snapshot 和 checksum 全部一致才允许调用 `driver.prepare`。
+controller staging 边界沿用既有 descriptor-bound/no-follow 读取与 O_EXCL 搬运，将固定完整变体及 exact T state 放进 §3.3 的 `input/`，通过现有 staged loader 对账后调用 `driver.prepare`。只扩展文件集合与现有 checksum map，参数文件改为原生 `yd.cfg.para`；不新建第二套 snapshot/验证/清理机制。
 
 `AttemptRequest.variant_dir`/`state_path` 仍逐字保留 NFS source 路径，只供登录节点 `prepare` 把自己通过 #171 loader 取得的 source snapshot 与 controller-staged snapshot 对账；不得把这两个字段放入 worker argv、环境、attempt handoff 或 receipt。production driver 把匹配后的 work-local capability 与 `AttemptRequest.source/cycle/work` 加入 #132 的 attempt handoff；Slurm worker 使用前仍重验 staged-input capability 与 attempt handoff，worker receipt 必须绑定同一 `WorkIdentity`、source/cycle/work/job 与两份 direct-grid asset checksum。不得从环境、`DATABASE_URL`、NWM PostgreSQL/服务型 registry、目录扫描、variant basename、`yd.binding` 内容或测试 fixture 推导任何 identity、contract、路径或 bytes。
 
-§6.1 的“重写 `sp.att`”只说明 real builder 必须产出 manifest 明示的 source-specific asset，不授权按后缀扫描；`contract.binding_uri` 与 `contract.sp_att_path` 仍是 D11 `stage_work_registry` 提交后的 work-local relative keys，不是 prepared variant 的读取路径。缺少 manifest/明示 asset、schema/identity/checksum 不一致或文件形态不可安全确认时，prepare 拒绝提交，production driver 也在 `sbatch` 前 fail closed。M2 以独立进程合成 builder/loader/worker 链证明 carrier、checksum、identity 与篡改拒绝；M4 才以真实 node-22 builder/site artifact 确认 `.sp.att` 物理布局/parser、stage mapping、四个 identifier 的现场值及 Slurm/NFS/SHUD receipt。
+`contract.binding_uri` 与 `contract.sp_att_path` 仍是 D11 work registry 的相对 key，不是 prepared 文件路径。真实 prepare driver 与 native assembly 均归 M2；本地证明必须实际行使 NWM mapping 库与 native 文件路径，不能只用写 DAT 的 shell double。M4 负责真实 baseline/binary 的数值、Slurm/NFS 与 00Z/12Z receipt，不再补缺失业务代码。详细单流域合同见 [native-yd-model-input](../openspec/changes/native-yd-model-input/design.md)。
 
 ## 6. CLI
 
@@ -213,16 +214,20 @@ yd-producer run --config <path> --local <path>
 
 1. 运行根预检后先枚举 `YD_ROOT` 顶层：若存在任一名字以 `prepare._STAGING_PREFIX` 开头的条目，按排序列出全部路径并拒绝；不跟随、不按类型/PID/mtime分流，不自动删除或回收；
 2. 检查本次将要写的**全部四个终名**——两个变体目录（路径取自 `config.toml` 的 `variants.gfs`/`variants.ifs`，相对 `yd_root`）与两份 viewer GeoJSON `input/viewer/rivers.geojson`、`input/viewer/boundary.geojson`——均不存在；任一存在即拒绝，不提供覆盖参数。被检查的路径与提交时实际写入的路径必须同源计算；
-3. 在 scratch 中通过薄外壳调用 NWM mapping-builder；
-4. 按 GFS、IFS 各自 canonical grid 生成两份 binding、重写后的 `sp.att`、forcing station 索引及 schema 为 `yd.prepare.direct-grid-handoff.v1` 的 `yd.direct-grid-handoff.json`；manifest 声明 builder 给该 prepared variant 的四个版本标识、完整 direct-grid contract 与唯一 `.sp.att` 资产名，checksum 绑定同变体的 opaque `yd.binding` 与该 asset；
-5. 生成完整运行变体 `yd_gfs`、`yd_ifs`；两者水文参数和率定状态来自同一基线，但网格 binding/contract 不共用。每个变体顶层最终恰含五个普通文件：`yd.cfg.ic`、`yd.para`、`yd.binding`、`yd.direct-grid-handoff.json` 和 manifest 明示的单层 `*.sp.att`；不接受嵌套、额外或缺失条目。提交前逐个只枚举变体顶层并要求恰有一份 `*.cfg.ic` 普通文件；零份或多于一份均以 `PrepareError` 拒绝，四个终名一个也不提交，不递归搜索或按项目名猜文件名；
-6. 从基线 GIS 生成 EPSG:4326 的 `rivers.geojson` 与 `boundary.geojson`；
+3. 在既有 prepare scratch 中，用固定 NWM 解释器执行 yd 的薄 driver，直接复用 NWM 的文件网格读取、mapping、FORC 重写、Z sampler 和 binding 库；不调用只输出 resolution 的 CLI，不引入 NWM DB/审批/evidence/rollback 平台；
+4. 按各 source 的已有 grid 文件生成真实 binding 和 rewritten `yd.sp.att`，写出 §5.1 的 v2 handoff；身份只由 builder 一次声明，日常 run 不推导；
+5. 两个完整变体固定携带 `yd.cfg.ic`、`yd.cfg.para`、`yd.cfg.calib`、`yd.sp.mesh`、`yd.sp.att`、`yd.sp.riv`、`yd.sp.rivseg`、`yd.para.lc`、`yd.para.soil`、`yd.para.geol`、`yd.tsd.lai`、`yd.tsd.mf`，加 binding/handoff 共 14 文件。当前仅支持无湖泊/无外部 BC 的 yd 模型；prepare 一次性拒绝非零 BC/SS/LAKE，不建设条件资产框架。仍检查顶层率定态唯一并保留四终名事务；
+6. baseline 目录直接包含 `yd.*` 与 `gis/`，从实际 `gis/river.shp` 与 `gis/domain.shp` 生成 EPSG:4326 的 `rivers.geojson` 与 `boundary.geojson`；
 7. 把校验通过的产物搬运到 `YD_ROOT` 之内的本次专属 staging 位置（按发布权限新建条目，不把计算节点的 uid/gid/mode 带进 NFS），再逐个 rename 到四个终名——rename 的源与终名必须同一文件系统，故不能直接把 scratch 目录 rename 过去（scratch 在计算节点本地盘、`YD_ROOT` 在 NFS）；
 8. 删除 scratch 中间物与该 staging 位置（无论成败）。
 
 运行根只保留两个运行变体，不长期保留基线包。基线模型包的现场路径和归档方式由实施方管理，不进入 Git；`--baseline` 是必需参数，代码不内置任何默认路径。本项目不额外维护人工填写的模型包总 checksum。
 
 本期 M1–M5 固定同一套基线模型、SHUD 二进制和河网。模型或 SHUD 升级是新的契约变更：禁止原地覆盖现有变体和状态；必须在新的干净 staging 根重新 `prepare`、`init`、真跑和 viewer 验证，再单独设计切换。当前 CLI 不提供在线升级状态机或 `--force`。
+
+`assemble_staged` 将 native 文件写到 `<work>/model/input/yd/`，用当前 T state 覆盖初态，渲染原生 `yd.cfg.para`。本轮 `yd.tsd.forc` 位于该输入目录，path 行为 `.`；CSV 保持在 `model/` 根，因为 stock SHUD 按 cwd 而非 index 所在目录解析该 path。SHUD cwd、`RunDirectory.path`、tracker 与显式 `-o` 输出仍为 `model/`；state/parameter/index 字段返回真实嵌套路径，recovery 使用实际 parameter_path 和独立输出目录。
+
+native `yd.cfg.para` 必须使用 stock SHUD 可读的 `KEY<TAB>number`，不能使用合成模板的 `KEY = number`。共享参数 writer 的 native 模式识别原生大小写/空白分隔，每个 runtime key 只输出一行；主运行 END=7，恢复 END=0.5。legacy 外部 assembly 保留原模板模式，不因本次原生适配放宽输入/清理边界。
 
 ### 6.2 `init`
 
@@ -444,7 +449,7 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 |---|---|
 | raw 扫描 | IFS/GFS 完整、缺文件、GFS f000 特例和临时 manifest |
 | DB-free 链 | 合成 raw/canonical fixture 跑到 direct-grid forcing 包；独立进程 M2 synthetic handoff 验证 WorkIdentity、binding/UTF-8 `.sp.att` checksum、receipt 篡改拒绝和同一 registry → forcing → assemble 链，不声明现场值 |
-| prepare | 两个 source-specific 五文件变体、v1 direct-grid handoff 的有界 no-follow 读取/严格 schema/checksum/深冻结、拒绝覆盖、两个 GeoJSON |
+| prepare | 真正调用固定 NWM 库生成两个完整 yd native 变体与 GeoJSON；旧包/缺文件/真实 mapping 失败不发布；复用现有事务与读写保障，不增加重复防御矩阵 |
 | state | 原生 mesh/river/lake 分段解析、T 重戳、负残差处理 |
 | tracker | T+12 正常捕获、快速覆盖漏采、12h 补跑成功/失败 |
 | 控制器 | 同源顺序、双源并行、raw 缺口、单源失败、flock 幂等 |
@@ -463,7 +468,7 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 7. 单源失败时另一源继续；
 8. NFS 只在控制器收尾阶段出现正式文件，`DONE` 最后写；
 9. scratch work 最终清理，失败只留一份日志；
-10. 真实 builder/site artifact 产出的 prepared-variant v1 handoff 可被同一 loader 接受，并对账 `DirectGridForcingContract`、`.sp.att` 物理布局/parser、四个版本标识与 receipt；不能用 M2 synthetic handoff 代替。
+10. 真实 prepare 的完整 native v2 变体可经 staged/assembly 被配置的 stock SHUD 读取；核对真实 binding、`.sp.att`、RunDirectory 与输出，不以本地结构/driver smoke 代替现场数值 receipt。
 
 ### 13.3 node-27 闭环
 
