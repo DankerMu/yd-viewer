@@ -21,4 +21,4 @@
 - [x] 2.1 Batched pre-change red proof for new rejection tests; same valid fixture before/after compares produced bytes, no leftover stash.
 - [x] 2.2 Parent runs focused canonical tests including real cfgrib and NetCDF, then project-profile deduplicated producer/viewer pytest, ruff and OpenSpec pipeline; all pass.
 - [x] 2.3 Correct issue #71 historical fail-closed rationale, accounting for its current state; no claim that read fix repairs rawcopy writes.
-- [ ] 2.4 Fixture review and strict validation, cross-review/verifier, final frozen-head review/CI/evidence and preauthorized merge; archive/log afterwards.
+- [x] 2.4 Fixture review and strict validation, cross-review/verifier, final frozen-head review/CI/evidence and preauthorized merge; archive/log afterwards.
