@@ -1,10 +1,10 @@
 ## 1. Implementation
-- [ ] 1.1 Add Mapping/key/equality admission guard with source-manifest and actionable lead/variable/value diagnostic, no alias/overwrite.
-- [ ] 1.2 Add public mismatch (apcp 2t-WRONG and reverse), invalid filter shape, missing key and equal custom-name regressions with raw/work snapshots and exact preserved metadata.
-- [ ] 1.3 Align existing surrogate test input on both names, retaining assertions; verify #75 serializer and existing claim/time/accumulation tests remain discriminating.
-- [ ] 1.4 Publish six-key contract and replace #99 Known-limit without touching sibling policies.
+- [x] 1.1 Add Mapping/key/equality admission guard with source-manifest and actionable lead/variable/value diagnostic, no alias/overwrite.
+- [x] 1.2 Add public mismatch (apcp 2t-WRONG and reverse), invalid filter shape, missing key and equal custom-name regressions with raw/work snapshots and exact preserved metadata.
+- [x] 1.3 Align existing surrogate test input on both names, retaining assertions; verify #75 serializer and existing claim/time/accumulation tests remain discriminating.
+- [x] 1.4 Publish six-key contract and replace #99 Known-limit without touching sibling policies.
 ## 2. Verification
-- [ ] 2.1 Baseline source against new negatives must fail; fixed focused and producer/viewer suites pass.
+- [x] 2.1 Baseline source against new negatives must fail; fixed focused and producer/viewer suites pass.
 - [ ] 2.2 Ruff check/format, OpenSpec strict/all, stage log and final Ubuntu CI pass, uv only.
 ## Risk packs
 - Public API / CLI / script entry: selected — stage_raw typed failure and diagnostic.
