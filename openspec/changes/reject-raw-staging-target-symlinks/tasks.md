@@ -5,7 +5,7 @@
 
 ## 2. Evidence
 - [x] 2.1 Orchestrator runs focused regressions against baseline then fixed source; negative link tests fail baseline; fixed rawcopy suite and producer suite pass.
-- [ ] 2.2 Run profile matrix: producer/viewer pytest and ruff check/format --check, openspec validate --all, stage-pipeline log gate; required Ubuntu CI, no macOS CI.
+- [x] 2.2 Run profile matrix: producer/viewer pytest and ruff check/format --check, openspec validate --all, stage-pipeline log gate; required Ubuntu CI, no macOS CI.
 
 ## Risk packs
 - Public API / CLI / script entry: selected — stage_raw stable typed failure and root compatibility.
