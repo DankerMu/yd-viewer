@@ -300,7 +300,7 @@ def _first_regular_file(
 
 
 def _locate_calibration_state(variant_dir: Path) -> Path | list[Path]:
-    """定位变体**顶层**（非递归）唯一的 `.cfg.ic` 普通文件。
+    """定位变体**顶层**（非递归）唯一的 `.cfg.ic` 普通文件。prepare 复用本函数。
 
     命中恰好一个时返回该路径；否则返回命中列表（可能为空）供调用方判
     `CALIBRATION_STATE_AMBIGUOUS`。目录不存在 / 不是目录由调用方先行判掉。
