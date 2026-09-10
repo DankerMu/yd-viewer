@@ -1,11 +1,18 @@
 # NWM@8ae9b8f2 workers/canonical_converter/converter.py
+# 偏离（#103）：GFS/IFS convert_manifest 在任一转换循环写入前，对全部 selected
+# raw 走 store no-follow 预检（object_kind / containment_root=store.root）；解码经
+# LocalObjectStore.iter_bytes（内部持 no-follow fd）流式写入上下文管理的私有临时
+# 文件，cfgrib 与 netCDF4 回退共用同一 staged 源，绝不把原 raw Path 交给解码器。
+# 私有 staging 是设计授权的可移植性取舍（相对 descriptor alias / /dev/fd）。
+# 不改算法、URI 或浮点表示。不新增资源上限（#102）。
 from __future__ import annotations
 
 import json
 import logging
 import math
 import tempfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,6 +24,7 @@ from yd_producer.store.object_store import (
     ObjectStoreError,
     sha256_bytes,
 )
+from yd_producer.store.safe_fs import SafeFilesystemError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1247,6 +1255,7 @@ class CanonicalConverter:
                 raise CanonicalConversionError(
                     self._missing_pairs_message(missing_pairs)
                 )
+            self._preflight_raw_entries(entries)
 
             entries_by_standard_variable = self._entries_by_standard_variable(entries)
             missing_variables = sorted(
@@ -1487,48 +1496,79 @@ class CanonicalConverter:
             ) from error
 
         dataset = None
-        file_path = self.object_store.resolve_path(local_key)
         cfgrib_error: Exception | None = None
         try:
-            expected_native_variable = str(entry["variable"])
-            backend_kwargs = _cfgrib_backend_kwargs(entry, expected_native_variable)
-            try:
-                dataset = xr.open_dataset(
-                    file_path, engine="cfgrib", backend_kwargs=backend_kwargs
-                )
-            except Exception as _cfgrib_err:
-                cfgrib_error = _cfgrib_err
-                LOGGER.warning(
-                    "Failed to parse raw file %s with cfgrib; falling back to netcdf4: %s",
-                    local_key,
-                    _cfgrib_err,
-                )
-                dataset = xr.open_dataset(file_path, engine="netcdf4")
-            data_variable = self._select_data_variable(
-                dataset, expected_native_variable, local_key
-            )
-            data_array = dataset[data_variable]
-            values = tuple(float(value) for value in data_array.values.ravel().tolist())
-            return RawRecord(
-                source_file=self.object_store.uri_for_key(local_key),
-                native_variable=expected_native_variable,
-                forecast_hour=int(entry["forecast_hour"]),
-                values=values,
-                longitudes=_coord_values_by_name(dataset, ("lon", "longitude")),
-                latitudes=_coord_values_by_name(dataset, ("lat", "latitude")),
-                shape=tuple(
-                    int(size) for size in getattr(data_array.values, "shape", ())
-                ),
-                metadata=dict(_mapping_value(entry.get("metadata"))),
-            )
+            with _staged_contained_raw_path(
+                self.object_store, local_key
+            ) as staged_path:
+                try:
+                    expected_native_variable = str(entry["variable"])
+                    backend_kwargs = _cfgrib_backend_kwargs(
+                        entry, expected_native_variable
+                    )
+                    try:
+                        dataset = xr.open_dataset(
+                            staged_path,
+                            engine="cfgrib",
+                            backend_kwargs=backend_kwargs,
+                        )
+                    except Exception as _cfgrib_err:
+                        cfgrib_error = _cfgrib_err
+                        LOGGER.warning(
+                            "Failed to parse raw file %s with cfgrib; falling back to netcdf4: %s",
+                            local_key,
+                            _cfgrib_err,
+                        )
+                        dataset = xr.open_dataset(staged_path, engine="netcdf4")
+                    data_variable = self._select_data_variable(
+                        dataset, expected_native_variable, local_key
+                    )
+                    data_array = dataset[data_variable]
+                    values = tuple(
+                        float(value) for value in data_array.values.ravel().tolist()
+                    )
+                    return RawRecord(
+                        source_file=self.object_store.uri_for_key(local_key),
+                        native_variable=expected_native_variable,
+                        forecast_hour=int(entry["forecast_hour"]),
+                        values=values,
+                        longitudes=_coord_values_by_name(dataset, ("lon", "longitude")),
+                        latitudes=_coord_values_by_name(dataset, ("lat", "latitude")),
+                        shape=tuple(
+                            int(size)
+                            for size in getattr(data_array.values, "shape", ())
+                        ),
+                        metadata=dict(_mapping_value(entry.get("metadata"))),
+                    )
+                finally:
+                    if dataset is not None:
+                        dataset.close()
         except Exception as error:
             detail = f"Failed to parse raw file {local_key}: {error}"
             if cfgrib_error is not None:
                 detail += f" (cfgrib also failed: {cfgrib_error})"
             raise CanonicalConversionError(detail) from error
-        finally:
-            if dataset is not None:
-                dataset.close()
+
+    def _preflight_raw_entries(self, entries: list[dict[str, Any]]) -> None:
+        for entry in entries:
+            if map_variable(entry["variable"], self.config.variable_mapping) is None:
+                continue
+            local_key = str(entry["local_key"])
+            try:
+                kind = self.object_store.object_kind(local_key)
+            except (
+                OSError,
+                ObjectStoreError,
+                ValueError,
+                SafeFilesystemError,
+            ) as error:
+                raise CanonicalConversionError(
+                    f"Raw object {local_key} is not a contained regular file: {error}"
+                ) from error
+            if kind != "file":
+                raise CanonicalConversionError(
+                    f"Raw object {local_key} is not a contained regular file: {kind}"
+                )
 
     def _select_data_variable(
         self, dataset: Any, expected_native_variable: str, local_key: str
@@ -2082,6 +2122,7 @@ class IFSCanonicalConverter(CanonicalConverter):
                 raise CanonicalConversionError(
                     self._missing_pairs_message(missing_pairs)
                 )
+            self._preflight_raw_entries(entries)
 
             entries_by_hour = self._entries_by_hour_and_variable(entries)
             forecast_hours = self._configured_forecast_hours(manifest, entries)
@@ -2654,3 +2695,28 @@ def _first_cfgrib_alias(native_variable: str) -> str | None:
     if aliases:
         return aliases[0]
     return native_variable or None
+
+
+_RAW_STAGING_CHUNK = 1024 * 1024
+
+
+@contextmanager
+def _staged_contained_raw_path(
+    object_store: LocalObjectStore, local_key: str
+) -> Iterator[str]:
+    suffix = Path(local_key).suffix or ".raw"
+    with tempfile.NamedTemporaryFile(
+        prefix="yd-canonical-raw-",
+        suffix=suffix,
+    ) as staging:
+        try:
+            for chunk in object_store.iter_bytes(
+                local_key, chunk_size=_RAW_STAGING_CHUNK
+            ):
+                staging.write(chunk)
+        except (OSError, ObjectStoreError, ValueError, SafeFilesystemError) as error:
+            raise CanonicalConversionError(
+                f"Raw object {local_key} is not a contained regular file: {error}"
+            ) from error
+        staging.flush()
+        yield staging.name
