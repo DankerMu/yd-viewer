@@ -21,3 +21,6 @@ Regression rows: manifest/grid exactly limit valid -> accept; limit+1 valid JSON
 Boundary checklist: both JSON readers, raw stat and streaming boundary, same no-follow source, mapped-entry compatibility, NumPy input consumer closure, no serialized scalar/type changes, owned staging cleanup.
 ## Risks / Trade-offs
 512MiB raw cap is a conservative policy using existing local precedent, test-injectable by module constant monkeypatch; larger legitimate raw now fails clearly. NumPy float64 may copy float32 raw once but avoids Python object amplification. Algorithms may still make temporary tuples; this issue removes retained raw tuple amplification, not all numerical allocation.
+
+## Phase 2 evidence-driven test adaptation
+The sole failing pin test uses a FakeValues supporting only ravel().tolist(), not a real NumPy input. Production must not special-case that fake. Replace its plumbing-only engine/kwargs echo oracle with a yd-owned real two-message GRIB bundle selection regression, distinct values per variable and no fallback. This is an explicitly registered test adaptation, not relaxed numeric/filter expectations. The earlier non-goal of untouched pin tests is superseded only for this one named test; all other pin tests remain unchanged.
