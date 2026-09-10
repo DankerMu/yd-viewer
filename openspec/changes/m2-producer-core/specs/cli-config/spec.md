@@ -40,7 +40,7 @@ worker 只可消费由 prepare 同一 loader 验证、再由 controller `stage_w
 
 #### Scenario: 生产依赖在同一锁内注入
 - **WHEN** 状态与配置齐备、显式 `command_timeout_seconds = 37` 且锁可取得时执行 `run`
-- **THEN** `run_sources` 在锁内恰调用一次，四份按源 mapping 均恰含 `{ifs,gfs}`，两源 executor/driver 实例互不相同，poll wait 会实际等待，失败 provider 遵守独立一次 `sacct -j <job_id> -n -P --format=ExitCode` 契约；两 executor 与两 provider 消费同一 bounded runner，sbatch/普通 sacct/ExitCode sacct 的底层 timeout 都为 37，资源映射与 sbatch argv 不含策略键
+- **THEN** `run_sources` 在锁内恰调用一次，四份按源 mapping 均恰含 `{ifs,gfs}`，两源 executor/driver 实例互不相同，poll wait 会实际等待，失败 provider 遵守独立一次 `sacct -j <job_id> -X -n -P --format=ExitCode` 契约；两 executor 与两 provider 消费同一 bounded runner，sbatch/普通 sacct/ExitCode sacct 的底层 timeout 都为 37，资源映射与 sbatch argv 不含策略键
 
 #### Scenario: production driver 拒绝未明示的 direct-grid 资产
 - **WHEN** driver 遇到缺失/非法 prepared-variant v1 manifest 或其明示 `.sp.att`，将 `contract.sp_att_path` 当作变体发现路径，从变体 basename/TOML/环境/数据库/目录扫描/`yd.binding` 内容/测试 fixture 推导任一 identity 或 asset，任一 handoff leaf/ancestor 是 symlink 或非普通文件、超过显式 limit，或任一 schema/bytes/SHA-256/source/project/grid/contract 不一致
