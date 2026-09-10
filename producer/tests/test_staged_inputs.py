@@ -375,7 +375,7 @@ def test_stage_source_checksum_drift_after_readiness_is_rejected(
 def test_generated_manifest_cap_is_checked_before_target_creation(
     tmp_path: Path,
 ) -> None:
-    work_root = tmp_path / ("w" * 80) / ("x" * 80) / ("y" * 80)
+    work_root = tmp_path / ("w" * 160) / ("x" * 160) / ("y" * 160)
     source, claim = (
         _write_source(tmp_path / "nfs-test-owned"),
         _claim(work_root),
