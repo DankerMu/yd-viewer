@@ -1,6 +1,6 @@
 ## 1. Evidence closure
 - [x] 1.1 Add one test importing ERROR_KINDS and asserting exact frozenset of nine literals from m2 fixture.
-- [ ] 1.2 Parent proves new test green, added-tenth mutation red and renamed-literal mutation red in fresh uv interpreters; full profile matrix and Ubuntu CI green.
+- [x] 1.2 Parent proves new test green, added-tenth mutation red and renamed-literal mutation red in fresh uv interpreters; full profile matrix and Ubuntu CI green.
 - [x] 1.3 Retire vocabulary Known-limit without changing admission fallback policy or runtime source.
 ## Risk packs
 - Public API / CLI / script entry: selected only as unchanged oracle — literal equality and two mutation proofs.
