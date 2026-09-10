@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -216,8 +218,8 @@ def test_write_failure_with_zero_landed_states_does_not_claim_cleanup(
     CORRECTION）：本构造走的是 `FileExistsError` 腿，目标上坐着一个外来条目，实测重跑
     的 `detail` 与首跑逐字节相同——「零写入，根仍是全新根」承诺的运维后果（直接重跑）在
     这条腿上为假，故期望改为第三路话术。第三路的完整判据（点名条目、移除后可重跑成功、
-    悬垂 symlink 载体）由 `test_foreign_entry_at_the_target_is_named_and_must_be_removed`
-    承担。
+    普通空目录载体）由 `test_foreign_entry_at_the_target_is_named_and_must_be_removed`
+    承担。#96 把悬垂 symlink 载体提前到阶段 A，不再走本腿。
     """
     tree = Tree(tmp_path)
     cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
@@ -244,21 +246,14 @@ def test_write_failure_with_zero_landed_states_does_not_claim_cleanup(
 def test_foreign_entry_at_the_target_is_named_and_must_be_removed(
     tmp_path: Path, carrier: str
 ) -> None:
-    """[桶 C-3] `FileExistsError` 腿的第三路话术（cand-R3-01 的正向钉死）。
+    """[桶 C-3] 终名腿：普通空目录仍走第三路；悬垂 symlink 按 #96 在阶段 A 拒绝。
 
-    构造：写入序**首位**（ifs）的目标路径上预置一个**外来**条目——它不是普通文件，故过得
-    了阶段 A 的守卫（守卫只数普通文件），而 `O_CREAT|O_EXCL` 对任何已存在条目都得
-    `EEXIST`。两种载体（空目录 / 悬垂 symlink）实测同构。
+    空目录载体：写入序**首位**（ifs）的目标路径上预置一个普通空目录——它不是普通文件也
+    不是 symlink，故过得了阶段 A 的守卫，而 `O_CREAT|O_EXCL` 对任何已存在条目都得
+    `EEXIST`。盘上终态是「零普通文件残留、但目标被占」，收尾 MUST 走第三路。
 
-    盘上终态是「零普通文件残留、但目标被占」：这既不是「根仍是全新根」（不移除该条目，
-    重跑必然以同样理由再次失败——实测 run 2 与 run 1 的 detail 逐字节相同），也不是「可能
-    已被部分写入」（该条目不是本次写入产生，照那句话清理会把 `states/` 整树删掉）。故
-    收尾 MUST 走第三路：点名条目路径 + 要求先确认并移除。
-
-    判别变异体：把第三路合并回「零写入，根仍是全新根」那一路 -> 本行必红。
-    移除条目后重跑成功这一半，是本行与
-    `test_open_time_failure_with_zero_residue_reports_a_fresh_root` 的重跑断言互为交叉
-    验证的地方：同一条断言在真零残留腿上成立、在本腿上（未移除条目时）必然失败。
+    悬垂 symlink 载体：#96 把它从阶段 B 的外来条目话术**迁走**——`lstat` 身份即
+    `STATES_NOT_EMPTY`、`written == ()`、两源零写入。不得再走到 `WRITE_FAILED`。
     """
     tree = Tree(tmp_path)
     cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
@@ -273,6 +268,20 @@ def test_foreign_entry_at_the_target_is_named_and_must_be_removed(
     before_output = snapshot(tree.output)
 
     report = tree.run()
+
+    if carrier == "dangling-symlink":
+        assert report.refusal is InitRefusal.STATES_NOT_EMPTY
+        assert report.written == ()
+        assert str(blocker) in report.detail
+        assert FOREIGN_ENTRY_CLAIM not in report.detail
+        assert FRESH_CLAIM not in report.detail
+        assert PARTIAL_CLAIM not in report.detail
+        assert CLEANUP_CLAIM not in report.detail
+        assert snapshot(tree.output) == before_output
+        assert os.readlink(blocker) == str(tree.root / "never-created.cfg.ic")
+        assert not (tree.states / "gfs").exists()
+        assert not os.path.lexists(tree.root / "never-created.cfg.ic")
+        return
 
     assert report.refusal is InitRefusal.WRITE_FAILED
     assert report.written == ()
@@ -290,10 +299,7 @@ def test_foreign_entry_at_the_target_is_named_and_must_be_removed(
 
     # 补救（只移除该条目、不动 `states/` 其余部分）之后重跑 MUST 成功——这正是第三路
     # 话术承诺的运维后果，也是「根仍是全新根」在本腿上为假的直接证据。
-    if carrier == "empty-dir":
-        blocker.rmdir()
-    else:
-        blocker.unlink()
+    blocker.rmdir()
 
     again = tree.run()
 
@@ -665,6 +671,62 @@ def test_bootstrap_is_not_idempotent_and_refuses_on_second_run(
     assert first.refusal is None
     assert second.refusal is InitRefusal.STATES_NOT_EMPTY
     assert snapshot(tree.states) == before_states
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["directory", "file", "link", "fifo"],
+)
+def test_init_ignores_top_level_prepare_staging_on_fresh_lanes(
+    tmp_path: Path, kind: str
+) -> None:
+    """#83：init 在 states/output 仍全新时忽略根级 `_STAGING_PREFIX*`，不认领不删除。"""
+    from yd_producer import prepare as prepare_module
+
+    tree = Tree(tmp_path)
+    prefix = prepare_module._STAGING_PREFIX
+    entry = tree.yd_root / f"{prefix}-{kind}"
+    if kind == "directory":
+        entry.mkdir()
+        (entry / "keep").write_bytes(b"staging-dir\n")
+    elif kind == "file":
+        entry.write_bytes(b"staging-file\n")
+    elif kind == "link":
+        target = tmp_path.resolve() / "outside-link-target"
+        target.write_bytes(b"link-target\n")
+        entry.symlink_to(target)
+    else:
+        os.mkfifo(entry)
+    before_states = snapshot(tree.states)
+    before_output = snapshot(tree.output)
+    existed = os.path.lexists(entry)
+    mode = entry.lstat().st_mode
+    link = os.readlink(entry) if kind == "link" else None
+    payload = None
+    if kind == "directory":
+        payload = (entry / "keep").read_bytes()
+    elif kind == "file":
+        payload = entry.read_bytes()
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+
+    report = tree.run()
+
+    assert report.refusal is None
+    assert len(report.written) == len(WRITE_ORDER)
+    assert os.path.lexists(entry) is existed
+    if kind == "directory":
+        assert (entry / "keep").read_bytes() == payload == b"staging-dir\n"
+    elif kind == "file":
+        assert entry.read_bytes() == payload == b"staging-file\n"
+    elif kind == "link":
+        assert entry.is_symlink()
+        assert os.readlink(entry) == link
+    else:
+        assert stat.S_ISFIFO(entry.lstat().st_mode)
+        assert entry.lstat().st_mode == mode
+    assert snapshot(tree.states) != before_states
+    assert snapshot(tree.output) == before_output
 
 
 # --- 跨 issue 兼容：#22 的前沿函数读 init 写出的首态 ------------------------

@@ -1163,3 +1163,11 @@ PR #178 的 fixture review PASS、独立 Gap Sweep CLEAN，无候选、无综合
 
 追加后审计为59行（58 merged、1 terminal），high桶29个PR、58个net catches；多轮样本33，later core=127 / rotated=96，历史排除9条。脚本再次输出 lens-rotation DECIDABLE。
 本次是用户授权的docs-only合同修复，Stage 4/4.5三路审核及三组独立核销归入stage-pipeline log；没有产品综合轮次或新的轮换对照样本。记录复议延期：不以本次合同文档修复改变已有keep决策，保持当前配置，后续keep/cut由维护者明确记录。#132的upstream-contract-defective阻塞已解除，产品仍OPEN；历史三份revise保留，14.2及shared change继续active。
+
+## PR #195 accountability checkpoint (2026-09-10)
+
+Loop audit remains DECIDABLE (33 multi-round PRs, core=127, rotated=96). Decision deferred to maintainer: #195 adds one clean single-round sample and no new rotation evidence; retain the existing keep policy, do not auto-narrow reviewer seats.
+
+## PR #196 accountability checkpoint (2026-09-10)
+
+DECIDABLE rotation attribution unchanged: 33 multi-round PRs, core=127, rotated=96. Decision deferred to maintainer because #196 adds only a clean single-round sample. Retain existing keep policy; no automatic narrowing.

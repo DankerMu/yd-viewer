@@ -45,8 +45,9 @@ REMOVE_DEMAND = "重跑 init 之前须人工确认该条目的来源并移除它
 def _plant_parent_blocker(tree: Tree, carrier: str) -> Path:
     """把 `states/ifs` 这个**父目录分量**预置成一个非目录的外来条目，返回该路径。
 
-    三种载体都过得了阶段 A 的守卫：`_entry_kind` 对 symlink→目录 / FIFO / 悬垂 symlink
-    都返回「既不是普通文件、也不是真实目录」，故它们既不算「已有状态」、也不被遍历进入。
+    FIFO 过得了阶段 A 的守卫：它既不是普通文件也不是 symlink，故既不算「已有状态」、
+    也不被遍历进入，到阶段 B 才被 `ensure_directory_no_follow` 挡住。
+    **symlink 载体不在阶段 B 这张表里**：#96 在 `lstat` 身份上判 `STATES_NOT_EMPTY`。
     **普通文件不在这张表里**：它会被守卫认成已有状态而判 `STATES_NOT_EMPTY`，端到端到
     不了阶段 B。
     """
@@ -66,25 +67,17 @@ def _plant_parent_blocker(tree: Tree, carrier: str) -> Path:
 def test_foreign_entry_at_the_parent_component_is_named_and_must_be_removed(
     tmp_path: Path, carrier: str
 ) -> None:
-    """[桶 C-3] 父目录腿的第三路话术（round 4 R4-A CONFIRMED/P2）。
+    """[桶 C-3] 父目录腿：FIFO 仍走第三路；symlink 按 #96 在阶段 A 拒绝。
 
-    构造：写入序**首位**（ifs）的**父目录分量** `states/ifs` 上预置一个外来条目，其余为
-    合法全新根。`ensure_directory_no_follow` 的 `mkdir` 撞 `EEXIST` 后走 `_open_child_dir`
-    （`O_DIRECTORY|O_NOFOLLOW`），symlink 得 `ELOOP`、FIFO 得 `ENOTDIR`，两者都被
-    `safe_fs` 包成 `SafeFilesystemError`。
+    FIFO：写入序**首位**（ifs）的**父目录分量** `states/ifs` 上预置 FIFO，其余为合法
+    全新根。`ensure_directory_no_follow` 的 `_open_child_dir`（`O_DIRECTORY|O_NOFOLLOW`）
+    得 `ENOTDIR`，被 `safe_fs` 包成 `SafeFilesystemError`。话术点名的 MUST 是
+    `states/ifs` 本身。
 
-    盘上终态与终名腿**逐字节同构**：零普通文件残留、写入路径被一个不是本次写入产生的持久
-    条目挡住、不移除它重跑必然以同样理由再次失败。故 MUST 走**同一路**（第三路），判据是
-    「阻塞物是否为持久外来条目」而不是「哪条腿抛的异常」。
-
-    话术点名的 MUST 是**被占住的那个路径本身**（`states/ifs`），不是终名
-    `states/ifs/<T>.cfg.ic`——后者在这条腿上根本没被创建过。断言刻意带上「写入路径 … 上」
-    这段前后文：裸的 `str(blocker) in detail` 在插值 `target` 的实现下**恒真**（终名路径
-    以 `states/ifs/` 为前缀），钉不住本行要修的正是那处。
-
-    判别变异体：(i) 把 ensure 腿的 `blocked_by_foreign_entry` 固定为 `False`（即恢复修复前
-    的现状）-> 本行必红；(ii) 把第三路合并回第二路 -> 本行必红；(iii) 第三路改插值 `target`
-    -> 本行必红。
+    symlink→目录 / 悬垂 symlink：#96 在阶段 A 判 `STATES_NOT_EMPTY`、`written == ()`、
+    点名该链、两源零写入。不得再走到 `WRITE_FAILED`。C-13（`states/` 根上的 symlink）
+    不在本策略内，仍由 `test_foreign_entry_higher_up_the_write_path_is_named_at_its_own_level`
+    钉死 `WRITE_FAILED`。
     """
     tree = Tree(tmp_path)
     cycle = datetime(2026, 8, 25, 0, tzinfo=UTC)
@@ -94,6 +87,26 @@ def test_foreign_entry_at_the_parent_component_is_named_and_must_be_removed(
     before_output = snapshot(tree.output)
 
     report = tree.run()
+
+    if carrier != "fifo":
+        assert report.refusal is InitRefusal.STATES_NOT_EMPTY
+        assert report.written == ()
+        assert str(blocker) in report.detail
+        assert FOREIGN_ENTRY_CLAIM not in report.detail
+        assert FRESH_CLAIM not in report.detail
+        assert PARTIAL_CLAIM not in report.detail
+        assert CLEANUP_CLAIM not in report.detail
+        assert snapshot(tree.output) == before_output
+        assert not (tree.states / "gfs").exists()
+        assert blocker.is_symlink()
+        if carrier == "symlink-to-dir":
+            assert os.readlink(blocker) == str(tree.root / "foreign_dir")
+            assert (tree.root / "foreign_dir").is_dir()
+            assert list((tree.root / "foreign_dir").iterdir()) == []
+        else:
+            assert os.readlink(blocker) == str(tree.root / "never-created")
+            assert not os.path.lexists(tree.root / "never-created")
+        return
 
     assert report.refusal is InitRefusal.WRITE_FAILED
     assert report.written == ()

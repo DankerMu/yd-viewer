@@ -188,10 +188,11 @@ _VARIANT_FORBIDDEN_RELATIVE_DIRS = (
     Path("output"),
 )
 
-#: 本次运行专属 staging 在 `YD_ROOT` 下的目录名前缀（**不**落在 `input/viewer/` 之内：
-#: products-contract §2 只允许该目录存在两个文件，把 staging 建在里面等于让 viewer 看见
-#: 中间态）。pinned: test_every_commit_renames_within_yd_root_on_one_device、
-#: test_success_survives_a_staging_cleanup_failure（把前缀挪进 `input/viewer/` 两条都变红）
+#: 本次运行专属 staging 在 `YD_ROOT` 下的目录名前缀（**不**落在 `input/viewer/` 之内）。
+#: 启动时顶层此前缀的既有条目一律拒绝、不回收（#83；pinned:
+#: test_mixed_top_level_staging_residue_is_refused_before_any_work）。提交位置 pinned:
+#: test_every_commit_renames_within_yd_root_on_one_device、
+#: test_success_survives_a_staging_cleanup_failure（前缀挪进 `input/viewer/` 即变红）
 _STAGING_PREFIX = ".yd-prepare-staging"
 _SCRATCH_PREFIX = "prepare"
 
@@ -717,6 +718,29 @@ def _verify_root(field_name: str, value: Path | str) -> Path:
     )
 
 
+def _refuse_staging_residue(yd_root: Path) -> None:
+    """一次 no-follow 顶层枚举，拒绝全部 `_STAGING_PREFIX*` 既有条目（#83）。
+
+    不先 `exists()`、不跟随、不按 PID/mtime/类型分流；命中则列出绝对路径并指向
+    `docs/agent-ops.md`。枚举失败经 `_wrap_fs`。必须先于终名探测。pinned:
+    test_mixed_top_level_staging_residue_is_refused_before_any_work、
+    test_staging_residue_discovery_failure_is_a_typed_refusal。
+    """
+    names = _wrap_fs(
+        lambda: safe_fs.list_directory_no_follow(yd_root),
+        f"枚举 YD_ROOT 顶层失败，无法确认有无遗留 staging：{yd_root}",
+    )
+    residue = sorted(yd_root / n for n in names if n.startswith(_STAGING_PREFIX))
+    if not residue:
+        return
+    listed = "\n".join(str(path) for path in residue)
+    raise PrepareError(
+        "YD_ROOT 顶层存在遗留 prepare staging，拒绝执行；既有条目不删除、"
+        "不覆盖、不自动回收。请按 docs/agent-ops.md 人工清理后再重跑：\n"
+        f"{listed}"
+    )
+
+
 def _refuse_existing_targets(
     labelled_targets: Sequence[tuple[str, Path]], *, phase: str
 ) -> None:
@@ -747,28 +771,32 @@ def run_prepare(
     baseline_root: Path | str,
     builder: Builder = default_builder,
 ) -> PrepareReport:
-    """执行一次 `prepare` 编排，严格按 fixture 钉死的八步顺序。
+    """执行一次 `prepare` 编排，严格按 fixture 钉死的顺序。
 
     0. **运行根预检**：`local.yd_root` 与 `local.scratch_root` MUST 是绝对路径且是已存在
        的目录（见 `_verify_root`；I3）；
-    1. **拒绝覆盖**：四个终名任一 `lexists` 即 `PrepareError`；此时 MUST NOT 创建
+    1. **遗留 staging 守卫（#83）**：一次 no-follow 顶层枚举，名字以 `_STAGING_PREFIX`
+       开头的任何类型即 `PrepareError`，列出绝对路径并指向 `docs/agent-ops.md`（pinned:
+       test_mixed_top_level_staging_residue_is_refused_before_any_work、
+       test_staging_residue_discovery_failure_is_a_typed_refusal）；
+    2. **拒绝覆盖**：四个终名任一 `lexists` 即 `PrepareError`；此时 MUST NOT 创建
        scratch、MUST NOT 调 builder（`prepare` 不幂等、无 `--force`，compute-loop §6.1；
        pinned: test_existing_variant_directory_is_refused、
        test_existing_viewer_geojson_is_refused_byte_for_byte——两者都断言 builder 零调用）；
-    2. 在 `local.scratch_root` 下建本次运行专属工作目录（名字含 pid + 随机 token，
+    3. 在 `local.scratch_root` 下建本次运行专属工作目录（名字含 pid + 随机 token，
        避免并发/重跑互相覆写；pinned:
        test_two_runs_get_distinct_scratch_and_staging_names——常量 token 变异即变红）；
-    3. 对 `("gfs", "ifs")` 各建一个此前不存在的 `variant_root`，各调 `builder` 一次；
-    4. 逐变体产物校验（目录存在、条目集合精确、率定末态可解析、river 段存在且行数等于
+    4. 对 `("gfs", "ifs")` 各建一个此前不存在的 `variant_root`，各调 `builder` 一次；
+    5. 逐变体产物校验（目录存在、条目集合精确、率定末态可解析、river 段存在且行数等于
        `config.reach_count`）；
-    5. 把校验通过的两棵变体树按发布权限复制进 `YD_ROOT` 内本次专属 staging；
-    6. `geometry.write_viewer_geojson` 直接写进该 staging（**不经 scratch**，唯一落点）；
-    7. 四个终名**再探一次**拒绝覆盖（TOCTOU 窄化，见 `_refuse_existing_targets`），随后
+    6. 把校验通过的两棵变体树按发布权限复制进 `YD_ROOT` 内本次专属 staging；
+    7. `geometry.write_viewer_geojson` 直接写进该 staging（**不经 scratch**，唯一落点）；
+    8. 四个终名**再探一次**拒绝覆盖（TOCTOU 窄化，见 `_refuse_existing_targets`），随后
        逐个同盘 rename 提交，顺序「两变体 → rivers → boundary」；
-    8. 无论成败删除 `YD_ROOT` 内 staging 与 scratch 工作目录；提交阶段失败时**同时**回滚
+    9. 无论成败删除 `YD_ROOT` 内 staging 与 scratch 工作目录；提交阶段失败时**同时**回滚
        本次已提交的终名与本次为提交新建的父目录，使 `YD_ROOT` 回到执行前的条目集合。
 
-    步骤 8 不用 `finally`（I1）。`finally` 里抛出的清理失败会在**成功路径**上抢在
+    步骤 9 不用 `finally`（I1）。`finally` 里抛出的清理失败会在**成功路径**上抢在
     `return PrepareReport(...)` 之前逃逸，把一次四个终名全部提交完成的运行报成失败，而
     重跑又被拒绝覆盖守卫挡住；在**失败路径**上它则替换掉正在传播的原始异常，
     `BuilderUnavailableError` 被降级成 `PrepareError`，`cli` 的退出码 `3` 变成 `1`。故
@@ -787,9 +815,10 @@ def run_prepare(
     # 步骤 0：运行根预检（在任何路径拼接、任何写入、任何 builder 调用之前）。
     yd_root = _verify_root("yd_root", local.yd_root)
     scratch_root = _verify_root("scratch_root", local.scratch_root)
+    _refuse_staging_residue(yd_root)
     baseline = Path(baseline_root)
 
-    # 步骤 1：相对性/互异性闸门（在任何写入之前）与拒绝覆盖检查。
+    # 步骤 2：相对性/互异性闸门（在任何写入之前）与拒绝覆盖检查。
     variants = variant_targets(local, config)
     viewer = viewer_targets(local)
     labelled_targets = list(variants.items()) + list(viewer.items())
@@ -802,7 +831,7 @@ def run_prepare(
     committed: list[Path] = []
 
     try:
-        # 步骤 2–3：scratch 工作目录 + 逐 source 调 builder。
+        # 步骤 3–4：scratch 工作目录 + 逐 source 调 builder。
         _ensure_directory(work_dir, [], lower_bound=scratch_root)
         requests: dict[str, VariantBuildRequest] = {}
         for source in SOURCE_IDS:
