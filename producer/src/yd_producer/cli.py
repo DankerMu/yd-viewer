@@ -6,70 +6,57 @@ seam 6：入口层不做业务行为测试，但入口层自身的契约必须�
 test_parser_registers_exactly_three_subcommands、test_unknown_subcommand_exits_two_without_delegation、
 test_database_url_guard_wins_before_parsing、test_run_rejects_missing_states_dir_and_creates_nothing。
 
-**契约标注约定**：见 `prepare` 模块头。凡以散文声明的行为选择都就地标注
-`（pinned: <test id>）` / `（等价变异，不可判别：…）` / `（归 M4/<issue>，本阶段不声明）`。
-
-退出码约定（issue #3 fixture 钉死）：
+退出码约定：
 
 - `2`：argparse 用法错误（未知子命令、缺子命令、缺必需参数），由 argparse 自身产生；
-- `1`：守卫或配置失败（`DATABASE_URL`、`ConfigError`、`states/` 缺失或为空、NWM 解释器
-  fail-closed、`prepare` 编排的 `PrepareError`）；
-- `3`：分阶段未实现的业务体，stderr 指名归属任务号；`prepare` 的
-  `BuilderUnavailableError`（生产 mapping-builder 绑定尚未可用）同属此码——它必须与
-  `1` 可区分，否则运维分不清该改配置还是该等 M4
-  （pinned: test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes、
-  test_prepare_with_executable_interpreter_reaches_production_builder_binding、
-  test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code；后两条同时钉住
-  `except BuilderUnavailableError` 必须先于 `except PrepareError`）。「归属**任务号**」
-  这一措辞对 `prepare` 已由 33edb44 放宽为「无编号任务时指名承接阶段」（本模块此处的
-  措辞滞后，不在本轮改动范围；`init` 自任务 11.1 落地后已不再走此码，`run` 一支仍是
-  任务号，pinned: test_run_with_non_empty_states_reaches_staged_unimplemented）。
+  `run` 的 `ConfigError` / 配置装配错误同样返回 `2`；
+- `1`：守卫失败（`DATABASE_URL`、`states/` 缺失或为空、NWM 解释器 fail-closed、
+  `prepare` 编排的 `PrepareError`）；装载失败在 `prepare`/`init` 仍为 `1`；
+- `3`：`prepare` 的 `BuilderUnavailableError`；`run` 任一 `STOPPED` / `JOB_FAILED` /
+  `SUCCEEDED_CLEANUP_PENDING` 或运行期 controller/executor/driver/provider 错误。
 
 **守卫位置**：`DATABASE_URL` 检查是 `main()` 的第一件事，先于 `parse_args` 与任何配置
-装载（agent-ops §2.2 把"不连 NWM 数据库"列为硬约束，环境本身有缺陷时最 fail-closed 的
-形态是在解释任何参数之前拒绝，且代码路径只有一条）。**被接受的后果**：`DATABASE_URL`
-存在时 `yd-producer --help` 同样以 `1` 退出而不打印帮助——环境错了就先修环境。
-（pinned: test_database_url_guard_wins_before_parsing——四份 argv 参数化，守卫若落到
-`parse_args` 之后，未知子命令/缺子命令/`--help` 三支会分别得到 2/2/0。）
-
-**路径形态**：`--config` / `--local` / `prepare` 的 `--baseline` 在此边界一律
-`Path.resolve()` 后再交给装载器/编排层
-（agent-ops §8.2：cron 以 cwd=`$HOME` 调 `run`、人工补跑在 checkout 目录走同一入口，同
-一条相对路径在两处指向不同文件，而装载器的失败消息忠实回显入参）。用 `Path.resolve()`
-而非 `os.path.abspath`：后者对已是绝对路径的入参做词法 `..` 折叠，跨 symlink 会指向不
-存在的目录。`resolve()` 路径不存在时不抛（`strict=False`），故不与 fail-closed 冲突。
-（pinned: test_relative_paths_are_resolved_before_reaching_loaders、
-test_error_message_carries_resolved_absolute_path、
-test_prepare_delegates_resolved_baseline_path。`resolve()` vs `os.path.abspath` 的差别
-**可判别**——判别方式：一条含 symlink 的 `..` 路径（`abspath` 只做词法折叠，`resolve()`
-跟随 symlink 后再折叠，两者落在不同目录，失败消息里的绝对路径随之不同）；本阶段裁定不
-钉：该语义属 `safe_fs` 的 no-follow 面，归 #88，本入口层不重复声明。）
-
-两个参数都**必需**、无内置默认：spec cli-config 禁止内置现场默认值，而给 `--config`
-一个默认等于在代码里第二次写死仓库布局（pinned: test_required_option_sets_per_subcommand、
-test_missing_required_option_exits_two）。
+装载（agent-ops §2.2）。路径形态：`--config` / `--local` / `prepare` 的 `--baseline`
+在此边界一律 `Path.resolve()` 后再交给装载器/编排层。
 """
 
 import argparse
 import os
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 from yd_producer import nwm
 from yd_producer.config import Config, ConfigError, LocalConfig, load_config, load_local
-
-# 只导入 `bootstrap` 这一个符号：`from yd_producer import init` 会用模块对象遮蔽本模块
-# 的 `init()` 委托目标，`main` 的按名解析随即失效。
+from yd_producer.controller import (
+    RunError,
+    RunOutcome,
+    RunSourcesError,
+    RunSourcesReport,
+    run_sources,
+)
+from yd_producer.executor import ExecutorError
 from yd_producer.init import bootstrap
+from yd_producer.nwm import ProductionAttemptDriver
 from yd_producer.prepare import BuilderUnavailableError, PrepareError, run_prepare
+from yd_producer.runlock import RunLockError, run_with_lock
+from yd_producer.slurm import (
+    SlurmJobExecutor,
+    query_failure_exit_code,
+    subprocess_runner,
+)
 
 __all__ = ["build_parser", "main"]
 
 EXIT_GUARD = 1
 EXIT_USAGE = 2
-EXIT_UNIMPLEMENTED = 3
+EXIT_RUNTIME = 3
+EXIT_UNIMPLEMENTED = EXIT_RUNTIME
+POLL_INTERVAL_SECONDS = 10
+_SOURCE_ORDER = ("ifs", "gfs")
 
 _DB_ENV_VAR = "DATABASE_URL"
 
@@ -202,18 +189,80 @@ def init(local: LocalConfig, config: Config) -> int:
     return 0
 
 
+class _StatesGuardFailed(Exception):
+    """states/ 守卫失败：锁内发现，退出码仍为 1。"""
+
+
 def run(local: LocalConfig, config: Config) -> int:
-    """`run`：状态目录守卫为真实实现；控制器循环归组 12–14，入口体承接者是任务 14.1。
+    """`run`：同一 `run_with_lock` 生命周期内装配 `run_sources`。
 
     spec「run 永不自动 bootstrap」：`states/` 缺失或为空即报错停止，MUST NOT 调用 init
-    逻辑，MUST NOT 自建该目录（pinned:
-    test_run_rejects_missing_states_dir_and_creates_nothing——断言目录仍不存在且注入的
-    `cli.init` fake 零调用、test_run_rejects_empty_states_dir）。
+    逻辑，MUST NOT 自建该目录。锁竞争成功跳过返回 `0` 且零工厂调用、零发现。
     """
-    guard = _check_states_dir(Path(local.yd_root) / "states")
-    if guard is not None:
-        return _fail(guard)
-    return _unimplemented("run", "14.1（run 主循环集成：`run_once` 骨架）")
+
+    def action() -> RunSourcesReport:
+        guard = _check_states_dir(Path(local.yd_root) / "states")
+        if guard is not None:
+            raise _StatesGuardFailed(guard)
+        runner = partial(
+            subprocess_runner,
+            command_timeout_seconds=local.slurm_command_timeout_seconds,
+        )
+        executors = {
+            source: SlurmJobExecutor(
+                required_fields=config.slurm.required_fields,
+                clock=lambda: datetime.now(UTC),
+                runner=runner,
+            )
+            for source in _SOURCE_ORDER
+        }
+        drivers = {
+            source: ProductionAttemptDriver(
+                grid_id=getattr(config.nwm_canonical_grid_id, source)
+            )
+            for source in _SOURCE_ORDER
+        }
+        poll_waits = {source: _production_poll_wait for source in _SOURCE_ORDER}
+        failure_exit_codes = {
+            source: partial(query_failure_exit_code, runner=runner)
+            for source in _SOURCE_ORDER
+        }
+        return run_sources(
+            config=config,
+            local=local,
+            executors=executors,
+            drivers=drivers,
+            poll_waits=poll_waits,
+            failure_exit_codes=failure_exit_codes,
+        )
+
+    try:
+        locked = run_with_lock(lock_path=local.cron.lock_path, action=action)
+    except _StatesGuardFailed as exc:
+        return _fail(str(exc))
+    except RunLockError as exc:
+        return _runtime_fail(str(exc))
+    if not locked.acquired:
+        return 0
+    return _run_exit(locked.value)
+
+
+def _production_poll_wait() -> None:
+    time.sleep(POLL_INTERVAL_SECONDS)
+
+
+def _run_exit(report: RunSourcesReport) -> int:
+    reports = (*report.ifs, *report.gfs)
+    if all(item.outcome is RunOutcome.SUCCEEDED for item in reports):
+        return 0
+    details = [item.detail for item in reports if item.detail]
+    message = "; ".join(details) if details else "run 未全部成功"
+    return _runtime_fail(message)
+
+
+def _runtime_fail(message: str) -> int:
+    print(f"错误：{message}", file=sys.stderr)
+    return EXIT_RUNTIME
 
 
 def _check_states_dir(states: Path) -> str | None:
@@ -289,15 +338,6 @@ def _fail(message: str) -> int:
     return EXIT_GUARD
 
 
-def _unimplemented(command: str, owner: str) -> int:
-    print(
-        f"`{command}` 的业务实现尚未落地，归属任务 {owner}；"
-        "入口守卫已全部通过（分阶段交付，见 openspec/changes/m2-producer-core）",
-        file=sys.stderr,
-    )
-    return EXIT_UNIMPLEMENTED
-
-
 def main(
     argv: Sequence[str] | None = None,
     env: Mapping[str, str] | None = None,
@@ -324,6 +364,9 @@ def main(
         config = load_config(args.config.resolve())
         local = load_local(args.local.resolve(), config)
     except ConfigError as exc:
+        if getattr(args, "command", None) == "run":
+            print(f"错误：{exc}", file=sys.stderr)
+            return EXIT_USAGE
         return _fail(str(exc))
 
     try:
@@ -333,11 +376,6 @@ def main(
             return init(local, config)
         return run(local, config)
     except BuilderUnavailableError as exc:
-        # 必须先于 `PrepareError` 捕获：它是后者的子类，反序会把"这条路还没通"报成
-        # 退出码 1，运维会去改一份没有问题的配置。
-        # pinned: test_prepare_with_executable_interpreter_reaches_production_builder_binding、
-        # test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code、
-        # test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes
         print(f"错误：{exc}", file=sys.stderr)
         _print_notes(exc)
         return EXIT_UNIMPLEMENTED
@@ -346,9 +384,43 @@ def main(
         _print_notes(exc)
         return code
     except ConfigError as exc:
+        if args.command == "run":
+            print(f"错误：{exc}", file=sys.stderr)
+            _print_notes(exc)
+            return EXIT_USAGE
         code = _fail(str(exc))
         _print_notes(exc)
         return code
+    except RunSourcesError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return EXIT_RUNTIME
+    except (RunError, ExecutorError) as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        if getattr(exc, "source", None):
+            print(f"source={exc.source}", file=sys.stderr)
+        if getattr(exc, "phase", None):
+            print(f"phase={exc.phase}", file=sys.stderr)
+        if getattr(exc, "job_id", None):
+            print(f"job={exc.job_id}", file=sys.stderr)
+        _print_notes(exc)
+        return EXIT_RUNTIME
+    except OSError as exc:
+        if args.command != "run":
+            raise
+        print(f"错误：{exc}", file=sys.stderr)
+        return EXIT_RUNTIME
+    except Exception as exc:
+        if args.command != "run":
+            raise
+        print(f"错误：{exc}", file=sys.stderr)
+        if getattr(exc, "source", None):
+            print(f"source={exc.source}", file=sys.stderr)
+        if getattr(exc, "phase", None):
+            print(f"phase={exc.phase}", file=sys.stderr)
+        if getattr(exc, "job_id", None):
+            print(f"job={exc.job_id}", file=sys.stderr)
+        _print_notes(exc)
+        return EXIT_RUNTIME
 
 
 if __name__ == "__main__":  # pragma: no cover - 入口点走 [project.scripts]
