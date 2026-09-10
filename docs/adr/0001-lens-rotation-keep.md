@@ -1167,3 +1167,7 @@ PR #178 的 fixture review PASS、独立 Gap Sweep CLEAN，无候选、无综合
 ## PR #195 accountability checkpoint (2026-09-10)
 
 Loop audit remains DECIDABLE (33 multi-round PRs, core=127, rotated=96). Decision deferred to maintainer: #195 adds one clean single-round sample and no new rotation evidence; retain the existing keep policy, do not auto-narrow reviewer seats.
+
+## PR #196 accountability checkpoint (2026-09-10)
+
+DECIDABLE rotation attribution unchanged: 33 multi-round PRs, core=127, rotated=96. Decision deferred to maintainer because #196 adds only a clean single-round sample. Retain existing keep policy; no automatic narrowing.

@@ -5,7 +5,7 @@
 ## 2. Verification and review
 - [x] 2.1 Parent batched old-source red proof then focused green and public bootstrap/CLI smoke; leaf skips validation per harness policy.
 - [x] 2.2 Parent producer/viewer pytest, Ruff/check-format, OpenSpec strict/all, stage anchor and actual merge-result check pass; no oracle weakening.
-- [ ] 2.3 Four high-risk seats and independent final review on frozen SHA, CI/evidence before preauthorized merge.
+- [x] 2.3 Four high-risk seats and independent final review on frozen SHA, CI/evidence before preauthorized merge.
 
 ## Keep / migrate oracle table
 - Migrate test_init_bootstrap.py::test_state_symlink_into_an_unreadable_vault_refuses -> STATES_NOT_EMPTY before target stat.
