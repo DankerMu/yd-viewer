@@ -1388,6 +1388,56 @@ def test_non_utf8_encodable_carried_value_is_refused_before_any_write(
     assert snapshot(work_dir) == {}
 
 
+@pytest.mark.parametrize(
+    "nonfinite",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "+inf", "-inf"],
+)
+def test_nonfinite_carried_cfgrib_filter_fails_closed(
+    tmp_path: Path, nonfinite: float
+) -> None:
+    payload = source_manifest_payload("gfs")
+    source_entry(payload, LEADS[0], GFS_VARIABLES[0])["metadata"][
+        "cfgrib_filter_by_keys"
+    ]["level"] = nonfinite
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    before_work = snapshot(work_dir)
+    before_source = snapshot(raw_root)
+    before_source_content = content_snapshot(raw_root)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "source-manifest")
+    assert snapshot(work_dir) == before_work == {}
+    assert snapshot(raw_root) == before_source
+    assert content_snapshot(raw_root) == before_source_content
+
+
+def test_finite_carried_cfgrib_filter_value_survives_strict_parse(
+    tmp_path: Path,
+) -> None:
+    finite_level = 850.25
+    payload = source_manifest_payload("gfs")
+    source_entry(payload, LEADS[0], GFS_VARIABLES[0])["metadata"][
+        "cfgrib_filter_by_keys"
+    ]["level"] = finite_level
+    raw_root, work_dir = build_tree(tmp_path, manifest=payload)
+    result = staged(raw_root, work_dir)
+
+    def reject_constant(name: str) -> None:
+        raise ValueError(name)
+
+    written = json.loads(
+        result.manifest_path.read_text(encoding="utf-8"),
+        parse_constant=reject_constant,
+    )
+    assert (
+        source_entry(written, LEADS[0], GFS_VARIABLES[0])["metadata"][
+            "cfgrib_filter_by_keys"
+        ]["level"]
+        == finite_level
+    )
+
+
 def test_mkdir_failing_midway_leaves_no_directories_behind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

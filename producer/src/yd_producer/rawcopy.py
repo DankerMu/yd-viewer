@@ -1074,9 +1074,9 @@ def _render_manifest(
         metadata=_manifest_metadata(leads),
     )
     try:
-        return json.dumps(manifest.as_dict(), ensure_ascii=False, indent=2).encode(
-            "utf-8"
-        )
+        return json.dumps(
+            manifest.as_dict(), ensure_ascii=False, indent=2, allow_nan=False
+        ).encode("utf-8")
     except (UnicodeEncodeError, TypeError, ValueError) as exc:
         raise RawStagingError(
             f"源 manifest {cycle_root / SOURCE_MANIFEST_FILENAME} 承接来的值无法序列化"

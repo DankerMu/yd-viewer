@@ -1,9 +1,9 @@
 ## 1. Implementation
-- [ ] 1.1 Add allow_nan=False to _render_manifest without new exception branch or kind.
-- [ ] 1.2 Add stage_raw cases for carried NaN/+inf/-inf -> source-manifest and unchanged recursive work/source snapshots; finite nested filter value -> strict parser accepts exact preserved value.
-- [ ] 1.3 Retire m2 task Known-limit for nonfinite output only; preserve other deferred policies.
+- [x] 1.1 Add allow_nan=False to _render_manifest without new exception branch or kind.
+- [x] 1.2 Add stage_raw cases for carried NaN/+inf/-inf -> source-manifest and unchanged recursive work/source snapshots; finite nested filter value -> strict parser accepts exact preserved value.
+- [x] 1.3 Retire m2 task Known-limit for nonfinite output only; preserve other deferred policies.
 ## 2. Verification
-- [ ] 2.1 Parent baseline/removal proof makes nonfinite cases fail; fixed focused cases and producer/viewer matrix pass.
+- [x] 2.1 Parent baseline/removal proof makes nonfinite cases fail; fixed focused cases and producer/viewer matrix pass.
 - [ ] 2.2 Ruff check/format, OpenSpec strict/all, stage log and Ubuntu CI pass; no macOS CI.
 ## Risk packs
 - Public API / CLI / script entry: selected — stage_raw typed failure.
