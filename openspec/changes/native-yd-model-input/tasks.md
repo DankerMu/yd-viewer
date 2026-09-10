@@ -2,11 +2,11 @@
 
 Implementation issue: #207
 
-- [ ] 1.1 在既有 prepare handoff 中实现 D1/D2 的固定 14 文件 v2 合同；迁移 `yd.para` 到 `yd.cfg.para` 及 prepare/fixture 消费者，保留顶层 calibrated state 与原有 direct-grid/identity 字段；five-only 明确要求重建，不增加通用角色/路径系统。
-- [ ] 1.2 将既有 staged 搬运/file-checksum map 切换为该固定完整变体与 cycle state；保持 WorkClaim、既有 no-follow/cleanup 代码，不新增第二层 snapshot/验证框架。
-- [ ] 1.3 `assemble_staged` 复用共享 kernel 写入 `model/input/yd`，CSV 留 model 根、index path=`.`；同一切片迁移 `tracker/checkpoint_tracker.py` 的 native RunDirectory 私有路径检查及 native 恢复调用，并更新 `test_checkpoint_tracker.py`/`test_checkpoint_recovery.py` 等相关 fixtures。保留独立 legacy external-root assembly 和其平铺路径约束，不将 tracker 改动留给 #132。
-- [ ] 1.4 给共享参数 writer 增加明确的 native 输出模式，正确读取空白分隔的 cfg.para 并输出 stock `%s %lf` 可读的六项参数；保留 legacy 模板模式，主运行/恢复均使用 native 模式，不只改文件名。
-- [ ] 1.5 沿同一 staged→native assembly→tracker 路径证明完整输入、T 初态、stock 参数/CSV 语法与 source 断开后可运行；覆盖已捕获 checkpoint 的零恢复调用分支和 genuine-miss END=0.5/参数原 bytes 还原。沿用已有缺文件/旧包失败与 project-profile 门禁，不再建 helper 级重复矩阵。
+- [x] 1.1 在既有 prepare handoff 中实现 D1/D2 的固定 14 文件 v2 合同；迁移 `yd.para` 到 `yd.cfg.para` 及 prepare/fixture 消费者，保留顶层 calibrated state 与原有 direct-grid/identity 字段；five-only 明确要求重建，不增加通用角色/路径系统。
+- [x] 1.2 将既有 staged 搬运/file-checksum map 切换为该固定完整变体与 cycle state；保持 WorkClaim、既有 no-follow/cleanup 代码，不新增第二层 snapshot/验证框架。
+- [x] 1.3 `assemble_staged` 复用共享 kernel 写入 `model/input/yd`，CSV 留 model 根、index path=`.`；同一切片迁移 `tracker/checkpoint_tracker.py` 的 native RunDirectory 私有路径检查及 native 恢复调用，并更新 `test_checkpoint_tracker.py`/`test_checkpoint_recovery.py` 等相关 fixtures。保留独立 legacy external-root assembly 和其平铺路径约束，不将 tracker 改动留给 #132。
+- [x] 1.4 给共享参数 writer 增加明确的 native 输出模式，正确读取空白分隔的 cfg.para 并输出 stock `%s %lf` 可读的六项参数；保留 legacy 模板模式，主运行/恢复均使用 native 模式，不只改文件名。
+- [x] 1.5 沿同一 staged→native assembly→tracker 路径证明完整输入、T 初态、stock 参数/CSV 语法与 source 断开后可运行；覆盖已捕获 checkpoint 的零恢复调用分支和 genuine-miss END=0.5/参数原 bytes 还原。沿用已有缺文件/旧包失败与 project-profile 门禁，不再建 helper 级重复矩阵。
 
 Depends on #171
 Depends on #177

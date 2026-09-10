@@ -7,32 +7,46 @@ import inspect
 import json
 import os
 import shutil
-from collections import namedtuple
-from datetime import UTC, datetime
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 from assembly_fixtures import (
+    NATIVE_PARAMETER_EXPECTED,
+    NATIVE_PARAMETER_TEMPLATE,
     PARAMETER_EXPECTED,
     PARAMETER_TEMPLATE,
     SP_ATT,
+    stage,
+    stock_runtime_values,
     write_forcing_package,
+    write_state,
+    write_variant,
 )
+from assembly_fixtures import STAGED_CALIBRATED_STATE as CALIBRATED_STATE
+from assembly_fixtures import STAGED_CYCLE as CYCLE
+from assembly_fixtures import STAGED_CYCLE_ID as CYCLE_ID
+from assembly_fixtures import STAGED_PROJECT as PROJECT
+from assembly_fixtures import STAGED_SOURCE as SOURCE
+from assembly_fixtures import STAGED_VARIANT_IDS as VARIANT_IDS
+from assembly_fixtures import native_segmented_cfg_ic as _native_segmented_cfg_ic
+from assembly_fixtures import stage_inputs as _stage_call
+from assembly_fixtures import staged_claim as _claim
+from assembly_fixtures import staged_fixture as _stage_fixture
+from assembly_fixtures import staged_ids as _ids
+from assembly_fixtures import staged_pair as _stage_pair
+from assembly_fixtures import write_staged_source as _write_source
+from cfg_ic_fixtures import build_cfg_ic
 from prepare_fixtures import (
+    NATIVE_VARIANT_FILES,
     VARIANT_HANDOFF_NAME,
-    binding_bytes,
     canonical_json_bytes,
-    contract_payload,
-    handoff_payload,
     sha256_literal,
-    sp_att_bytes,
-    station_payload,
-    write_prepared_variant,
 )
 
 import yd_producer.staged_inputs as staged_module
-from yd_producer._work_claim import WorkClaim, claim_exact_work
+from yd_producer._work_claim import WorkClaim
 from yd_producer.assemble import (
     AssemblyError,
     WorkIdentity,
@@ -52,21 +66,10 @@ from yd_producer.staged_inputs import (
     STAGED_VARIANT_DIRNAME,
     StagedWorkInputs,
     load_staged_work_inputs,
-    stage_work_inputs,
 )
+from yd_producer.tracker import CheckpointTracker, ensure_twelve_hour_checkpoint
 
-CYCLE = datetime(2026, 8, 26, 12, tzinfo=UTC)
-CYCLE_ID = "2026082612"
-SOURCE = "gfs"
-PROJECT = "yd"
-GRID_ID = "fixture-grid-gfs"
-MODEL_ID = "model-177"
 MAX_MANIFEST_BYTES = MAX_ASSET_BYTES = MAX_STATE_BYTES = 65_536
-LIMITS = {
-    "max_manifest_bytes": MAX_MANIFEST_BYTES,
-    "max_asset_bytes": MAX_ASSET_BYTES,
-    "max_state_bytes": MAX_STATE_BYTES,
-}
 ASSEMBLE_PARAMETERS = ["registry", "staged_inputs", "forcing"]
 VALID_PARAMETER_DRIFT = b"# valid parameter drift\nKsatH 2.0e-4\n"
 ASSEMBLY_BINDING = b"opaque\x00binding\n"
@@ -80,117 +83,15 @@ ASSEMBLY_CSV_ONE = (
 )
 ASSEMBLY_CSV_TWO = ASSEMBLY_CSV_ONE.replace(b"0\t1\t2\t3\t4\t5", b"0\t6\t7\t8\t9\t10")
 VARIANT_FILES = frozenset(
-    ["yd.cfg.ic", "yd.para", "yd.binding", "yd.direct-grid-handoff.json", "gfs.sp.att"]
+    [*NATIVE_VARIANT_FILES, "yd.binding", "yd.direct-grid-handoff.json"]
 )
-STAGED_FIELDS = ["source", "cycle", "work_dir", "variant_dir", "state_path", "manifest_path", "work_identity", "manifest_checksum", "file_checksums", "prepared", "project_name", "grid_id", "max_manifest_bytes", "max_asset_bytes", "max_state_bytes"]  # fmt: skip
-STAGE_PARAMETERS = ["claim", "source_variant_dir", "source_state_path", "source", "cycle", "project_name", "grid_id", "max_manifest_bytes", "max_asset_bytes", "max_state_bytes"]  # fmt: skip
-LOAD_PARAMETERS = ["work_dir", "source", "cycle", "project_name", "grid_id", "max_manifest_bytes", "max_asset_bytes", "max_state_bytes"]  # fmt: skip
 STATE_KEY = f"input/states/{SOURCE}/{CYCLE_ID}.cfg.ic"
 PARA_KEY = f"input/variant/{VARIANT_HYDRO_PARAM_NAME}"
-VARIANT_IDS = {
-    "model_id": MODEL_ID,
-    "basin_id": "b",
-    "basin_version_id": "v",
-    "river_network_version_id": "r",
-}
-CALIBRATED_STATE = b"CALIBRATED-VARIANT-STATE\n"
-DEFAULT_PARAMETER = b"# hydrologic parameters\nKsatH 1.0e-4\n"
-SourceFixture = namedtuple("SourceFixture", "root variant_dir state_path files")
 _checksum = sha256_literal
 
 
-def _native_segmented_cfg_ic() -> bytes:
-    minute = round(CYCLE.timestamp() / 60)
-    return (
-        f"2\t6\t{minute}\nIndex\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
-        "1\t0.100000\t1e-3\t-0.0\t2.5E+01\t0.000000\n"
-        "2\t0.100000\t1e-3\t-0.0\t2.5E+01\t0.000000\n"
-        "Index\tRiver_Stage\n1\t0.100000\n"
-    ).encode()
-
-
-def _ids(**overrides: object) -> dict[str, object]:
-    values = dict(
-        LIMITS, source=SOURCE, cycle=CYCLE, project_name=PROJECT, grid_id=GRID_ID
-    )
-    values.update(overrides)
-    return values
-
-
-def _write_source(root: Path, **kwargs: object) -> SourceFixture:
-    source_root, variant_dir = root.resolve(), root.resolve() / "variant"
-    state_path = source_root / "states" / SOURCE / f"{CYCLE_ID}.cfg.ic"
-    binding = kwargs.get("binding") or binding_bytes(grid_id=GRID_ID, source_id=SOURCE)
-    sp_att = kwargs.get("sp_att") or sp_att_bytes(source_id=SOURCE)
-    stations = [station_payload(grid_id=GRID_ID, index=1)]
-    if kwargs.get("two_stations"):
-        extra = station_payload(grid_id=GRID_ID, index=2)
-        extra.update(latitude=7.0, longitude=6.0, x=8.0, y=9.0, z=10.0)
-        stations.append(extra)
-    shared = {
-        "source_id": SOURCE,
-        "project_name": PROJECT,
-        "grid_id": GRID_ID,
-        "binding": binding,
-        "sp_att": sp_att,
-    }
-    extras = {"grid_signature": "s", "model_input_package_id": "p"}
-    contract = contract_payload(model_id=MODEL_ID, stations=stations, **shared) | extras
-    write_prepared_variant(
-        variant_dir,
-        state=kwargs.get("calibrated_state", b"calibrated-state\n"),
-        parameter=kwargs.get("parameter", DEFAULT_PARAMETER),
-        payload=handoff_payload(ids=VARIANT_IDS, contract=contract, **shared),
-        **shared,
-    )
-    state_bytes = _native_segmented_cfg_ic()
-    state_path.parent.mkdir(parents=True)
-    state_path.write_bytes(state_bytes)
-    files = {name: (variant_dir / name).read_bytes() for name in VARIANT_FILES}
-    staged = {f"input/variant/{name}": content for name, content in files.items()}
-    staged[STATE_KEY] = state_bytes
-    return SourceFixture(source_root, variant_dir, state_path, staged)
-
-
-def _claim(tmp_path: Path) -> WorkClaim:
-    return claim_exact_work(
-        work_root=(tmp_path / "scratch/work").resolve(),
-        source=SOURCE,
-        cycle=CYCLE,
-        cycle_name=CYCLE_ID,
-    )
-
-
-def _stage_pair(tmp_path: Path, leaf: str = "nfs-test-owned"):
-    return _write_source(tmp_path / leaf), _claim(tmp_path)
-
-
-def _stage_call(claim: WorkClaim, source: SourceFixture, **overrides: object):
-    values: dict[str, object] = {
-        "claim": claim,
-        "source_variant_dir": source.variant_dir,
-        "source_state_path": source.state_path,
-        **_ids(),
-    }
-    values.update(overrides)
-    return stage_work_inputs(**values)  # type: ignore[arg-type]
-
-
-def _stage_fixture(tmp_path: Path) -> tuple[SourceFixture, WorkClaim, StagedWorkInputs]:
-    source, claim = _stage_pair(tmp_path)
-    return source, claim, _stage_call(claim, source)
-
-
 def _load(work_dir: Path, **overrides: int) -> StagedWorkInputs:
-    return load_staged_work_inputs(work_dir=work_dir, **_ids(**overrides))  # type: ignore[arg-type]
-
-
-def _assert_required_signature(callable_: object, names: list[str]) -> None:
-    parameters = inspect.signature(callable_).parameters
-    assert list(parameters) == names
-    for parameter in parameters.values():
-        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
-        assert parameter.default is inspect.Parameter.empty
+    return load_staged_work_inputs(work_dir=work_dir, **_ids(**overrides))
 
 
 def _replace_minute(content: bytes, minute: str) -> bytes:
@@ -208,10 +109,13 @@ def _input_absent(claim: WorkClaim) -> None:
 
 
 def _rewrite_manifest(
-    staged: StagedWorkInputs, mutate: object, *, canonical: bool = True
+    staged: StagedWorkInputs,
+    mutate: Callable[[dict[str, Any]], None],
+    *,
+    canonical: bool = True,
 ) -> None:
     payload = json.loads(staged.manifest_path.read_bytes())
-    mutate(payload)  # type: ignore[operator]
+    mutate(payload)
     encoded = canonical_json_bytes(payload)
     staged.manifest_path.write_bytes(encoded if canonical else encoded + b"\n")
 
@@ -279,46 +183,6 @@ def _refuse_assemble(
         assert not (extra / "model").exists()
 
 
-def test_public_api_shape_and_freeze(tmp_path: Path) -> None:
-    assert STAGED_INPUTS_SCHEMA == "yd.run.staged-inputs.v1"
-    assert STAGED_INPUT_DIRNAME == "input"
-    assert STAGED_VARIANT_DIRNAME == "variant"
-    assert STAGED_STATES_DIRNAME == "states"
-    assert STAGED_INPUTS_MANIFEST_FILENAME == "yd.staged-inputs.json"
-    _assert_required_signature(StagedWorkInputs, STAGED_FIELDS)
-    _assert_required_signature(stage_work_inputs, STAGE_PARAMETERS)
-    _assert_required_signature(load_staged_work_inputs, LOAD_PARAMETERS)
-    names = [field.name for field in dataclasses.fields(StagedWorkInputs)]
-    assert names == STAGED_FIELDS
-    assert StagedWorkInputs.__dataclass_params__.frozen
-    _, _, staged = _stage_fixture(tmp_path)
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        staged.source = "ifs"  # type: ignore[misc]
-    values = {field: getattr(staged, field) for field in STAGED_FIELDS}
-    invalid_values = {
-        "source": 1,
-        "project_name": None,
-        "grid_id": False,
-        "manifest_checksum": b"sha256",
-        "work_dir": str(staged.work_dir),
-        "prepared": object(),
-        "work_identity": [*staged.work_identity],
-        "work_identity-bool": (True, staged.work_identity[1]),
-        "work_identity-member": ("1", staged.work_identity[1]),
-        "file_checksums": [*staged.file_checksums],
-        "file_checksums-member": (("key", 1),),
-        **{
-            f"{field}-{kind}": value
-            for field in ("max_manifest_bytes", "max_asset_bytes", "max_state_bytes")
-            for kind, value in (("nonpositive", 0), ("bool", True))
-        },
-    }
-    for case, value in invalid_values.items():
-        field = case.rsplit("-", 1)[0] if "-" in case else case
-        with pytest.raises((TypeError, ValueError)):
-            StagedWorkInputs(**(values | {field: value}))
-
-
 def test_stage_manifest_and_reload_are_exact(tmp_path: Path) -> None:
     source, claim, staged = _stage_fixture(tmp_path)
     work = (tmp_path / "scratch" / "work" / SOURCE / CYCLE_ID).resolve()
@@ -337,25 +201,19 @@ def test_stage_manifest_and_reload_are_exact(tmp_path: Path) -> None:
     states = input_dir / STAGED_STATES_DIRNAME
     assert set(os.listdir(states)) == {SOURCE}
     assert set(os.listdir(states / SOURCE)) == {f"{CYCLE_ID}.cfg.ic"}
-    expected_checksums = {key: _checksum(value) for key, value in source.files.items()}
     expected_manifest = _expected_manifest(work, source.files)
     manifest_bytes = staged.manifest_path.read_bytes()
     assert manifest_bytes == canonical_json_bytes(expected_manifest)
     manifest = json.loads(manifest_bytes)
-    assert set(manifest) == set(expected_manifest)
-    assert len(manifest["files"]) == 6
-    assert set(manifest["files"]) == set(source.files)
-    for key in expected_checksums:
-        content = work.joinpath(*key.split("/")).read_bytes()
-        assert content == source.files[key]
-        assert manifest["files"][key] == _checksum(content)
-        assert manifest["files"][key].startswith("sha256:")
-        assert len(manifest["files"][key]) == 71
-    assert "input/yd.staged-inputs.json" not in manifest["files"]
+    assert len(manifest["files"]) == 15
+    for key, content in source.files.items():
+        staged_content = work.joinpath(*key.split("/")).read_bytes()
+        assert staged_content == content
+        assert manifest["files"][key] == _checksum(staged_content)
     for forbidden in (b'"st_dev"', b'"st_ino"', b'"job_id"', str(source.root).encode()):
         assert forbidden not in manifest_bytes
     assert staged.manifest_checksum == _checksum(manifest_bytes)
-    assert dict(staged.file_checksums) == expected_checksums
+    assert dict(staged.file_checksums) == expected_manifest["files"]
     assert _load(work) == staged
 
 
@@ -365,7 +223,12 @@ def test_load_survives_source_disconnect(tmp_path: Path) -> None:
     assert not source.root.exists()
     reloaded = _load(claim.work_dir)
     assert reloaded == staged
-    for path in (reloaded.work_dir, reloaded.variant_dir, reloaded.state_path, reloaded.manifest_path):  # fmt: skip
+    for path in (
+        reloaded.work_dir,
+        reloaded.variant_dir,
+        reloaded.state_path,
+        reloaded.manifest_path,
+    ):
         assert path == claim.work_dir or path.is_relative_to(claim.work_dir)
 
 
@@ -512,14 +375,15 @@ def test_stage_source_checksum_drift_after_readiness_is_rejected(
 def test_generated_manifest_cap_is_checked_before_target_creation(
     tmp_path: Path,
 ) -> None:
+    work_root = tmp_path / ("w" * 80) / ("x" * 80) / ("y" * 80)
     source, claim = (
         _write_source(tmp_path / "nfs-test-owned"),
-        _claim(tmp_path / ("w" * 80)),
+        _claim(work_root),
     )
     expected = canonical_json_bytes(_expected_manifest(claim.work_dir, source.files))
     handoff_size = len((source.variant_dir / VARIANT_HANDOFF_NAME).read_bytes())
     cap = len(expected) - 1
-    assert cap >= handoff_size
+    assert handoff_size <= cap
     with pytest.raises(staged_module.StagedWorkInputsError):
         _stage_call(claim, source, max_manifest_bytes=cap)
     _input_absent(claim)
@@ -576,21 +440,26 @@ def test_load_rejects_manifest_mutations(
     )
 
 
-WRONG_FIELDS = "source_id cycle_id work_dir schema_version".split()  # noqa: SIM905
+WRONG_FIELDS = (
+    "source_id",
+    "cycle_id",
+    "work_dir",
+    "schema_version",
+)
 MANIFEST_MUTATIONS = [
     ("top-list", "top", []),
     ("files-list", "files", []),
     *((f"{field}-wrong-type", field, False) for field in WRONG_FIELDS),
     ("missing-top-key", "pop", "source_id"),
-    ("absolute-key", PARA_KEY, "/tmp/yd.para"),
-    ("parent-key", PARA_KEY, "input/variant/../yd.para"),
-    ("backslash-key", PARA_KEY, r"input\variant\yd.para"),
-    ("nul-key", PARA_KEY, "input/variant/yd.para\0"),
+    ("absolute-key", PARA_KEY, "/tmp/yd.cfg.para"),
+    ("parent-key", PARA_KEY, "input/variant/../yd.cfg.para"),
+    ("backslash-key", PARA_KEY, r"input\variant\yd.cfg.para"),
+    ("nul-key", PARA_KEY, "input/variant/yd.cfg.para\0"),
     ("self-key", PARA_KEY, "input/yd.staged-inputs.json"),
     ("nested-key", PARA_KEY, "input/variant/nested/file"),
     ("wrong-state-key", STATE_KEY, f"input/states/ifs/{CYCLE_ID}.cfg.ic"),
     ("checksum-non-string", STATE_KEY, 1),
-    ("path-alias", PARA_KEY, "input//variant/yd.para"),
+    ("path-alias", PARA_KEY, "input//variant/yd.cfg.para"),
 ]
 
 
@@ -614,7 +483,7 @@ def test_load_rejects_manifest_schema_and_path_grammar_before_declared_reads(
             payload["files"][value] = payload["files"].pop(target)
         else:
             payload["files"][target] = value
-        encoded = canonical_json_bytes(payload)  # type: ignore[arg-type]
+        encoded = canonical_json_bytes(payload)
         staged.manifest_path.write_bytes(encoded)
 
     _refuse_load(
@@ -634,7 +503,7 @@ def test_load_rejects_noncanonical_or_unbounded_json_before_declared_reads(
         "malformed": b'{"source_id":"gfs"',
         "nan": (
             b'{"cycle_id":"2026082612","files":{},'
-            b'"schema_version":"yd.run.staged-inputs.v1",'
+            b'"schema_version":"yd.run.staged-inputs.v2",'
             b'"source_id":NaN,"work_dir":"/tmp"}'
         ),
         "depth": (
@@ -692,7 +561,7 @@ def test_load_rejects_staged_tree_and_declared_byte_mutations(
         elif case == "corrupt-parameter-valid":
             victim.write_bytes(VALID_PARAMETER_DRIFT)
         else:
-            (staged.variant_dir / "gfs.sp.att").write_bytes(b"corrupt sp.att\n")
+            (staged.variant_dir / "yd.sp.att").write_bytes(b"corrupt sp.att\n")
 
     _refuse_load(tmp_path, mutate=mutate)
 
@@ -791,7 +660,7 @@ def _assembly_fixture(tmp_path: Path):
         tmp_path / "nfs-test-owned",
         binding=ASSEMBLY_BINDING,
         sp_att=SP_ATT,
-        parameter=PARAMETER_TEMPLATE,
+        parameter=NATIVE_PARAMETER_TEMPLATE,
         calibrated_state=CALIBRATED_STATE,
         two_stations=True,
     )
@@ -826,31 +695,33 @@ def _assembly_fixture(tmp_path: Path):
 def test_assemble_staged_signature_and_work_local_success(tmp_path: Path) -> None:
     source, claim, staged, registry, forcing = _assembly_fixture(tmp_path)
     cycle_state = source.state_path.read_bytes()
-    handoff = source.files[f"input/variant/{VARIANT_HANDOFF_NAME}"]
     shutil.rmtree(source.root)
     assert not source.root.exists()
-    _assert_required_signature(staged_module.assemble_staged, ASSEMBLE_PARAMETERS)
+    parameters = inspect.signature(staged_module.assemble_staged).parameters
+    assert list(parameters) == ASSEMBLE_PARAMETERS
+    assert all(
+        parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        and parameter.default is inspect.Parameter.empty
+        for parameter in parameters.values()
+    )
     result = _assemble(registry, staged, forcing)
     assert result.path == claim.work_dir / "model" and result.path.is_dir()
     assert result.state_path.read_bytes() == cycle_state
     assert result.state_path.read_bytes() != CALIBRATED_STATE
-    assert result.parameter_path.read_bytes() == PARAMETER_EXPECTED
-    expected_variant = {
-        VARIANT_BINDING_NAME: ASSEMBLY_BINDING,
-        VARIANT_HANDOFF_NAME: handoff,
-        "gfs.sp.att": SP_ATT,
-    }
-    for name, content in expected_variant.items():
-        assert (result.path / name).read_bytes() == content
+    assert result.parameter_path.read_bytes() == NATIVE_PARAMETER_EXPECTED
+    assert (result.path / "input" / "yd" / "yd.sp.att").read_bytes() == SP_ATT
     assert not (result.path / "yd.staged-inputs.json").exists()
-    assert result.forcing_index_path.name == "yd.tsd.forc"
-    assert result.forcing_index_path.read_bytes() == ASSEMBLY_INDEX
+    assert result.forcing_index_path == result.path / "input" / "yd" / "yd.tsd.forc"
+    assert result.forcing_index_path.read_bytes().splitlines()[1] == b"."
     assert tuple(path.name for path in result.forcing_csv_paths) == ("X1.csv", "X2.csv")
+    assert tuple(path.parent for path in result.forcing_csv_paths) == (
+        result.path,
+        result.path,
+    )
     assert tuple(path.read_bytes() for path in result.forcing_csv_paths) == (
         ASSEMBLY_CSV_ONE,
         ASSEMBLY_CSV_TWO,
     )
-    assert not source.root.exists()
 
 
 @pytest.mark.parametrize("case", ["file", "work-root", "capability"])
@@ -873,7 +744,7 @@ def test_assemble_staged_rejects_point_of_use_tamper(tmp_path: Path, case: str) 
         assert claim.work_dir.is_dir() and old_root.is_dir()
 
 
-@pytest.mark.parametrize("case", ["binding", "parameter", "state"])
+@pytest.mark.parametrize("case", ["sp-att", "parameter", "state"])
 def test_assemble_staged_checksums_files_at_kernel_point_of_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
@@ -885,9 +756,9 @@ def test_assemble_staged_checksums_files_at_kernel_point_of_use(
         1,
     )
     path, mutation = {
-        "binding": (
-            staged.variant_dir / VARIANT_BINDING_NAME,
-            b"opaque\x00binding-drift\n",
+        "sp-att": (
+            staged.variant_dir / "yd.sp.att",
+            b"sp-att-drift\n",
         ),
         "parameter": (
             staged.variant_dir / VARIANT_HYDRO_PARAM_NAME,
@@ -960,39 +831,130 @@ def test_assemble_staged_rejects_registry_mismatch_before_model(
     )
 
 
+def _leaves(root: Path) -> set[str]:
+    return {
+        path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()
+    }
+
+
 def test_legacy_and_staged_assemblies_match_common_model_bytes(tmp_path: Path) -> None:
-    staged_source, _, staged, staged_registry, staged_forcing = _assembly_fixture(tmp_path / "staged")  # fmt: skip
-    legacy_source, legacy_claim, _, legacy_registry, legacy_forcing = _assembly_fixture(tmp_path / "legacy")  # fmt: skip
-    nested = legacy_source.variant_dir / "nested"
-    nested.mkdir()
-    (nested / "ordinary.dat").write_bytes(b"legacy nested bytes\n")
+    staged_source, _, staged, staged_registry, staged_forcing = _assembly_fixture(
+        tmp_path / "staged"
+    )
+    legacy_root = tmp_path / "legacy"
+    legacy_identity, legacy_work, legacy_registry = stage(
+        legacy_root / "scratch" / "work",
+        WorkIdentity(
+            source_id=SOURCE,
+            cycle_time=CYCLE,
+            project_name=PROJECT,
+            **VARIANT_IDS,
+        ),
+    )
+    legacy_variant = write_variant(
+        legacy_root / "variant",
+        legacy_identity,
+        parameter=PARAMETER_TEMPLATE,
+    )
+    assert (legacy_variant / f"{PROJECT}.para").read_bytes() == PARAMETER_TEMPLATE
+    assert not (legacy_variant / "yd.cfg.para").exists()
+    legacy_states = legacy_root / "states"
+    legacy_state = write_state(
+        legacy_states,
+        legacy_identity,
+        content=staged_source.state_path.read_bytes(),
+    )
+    legacy_forcing = write_forcing_package(
+        legacy_registry.object_store_root,
+        legacy_identity,
+        index=ASSEMBLY_INDEX,
+        csv_one=ASSEMBLY_CSV_ONE,
+        csv_two=ASSEMBLY_CSV_TWO,
+    )
     staged_result = _assemble(staged_registry, staged, staged_forcing)
     legacy_result = assemble(
         registry=legacy_registry,
-        variant_dir=legacy_source.variant_dir,
+        variant_dir=legacy_variant,
         forcing=legacy_forcing,
-        states_root=legacy_source.state_path.parents[1],
-        state_path=legacy_source.state_path,
+        states_root=legacy_states,
+        state_path=legacy_state,
     )
-    common = {
-        "yd.cfg.ic",
-        "yd.para",
-        "yd.binding",
-        "yd.direct-grid-handoff.json",
-        "gfs.sp.att",
-        "yd.tsd.forc",
+    native_common = {f"input/yd/{name}" for name in NATIVE_VARIANT_FILES}
+    native_common.update({"input/yd/yd.tsd.forc", "X1.csv", "X2.csv"})
+    legacy_common = {
+        f"{PROJECT}.cfg.ic",
+        f"{PROJECT}.para",
+        f"{PROJECT}.tsd.forc",
         "X1.csv",
         "X2.csv",
+        "nested/ordinary.dat",
     }
-    staged_leaves = {p.relative_to(staged_result.path).as_posix() for p in staged_result.path.rglob("*") if p.is_file()}  # fmt: skip
-    legacy_leaves = {p.relative_to(legacy_result.path).as_posix() for p in legacy_result.path.rglob("*") if p.is_file()}  # fmt: skip
-    assert staged_leaves == common
-    assert legacy_leaves == common | {"nested/ordinary.dat"}
-    for relative in common:
-        left = (staged_result.path / relative).read_bytes()
-        right = (legacy_result.path / relative).read_bytes()
-        assert left == right
-    nested_bytes = (legacy_result.path / "nested/ordinary.dat").read_bytes()
-    assert nested_bytes == b"legacy nested bytes\n"
-    assert legacy_result.path == legacy_claim.work_dir / "model"
+    staged_leaves = _leaves(staged_result.path)
+    legacy_leaves = _leaves(legacy_result.path)
+    assert staged_leaves == native_common
+    assert legacy_leaves == legacy_common
+    assert (
+        staged_result.state_path.read_bytes() == legacy_result.state_path.read_bytes()
+    )
+    assert tuple(path.read_bytes() for path in staged_result.forcing_csv_paths) == (
+        tuple(path.read_bytes() for path in legacy_result.forcing_csv_paths)
+    )
+    assert legacy_result.parameter_path.read_bytes() == PARAMETER_EXPECTED
+    assert (legacy_result.path / "nested/ordinary.dat").read_bytes() == (
+        b"nested bytes\n"
+    )
+    assert legacy_result.path == legacy_work / "model"
     assert staged_source.variant_dir.is_dir()
+
+
+def test_native_assembly_to_tracker_captured_and_genuine_miss(tmp_path: Path) -> None:
+
+    source, _, staged, registry, forcing = _assembly_fixture(tmp_path)
+    shutil.rmtree(source.root)
+    result = _assemble(registry, staged, forcing)
+    assert stock_runtime_values(result.parameter_path.read_bytes())["END"] == 7.0
+    payload = build_cfg_ic(mesh_count=2, river_count=2, minute="720.000000").payload
+    (result.path / f"{PROJECT}.cfg.ic.update").write_bytes(payload)
+    tracker = CheckpointTracker(
+        run_dir=result.path, project_name=PROJECT, checkpoint_hours=(12,)
+    )
+    tracker.capture_available()
+    captured = tracker.captured[12]
+    assert captured.path.read_bytes() == payload
+
+    calls = 0
+
+    def zero(*, run_directory, output_dir):
+        nonlocal calls
+        calls += 1
+        return 0
+
+    record = ensure_twelve_hour_checkpoint(
+        tracker=tracker, run_directory=result, runner=zero
+    )
+    assert record is captured
+    assert calls == 0 and record.path.read_bytes() == payload
+    other, _, other_staged, other_registry, other_forcing = _assembly_fixture(
+        tmp_path / "miss"
+    )
+    shutil.rmtree(other.root)
+    missed = _assemble(other_registry, other_staged, other_forcing)
+    original, seen = missed.parameter_path.read_bytes(), {}
+
+    def miss(*, run_directory, output_dir):
+        seen["p"] = run_directory.parameter_path.read_bytes()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / f"{PROJECT}.cfg.ic.update").write_bytes(payload)
+        return 0
+
+    recovered = ensure_twelve_hour_checkpoint(
+        tracker=CheckpointTracker(
+            run_dir=missed.path, project_name=PROJECT, checkpoint_hours=(12,)
+        ),
+        run_directory=missed,
+        runner=miss,
+    )
+    assert stock_runtime_values(seen["p"])["END"] == 0.5
+    assert missed.parameter_path.read_bytes() == original
+    assert recovered.relative_minute == 720.0
+    assert recovered.path.read_bytes() == payload

@@ -29,6 +29,7 @@ from cli_fixtures import (
 from geometry_fixtures import write_bowtie_domain_layer
 from prepare_fixtures import (
     BASELINE_HYDRO_PARAM_BYTES,
+    NATIVE_VARIANT_FILES,
     VARIANT_HANDOFF_NAME,
     Env,
     RenameProbe,
@@ -39,7 +40,6 @@ from prepare_fixtures import (
     make_env,
     run,
     tree_snapshot,
-    variant_asset_name,
 )
 
 from yd_producer import prepare as prepare_module
@@ -64,17 +64,13 @@ EXPECTED_NEW_ENTRIES = {
     "input",
     "input/models",
     "input/models/yd_gfs",
-    f"input/models/yd_gfs/{VARIANT_HYDRO_PARAM_NAME}",
+    *(f"input/models/yd_gfs/{name}" for name in NATIVE_VARIANT_FILES),
     f"input/models/yd_gfs/{VARIANT_BINDING_NAME}",
-    f"input/models/yd_gfs/{VARIANT_CALIBRATED_STATE_NAME}",
     f"input/models/yd_gfs/{VARIANT_HANDOFF_NAME}",
-    f"input/models/yd_gfs/{variant_asset_name('gfs')}",
     "input/models/yd_ifs",
-    f"input/models/yd_ifs/{VARIANT_HYDRO_PARAM_NAME}",
+    *(f"input/models/yd_ifs/{name}" for name in NATIVE_VARIANT_FILES),
     f"input/models/yd_ifs/{VARIANT_BINDING_NAME}",
-    f"input/models/yd_ifs/{VARIANT_CALIBRATED_STATE_NAME}",
     f"input/models/yd_ifs/{VARIANT_HANDOFF_NAME}",
-    f"input/models/yd_ifs/{variant_asset_name('ifs')}",
     "input/viewer",
     "input/viewer/rivers.geojson",
     "input/viewer/boundary.geojson",

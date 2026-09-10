@@ -1,4 +1,4 @@
-"""Validated immutable prepared-variant direct-grid handoff (#171)."""
+"""Validated immutable prepared-variant direct-grid handoff (#171 / #207)."""
 
 import hashlib
 import json
@@ -9,6 +9,16 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from yd_producer._native_input import (
+    PREPARED_VARIANT_BINDING_FILENAME,
+    PREPARED_VARIANT_CALIBRATED_STATE_FILENAME,
+    PREPARED_VARIANT_CHECKSUM_FILENAMES,
+    PREPARED_VARIANT_ENTRY_COUNT,
+    PREPARED_VARIANT_FIXED_FILENAMES,
+    PREPARED_VARIANT_HANDOFF_FILENAME,
+    PREPARED_VARIANT_PARAMETER_FILENAME,
+    PREPARED_VARIANT_SP_ATT_FILENAME,
+)
 from yd_producer.forcing.bounded_json import BoundedJSONError, load_bounded_json
 from yd_producer.forcing.direct_grid_contract import (
     REQUIRED_STATION_FIELDS,
@@ -40,14 +50,9 @@ __all__ = [
     "load_prepared_variant_handoff",
 ]
 
-PREPARED_VARIANT_CALIBRATED_STATE_FILENAME = "yd.cfg.ic"
-PREPARED_VARIANT_PARAMETER_FILENAME = "yd.para"
-PREPARED_VARIANT_BINDING_FILENAME = "yd.binding"
-PREPARED_VARIANT_HANDOFF_FILENAME = "yd.direct-grid-handoff.json"
-PREPARED_VARIANT_HANDOFF_SCHEMA = "yd.prepare.direct-grid-handoff.v1"
+PREPARED_VARIANT_HANDOFF_SCHEMA = "yd.prepare.direct-grid-handoff.v2"
 MAX_PREPARED_VARIANT_MANIFEST_BYTES = MAX_OBJECT_MANIFEST_BYTES
 MAX_PREPARED_VARIANT_ASSET_BYTES = MAX_OBJECT_MANIFEST_BYTES
-
 _ENVELOPE_KEYS = frozenset(
     {
         "schema_version",
@@ -59,6 +64,7 @@ _ENVELOPE_KEYS = frozenset(
         "river_network_version_id",
         "direct_grid_forcing_contract",
         "sp_att_asset_name",
+        "file_checksums",
     }
 )
 _CONTRACT_KEYS = frozenset(
@@ -75,14 +81,9 @@ _CONTRACT_KEYS = frozenset(
         "station_bindings",
     }
 )
-_FIXED_FILENAMES = frozenset(
-    {
-        PREPARED_VARIANT_CALIBRATED_STATE_FILENAME,
-        PREPARED_VARIANT_PARAMETER_FILENAME,
-        PREPARED_VARIANT_BINDING_FILENAME,
-        PREPARED_VARIANT_HANDOFF_FILENAME,
-    }
-)
+_FIXED_FILENAMES = PREPARED_VARIANT_FIXED_FILENAMES
+_CHECKSUM_FILENAMES = PREPARED_VARIANT_CHECKSUM_FILENAMES
+_ENTRY_COUNT = PREPARED_VARIANT_ENTRY_COUNT
 _COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CHECKSUM = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -114,7 +115,7 @@ def load_prepared_variant_handoff(
     max_manifest_bytes: int,
     max_asset_bytes: int,
 ) -> PreparedVariantHandoff:
-    """Load exactly one canonical v1 carrier without discovering any candidate paths."""
+    """Load exactly one canonical v2 carrier without discovering any candidate paths."""
     try:
         root, source, project, grid = _preflight(
             variant_root,
@@ -126,9 +127,9 @@ def load_prepared_variant_handoff(
         )
         expected_identity = directory_identity_no_follow(root)
         initial_names = _entries(root)
-        if len(initial_names) != 5:
+        if set(initial_names) != _FIXED_FILENAMES:
             raise ValueError(
-                "prepared variant must contain exactly five entries; "
+                "prepared variant must contain the fixed fourteen-file v2 set; "
                 f"missing fixed files={sorted(_FIXED_FILENAMES - set(initial_names))!r}."
             )
 
@@ -139,12 +140,6 @@ def load_prepared_variant_handoff(
         _exact_keys(manifest, _ENVELOPE_KEYS, "handoff manifest")
         _manifest_fields(manifest, source, project)
         asset_name = _asset_name(manifest["sp_att_asset_name"])
-        expected_entries = _FIXED_FILENAMES | {asset_name}
-        if set(initial_names) != expected_entries:
-            raise ValueError(
-                "prepared variant entries do not equal the v1 exact five-entry set."
-            )
-
         contract_payload = _contract_shape(manifest["direct_grid_forcing_contract"])
         identifiers = {
             field: _identifier(manifest[field], field)
@@ -158,26 +153,39 @@ def load_prepared_variant_handoff(
         _contract_binding(
             contract_payload, source, project, grid, identifiers["model_id"]
         )
-        for name in (
-            PREPARED_VARIANT_CALIBRATED_STATE_FILENAME,
-            PREPARED_VARIANT_PARAMETER_FILENAME,
-        ):
-            _read(root, name, max_asset_bytes)
-        binding = _read(root, PREPARED_VARIANT_BINDING_FILENAME, max_asset_bytes)
-        sp_att = _read(root, asset_name, max_asset_bytes)
+        contents = {
+            PREPARED_VARIANT_HANDOFF_FILENAME: manifest_content,
+            **{
+                name: _read(root, name, max_asset_bytes)
+                for name in sorted(
+                    _FIXED_FILENAMES - {PREPARED_VARIANT_HANDOFF_FILENAME}
+                )
+            },
+        }
         try:
-            sp_att.decode("utf-8")
+            contents[PREPARED_VARIANT_SP_ATT_FILENAME].decode("utf-8")
         except UnicodeDecodeError as error:
             raise ValueError("prepared .sp.att asset must be UTF-8.") from error
-        _checksum(contract_payload["binding_checksum"], binding, "binding")
-        _checksum(contract_payload["sp_att_checksum"], sp_att, ".sp.att")
+        checksums = _file_checksums(manifest["file_checksums"])
+        for name, expected in checksums.items():
+            _checksum(expected, contents[name], name)
+        _checksum(
+            contract_payload["binding_checksum"],
+            contents[PREPARED_VARIANT_BINDING_FILENAME],
+            "binding",
+        )
+        _checksum(
+            contract_payload["sp_att_checksum"],
+            contents[PREPARED_VARIANT_SP_ATT_FILENAME],
+            ".sp.att",
+        )
 
         contract = parse_direct_grid_forcing_contract(
             contract_payload, source_id=source
         )
         frozen_contract = _freeze_contract(contract)
         validate_direct_grid_forcing_contract(frozen_contract, source_id=source)
-        _coherent_root(root, expected_identity, expected_entries)
+        _coherent_root(root, expected_identity, _FIXED_FILENAMES)
         return PreparedVariantHandoff(
             source_id=source,
             project_name=project,
@@ -187,8 +195,8 @@ def load_prepared_variant_handoff(
             river_network_version_id=identifiers["river_network_version_id"],
             contract=frozen_contract,
             sp_att_asset_name=asset_name,
-            binding_content=bytes(binding),
-            sp_att_content=bytes(sp_att),
+            binding_content=bytes(contents[PREPARED_VARIANT_BINDING_FILENAME]),
+            sp_att_content=bytes(contents[PREPARED_VARIANT_SP_ATT_FILENAME]),
         )
     except PreparedVariantHandoffError:
         raise
@@ -250,10 +258,13 @@ def _identifier(value: Any, label: str) -> str:
 
 
 def _entries(root: Path) -> list[str]:
-    names = list_directory_no_follow_limited(root, max_entries=5, containment_root=root)
-    if len(names) > 5:
+    names = list_directory_no_follow_limited(
+        root, max_entries=_ENTRY_COUNT, containment_root=root
+    )
+    if len(names) > _ENTRY_COUNT:
         raise ValueError(
-            f"prepared variant 未预期条目 / exceeds five-entry limit: {sorted(names)!r}."
+            "prepared variant 未预期条目 / exceeds fourteen-entry limit: "
+            f"{sorted(names)!r}."
         )
     return names
 
@@ -312,8 +323,8 @@ def _manifest_fields(manifest: Mapping[str, Any], source: str, project: str) -> 
 
 def _asset_name(value: Any) -> str:
     name = _identifier(value, "sp_att_asset_name")
-    if not name.endswith(".sp.att") or name in _FIXED_FILENAMES:
-        raise ValueError("sp_att_asset_name must name a non-fixed .sp.att leaf.")
+    if name != PREPARED_VARIANT_SP_ATT_FILENAME:
+        raise ValueError("sp_att_asset_name must be yd.sp.att.")
     return name
 
 
@@ -352,6 +363,19 @@ def _contract_binding(
             or _CHECKSUM.fullmatch(contract[field]) is None
         ):
             raise ValueError(f"{field} must be sha256:<64 lowercase hex>.")
+
+
+def _file_checksums(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise TypeError("file_checksums must be a JSON object.")
+    _exact_keys(value, _CHECKSUM_FILENAMES, "file_checksums")
+    checksums: dict[str, str] = {}
+    for name in sorted(_CHECKSUM_FILENAMES):
+        digest = value[name]
+        if not isinstance(digest, str) or _CHECKSUM.fullmatch(digest) is None:
+            raise ValueError(f"{name} checksum must be sha256:<64 lowercase hex>.")
+        checksums[name] = digest
+    return checksums
 
 
 def _checksum(expected: str, content: bytes, label: str) -> None:
