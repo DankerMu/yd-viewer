@@ -5,4 +5,4 @@
 ## 2. Verification
 - [x] 2.1 Orchestrator runs a batched red proof against pre-change source in isolated scratch, then final focused tests and a real CLI smoke: residual top-level entries -> exit 1 (not 3), sorted absolute paths and docs/agent-ops.md on stderr, no traceback; agents skip all validation per harness delegation policy.
 - [x] 2.2 Orchestrator runs producer and viewer pytest, ruff check/format checks, OpenSpec strict/all validation and stage-log anchor; preserve existing tests and cleanup semantics.
-- [ ] 2.3 Four high-risk review seats plus final independent review check every invariant row before SHA-bound merge.
+- [x] 2.3 Four high-risk review seats plus final independent review check every invariant row before SHA-bound merge.
