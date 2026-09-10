@@ -4,7 +4,14 @@
 # LocalObjectStore.iter_bytes（内部持 no-follow fd）流式写入上下文管理的私有临时
 # 文件，cfgrib 与 netCDF4 回退共用同一 staged 源，绝不把原 raw Path 交给解码器。
 # 私有 staging 是设计授权的可移植性取舍（相对 descriptor alias / /dev/fd）。
-# 不改算法、URI 或浮点表示。不新增资源上限（#102）。
+# 偏离（#102）：load_manifest 与既有 grid-definition JSON 读改走
+# store.read_bytes_limited(max_bytes=MAX_OBJECT_MANIFEST_BYTES)；#103
+# _staged_contained_raw_path 在 staging/解码前 store.size 无跟随预检，并在
+# iter_bytes 流式累计 observed，超过 MAX_RAW_INPUT_BYTES=512*1024*1024 以
+# CanonicalConversionError 明示 input size、key、observed size、limit，且不写
+# overflow chunk、不调用解码器。解码 RawRecord.values 为
+# np.asarray(..., dtype=np.float64).ravel()，不经 .tolist()/Python float 元组。
+# 不改算法、坐标元组、URI、错误类型或已接受产物字节。
 from __future__ import annotations
 
 import json
@@ -18,8 +25,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from yd_producer.raw.source_identity import normalize_source_id
 from yd_producer.store.object_store import (
+    MAX_OBJECT_MANIFEST_BYTES,
     LocalObjectStore,
     ObjectStoreError,
     sha256_bytes,
@@ -27,6 +37,8 @@ from yd_producer.store.object_store import (
 from yd_producer.store.safe_fs import SafeFilesystemError
 
 LOGGER = logging.getLogger(__name__)
+
+MAX_RAW_INPUT_BYTES = 512 * 1024 * 1024
 
 
 # IFS 累积净太阳辐射夜间持平,GRIB 位打包让持平段抖动几百 J/m²(≈0.1 W/m²),
@@ -227,7 +239,7 @@ class RawRecord:
     source_file: str
     native_variable: str
     forecast_hour: int
-    values: tuple[float, ...]
+    values: tuple[float, ...] | np.ndarray
     longitudes: tuple[float, ...] = ()
     latitudes: tuple[float, ...] = ()
     shape: tuple[int, ...] = ()
@@ -700,16 +712,16 @@ def unit_for_standard_variable(standard_variable: str) -> str:
 
 def convert_units(
     native_variable: str,
-    values: tuple[float, ...] | list[float],
-    previous_values: tuple[float, ...] | list[float] | None = None,
+    values: tuple[float, ...] | list[float] | np.ndarray,
+    previous_values: tuple[float, ...] | list[float] | np.ndarray | None = None,
 ) -> tuple[float, ...]:
     return convert_units_with_metadata(native_variable, values, previous_values).values
 
 
 def convert_units_with_metadata(
     native_variable: str,
-    values: tuple[float, ...] | list[float],
-    previous_values: tuple[float, ...] | list[float] | None = None,
+    values: tuple[float, ...] | list[float] | np.ndarray,
+    previous_values: tuple[float, ...] | list[float] | np.ndarray | None = None,
     *,
     forecast_hour: int | None = None,
     previous_forecast_hour: int | None = None,
@@ -840,8 +852,8 @@ def compute_relative_humidity(temperature_c: float, dewpoint_c: float) -> float:
 
 
 def compute_relative_humidity_values(
-    temperature_c: tuple[float, ...] | list[float],
-    dewpoint_c: tuple[float, ...] | list[float],
+    temperature_c: tuple[float, ...] | list[float] | np.ndarray,
+    dewpoint_c: tuple[float, ...] | list[float] | np.ndarray,
 ) -> tuple[float, ...]:
     if len(temperature_c) != len(dewpoint_c):
         raise CanonicalConversionError(
@@ -854,10 +866,10 @@ def compute_relative_humidity_values(
 
 
 def convert_era5_radiation_values(
-    ssr_values: tuple[float, ...] | list[float],
-    str_values: tuple[float, ...] | list[float],
-    previous_ssr_values: tuple[float, ...] | list[float] | None = None,
-    previous_str_values: tuple[float, ...] | list[float] | None = None,
+    ssr_values: tuple[float, ...] | list[float] | np.ndarray,
+    str_values: tuple[float, ...] | list[float] | np.ndarray,
+    previous_ssr_values: tuple[float, ...] | list[float] | np.ndarray | None = None,
+    previous_str_values: tuple[float, ...] | list[float] | np.ndarray | None = None,
     *,
     forecast_hour: int | None = None,
     previous_forecast_hour: int | None = None,
@@ -899,8 +911,8 @@ def compute_ifs_relative_humidity(temperature_c: float, dewpoint_c: float) -> fl
 
 
 def compute_ifs_relative_humidity_values(
-    temperature_c: tuple[float, ...] | list[float],
-    dewpoint_c: tuple[float, ...] | list[float],
+    temperature_c: tuple[float, ...] | list[float] | np.ndarray,
+    dewpoint_c: tuple[float, ...] | list[float] | np.ndarray,
 ) -> tuple[float, ...]:
     if len(temperature_c) != len(dewpoint_c):
         raise CanonicalConversionError(
@@ -913,8 +925,8 @@ def compute_ifs_relative_humidity_values(
 
 
 def convert_ifs_precipitation_with_metadata(
-    values_m: tuple[float, ...] | list[float],
-    previous_values_m: tuple[float, ...] | list[float] | None = None,
+    values_m: tuple[float, ...] | list[float] | np.ndarray,
+    previous_values_m: tuple[float, ...] | list[float] | np.ndarray | None = None,
     *,
     forecast_hour: int | None = None,
     previous_forecast_hour: int | None = None,
@@ -981,10 +993,10 @@ def convert_ifs_precipitation_with_metadata(
 
 
 def convert_ifs_radiation_values(
-    ssr_values: tuple[float, ...] | list[float],
-    str_values: tuple[float, ...] | list[float],
-    previous_ssr_values: tuple[float, ...] | list[float] | None = None,
-    previous_str_values: tuple[float, ...] | list[float] | None = None,
+    ssr_values: tuple[float, ...] | list[float] | np.ndarray,
+    str_values: tuple[float, ...] | list[float] | np.ndarray,
+    previous_ssr_values: tuple[float, ...] | list[float] | np.ndarray | None = None,
+    previous_str_values: tuple[float, ...] | list[float] | np.ndarray | None = None,
     *,
     forecast_hour: int | None = None,
     previous_forecast_hour: int | None = None,
@@ -1022,8 +1034,8 @@ def convert_ifs_radiation_values(
 
 
 def convert_ifs_shortwave_down_values(
-    ssr_values: tuple[float, ...] | list[float],
-    previous_ssr_values: tuple[float, ...] | list[float] | None = None,
+    ssr_values: tuple[float, ...] | list[float] | np.ndarray,
+    previous_ssr_values: tuple[float, ...] | list[float] | np.ndarray | None = None,
     *,
     forecast_hour: int | None = None,
     previous_forecast_hour: int | None = None,
@@ -1220,7 +1232,9 @@ class CanonicalConverter:
     def load_manifest(self, manifest_uri: str) -> dict[str, Any]:
         try:
             return json.loads(
-                self.object_store.read_bytes(manifest_uri).decode("utf-8")
+                self.object_store.read_bytes_limited(
+                    manifest_uri, max_bytes=MAX_OBJECT_MANIFEST_BYTES
+                ).decode("utf-8")
             )
         except (json.JSONDecodeError, OSError, ObjectStoreError, ValueError) as error:
             raise CanonicalConversionError(
@@ -1274,7 +1288,7 @@ class CanonicalConverter:
                     entries_by_standard_variable[standard_variable],
                     key=lambda entry: int(entry["forecast_hour"]),
                 )
-                previous_values: tuple[float, ...] | None = None
+                previous_values: tuple[float, ...] | np.ndarray | None = None
                 previous_source_file: str | None = None
                 previous_forecast_hour: int | None = None
                 apcp_cumulative_gap = False
@@ -1524,9 +1538,7 @@ class CanonicalConverter:
                         dataset, expected_native_variable, local_key
                     )
                     data_array = dataset[data_variable]
-                    values = tuple(
-                        float(value) for value in data_array.values.ravel().tolist()
-                    )
+                    values = np.asarray(data_array.values, dtype=np.float64).ravel()
                     return RawRecord(
                         source_file=self.object_store.uri_for_key(local_key),
                         native_variable=expected_native_variable,
@@ -1543,6 +1555,8 @@ class CanonicalConverter:
                 finally:
                     if dataset is not None:
                         dataset.close()
+        except CanonicalConversionError:
+            raise
         except Exception as error:
             detail = f"Failed to parse raw file {local_key}: {error}"
             if cfgrib_error is not None:
@@ -1804,7 +1818,7 @@ class CanonicalConverter:
         cycle_time: datetime,
         standard_variable: str,
         record: RawRecord,
-        previous_values: tuple[float, ...] | None,
+        previous_values: tuple[float, ...] | np.ndarray | None,
         previous_source_file: str | None,
         previous_forecast_hour: int | None,
         policy_identity: Mapping[str, Any] | None = None,
@@ -1968,8 +1982,9 @@ class CanonicalConverter:
         try:
             if self.object_store.exists(self.config.grid_definition_uri):
                 existing = json.loads(
-                    self.object_store.read_bytes(
-                        self.config.grid_definition_uri
+                    self.object_store.read_bytes_limited(
+                        self.config.grid_definition_uri,
+                        max_bytes=MAX_OBJECT_MANIFEST_BYTES,
                     ).decode("utf-8")
                 )
                 if _grid_definition_signature(existing) != _grid_definition_signature(
@@ -2700,20 +2715,44 @@ def _first_cfgrib_alias(native_variable: str) -> str | None:
 _RAW_STAGING_CHUNK = 1024 * 1024
 
 
+def _raw_input_size_error(
+    local_key: str, observed_size: int
+) -> CanonicalConversionError:
+    return CanonicalConversionError(
+        f"Raw object {local_key} exceeds input size: observed {observed_size} bytes, "
+        f"limit {MAX_RAW_INPUT_BYTES} bytes"
+    )
+
+
 @contextmanager
 def _staged_contained_raw_path(
     object_store: LocalObjectStore, local_key: str
 ) -> Iterator[str]:
+    try:
+        observed_size = object_store.size(local_key)
+    except (OSError, ObjectStoreError, ValueError, SafeFilesystemError) as error:
+        raise CanonicalConversionError(
+            f"Raw object {local_key} is not a contained regular file: {error}"
+        ) from error
+    if observed_size > MAX_RAW_INPUT_BYTES:
+        raise _raw_input_size_error(local_key, observed_size)
+
     suffix = Path(local_key).suffix or ".raw"
     with tempfile.NamedTemporaryFile(
         prefix="yd-canonical-raw-",
         suffix=suffix,
     ) as staging:
+        observed = 0
         try:
             for chunk in object_store.iter_bytes(
                 local_key, chunk_size=_RAW_STAGING_CHUNK
             ):
+                observed += len(chunk)
+                if observed > MAX_RAW_INPUT_BYTES:
+                    raise _raw_input_size_error(local_key, observed)
                 staging.write(chunk)
+        except CanonicalConversionError:
+            raise
         except (OSError, ObjectStoreError, ValueError, SafeFilesystemError) as error:
             raise CanonicalConversionError(
                 f"Raw object {local_key} is not a contained regular file: {error}"
