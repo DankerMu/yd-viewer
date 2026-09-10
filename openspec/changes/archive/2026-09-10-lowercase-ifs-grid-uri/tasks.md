@@ -6,4 +6,4 @@
 - [x] 2.1 Parent old-source red for updated IFS e2e string; final focused canonical/forcing tests green.
 - [x] 2.2 Parent smoke: actual lowercase emitted key/case-sensitive string+object_path parsing; products byte-identical and catalog only URI differs; GFS unchanged.
 - [x] 2.3 Fixture review+strict validation; parent profile serial producer/viewer/ruff/OpenSpec/stage-log verification.
-- [ ] 2.4 Comprehensive review/final review/CI/frozen-tip merge and archive/log tracked in PR evidence.
+- [x] 2.4 Comprehensive review/final review/CI/frozen-tip merge and archive/log tracked in PR evidence.
