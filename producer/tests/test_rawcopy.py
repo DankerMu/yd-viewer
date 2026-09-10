@@ -38,7 +38,7 @@ from yd_producer.config import (
     VariantsConfig,
 )
 from yd_producer.raw.manifest import DownloadManifest
-from yd_producer.rawcopy import RawStagingError, stage_raw
+from yd_producer.rawcopy import ERROR_KINDS, RawStagingError, stage_raw
 from yd_producer.rawscan import judge
 from yd_producer.store.object_store import LocalObjectStore
 
@@ -1251,6 +1251,23 @@ def test_yd_root_mock_is_untouched_and_holds_no_raw_copy(tmp_path: Path) -> None
 
 
 # --- kind 词表与异常面 -------------------------------------------------------
+
+
+def test_error_kinds_equals_the_closed_nine_fixture_literals() -> None:
+    # Fixture: m2-producer-core/tasks.md 任务 3.2 闭合词表（恰好九项）。
+    assert ERROR_KINDS == frozenset(
+        {
+            "incomplete-verdict",
+            "unsupported-layout",
+            "source-symlink",
+            "source-manifest",
+            "verdict-mismatch",
+            "accumulation-metadata",
+            "source-mutated",
+            "target-exists",
+            "copy-failed",
+        }
+    )
 
 
 def test_no_bare_stdlib_exception_escapes_for_each_failure_shape(
