@@ -14,11 +14,11 @@
 - Time series / forcing / temporal boundaries: not selected — conversion algorithms unchanged.
 - 状态链 / warm-start 定戳一致性: not selected — no state files.
 - NWM 快照溯源与 DB-free 隔离: selected — registered fork and existing provenance/socket guard.
-- [ ] 1.1 Register converter fork in inventory before code and update module header with problem/fix.
-- [ ] 1.2 Replace bare raw-path decoder access with existing no-follow access; preserve backend behavior and lifecycle.
-- [ ] 1.3 Add leaf/raw/source/cycle pre-existing external-link regressions for BOTH GFS and IFS convert_manifest, including a late entry after valid entries, asserting zero writes under canonical/ (products, catalog and grid definition); add resource/identity checks. Use a new yd-owned test_canonical_raw_containment.py without NWM provenance; leave pin test_canonical_converter.py and unrelated product-read helpers unchanged.
+- [x] 1.1 Register converter fork in inventory before code and update module header with problem/fix.
+- [x] 1.2 Replace bare raw-path decoder access with existing no-follow access; preserve backend behavior and lifecycle.
+- [x] 1.3 Add leaf/raw/source/cycle pre-existing external-link regressions for BOTH GFS and IFS convert_manifest, including a late entry after valid entries, asserting zero writes under canonical/ (products, catalog and grid definition); add resource/identity checks. Use a new yd-owned test_canonical_raw_containment.py without NWM provenance; leave pin test_canonical_converter.py and unrelated product-read helpers unchanged.
 ## 2. Evidence and delivery
-- [ ] 2.1 Batched pre-change red proof for new rejection tests; same valid fixture before/after compares produced bytes, no leftover stash.
-- [ ] 2.2 Parent runs focused canonical tests including real cfgrib and NetCDF, then project-profile deduplicated producer/viewer pytest, ruff and OpenSpec pipeline; all pass.
-- [ ] 2.3 Correct issue #71 historical fail-closed rationale, accounting for its current state; no claim that read fix repairs rawcopy writes.
+- [x] 2.1 Batched pre-change red proof for new rejection tests; same valid fixture before/after compares produced bytes, no leftover stash.
+- [x] 2.2 Parent runs focused canonical tests including real cfgrib and NetCDF, then project-profile deduplicated producer/viewer pytest, ruff and OpenSpec pipeline; all pass.
+- [x] 2.3 Correct issue #71 historical fail-closed rationale, accounting for its current state; no claim that read fix repairs rawcopy writes.
 - [ ] 2.4 Fixture review and strict validation, cross-review/verifier, final frozen-head review/CI/evidence and preauthorized merge; archive/log afterwards.
