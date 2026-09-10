@@ -30,11 +30,13 @@
 
 **阶段 B 的失败构造分两类**（MUST NOT 再写「唯一可达构造」——那个说法已被实测证伪）：
 
-- **类一（`EEXIST`）**：拒绝守卫只认**普通文件**（下条），而 `safe_fs._FILE_FLAGS` 的
-  `O_CREAT|O_EXCL` 对**任何**已存在的条目都得 `EEXIST`。于是 `states/<source>/<T>.cfg.ic`
-  预置为目录/FIFO 一类非普通文件时，它过得了阶段 A 的守卫却挡得住阶段 B 的写入。这是
+- **类一（`EEXIST`）**：拒绝守卫认**普通文件**以及 `states/<source>` 自身或其树内
+  任一 symlink（#96，下条），而 `safe_fs._FILE_FLAGS` 的 `O_CREAT|O_EXCL` 对**任何**
+  已存在的条目都得 `EEXIST`。于是 `states/<source>/<T>.cfg.ic` 预置为普通空目录 / FIFO
+  一类**非 symlink** 的非普通文件时，它过得了阶段 A 的守卫却挡得住阶段 B 的写入。这是
   **已知且刻意**的缝隙：不把守卫扩到「任何条目」，否则 `states/` 下一个 `.DS_Store` 目录
-  就永久砖化建链，方向与下条「宁可要求人工确认」相反。此类**盘上零残留**。
+  就永久砖化建链，方向与下条「宁可要求人工确认」相反。#96 只撤销 symlink 例外，不撤销
+  普通空目录例外。此类**盘上零残留**。
 - **类二（写循环中途的 I/O 失败）**：目标不存在、`O_EXCL` 成功创建之后 `os.write` 中途抛
   `ENOSPC`/`EDQUOT`/`EIO`（NFS 发布根上最现实的失败类）。
   `safe_fs.write_bytes_no_follow_exclusive` 的 `except OSError` 臂只关 fd 后转抛、**不
@@ -64,8 +66,9 @@
 target 的** `os.open(..., O_CREAT|O_EXCL, ...)` 从未被调用过（它只开/建目录分量），target
 侧零残留是结构性事实。但它 MUST 做**另一种**探测——no-follow `os.lstat(target_dir)`，用来
 分流下面收尾话术的第二路与第三路（:func:`_foreign_entry_blocks`）：`states/<source>` 本身
-被一个 symlink/FIFO/普通文件占住时该腿同样失败，而那是一个**持久外来条目**，与终名被占
-逐字节同构。
+被一个 FIFO/普通文件占住时该腿同样失败，而那是一个**持久外来条目**，与终名被占
+逐字节同构。`states/<source>` 自身或其树内的 symlink 不再走这条腿：#96 要求它们在阶段
+A 直接判 `STATES_NOT_EMPTY`、零写入。
 
 **收尾话术是三路**（`docs/compute-loop-design.md` §6.2 逐字；MUST NOT 退化成两路，更 MUST
 NOT 退化成单看 `written`）：
@@ -90,9 +93,9 @@ NOT 退化成单看 `written`）：
 逐字节相同（重跑复现同一失败，必须先移除该条目），故 MUST 走同一路：
 
 - **占住终名 `target`**：`O_CREAT|O_EXCL` 撞已存在条目得 `EEXIST`，话术点名 `target`；
-- **占住父目录分量 `states/<source>`**（symlink / FIFO / 普通文件）：
-  `ensure_directory_no_follow` 抛 `NotADirectoryError`/`ELOOP`（`store/safe_fs.py`），
-  话术点名 `target_dir`。
+- **占住父目录分量 `states/<source>`**（FIFO / 普通文件；**不是** symlink——symlink 已
+  在阶段 A 收敛）：`ensure_directory_no_follow` 抛 `NotADirectoryError`
+  （`store/safe_fs.py`），话术点名 `target_dir`。
 
 与之相对，权限类失败（`states/` 的 `0o500`/`0o600`）盘上并没有外来条目，`chmod` 后直接
 重跑即可成功，仍走第二路。分流判据同样是**盘上探测**而非 `SafeFilesystemError.kind`：
@@ -102,8 +105,10 @@ no-follow `os.lstat(target_dir)` 能把它们分开（:func:`_foreign_entry_bloc
 **可见性判据取「宽」，与 `controller` 的前沿可见集刻意不同**：`controller.decide_frontier`
 （issue #22）对不可解析的条目判「不可见」，为的是不让一次崩溃的发布永久砖化该源；本模块
 是**唯一的 bootstrap 闸门**，方向相反——`states/` 树下**任一**普通文件（含不合命名规则的
-残留）都算「已有状态」而拒绝，`output/` 树下**任一**名为 `DONE` 的普通文件都算已有产物而
-拒绝。init 只在系统历史第一次执行，宁可要求人工确认，也不能在一个有残留的根上重新建链。
+残留），以及 `states/<source>` 自身或其树内**任一** symlink（#96，不跟随、不区分目标
+类型），都算「已有状态」而拒绝；普通（非 symlink）空目录仍忽略。`output/` 树下**任一**
+名为 `DONE` 的普通文件都算已有产物而拒绝（#96 **不**扩大 `DONE` 对 symlink 的可见性）。
+init 只在系统历史第一次执行，宁可要求人工确认，也不能在一个有残留的根上重新建链。
 
 **枚举/探测失败 MUST NOT fail-open**（沿用 #22 裁决 9 的同一规则，本模块是写侧）：**只有**
 `FileNotFoundError` / `NotADirectoryError` 等价于「空集合」；其余任何 `OSError`
@@ -176,7 +181,8 @@ DONE_NAME = "DONE"
 class InitRefusal(enum.StrEnum):
     """`init` 的拒绝理由。闭合词表（10 项），逐项可区分，MUST NOT 以异常逃逸。"""
 
-    #: `states/` 树下存在任一普通文件（含不合命名规则的残留）。
+    #: `states/` 树下存在任一普通文件，或 `states/<source>` 自身 / 其树内存在任一
+    #: symlink（#96；不跟随、不区分目标类型）。
     STATES_NOT_EMPTY = "states_not_empty"
     #: `output/` 树下存在任一名为 `DONE` 的普通文件。
     DONE_PRESENT = "done_present"
@@ -239,12 +245,18 @@ def _entry_names(directory: Path) -> list[str]:
         raise _DiscoveryUnreadable(f"目录 {directory} 无法枚举（{error}）") from error
 
 
-def _entry_kind(path: Path) -> tuple[bool, bool]:
+def _entry_kind(path: Path, *, for_state_guard: bool = False) -> tuple[bool, bool]:
     """返回 `(是普通文件, 是真实目录)`。
 
-    「普通文件」跟随 symlink（指向普通文件的 symlink 同样算「已有状态」——守卫取宽）；
     「真实目录」用 `lstat` 判，故遍历**不进入** symlink 指向的目录，符号链接环因此不可能
-    让遍历发散。断链 symlink 的 `stat` 抛 `ENOENT`，两项皆为假。
+    让遍历发散。
+
+    **默认**（`output/` DONE 与率定末态定位）：「普通文件」跟随 symlink；断链的 `stat`
+    抛 `ENOENT`，两项皆为假。MUST NOT 把下面的 state 策略套到这两个调用方。
+
+    **state 守卫**（`for_state_guard=True`）：`lstat` 一旦认出门面是 symlink，立即视为
+    已有状态条目并返回 `(True, False)`，MUST NOT 再 FOLLOW `stat`，也不按目标为普通文件、
+    目录、断链、FIFO、不可读或环分流（#96）。
     """
     try:
         link_mode = os.lstat(path).st_mode
@@ -254,6 +266,8 @@ def _entry_kind(path: Path) -> tuple[bool, bool]:
         raise _DiscoveryUnreadable(f"条目 {path} 无法判定（{error}）") from error
     if stat.S_ISDIR(link_mode):
         return (False, True)
+    if for_state_guard and stat.S_ISLNK(link_mode):
+        return (True, False)
     try:
         mode = os.stat(path).st_mode
     except (FileNotFoundError, NotADirectoryError):
@@ -263,17 +277,21 @@ def _entry_kind(path: Path) -> tuple[bool, bool]:
     return (stat.S_ISREG(mode), False)
 
 
-def _first_regular_file(root: Path, *, name: str | None = None) -> Path | None:
+def _first_regular_file(
+    root: Path, *, name: str | None = None, for_state_guard: bool = False
+) -> Path | None:
     """树遍历：返回首个普通文件（`name` 非空时只认该文件名），没有则 `None`。
 
     遍历序由 `_entry_names` 的排序保证可复现；探测失败一律上抛 `_DiscoveryUnreadable`。
+    `for_state_guard=True` 时把 symlink 门面本身当作占用（见 :func:`_entry_kind`），
+    默认保持 `output/` / 率定末态调用方的 FOLLOW 语义。
     """
     pending = [root]
     while pending:
         directory = pending.pop(0)
         for entry_name in _entry_names(directory):
             path = directory / entry_name
-            is_file, is_dir = _entry_kind(path)
+            is_file, is_dir = _entry_kind(path, for_state_guard=for_state_guard)
             if is_dir:
                 pending.append(path)
             elif is_file and (name is None or entry_name == name):
@@ -614,8 +632,9 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
     output_root = yd_root / "output"
 
     try:
-        # 1. 拒绝守卫：`states/` 树下任一普通文件、`output/` 树下任一 `DONE`。
-        residual_state = _first_regular_file(states_root)
+        # 1. 拒绝守卫：`states/` 树下任一普通文件或 `states/<source>` 自身及其树内
+        #    任一 symlink（#96）；`output/` 树下任一名为 `DONE` 的普通文件。
+        residual_state = _first_regular_file(states_root, for_state_guard=True)
         if residual_state is not None:
             return _refuse(
                 InitRefusal.STATES_NOT_EMPTY,
@@ -740,8 +759,9 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
         # 两次调用**分别** try：目录腿失败时 `os.open(target...)` 结构性地**从未被调用
         # 过**，零残留是事实而非推断，故不必也不该去探测 **target**（`chmod 0o500 states/`
         # 就是这种终态）。合在一个 try 里会把写入腿的探测语义套到一条与目标无关的失败上。
-        # 但这条腿仍必须探测**写入路径的每一级分量**：`yd_root`、`states/`、
-        # `states/<source>` 中任意一级被 symlink/FIFO/普通文件占住时它都在这里失败，而那是
+        # 但这条腿仍必须探测**写入路径的每一级分量**：`yd_root`、`states/` 被
+        # symlink/FIFO/普通文件占住时它都在这里失败（`states/<source>` 的 symlink 已在
+        # 阶段 A 收敛；此处剩下 FIFO/普通文件与 `states/` 根上的 C-13 载体），而那是
         # 一个持久外来条目，收尾 MUST 走第三路并点名**真正被占住的那一级**（round 4 R4-A、
         # round 5 R5-G；判据是逐级盘上探测，不是异常类型/`kind`，也不是末分量）。
         try:
