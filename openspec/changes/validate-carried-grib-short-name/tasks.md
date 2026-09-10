@@ -5,7 +5,7 @@
 - [x] 1.4 Publish six-key contract and replace #99 Known-limit without touching sibling policies.
 ## 2. Verification
 - [x] 2.1 Baseline source against new negatives must fail; fixed focused and producer/viewer suites pass.
-- [ ] 2.2 Ruff check/format, OpenSpec strict/all, stage log and final Ubuntu CI pass, uv only.
+- [x] 2.2 Ruff check/format, OpenSpec strict/all, stage log and final Ubuntu CI pass, uv only.
 ## Risk packs
 - Public API / CLI / script entry: selected — stage_raw typed failure and diagnostic.
 - Config / project setup: not selected — untouched.
