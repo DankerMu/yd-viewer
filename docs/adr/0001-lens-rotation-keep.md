@@ -1175,3 +1175,8 @@ DECIDABLE rotation attribution unchanged: 33 multi-round PRs, core=127, rotated=
 ## PR #198 accountability checkpoint (2026-09-10)
 
 DECIDABLE rotation attribution remains 33 multi-round PRs, core=127, rotated=96. Decision deferred to maintainer: this single-round clean PR supplies no new rotation evidence. Retain existing keep policy; no automatic narrowing.
+
+## PR #201 accountability checkpoint (2026-09-10)
+
+追加后审计为64行（63 merged、1 terminal），high桶34个PR、58个net catches；多轮样本33，later core=127 / rotated=96，历史排除9条。lens-rotation 再次 DECIDABLE。
+本次仅修正 #47 allocation-only 文档合同，独立核销与 issue 对齐记入 stage log，没有新增产品综合轮次或轮换对照样本。记录复议延期：保持已有 keep 决策，不自动收窄。产品 PR #197 仍在原 Round 1 后修复，计数不重置；#132/task14.2/shared change 均未完成。
