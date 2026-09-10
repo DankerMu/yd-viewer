@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -494,22 +496,155 @@ def test_unstatable_variant_directory_itself_is_not_read_as_missing(
     assert all_files(tree.states) == []
 
 
-# --- `_entry_kind` 的 `os.stat` FOLLOW 臂（round 2 cand-R2-05）----------------
+# --- #96：state symlink 在 FOLLOW stat 之前 fail closed ---------------------------
 #
-# 上面三条 `0o444` 只行使 `_entry_kind` 的 **`os.lstat`** 臂与 `_is_directory`。条目本身是
-# **symlink** 时 `lstat` 成功（它不是目录，也不需要解析目标），随后的 `os.stat` 才去跟随
-# 链接、才可能拿到 `EACCES`——那条 FOLLOW 臂此前没有任何用例。把它的两条 except 收成
-# `except OSError: return (False, False)` 的实现在下面两行必红：实测该变异下守卫会放行，
-# init 往一个**已持有可达前态**的根上写两份首态，正是裁决 7 禁止的断链。
-# symlink 只是本地的差分手段；NFS 发布根上 `ESTALE`/`EIO` 无需任何 symlink 即可到达同一臂。
+# `states/<source>` 自身或其树内任一 symlink 都是已有状态条目：阶段 A 以
+# `STATES_NOT_EMPTY` 拒绝、点名该链、两源零写入，且 MUST NOT FOLLOW `stat` 目标。
+# 普通（非 symlink）空目录仍放行。`output/` DONE 与率定末态的 FOLLOW 语义不在本策略内。
+# 旧 round 2 cand-R2-05 把 state 不可读目标链判成 `DISCOVERY_UNREADABLE`；#96 撤销该
+# oracle。率定末态侧的 FOLLOW 失败仍归 `DISCOVERY_UNREADABLE`。
 
 
-def test_state_symlink_into_an_unreadable_vault_refuses(tmp_path: Path) -> None:
-    """`states/ifs/<T>.cfg.ic` 是指向 `0o000` 目录内真实前态的 symlink -> `DISCOVERY_UNREADABLE`。"""
+_STATE_LINK_KINDS = ("file", "dir", "dangling", "fifo", "unreadable", "loop")
+_STATE_LINK_PLACEMENTS = ("source-root", "nested")
+_FRONTIER = datetime(2026, 8, 25, 0, tzinfo=UTC)
+
+
+def _lex_snapshot(root: Path) -> dict[str, tuple[object, ...]]:
+    """No-follow 树快照：只 `lstat`/`readlink`/`listdir`，不解析 symlink 目标。"""
+    result: dict[str, tuple[object, ...]] = {}
+    if not os.path.lexists(root):
+        return result
+    pending = [root]
+    while pending:
+        directory = pending.pop(0)
+        try:
+            names = sorted(os.listdir(directory))
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        for name in names:
+            path = directory / name
+            key = str(path.relative_to(root))
+            mode = os.lstat(path).st_mode
+            if stat.S_ISLNK(mode):
+                result[key] = ("symlink", os.readlink(path))
+            elif stat.S_ISDIR(mode):
+                result[key] = ("dir",)
+                pending.append(path)
+            elif stat.S_ISFIFO(mode):
+                result[key] = ("fifo",)
+            elif stat.S_ISREG(mode):
+                result[key] = ("file", path.read_bytes())
+            else:
+                result[key] = ("other", stat.S_IFMT(mode))
+    return result
+
+
+def _forbid_follow_stat(
+    monkeypatch: pytest.MonkeyPatch, link: Path, target: Path | None
+) -> list[bool]:
+    """OS 边界哨兵：对 state 链门面的 FOLLOW `stat`、以及对目标的任何 `stat` 都失败。
+
+    返回 `armed` 开关：`run()` 返回后必须关掉，避免事后 `read_bytes` 误伤。
+    """
+    real_stat = os.stat
+    link_abs = os.path.abspath(str(link))
+    target_abs = os.path.abspath(str(target)) if target is not None else None
+    armed = [True]
+
+    def wrapped(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if not armed[0]:
+            return real_stat(*args, **kwargs)
+        follow = kwargs.get("follow_symlinks", True)
+        path = args[0] if args else kwargs.get("path")
+        abs_path = os.path.abspath(os.fspath(path))
+        if abs_path == link_abs:
+            if follow:
+                raise AssertionError(f"FOLLOW stat of state-lane symlink {path}")
+            return real_stat(*args, **kwargs)
+        if target_abs is not None and (
+            abs_path == target_abs or abs_path.startswith(target_abs + os.sep)
+        ):
+            raise AssertionError(f"stat of state-link target {path}")
+        return real_stat(*args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", wrapped)
+    return armed
+
+
+def _plant_state_symlink(
+    tree: Tree, source: str, placement: str, kind: str
+) -> tuple[Path, Path | None, Path | None]:
+    """在 `states/<source>` 或其后裔上种一条 symlink；目标放在 yd_root 之外。"""
+    if placement == "source-root":
+        link = tree.states / source
+    else:
+        link = tree.states / source / "old"
+        link.parent.mkdir(parents=True)
+    outside = tree.root / f"outside-{source}-{placement}-{kind}"
+    outside.mkdir()
+    vault: Path | None = None
+    if kind == "file":
+        target: Path | None = outside / "prior.cfg.ic"
+        target.write_bytes(b"prior-state")
+        link.symlink_to(target)
+    elif kind == "dir":
+        target = outside / "prior-dir"
+        target.mkdir()
+        (target / "prior.cfg.ic").write_bytes(b"prior-state")
+        link.symlink_to(target)
+    elif kind == "dangling":
+        target = outside / "never-created"
+        link.symlink_to(target)
+    elif kind == "fifo":
+        target = outside / "prior.fifo"
+        os.mkfifo(target)
+        link.symlink_to(target)
+    elif kind == "unreadable":
+        vault = outside / "vault"
+        vault.mkdir()
+        target = vault / "prior.cfg.ic"
+        target.write_bytes(b"prior-state")
+        link.symlink_to(target)
+    elif kind == "loop":
+        target = link
+        os.symlink(link.name, link)
+    else:
+        raise AssertionError(kind)
+    return link, target, vault
+
+
+def _assert_target_untouched(kind: str, link: Path, target: Path | None) -> None:
+    assert link.is_symlink()
+    if kind == "loop":
+        assert os.readlink(link) == link.name
+        return
+    assert target is not None
+    assert os.readlink(link) == str(target)
+    if kind == "file":
+        assert target.read_bytes() == b"prior-state"
+    elif kind == "dir":
+        assert (target / "prior.cfg.ic").read_bytes() == b"prior-state"
+    elif kind == "dangling":
+        assert not os.path.lexists(target)
+    elif kind == "fifo":
+        assert stat.S_ISFIFO(os.lstat(target).st_mode)
+    elif kind == "unreadable":
+        assert target.read_bytes() == b"prior-state"
+
+
+def test_state_symlink_into_an_unreadable_vault_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """migrate：`states/ifs/<T>.cfg.ic` 指向 `0o000` 目录内真实前态 -> `STATES_NOT_EMPTY`。
+
+    旧 oracle 是 FOLLOW 失败后的 `DISCOVERY_UNREADABLE`。#96 在 `lstat` 身份上拒绝，
+    MUST NOT 先 `stat` 目标，也不得因目标不可访问而改判探测失败。
+    """
     skip_if_root()
     tree = Tree(tmp_path)
     for source in WRITE_ORDER:
-        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+        tree.write_cycle(source, _FRONTIER)
     vault = tree.root / "vault"  # 刻意放在 yd_root **之外**：它自身不是守卫的输入
     vault.mkdir()
     prior = vault / ("2026082400" + STATE_SUFFIX)
@@ -517,20 +652,196 @@ def test_state_symlink_into_an_unreadable_vault_refuses(tmp_path: Path) -> None:
     residual = tree.states / "ifs" / ("2026082400" + STATE_SUFFIX)
     residual.parent.mkdir(parents=True)
     residual.symlink_to(prior)
-    before_states = snapshot(tree.states)
+    before_states = _lex_snapshot(tree.states)
     before_output = snapshot(tree.output)
+    armed = _forbid_follow_stat(monkeypatch, residual, prior)
 
     with unreadable(vault):
         report = tree.run()
+    armed[0] = False
 
-    assert report.refusal is InitRefusal.DISCOVERY_UNREADABLE
+    assert report.refusal is InitRefusal.STATES_NOT_EMPTY
+    assert report.refusal is not InitRefusal.DISCOVERY_UNREADABLE
     assert report.written == ()
     assert str(residual) in report.detail
-    # `states/` 逐字节不变。此处不能用 `assert_zero_write`：它断言 `states/` 下零普通
-    # 文件，而本构造刻意在那里放了一条**指向**普通文件的 symlink。
-    assert snapshot(tree.states) == before_states
+    assert _lex_snapshot(tree.states) == before_states
     assert snapshot(tree.output) == before_output
-    assert list(tree.states.rglob("*")) == [residual.parent, residual]
+    assert os.readlink(residual) == str(prior)
+    assert prior.read_bytes() == b"prior state\n"
+    assert not (tree.states / "gfs").exists()
+
+
+@pytest.mark.parametrize("source", WRITE_ORDER)
+@pytest.mark.parametrize("placement", _STATE_LINK_PLACEMENTS)
+@pytest.mark.parametrize("kind", _STATE_LINK_KINDS)
+def test_state_lane_symlink_refuses_before_follow_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    placement: str,
+    kind: str,
+) -> None:
+    """#96 矩阵：两源 × 源根/后裔 × 目标类型 -> 阶段 A `STATES_NOT_EMPTY`，零写入、不跟随。"""
+    if kind == "unreadable":
+        skip_if_root()
+    tree = Tree(tmp_path)
+    for name in WRITE_ORDER:
+        tree.write_cycle(name, _FRONTIER)
+    link, target, vault = _plant_state_symlink(tree, source, placement, kind)
+    before_states = _lex_snapshot(tree.states)
+    before_output = snapshot(tree.output)
+    armed = _forbid_follow_stat(monkeypatch, link, target)
+
+    if vault is None:
+        report = tree.run()
+    else:
+        with unreadable(vault):
+            report = tree.run()
+    armed[0] = False
+
+    assert report.refusal is InitRefusal.STATES_NOT_EMPTY
+    assert report.written == ()
+    assert str(link) in report.detail
+    assert _lex_snapshot(tree.states) == before_states
+    assert snapshot(tree.output) == before_output
+    _assert_target_untouched(kind, link, target)
+    other = "gfs" if source == "ifs" else "ifs"
+    assert not (tree.states / other).exists()
+
+
+@pytest.mark.parametrize("source", WRITE_ORDER)
+@pytest.mark.parametrize("placement", _STATE_LINK_PLACEMENTS)
+def test_real_empty_directory_at_state_lane_still_bootstraps(
+    tmp_path: Path, source: str, placement: str
+) -> None:
+    """反向钉死：同一位置换成普通空目录 -> 两源成功建链，重戳字节与写入序不变。"""
+    tree = Tree(tmp_path)
+    for name in WRITE_ORDER:
+        tree.write_cycle(name, _FRONTIER)
+    if placement == "source-root":
+        (tree.states / source).mkdir()
+    else:
+        (tree.states / source / "old").mkdir(parents=True)
+
+    report = tree.run()
+
+    assert report.refusal is None
+    expected = tuple(tree.state_path(name, _FRONTIER) for name in WRITE_ORDER)
+    assert report.written == expected
+    for name in WRITE_ORDER:
+        assert tree.state_path(name, _FRONTIER).read_bytes() == expected_bytes(
+            tree.payloads[name], EPOCH_MINUTES_25_00Z
+        )
+
+
+def test_states_root_symlink_containing_prior_state_still_refuses(
+    tmp_path: Path,
+) -> None:
+    """`states/` 自身是指向含既有状态文件的目录的 symlink -> 仍 `STATES_NOT_EMPTY`。"""
+    tree = Tree(tmp_path)
+    for name in WRITE_ORDER:
+        tree.write_cycle(name, _FRONTIER)
+    foreign = tree.root / "foreign_states"
+    foreign.mkdir()
+    leftover = foreign / ("2026082400" + STATE_SUFFIX)
+    leftover.write_bytes(b"prior-root-state\n")
+    tree.states.rmdir()
+    tree.states.symlink_to(foreign)
+    before_output = snapshot(tree.output)
+
+    report = tree.run()
+
+    named = tree.states / leftover.name
+    assert report.refusal is InitRefusal.STATES_NOT_EMPTY
+    assert report.written == ()
+    assert str(named) in report.detail
+    assert os.readlink(tree.states) == str(foreign)
+    assert leftover.read_bytes() == b"prior-root-state\n"
+    assert snapshot(tree.output) == before_output
+
+
+def test_output_done_symlink_to_regular_file_is_done_present(tmp_path: Path) -> None:
+    """兄弟面：名为 `DONE` 的 symlink→普通文件仍走默认 FOLLOW，判 `DONE_PRESENT`。"""
+    tree = Tree(tmp_path)
+    for name in WRITE_ORDER:
+        tree.write_cycle(name, _FRONTIER)
+    target = tree.root / "done-bytes"
+    target.write_bytes(b"")
+    done = tree.output / "2026082400" / "gfs" / "DONE"
+    done.parent.mkdir(parents=True)
+    done.symlink_to(target)
+    before_states = snapshot(tree.states)
+    before_output = snapshot(tree.output)
+
+    report = tree.run()
+
+    assert report.refusal is InitRefusal.DONE_PRESENT
+    assert report.written == ()
+    assert str(done) in report.detail
+    assert_zero_write(tree, before_states, before_output)
+    assert os.readlink(done) == str(target)
+
+
+@pytest.mark.parametrize("shape", ["dangling-done", "hidden-dir", "non-done-link"])
+def test_output_symlink_shapes_that_are_not_done_do_not_block(
+    tmp_path: Path, shape: str
+) -> None:
+    """兄弟面：悬垂 DONE、藏 DONE 的目录链、非 DONE 链都不扩大为拒绝。"""
+    tree = Tree(tmp_path)
+    for name in WRITE_ORDER:
+        tree.write_cycle(name, _FRONTIER)
+    if shape == "dangling-done":
+        done = tree.output / "2026082400" / "gfs" / "DONE"
+        done.parent.mkdir(parents=True)
+        done.symlink_to(tree.root / "missing-DONE")
+    elif shape == "hidden-dir":
+        hidden = tree.root / "hidden-output"
+        hidden.mkdir()
+        (hidden / "DONE").write_bytes(b"")
+        cycle_dir = tree.output / "2026082400"
+        cycle_dir.symlink_to(hidden)
+    else:
+        residue = tree.output / "2026082400" / "gfs" / "yd.rivqdown.dat"
+        residue.parent.mkdir(parents=True)
+        target = tree.root / "stale-product"
+        target.write_bytes(b"stale product\n")
+        residue.symlink_to(target)
+    before_output = snapshot(tree.output)
+
+    report = tree.run()
+
+    assert report.refusal is None
+    expected = tuple(tree.state_path(name, _FRONTIER) for name in WRITE_ORDER)
+    assert report.written == expected
+    assert snapshot(tree.output) == before_output
+
+
+def test_readable_calibration_symlink_to_regular_file_parses_and_restamps(
+    tmp_path: Path,
+) -> None:
+    """兄弟面：可读的率定末态普通文件链仍定位、解析并重戳成功。"""
+    tree = Tree(tmp_path)
+    for name in WRITE_ORDER:
+        tree.write_cycle(name, _FRONTIER)
+    prior = tree.root / ("baseline" + STATE_SUFFIX)
+    prior.write_bytes(tree.payloads["ifs"])
+    calibration = tree.calibration["ifs"]
+    calibration.unlink()
+    calibration.symlink_to(prior)
+
+    report = tree.run()
+
+    assert report.refusal is None
+    expected = tuple(tree.state_path(name, _FRONTIER) for name in WRITE_ORDER)
+    assert report.written == expected
+    assert tree.state_path("ifs", _FRONTIER).read_bytes() == expected_bytes(
+        tree.payloads["ifs"], EPOCH_MINUTES_25_00Z
+    )
+    assert tree.state_path("gfs", _FRONTIER).read_bytes() == expected_bytes(
+        tree.payloads["gfs"], EPOCH_MINUTES_25_00Z
+    )
+    assert os.readlink(calibration) == str(prior)
+    assert prior.read_bytes() == tree.payloads["ifs"]
 
 
 def test_calibration_symlink_into_an_unreadable_vault_refuses(tmp_path: Path) -> None:
@@ -538,7 +849,7 @@ def test_calibration_symlink_into_an_unreadable_vault_refuses(tmp_path: Path) ->
 
     变体顶层唯一的 `.cfg.ic` 换成指向 `0o000` 目录内真实文件的 symlink -> 判
     `DISCOVERY_UNREADABLE`，**不是** `CALIBRATION_STATE_AMBIGUOUS`（吞掉 `OSError` 的实现
-    会把命中数读成 0，把权限故障说成「prepare 提交形态不对」）。
+    会把命中数读成 0，把权限故障说成「prepare 提交形态不对」）。#96 不改变这一侧。
     """
     skip_if_root()
     tree = Tree(tmp_path)
