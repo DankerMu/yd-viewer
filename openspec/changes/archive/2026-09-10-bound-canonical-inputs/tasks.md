@@ -23,7 +23,7 @@
 - [x] 2.1 Parent runs new oversize tests against old converter: genuine red rejection failures, then focused green; no stash or binding ambiguity.
 - [x] 2.2 Original-vs-final smoke GFS real GRIB/NetCDF + IFS NetCDF compares all products and catalog JSON bytes; existing canonical/symlink suites remain green.
 - [x] 2.3 Parent runs profile serial producer/viewer pytest, ruff, OpenSpec and stage log checks; reviewer fixture approval+strict validation before implementation.
-- [ ] 2.4 Cross-review/verdicts/final review/CI/preauthorized merge, archive and loop log tracked in PR evidence.
+- [x] 2.4 Cross-review/verdicts/final review/CI/preauthorized merge, archive and loop log tracked in PR evidence.
 
 ## 3. Phase 2 oracle adaptation
 - [x] 3.1 Replace pin test_bundle_entries_open_cfgrib_with_entry_specific_filter (fake values incompatible with NumPy, only wiring assertions) with a real multi-message GRIB selection test in the yd-owned module, distinct same-key variable values and no fallback; inventory explicitly registers this one exception. No production fake compatibility path.
