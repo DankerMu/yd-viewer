@@ -2852,3 +2852,150 @@ def test_every_asserted_manifest_value_diverges_from_its_source_side_value(
         origin = source_entry(payload, entry["forecast_hour"], entry["variable"])
         assert entry["forecast_hour"] == origin["forecast_hour"]
         assert entry["variable"] == origin["variable"]
+
+
+# --- Row：目标侧逐段 symlink 拒绝（#71 / raw-staging-target-containment）------
+#
+# 取证是 work 树与链目标的双向 no-follow 递归快照，不是只断言 manifest 缺席。
+# `work_dir` 根豁免由合法根别名绿用例钉死；叶子链走 `copy-failed` 而不是
+# `target-exists`（预检先于 `lexists`）。不覆盖独立 staging 的并发换根。
+
+
+def _no_follow_snapshot(root: Path) -> dict[str, tuple[int, int, int, int]]:
+    """递归快照，不跟随任何目录 symlink；非目录目标记录自身。"""
+    if not os.path.lexists(root):
+        return {}
+    info = os.lstat(root)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return {
+            ".": (
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ino,
+                info.st_mode,
+            )
+        }
+    return snapshot(root)
+
+
+def _destination_rel(component: str) -> Path:
+    source_seg = DIR_SEGMENTS["gfs"]
+    rels = {
+        "raw": Path("raw"),
+        "source": Path("raw") / source_seg,
+        "cycle": Path("raw") / source_seg / CYCLE_DIR,
+        "bundle": Path("raw") / source_seg / CYCLE_DIR / bundle_name("gfs", 6),
+        "manifest": Path(MANIFEST_NAME),
+    }
+    return rels[component]
+
+
+def _assert_zero_write_symlink_refusal(
+    raw_root: Path, work_dir: Path, link_target: Path
+) -> None:
+    before_work = _no_follow_snapshot(work_dir)
+    before_target = _no_follow_snapshot(link_target)
+    before_source = snapshot(raw_root)
+    before_source_content = content_snapshot(raw_root)
+    with pytest.raises(RawStagingError) as excinfo:
+        staged(raw_root, work_dir)
+    expect_kind(excinfo, "copy-failed")
+    assert _no_follow_snapshot(work_dir) == before_work
+    assert _no_follow_snapshot(link_target) == before_target
+    assert snapshot(raw_root) == before_source
+    assert content_snapshot(raw_root) == before_source_content
+
+
+@pytest.mark.parametrize(
+    "component",
+    ["raw", "source", "cycle", "bundle", "manifest"],
+)
+def test_target_descendant_symlink_is_refused_before_any_write(
+    tmp_path: Path, component: str
+) -> None:
+    """外指链：raw / source / cycle 目录段与 bundle / manifest 叶子。"""
+    raw_root, work_dir = build_tree(tmp_path)
+    dest = work_dir / _destination_rel(component)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    elsewhere = tmp_path / f"elsewhere-{component}"
+    if component in {"bundle", "manifest"}:
+        elsewhere.write_bytes(b"external-payload")
+        dest.symlink_to(elsewhere)
+    else:
+        elsewhere.mkdir()
+        (elsewhere / "keep.txt").write_text("outside", encoding="utf-8")
+        dest.symlink_to(elsewhere, target_is_directory=True)
+    _assert_zero_write_symlink_refusal(raw_root, work_dir, elsewhere)
+
+
+@pytest.mark.parametrize(
+    "component",
+    ["raw", "source", "cycle", "bundle", "manifest"],
+)
+def test_internal_destination_symlink_is_refused_before_any_write(
+    tmp_path: Path, component: str
+) -> None:
+    raw_root, work_dir = build_tree(tmp_path)
+    dest = work_dir / _destination_rel(component)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if component in {"bundle", "manifest"}:
+        inside = work_dir / "inside-payload"
+        inside.write_bytes(b"internal-payload")
+        dest.symlink_to(inside)
+        target = inside
+    else:
+        inside = work_dir / "inside-dir"
+        inside.mkdir()
+        (inside / "keep.txt").write_text("inside", encoding="utf-8")
+        dest.symlink_to(inside, target_is_directory=True)
+        target = inside
+    _assert_zero_write_symlink_refusal(raw_root, work_dir, target)
+
+
+@pytest.mark.parametrize(
+    "component",
+    ["raw", "source", "cycle", "bundle", "manifest"],
+)
+def test_dangling_destination_symlink_is_refused_before_any_write(
+    tmp_path: Path, component: str
+) -> None:
+    raw_root, work_dir = build_tree(tmp_path)
+    dest = work_dir / _destination_rel(component)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    missing = tmp_path / f"missing-{component}"
+    dest.symlink_to(
+        missing, target_is_directory=component not in {"bundle", "manifest"}
+    )
+    _assert_zero_write_symlink_refusal(raw_root, work_dir, missing)
+
+
+def test_symlinked_work_root_alias_stages_normally(tmp_path: Path) -> None:
+    """`work_dir` 根自身是指向独立目录的链：合法调用，副本与 manifest 落在物理根下。"""
+    raw_root, _unused = build_tree(tmp_path)
+    physical = tmp_path / "physical-work"
+    physical.mkdir()
+    alias = tmp_path / "work-alias"
+    alias.symlink_to(physical, target_is_directory=True)
+    before_source = snapshot(raw_root)
+    before_source_content = content_snapshot(raw_root)
+
+    result = staged(raw_root, alias)
+
+    assert snapshot(raw_root) == before_source
+    assert content_snapshot(raw_root) == before_source_content
+    expected_copies = tuple(
+        alias / "raw" / "gfs" / CYCLE_DIR / bundle_name("gfs", lead) for lead in LEADS
+    )
+    assert result.copied_files == expected_copies
+    assert result.manifest_path == alias / MANIFEST_NAME
+    for lead, logical in zip(LEADS, expected_copies, strict=True):
+        payload = bundle_bytes(lead)
+        assert logical.read_bytes() == payload
+        physical_copy = physical / logical.relative_to(alias)
+        assert physical_copy.read_bytes() == payload
+        assert not physical_copy.is_symlink()
+    assert (physical / MANIFEST_NAME).is_file()
+    assert not (physical / MANIFEST_NAME).is_symlink()
+    written = json.loads((physical / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert written["source_id"] == "gfs"
+    assert written["cycle_time"] == CYCLE_ISO
