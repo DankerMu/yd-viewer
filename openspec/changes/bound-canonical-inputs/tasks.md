@@ -14,16 +14,16 @@
 - Time series / forcing / temporal boundaries: selected — unchanged math/quality/lineage proven by existing suite and bytes.
 - 状态链 / warm-start 定戳一致性: not selected — no state operations.
 - NWM 快照溯源与 DB-free 隔离: selected — fork register and existing guards.
-- [ ] 1.1 Register each #102 fork in inventory before source; update converter header and issue13 Known limits when implemented.
-- [ ] 1.2 Replace both JSON read sites with existing bounded store API/constant.
-- [ ] 1.3 Add raw stat bound and observed-byte staging cap, exact-limit acceptance, size-specific error before decoders.
-- [ ] 1.4 Keep RawRecord decoded values NumPy float64; inspect/update all consumers without numerical/output drift; do not edit dead _read_records logic or pin tests.
-- [ ] 1.5 Add new yd-owned test_canonical_input_bounds.py: tiny injected limits, valid JSON exact/+1, actual raw exact/+1, stat-growth, cleanup, NumPy retained representation and observable values after close. No source text tests or huge allocations.
+- [x] 1.1 Register each #102 fork in inventory before source; update converter header and issue13 Known limits when implemented.
+- [x] 1.2 Replace both JSON read sites with existing bounded store API/constant.
+- [x] 1.3 Add raw stat bound and observed-byte staging cap, exact-limit acceptance, size-specific error before decoders.
+- [x] 1.4 Keep RawRecord decoded values NumPy float64; inspect/update all consumers without numerical/output drift; do not edit dead _read_records logic or pin tests.
+- [x] 1.5 Add new yd-owned test_canonical_input_bounds.py: tiny injected limits, valid JSON exact/+1, actual raw exact/+1, stat-growth, cleanup, NumPy retained representation and observable values after close. No source text tests or huge allocations.
 ## 2. Verification and delivery
-- [ ] 2.1 Parent runs new oversize tests against old converter: genuine red rejection failures, then focused green; no stash or binding ambiguity.
-- [ ] 2.2 Original-vs-final smoke GFS real GRIB/NetCDF + IFS NetCDF compares all products and catalog JSON bytes; existing canonical/symlink suites remain green.
-- [ ] 2.3 Parent runs profile serial producer/viewer pytest, ruff, OpenSpec and stage log checks; reviewer fixture approval+strict validation before implementation.
+- [x] 2.1 Parent runs new oversize tests against old converter: genuine red rejection failures, then focused green; no stash or binding ambiguity.
+- [x] 2.2 Original-vs-final smoke GFS real GRIB/NetCDF + IFS NetCDF compares all products and catalog JSON bytes; existing canonical/symlink suites remain green.
+- [x] 2.3 Parent runs profile serial producer/viewer pytest, ruff, OpenSpec and stage log checks; reviewer fixture approval+strict validation before implementation.
 - [ ] 2.4 Cross-review/verdicts/final review/CI/preauthorized merge, archive and loop log tracked in PR evidence.
 
 ## 3. Phase 2 oracle adaptation
-- [ ] 3.1 Replace pin test_bundle_entries_open_cfgrib_with_entry_specific_filter (fake values incompatible with NumPy, only wiring assertions) with a real multi-message GRIB selection test in the yd-owned module, distinct same-key variable values and no fallback; inventory explicitly registers this one exception. No production fake compatibility path.
+- [x] 3.1 Replace pin test_bundle_entries_open_cfgrib_with_entry_specific_filter (fake values incompatible with NumPy, only wiring assertions) with a real multi-message GRIB selection test in the yd-owned module, distinct same-key variable values and no fallback; inventory explicitly registers this one exception. No production fake compatibility path.
