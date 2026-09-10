@@ -4,7 +4,7 @@
 - [x] 1.3 Retire m2 task Known-limit for nonfinite output only; preserve other deferred policies.
 ## 2. Verification
 - [x] 2.1 Parent baseline/removal proof makes nonfinite cases fail; fixed focused cases and producer/viewer matrix pass.
-- [ ] 2.2 Ruff check/format, OpenSpec strict/all, stage log and Ubuntu CI pass; no macOS CI.
+- [x] 2.2 Ruff check/format, OpenSpec strict/all, stage log and Ubuntu CI pass; no macOS CI.
 ## Risk packs
 - Public API / CLI / script entry: selected — stage_raw typed failure.
 - Config / project setup: not selected — unchanged.
