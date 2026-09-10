@@ -51,6 +51,7 @@ from yd_producer.store.object_store import (
 from yd_producer.store.safe_fs import (
     SafeFilesystemError,
     directory_identity_no_follow,
+    open_directory_no_follow,
     open_file_no_follow,
     read_bytes_limited_no_follow,
     stat_no_follow,
@@ -270,7 +271,7 @@ class ProductionAttemptDriver:
         identity = _identity_from_prepared(
             source=request.source, cycle=request.cycle, prepared=source
         )
-        scratch_dat = request.work_dir / "output" / "yd.rivqdown.dat"
+        scratch_dat = request.work_dir / "model" / "yd.rivqdown.dat"
         job_log = request.work_dir / "job.log"
         command = (
             sys.executable,
@@ -315,7 +316,7 @@ class ProductionAttemptDriver:
     def collect(
         self, *, attempt: PreparedAttempt, terminal_record: JobRecord
     ) -> AttemptProducts:
-        work_dir = _work_dir_from_attempt(attempt)
+        work_dir = attempt.scratch_dat.parent.parent
         _pin_work_root(work_dir)
         if terminal_record.state is not JobState.SUCCEEDED:
             raise ProductionAttemptError("collect requires a SUCCEEDED terminal record")
@@ -328,7 +329,12 @@ class ProductionAttemptDriver:
             project_name=run_directory.project_name,
             checkpoint_hours=(12,),
         )
-        import_verified_checkpoint(tracker=tracker, record=record)
+        try:
+            import_verified_checkpoint(tracker=tracker, record=record)
+        except TrackerError as error:
+            raise ProductionAttemptError(
+                f"receipt checkpoint import failed: {error}"
+            ) from error
         return AttemptProducts(
             job_id=terminal_record.job_id,
             run_directory=run_directory,
@@ -376,10 +382,6 @@ def _reject_nfs_leak(encoded: bytes, request: AttemptRequest) -> None:
         raise ProductionAttemptError("attempt handoff must not serialize work_identity")
 
 
-def _work_dir_from_attempt(attempt: PreparedAttempt) -> Path:
-    return attempt.scratch_dat.parent.parent
-
-
 def _pin_work_root(work_dir: Path) -> tuple[int, int]:
     try:
         return directory_identity_no_follow(work_dir)
@@ -412,8 +414,6 @@ def _load_json_object(
         ) from error
     if not stat.S_ISREG(info.st_mode):
         raise ProductionAttemptError(f"{label} is not a regular file: {path}")
-    if stat.S_ISFIFO(info.st_mode) or stat.S_ISLNK(info.st_mode):
-        raise ProductionAttemptError(f"{label} must not be a FIFO or symlink: {path}")
     if info.st_size > max_bytes:
         raise ProductionAttemptError(f"{label} exceeds bounded size")
     content = read_bytes_limited_no_follow(
@@ -463,15 +463,8 @@ def _verify_receipt_envelope(
     declared = receipt["identity"]
     if not isinstance(declared, dict) or set(declared) != set(_IDENTITY_KEYS):
         raise ProductionAttemptError("receipt identity keys are not exact")
-    expected = {
-        "source_id": identity.source_id,
-        "cycle_time": identity.cycle_time.isoformat(),
-        "project_name": identity.project_name,
-        "model_id": identity.model_id,
-        "basin_id": identity.basin_id,
-        "basin_version_id": identity.basin_version_id,
-        "river_network_version_id": identity.river_network_version_id,
-    }
+    expected = {key: getattr(identity, key) for key in _IDENTITY_KEYS}
+    expected["cycle_time"] = identity.cycle_time.isoformat()
     if declared != expected:
         raise ProductionAttemptError("receipt WorkIdentity does not match attempt")
     digest = _SHA256_PREFIX + sha256_bytes(
@@ -479,21 +472,11 @@ def _verify_receipt_envelope(
     )
     if receipt["attempt_payload_digest"] != digest:
         raise ProductionAttemptError("receipt attempt payload digest does not match")
-    for label, value, expected_path, checksum_key in (
-        (
-            "scratch_dat",
-            receipt["scratch_dat"],
-            attempt.scratch_dat,
-            "scratch_dat_checksum",
-        ),
-        (
-            "merged_log",
-            receipt["merged_log"],
-            work_dir / "job.log",
-            "merged_log_checksum",
-        ),
+    for label, expected_path, checksum_key in (
+        ("scratch_dat", attempt.scratch_dat, "scratch_dat_checksum"),
+        ("merged_log", work_dir / "job.log", "merged_log_checksum"),
     ):
-        path = Path(value)
+        path = Path(receipt[label])
         if path != expected_path:
             raise ProductionAttemptError(f"receipt {label} is not the declared path")
         _require_regular(path, work_dir)
@@ -526,8 +509,7 @@ def _verify_asset_checksums(receipt: Mapping[str, Any], work_dir: Path) -> None:
 
 
 def _grid_id_from_work(work_dir: Path) -> str:
-    handoff = _load_handoff(work_dir, _pin_work_root(work_dir))
-    return str(handoff["grid_id"])
+    return str(_load_handoff(work_dir, _pin_work_root(work_dir))["grid_id"])
 
 
 def _require_regular(path: Path, work_dir: Path) -> os.stat_result:
@@ -539,8 +521,6 @@ def _require_regular(path: Path, work_dir: Path) -> os.stat_result:
         raise ProductionAttemptError(f"path is not a regular file: {path}") from error
     if not stat.S_ISREG(info.st_mode):
         raise ProductionAttemptError(f"path is not a regular file: {path}")
-    if stat.S_ISFIFO(info.st_mode) or stat.S_ISLNK(info.st_mode):
-        raise ProductionAttemptError(f"path must not be a FIFO or symlink: {path}")
     return info
 
 
@@ -597,7 +577,7 @@ def _verify_checkpoint_member(
         work_dir
         / "model"
         / "state_checkpoints"
-        / f"{identity.project_name}.f012.cfg.ic.update"
+        / (f"{identity.project_name}.f012.cfg.ic.update")
     )
     if path != expected:
         raise ProductionAttemptError("receipt checkpoint path is not the declared leaf")
@@ -631,15 +611,12 @@ def _run_directory_from_receipt(
 
 
 def _checkpoint_from_receipt(payload: Mapping[str, Any]) -> CapturedCheckpoint:
-    checksum = str(payload["checksum"])
-    if checksum.startswith(_SHA256_PREFIX):
-        checksum = checksum.removeprefix(_SHA256_PREFIX)
     return CapturedCheckpoint(
         lead_hours=int(payload["lead_hours"]),
         relative_minute=float(payload["relative_minute"]),
         path=Path(payload["path"]),
         source_name=str(payload["source_name"]),
-        checksum=checksum,
+        checksum=str(payload["checksum"]).removeprefix(_SHA256_PREFIX),
     )
 
 
@@ -725,28 +702,52 @@ def _convert_canonical(staged, store: LocalObjectStore) -> None:
         )
 
 
-def _shud_argv(binary: str, project_name: str) -> tuple[str, ...]:
-    return (binary, project_name)
+def _shud_argv(binary: str, project_name: str, output_dir: Path) -> tuple[str, ...]:
+    return (binary, "-o", str(output_dir), project_name)
 
 
-def _append_job_log(log_path: Path, work_dir: Path, data: bytes) -> None:
+def _append_job_log(
+    log_path: Path, work_dir: Path, root_id: tuple[int, int], data: bytes
+) -> None:
     if not data:
         return
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    parent_fd = os.open(str(log_path.parent), flags)
+    _require_same_root(work_dir, root_id)
     try:
-        fd = os.open(
-            log_path.name,
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-            0o644,
-            dir_fd=parent_fd,
-        )
+        parent_fd = open_directory_no_follow(log_path.parent, containment_root=work_dir)
         try:
-            os.write(fd, data)
+            parent = os.fstat(parent_fd)
+            if (parent.st_dev, parent.st_ino) != root_id:
+                raise ProductionAttemptError(
+                    "job log parent changed while being opened"
+                )
+            _require_same_root(work_dir, root_id)
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_APPEND
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            fd = os.open(log_path.name, flags, 0o644, dir_fd=parent_fd)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise ProductionAttemptError(
+                        f"job log is not a regular file: {log_path}"
+                    )
+                _require_same_root(work_dir, root_id)
+                view = memoryview(data)
+                while view:
+                    written = os.write(fd, view)
+                    if written <= 0:
+                        raise ProductionAttemptError("job log write made no progress")
+                    view = view[written:]
+            finally:
+                os.close(fd)
         finally:
-            os.close(fd)
-    finally:
-        os.close(parent_fd)
+            os.close(parent_fd)
+    except (OSError, SafeFilesystemError) as error:
+        raise ProductionAttemptError(f"cannot append job log: {log_path}") from error
 
 
 def _run_shud_live(
@@ -754,6 +755,7 @@ def _run_shud_live(
     argv: Sequence[str],
     cwd: Path,
     work_dir: Path,
+    root_id: tuple[int, int],
     log_path: Path,
     tracker: CheckpointTracker,
     env: Mapping[str, str],
@@ -775,15 +777,12 @@ def _run_shud_live(
             if ready:
                 chunk = os.read(stream.fileno(), _LOG_CHUNK)
                 if chunk:
-                    _append_job_log(log_path, work_dir, chunk)
+                    _append_job_log(log_path, work_dir, root_id, chunk)
                 else:
                     break
             if process.poll() is not None:
-                leftover = (
-                    os.read(stream.fileno(), _LOG_CHUNK) if stream is not None else b""
-                )
-                if leftover:
-                    _append_job_log(log_path, work_dir, leftover)
+                while chunk := os.read(stream.fileno(), _LOG_CHUNK):
+                    _append_job_log(log_path, work_dir, root_id, chunk)
                 break
         process.wait()
         tracker.capture_available()
@@ -857,8 +856,7 @@ def _write_receipt(
         raise ProductionAttemptError("receipt must not serialize work_identity")
     if set(payload) != _RECEIPT_KEYS:
         raise ProductionAttemptError("receipt envelope keys are not exact")
-    reread = load_bounded_json(encoded, max_bytes=_RECEIPT_MAX_BYTES)
-    if reread != payload:
+    if load_bounded_json(encoded, max_bytes=_RECEIPT_MAX_BYTES) != payload:
         raise ProductionAttemptError("receipt snapshot is not canonical")
     write_bytes_no_follow_exclusive(
         work_dir / RECEIPT_FILENAME,
@@ -931,11 +929,13 @@ def run_private_worker(*, work_dir: Path) -> None:
         project_name=identity.project_name,
         checkpoint_hours=tuple(handoff["checkpoint_hours"]),
     )
-    argv = _shud_argv(str(handoff["shud_binary"]), identity.project_name)
+    binary = str(handoff["shud_binary"])
+    argv = _shud_argv(binary, identity.project_name, run_directory.path)
     code = _run_shud_live(
         argv=argv,
         cwd=run_directory.path,
         work_dir=staged.work_dir,
+        root_id=root_id,
         log_path=job_log,
         tracker=tracker,
         env=env,
@@ -945,14 +945,14 @@ def run_private_worker(*, work_dir: Path) -> None:
 
     def recovery_runner(*, run_directory: RunDirectory, output_dir: Path) -> int:
         recovered = subprocess.Popen(
-            list(argv),
-            cwd=output_dir,
+            list(_shud_argv(binary, identity.project_name, output_dir)),
+            cwd=run_directory.path,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=dict(env),
         )
         stdout, _stderr = recovered.communicate()
-        _append_job_log(job_log, staged.work_dir, stdout)
+        _append_job_log(job_log, staged.work_dir, root_id, stdout)
         return int(recovered.returncode or 0)
 
     try:
@@ -965,8 +965,7 @@ def run_private_worker(*, work_dir: Path) -> None:
         raise ProductionAttemptError(
             f"T+12 checkpoint recovery failed: {error}"
         ) from error
-    if not scratch_dat.is_file():
-        raise ProductionAttemptError(f"SHUD did not write DAT {scratch_dat}")
+    _require_regular(scratch_dat, staged.work_dir)
     slurm_job = os.environ.get("SLURM_JOB_ID")
     if not slurm_job:
         raise ProductionAttemptError("SLURM_JOB_ID is required to bind the receipt")

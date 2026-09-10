@@ -834,11 +834,26 @@ def test_exit_code_command_is_exactly_the_pinned_argv():
         "sacct",
         "-j",
         "12345",
+        "-X",
         "-n",
         "-P",
         "--format=ExitCode",
     )
     assert build_sacct_command("12345")[-1] == "--format=JobID,State,Start,End"
+
+
+def test_exit_code_provider_selects_only_the_allocation_record():
+    calls: list[tuple[str, ...]] = []
+
+    def runner(argv, *, env):
+        calls.append(tuple(argv))
+        return "42:7|\n" if "-X" in argv else "42:7|\n0:0|\n"
+
+    assert (
+        query_failure_exit_code(_terminal_record(JobState.FAILED), runner=runner)
+        == "42:7"
+    )
+    assert calls == [build_exit_code_sacct_command("12345")]
 
 
 @pytest.mark.parametrize("state", [JobState.FAILED, JobState.TIMEOUT])
@@ -915,3 +930,36 @@ def test_exit_code_timeout_is_job_bound_and_does_not_retry():
     assert captured.value.__cause__ is timeout
     assert runner.count == 1
     assert runner._outputs == []
+
+
+def test_job_log_append_refuses_unsafe_leaves_and_completes_short_writes(
+    tmp_path, monkeypatch
+):
+    from yd_producer import nwm as nwm_module
+
+    work = tmp_path / "work"
+    work.mkdir()
+    log = work / "job.log"
+    root_id = nwm_module._pin_work_root(work)
+    original_write = nwm_module.os.write
+
+    def short_write(fd, data):
+        return original_write(fd, data[:2])
+
+    monkeypatch.setattr(nwm_module.os, "write", short_write)
+    nwm_module._append_job_log(log, work, root_id, b"complete-job-log")
+    assert log.read_bytes() == b"complete-job-log"
+    monkeypatch.setattr(nwm_module.os, "write", original_write)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"external")
+    unsafe = (
+        (work / "link.log", lambda path: path.symlink_to(outside)),
+        (work / "fifo.log", os.mkfifo),
+        (work / "directory.log", Path.mkdir),
+    )
+    for path, create in unsafe:
+        create(path)
+        with pytest.raises(nwm_module.ProductionAttemptError):
+            nwm_module._append_job_log(path, work, root_id, b"x")
+    assert log.read_bytes() == b"complete-job-log"
+    assert outside.read_bytes() == b"external"

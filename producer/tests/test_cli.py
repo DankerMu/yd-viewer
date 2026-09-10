@@ -21,7 +21,7 @@ from yd_producer.controller import (
     RunSourcesReport,
     StopReason,
 )
-from yd_producer.executor import JobState
+from yd_producer.executor import JobSpec, JobState
 from yd_producer.init import InitReport
 from yd_producer.nwm import ProductionAttemptDriver
 from yd_producer.runlock import RunLockResult
@@ -322,8 +322,14 @@ def test_run_with_non_empty_states_enters_locked_production_assembly(
     )
     assert kwargs["executors"]["ifs"] is not kwargs["executors"]["gfs"]
     assert kwargs["drivers"]["ifs"] is not kwargs["drivers"]["gfs"]
-    assert isinstance(kwargs["executors"]["ifs"], SlurmJobExecutor)
-    assert isinstance(kwargs["drivers"]["ifs"], ProductionAttemptDriver)
+    assert all(
+        isinstance(executor, SlurmJobExecutor)
+        for executor in kwargs["executors"].values()
+    )
+    assert all(
+        isinstance(driver, ProductionAttemptDriver)
+        for driver in kwargs["drivers"].values()
+    )
     assert kwargs["poll_waits"]["ifs"] is cli._production_poll_wait
     assert "command_timeout_seconds" not in dict(kwargs["local"].slurm)
     assert init_fake.count == 0
@@ -688,6 +694,8 @@ def test_run_lock_skip_returns_zero_with_zero_factories(monkeypatch, tmp_path):
 
 
 def test_run_same_bounded_runner_timeout_37_is_shared(monkeypatch, tmp_path):
+    import yd_producer.slurm as slurm_module
+
     captured: dict[str, object] = {}
 
     def fake_run_sources(**kwargs):
@@ -707,7 +715,33 @@ def test_run_same_bounded_runner_timeout_37_is_shared(monkeypatch, tmp_path):
     assert kwargs["failure_exit_codes"]["ifs"].func is query_failure_exit_code
     assert kwargs["failure_exit_codes"]["ifs"].keywords["runner"] is runner
     assert kwargs["failure_exit_codes"]["gfs"].keywords["runner"] is runner
-    assert "command_timeout_seconds" not in dict(kwargs["local"].slurm)
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_subprocess_run(command, **options):
+        calls.append((list(command), options))
+        if command[0] == "sbatch":
+            stdout = "12345\n"
+        elif command[-1] == "--format=ExitCode":
+            stdout = "42:7|\n"
+        else:
+            stdout = "12345|FAILED|2099-01-01T00:00:00|2099-01-01T00:01:00"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout)
+
+    monkeypatch.setattr(slurm_module.subprocess, "run", fake_subprocess_run)
+    spec = JobSpec(
+        name="yd-ifs-2026010200",
+        work_dir=tmp_path,
+        command=("yd_producer.nwm", "--work-dir", str(tmp_path)),
+        log_path=tmp_path / "job.log",
+        resources=dict(kwargs["local"].slurm),
+    )
+    for source in ("ifs", "gfs"):
+        executor = kwargs["executors"][source]
+        terminal = executor.poll(executor.submit(spec).job_id)
+        assert kwargs["failure_exit_codes"][source](terminal) == "42:7"
+    assert [options["timeout"] for _command, options in calls] == [37] * 6
+    assert "command_timeout_seconds" not in spec.resources
+    assert all("command_timeout_seconds" not in command for command, _ in calls)
 
 
 def test_production_poll_wait_sleeps_exactly_ten_seconds(monkeypatch):
@@ -915,7 +949,7 @@ class _ProviderRunner:
         self.calls += 1
         if self.timeout:
             raise subprocess.TimeoutExpired(argv, 37)
-        assert argv[:3] == ("sacct", "-j", "fake-1")
+        assert argv[:4] == ("sacct", "-j", "fake-1", "-X")
         return self.value
 
 

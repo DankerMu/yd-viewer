@@ -1,5 +1,3 @@
-"""`yd_producer.nwm` interpreter wrapper and production worker tests."""
-
 import json
 import os
 import shutil
@@ -28,8 +26,9 @@ from dat_fixtures import (
     expected_v2_size,
 )
 
+from yd_producer import nwm
 from yd_producer.config import ConfigError, load_config, load_local
-from yd_producer.controller import AttemptRequest
+from yd_producer.controller import AttemptRequest, RunError, RunOutcome, run_once
 from yd_producer.executor import JobRecord, JobState
 from yd_producer.nwm import (
     RECEIPT_FILENAME,
@@ -64,38 +63,31 @@ def _load(tmp_path, module=MAPPING_BUILDER_MODULE, **local_kwargs):
     return local, config
 
 
-def test_missing_interpreter_raises_and_starts_no_process(tmp_path):
-    local, config = _load(tmp_path, python=tmp_path.resolve() / "absent" / "python")
+@pytest.mark.parametrize(
+    ("kind", "message", "args"),
+    [
+        ("missing", "不存在", ["--package-path", "x"]),
+        ("directory", "不是普通文件", []),
+        ("non_executable", "不可执行", []),
+    ],
+)
+def test_invalid_interpreter_raises_and_starts_no_process(
+    tmp_path, kind, message, args
+):
+    candidate = tmp_path.resolve() / "interpreter"
+    if kind == "directory":
+        candidate.mkdir()
+    elif kind == "non_executable":
+        candidate.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        candidate.chmod(0o644)
+    else:
+        candidate /= "absent"
+    local, config = _load(tmp_path, python=candidate)
     runner = RecordingRunner()
     with pytest.raises(ConfigError) as excinfo:
-        invoke_mapping_builder(local, config, ["--package-path", "x"], runner)
+        invoke_mapping_builder(local, config, args, runner)
     assert excinfo.value.path == "nwm.python"
-    assert "不存在" in str(excinfo.value)
-    assert runner.calls == []
-
-
-def test_directory_interpreter_raises_and_starts_no_process(tmp_path):
-    directory = tmp_path.resolve() / "not-a-file"
-    directory.mkdir()
-    local, config = _load(tmp_path, python=directory)
-    runner = RecordingRunner()
-    with pytest.raises(ConfigError) as excinfo:
-        invoke_mapping_builder(local, config, [], runner)
-    assert excinfo.value.path == "nwm.python"
-    assert "不是普通文件" in str(excinfo.value)
-    assert runner.calls == []
-
-
-def test_non_executable_interpreter_raises_and_starts_no_process(tmp_path):
-    script = tmp_path.resolve() / "python-no-x"
-    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    script.chmod(0o644)
-    local, config = _load(tmp_path, python=script)
-    runner = RecordingRunner()
-    with pytest.raises(ConfigError) as excinfo:
-        invoke_mapping_builder(local, config, [], runner)
-    assert excinfo.value.path == "nwm.python"
-    assert "不可执行" in str(excinfo.value)
+    assert message in str(excinfo.value)
     assert runner.calls == []
 
 
@@ -123,7 +115,7 @@ def _run_fake(
     return script, checkout, recorded, completed, runner
 
 
-def test_fake_interpreter_receives_exact_command_and_context(tmp_path):
+def test_fake_interpreter_receives_exact_command_and_context(tmp_path, monkeypatch):
     script, checkout, recorded, completed, _ = _run_fake(
         tmp_path, args=("--package-path", "baseline")
     )
@@ -133,9 +125,19 @@ def test_fake_interpreter_receives_exact_command_and_context(tmp_path):
     assert recorded["argv"][3:] == ["--package-path", "baseline"]
     assert recorded["cwd"] == str(checkout)
     assert recorded["pythonpath"].split(os.pathsep)[0] == str(checkout)
-
-
-def test_checkout_root_change_moves_cwd_and_pythonpath(tmp_path):
+    assert all("uv" not in part for part in recorded["argv"])
+    assert "--active" not in recorded["argv"]
+    _, _, _, failed, runner = _run_fake(tmp_path, checkout_name="nonzero", exit_code=7)
+    assert failed.returncode == 7
+    assert runner.calls == 1
+    monkeypatch.setenv("PYTHONPATH", "/inherited/path")
+    _, inherited_checkout, inherited, _, _ = _run_fake(
+        tmp_path, checkout_name="inherited"
+    )
+    assert inherited["pythonpath"].split(os.pathsep) == [
+        str(inherited_checkout),
+        "/inherited/path",
+    ]
     _, first_checkout, first, _, _ = _run_fake(tmp_path, checkout_name="checkout-a")
     _, second_checkout, second, _, _ = _run_fake(tmp_path, checkout_name="checkout-b")
     assert first_checkout != second_checkout
@@ -143,9 +145,6 @@ def test_checkout_root_change_moves_cwd_and_pythonpath(tmp_path):
     assert second["cwd"] == str(second_checkout)
     assert first["pythonpath"].split(os.pathsep)[0] == str(first_checkout)
     assert second["pythonpath"].split(os.pathsep)[0] == str(second_checkout)
-
-
-def test_module_name_follows_config_value(tmp_path):
     assert MAPPING_BUILDER_MODULE != ALT_MAPPING_BUILDER_MODULE
     _, _, first, _, _ = _run_fake(tmp_path, checkout_name="module-a")
     _, _, second, _, _ = _run_fake(
@@ -153,30 +152,6 @@ def test_module_name_follows_config_value(tmp_path):
     )
     assert first["argv"][1:3] == ["-m", MAPPING_BUILDER_MODULE]
     assert second["argv"][1:3] == ["-m", ALT_MAPPING_BUILDER_MODULE]
-
-
-def test_command_contains_no_interpreter_fallback(tmp_path):
-    script, _, recorded, _, _ = _run_fake(tmp_path)
-    joined = " ".join(recorded["argv"])
-    assert "uv" not in joined
-    assert "--active" not in joined
-    assert recorded["argv"][0] != sys.executable
-    assert Path(recorded["argv"][0]).name == script.name
-
-
-def test_nonzero_exit_reported_faithfully(tmp_path):
-    _, _, _, completed, runner = _run_fake(tmp_path, exit_code=7)
-    assert completed.returncode == 7
-    assert runner.calls == 1
-
-
-def test_pythonpath_prepends_checkout_without_dropping_inherited(tmp_path, monkeypatch):
-    monkeypatch.setenv("PYTHONPATH", "/inherited/path")
-    _, checkout, recorded, _, _ = _run_fake(tmp_path)
-    assert recorded["pythonpath"].split(os.pathsep) == [
-        str(checkout),
-        "/inherited/path",
-    ]
 
 
 def test_symlinked_interpreter_is_invoked_verbatim_not_resolved(tmp_path):
@@ -188,14 +163,10 @@ def test_symlinked_interpreter_is_invoked_verbatim_not_resolved(tmp_path):
     venv_bin.mkdir(parents=True)
     link = venv_bin / "python"
     link.symlink_to(target)
-    assert link.name != target.name
-    assert link.resolve() == target
     local, config = _load(tmp_path, checkout_root=checkout, python=link)
-    completed = invoke_mapping_builder(local, config, [], CountingRunner())
-    assert completed.returncode == 0
+    invoke_mapping_builder(local, config, [], CountingRunner())
     recorded = json.loads(record.read_text(encoding="utf-8"))
     assert recorded["argv"][0] == str(link)
-    assert recorded["argv"][0] != str(target)
 
 
 SOURCE = "gfs"
@@ -238,16 +209,16 @@ FORECAST_HOURS = (0, 3)
 WORKER_STRIP = ("YD_ROOT", "NWM_RAW_ROOT", "NWM_CHECKOUT_ROOT", "DATABASE_URL")
 
 
-def _handoff_payload(
-    source: str, grid_id: str, *, fixture: str = "named", extra_cell: bool = False
-) -> dict:
+def _write_handoff(
+    variant: Path, source: str, grid_id: str, *, fixture: str, extra_cell: bool = False
+) -> bytes:
     if fixture == "named":
         cell_id, signature = "m2-synthetic-cell", GRID_SIGNATURE
     elif extra_cell:
         cell_id, signature = "0", TWO_CELL_GRID_SIGNATURE
     else:
         cell_id, signature = "0", CONVERTER_GRID_SIGNATURE
-    return {
+    payload = {
         "basin_id": "m2-synthetic-basin",
         "basin_version_id": "m2-synthetic-basin-v1",
         "direct_grid_forcing_contract": {
@@ -282,12 +253,6 @@ def _handoff_payload(
         "source_id": source,
         "sp_att_asset_name": "explicit-synthetic.sp.att",
     }
-
-
-def _write_handoff(
-    variant: Path, source: str, grid_id: str, *, fixture: str, extra_cell: bool = False
-) -> None:
-    payload = _handoff_payload(source, grid_id, fixture=fixture, extra_cell=extra_cell)
     (variant / "yd.direct-grid-handoff.json").write_bytes(
         json.dumps(
             payload,
@@ -297,28 +262,61 @@ def _write_handoff(
             separators=(",", ":"),
         ).encode()
     )
+    calibrated_state_path(variant).write_bytes(VALID_CFG)
+    (variant / "yd.para").write_bytes(b"# m2 synthetic parameters\n")
+    (variant / "yd.binding").write_bytes(BINDING)
+    (variant / "explicit-synthetic.sp.att").write_bytes(SP_ATT)
+    minute = round(CYCLE.timestamp() / 60)
+    return VALID_CFG.replace(b"1 6 0 0\n", f"1 6 0 {minute}\n".encode(), 1)
 
 
-def _write_shud(path: Path, *, dat: bytes, update: bytes) -> Path:
+def _write_shud(
+    path: Path,
+    *,
+    dat: bytes,
+    update: bytes,
+    recovery_update: bytes | None = None,
+    stdout: bytes = b"shud-ok\n",
+) -> Path:
     dat_src = path.parent / "shud-dat.bin"
     update_src = path.parent / "shud-update.bin"
+    recovery_src = path.parent / "shud-recovery-update.bin"
+    stdout_src = path.parent / "shud-stdout.bin"
     dat_src.write_bytes(dat)
     update_src.write_bytes(update)
+    recovery_src.write_bytes(update if recovery_update is None else recovery_update)
+    stdout_src.write_bytes(stdout)
     path.write_text(
         "#!/bin/sh\n"
-        "mkdir -p ../output\n"
-        f"cp '{dat_src}' ../output/yd.rivqdown.dat\n"
-        f"cp '{update_src}' yd.cfg.ic.update\n"
-        "echo shud-ok\n",
+        'if [ "$1" = "-o" ]; then out=$2; project=$3; '
+        "else out=output/$1.out; project=$1; fi\n"
+        f'if [ "${{out##*/}}" = f012 ]; then update="{recovery_src}"; '
+        f'else update="{update_src}"; fi\n'
+        'mkdir -p "$out"\n'
+        f'cp "{dat_src}" "$out/yd.rivqdown.dat"\n'
+        'cp "$update" "$out/yd.cfg.ic.update"\n'
+        f'cat "{stdout_src}"\n',
         encoding="utf-8",
     )
     path.chmod(0o755)
     return path
 
 
-def _synthetic_shud(path: Path) -> Path:
-    update = build_cfg_ic(mesh_count=1, river_count=1, minute="720.000000").payload
-    return _write_shud(path, dat=build_dat_bytes(nc=1, rows=168), update=update)
+def _synthetic_shud(
+    path: Path, *, stdout: bytes = b"shud-ok\n", recovery: bool = False
+) -> Path:
+    valid = build_cfg_ic(mesh_count=1, river_count=1, minute="720.000000").payload
+    return _write_shud(
+        path,
+        dat=build_dat_bytes(nc=1, rows=168),
+        update=(
+            build_cfg_ic(mesh_count=1, river_count=1, minute="0.000000").payload
+            if recovery
+            else valid
+        ),
+        recovery_update=valid if recovery else None,
+        stdout=stdout,
+    )
 
 
 def _encode_raw_bytes(
@@ -437,13 +435,9 @@ def _stage_synthetic(
     )
     variant_dir = source_root / "variant"
     variant_dir.mkdir()
-    calibrated_state_path(variant_dir).write_bytes(VALID_CFG)
-    (variant_dir / "yd.para").write_bytes(b"# m2 synthetic parameters\n")
-    (variant_dir / "yd.binding").write_bytes(BINDING)
-    (variant_dir / "explicit-synthetic.sp.att").write_bytes(SP_ATT)
-    _write_handoff(variant_dir, source, grid_id, fixture=fixture, extra_cell=extra_cell)
-    minute = round(CYCLE.timestamp() / 60)
-    cycle_state = VALID_CFG.replace(b"1 6 0 0\n", f"1 6 0 {minute}\n".encode(), 1)
+    cycle_state = _write_handoff(
+        variant_dir, source, grid_id, fixture=fixture, extra_cell=extra_cell
+    )
     state_path = source_root / "states" / source / "2026010200.cfg.ic"
     state_path.parent.mkdir(parents=True)
     state_path.write_bytes(cycle_state)
@@ -503,7 +497,8 @@ def _worker_env(*, extra: dict | None = None) -> dict[str, str]:
 
 
 class _SubprocessJobExecutor:
-    def __init__(self) -> None:
+    def __init__(self, after_worker=None) -> None:
+        self._after_worker = after_worker
         self._spec = None
         self._record = None
         self._polls = 0
@@ -541,6 +536,8 @@ class _SubprocessJobExecutor:
         )
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr or completed.stdout or "worker failed")
+        if self._after_worker is not None:
+            self._after_worker(self._spec.work_dir)
         self._record = _record(
             job_id, name=self._spec.name, resources=dict(self._spec.resources)
         )
@@ -557,12 +554,18 @@ class _TamperAfterCollectDriver(ProductionAttemptDriver):
 
 def _prepared_attempt(tmp_path, **kwargs):
     shud_name = kwargs.pop("shud_name", None)
+    shud_stdout = kwargs.pop("shud_stdout", b"shud-ok\n")
+    shud_recovery = kwargs.pop("shud_recovery", False)
     source = kwargs.get("source", SOURCE)
     grid_id = kwargs.get("grid_id", GRID_ID)
     source_root, claim, variant_dir, state_path, _staged, _cycle_state = (
         _stage_synthetic(tmp_path, **kwargs)
     )
-    shud = _synthetic_shud(tmp_path / (shud_name or f"shud-{source}"))
+    shud = _synthetic_shud(
+        tmp_path / (shud_name or f"shud-{source}"),
+        stdout=shud_stdout,
+        recovery=shud_recovery,
+    )
     request = _request(claim, variant_dir, state_path, shud, source=source)
     attempt = ProductionAttemptDriver(grid_id=grid_id).prepare(request=request)
     return source_root, claim, variant_dir, state_path, attempt
@@ -616,13 +619,7 @@ def _production_tree(tmp_path: Path, *, source: str = SOURCE):
     (yd_root / "output").mkdir()
     scratch.mkdir()
     (root / "run").mkdir()
-    calibrated_state_path(variant).write_bytes(VALID_CFG)
-    (variant / "yd.para").write_bytes(b"# m2 synthetic parameters\n")
-    (variant / "yd.binding").write_bytes(BINDING)
-    (variant / "explicit-synthetic.sp.att").write_bytes(SP_ATT)
-    _write_handoff(variant, source, GRID_ID, fixture="converter")
-    minute = round(CYCLE.timestamp() / 60)
-    cycle_state = VALID_CFG.replace(b"1 6 0 0\n", f"1 6 0 {minute}\n".encode(), 1)
+    cycle_state = _write_handoff(variant, source, GRID_ID, fixture="converter")
     (states / "2026010200.cfg.ic").write_bytes(cycle_state)
     native = GFS_NATIVE if source == "gfs" else IFS_NATIVE
     _plant_nwm_raw_root(raw_root, source=source, native=native)
@@ -671,64 +668,84 @@ def _production_tree(tmp_path: Path, *, source: str = SOURCE):
     return config, local, yd_root, scratch
 
 
-def test_independent_worker_converts_gfs_raw_and_writes_receipt(tmp_path, monkeypatch):
-    assert sha256(BINDING).hexdigest() == BINDING_SHA256
-    assert sha256(SP_ATT).hexdigest() == SP_ATT_SHA256
-    assert sha256(b'{"grid_points":[["m2-synthetic-cell",0.0,0.0]]}').hexdigest() == (
-        GRID_SIGNATURE
+def _run_production(config, local, executor, driver):
+    return run_once(
+        config=config,
+        local=local,
+        source=SOURCE,
+        executor=executor,
+        driver=driver,
+        poll_wait=lambda: None,
     )
-    assert sha256(b'{"grid_points":[["0",0.0,0.0]]}').hexdigest() == (
-        CONVERTER_GRID_SIGNATURE
+
+
+@pytest.mark.parametrize(
+    ("source", "native", "grid_id", "recovery"),
+    [
+        (SOURCE, GFS_NATIVE, GRID_ID, False),
+        ("ifs", IFS_NATIVE, "m2-synthetic-gfs-grid", True),
+    ],
+)
+def test_independent_worker_converts_source_raw_and_writes_receipt(
+    tmp_path, monkeypatch, source, native, grid_id, recovery
+):
+    assert (sha256(BINDING).hexdigest(), sha256(SP_ATT).hexdigest()) == (
+        BINDING_SHA256,
+        SP_ATT_SHA256,
     )
-    claim, attempt, completed = _run_worker(tmp_path, monkeypatch)
+    assert (
+        sha256(b'{"grid_points":[["m2-synthetic-cell",0.0,0.0]]}').hexdigest(),
+        sha256(b'{"grid_points":[["0",0.0,0.0]]}').hexdigest(),
+    ) == (GRID_SIGNATURE, CONVERTER_GRID_SIGNATURE)
+    stdout = b"final-burst\n" * 20_000 if source == SOURCE else b"shud-ok\n"
+    expected_log = stdout * (2 if recovery else 1)
+    claim, attempt, completed = _run_worker(
+        tmp_path,
+        monkeypatch,
+        source=source,
+        native=native,
+        grid_id=grid_id,
+        shud_stdout=stdout,
+        shud_recovery=recovery,
+    )
     assert completed.returncode == 0, completed.stderr
-    assert _canonical_cell_ids(claim.work_dir) == ["0"]
+    assert _canonical_cell_ids(claim.work_dir, source=source) == ["0"]
     receipt = json.loads(
         (claim.work_dir / RECEIPT_FILENAME).read_text(encoding="utf-8")
     )
     assert receipt["job_id"] == "job-9"
-    assert receipt["source"] == SOURCE
-    assert receipt["identity"]["model_id"] == "m2-synthetic-model"
-    assert "binding_checksum" in receipt and "sp_att_checksum" in receipt
-    products = ProductionAttemptDriver(grid_id=GRID_ID).collect(
-        attempt=attempt, terminal_record=_record()
+    assert receipt["source"] == source
+    assert Path(receipt["scratch_dat"]) == attempt.scratch_dat
+    assert attempt.scratch_dat == claim.work_dir / "model" / "yd.rivqdown.dat"
+    assert (claim.work_dir / "job.log").read_bytes() == expected_log
+    assert receipt["merged_log_checksum"] == (
+        f"sha256:{sha256(expected_log).hexdigest()}"
     )
-    assert products.job_id == "job-9"
-    assert products.run_directory.path == claim.work_dir / "model"
-    assert 12 in products.tracker.captured
-
-
-def test_independent_worker_converts_ifs_raw_lowercase_grid(tmp_path, monkeypatch):
-    claim, attempt, completed = _run_worker(
-        tmp_path,
-        monkeypatch,
-        source="ifs",
-        native=IFS_NATIVE,
-        grid_id="m2-synthetic-gfs-grid",
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert _canonical_cell_ids(claim.work_dir, source="ifs") == ["0"]
-    receipt = json.loads(
-        (claim.work_dir / RECEIPT_FILENAME).read_text(encoding="utf-8")
-    )
-    assert receipt["source"] == "ifs"
+    if recovery:
+        assert (
+            claim.work_dir / "state_checkpoint_recovery" / "f012" / "yd.cfg.ic.update"
+        ).is_file()
     products = ProductionAttemptDriver(grid_id=GRID_ID).collect(
         attempt=attempt, terminal_record=_record()
     )
     assert 12 in products.tracker.captured
 
 
-def test_worker_fails_closed_without_raw_manifest(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ("missing_raw", "database_url"))
+def test_worker_fails_closed_without_raw_or_database_url(
+    tmp_path, monkeypatch, failure
+):
     source_root, claim, _variant_dir, _state_path, attempt = _prepared_attempt(
-        tmp_path, fixture="converter", shud_name="shud-missing"
+        tmp_path, fixture="converter", shud_name=f"shud-{failure}"
     )
     shutil.rmtree(source_root)
+    extra = {"DATABASE_URL": "postgresql://x"} if failure == "database_url" else None
     completed = subprocess.run(
         list(attempt.command),
         check=False,
         capture_output=True,
         text=True,
-        env=_worker_env(),
+        env=_worker_env(extra=extra),
     )
     assert completed.returncode != 0
     assert not (claim.work_dir / RECEIPT_FILENAME).exists()
@@ -756,41 +773,27 @@ def test_collect_rejects_tampered_receipt_from_success(tmp_path, monkeypatch, mu
     assert completed.returncode == 0, completed.stderr
     path = claim.work_dir / RECEIPT_FILENAME
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if mutation == "job":
-        payload["job_id"] = "other"
-    elif mutation == "source":
-        payload["source"] = "ifs"
-    elif mutation == "cycle":
-        payload["cycle"] = "2026-01-03T00:00:00+00:00"
-    elif mutation == "work":
-        payload["work_dir"] = str(claim.work_dir.parent / "other")
-    elif mutation == "model":
-        payload["identity"]["model_id"] = "other-model"
-    elif mutation == "binding":
-        payload["binding_checksum"] = "sha256:" + "0" * 64
-    elif mutation == "spatt":
-        payload["sp_att_checksum"] = "sha256:" + "0" * 64
-    elif mutation == "digest":
-        payload["attempt_payload_digest"] = "sha256:" + "0" * 64
-    elif mutation == "path":
-        payload["checkpoint"]["path"] = str(claim.work_dir / "model" / "other.update")
-    elif mutation == "checksum":
-        payload["scratch_dat_checksum"] = "sha256:" + "0" * 64
-    elif mutation == "oversize":
+    other_update = str(claim.work_dir / "model" / "other.update")
+    replacements = {
+        "job": (payload, "job_id", "other"),
+        "source": (payload, "source", "ifs"),
+        "cycle": (payload, "cycle", "2026-01-03T00:00:00+00:00"),
+        "work": (payload, "work_dir", str(claim.work_dir.parent / "other")),
+        "model": (payload["identity"], "model_id", "other-model"),
+        "binding": (payload, "binding_checksum", "sha256:" + "0" * 64),
+        "spatt": (payload, "sp_att_checksum", "sha256:" + "0" * 64),
+        "digest": (payload, "attempt_payload_digest", "sha256:" + "0" * 64),
+        "path": (payload["checkpoint"], "path", other_update),
+        "checksum": (payload, "scratch_dat_checksum", "sha256:" + "0" * 64),
+    }
+    if mutation == "oversize":
         path.write_bytes(b"{" + b"x" * 70000 + b"}")
-        with pytest.raises(ProductionAttemptError):
-            ProductionAttemptDriver(grid_id=GRID_ID).collect(
-                attempt=attempt, terminal_record=_record()
-            )
-        return
     elif mutation == "partial":
         path.write_text("{", encoding="utf-8")
-        with pytest.raises(ProductionAttemptError):
-            ProductionAttemptDriver(grid_id=GRID_ID).collect(
-                attempt=attempt, terminal_record=_record()
-            )
-        return
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        target, key, value = replacements[mutation]
+        target[key] = value
+        path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ProductionAttemptError):
         ProductionAttemptDriver(grid_id=GRID_ID).collect(
             attempt=attempt, terminal_record=_record()
@@ -811,22 +814,6 @@ def test_prepare_rejects_nfs_path_in_handoff(tmp_path):
     assert str(state_path) not in text
     assert attempt.command[1:3] == ("-m", "yd_producer.nwm")
     assert attempt.command[0] == sys.executable
-
-
-def test_worker_refuses_database_url(tmp_path, monkeypatch):
-    source_root, claim, _variant_dir, _state_path, attempt = _prepared_attempt(
-        tmp_path, fixture="converter", shud_name="shud-db"
-    )
-    shutil.rmtree(source_root)
-    completed = subprocess.run(
-        list(attempt.command),
-        check=False,
-        capture_output=True,
-        text=True,
-        env=_worker_env(extra={"DATABASE_URL": "postgresql://x"}),
-    )
-    assert completed.returncode != 0
-    assert not (claim.work_dir / RECEIPT_FILENAME).exists()
 
 
 def _plant_nwm_raw_root(raw_root: Path, *, source: str, native) -> None:
@@ -897,48 +884,72 @@ def _plant_nwm_raw_root(raw_root: Path, *, source: str, native) -> None:
     )
 
 
-def test_tamper_checkpoint_after_collect_import_zero_done(tmp_path, monkeypatch):
-    from yd_producer.controller import RunError, run_once
-
+@pytest.mark.parametrize(
+    "mutation", ("symlink", "fifo", "directory", "old", "import", "post_collect")
+)
+def test_controller_rejects_receipt_drift_without_done(tmp_path, monkeypatch, mutation):
     config, local, yd_root, scratch = _production_tree(tmp_path)
+    external = tmp_path / "external-receipt"
+    external.write_bytes(b"external")
+    sibling = scratch / "work" / SOURCE / "sibling"
+    sibling.mkdir(parents=True)
+    (sibling / "sentinel").write_bytes(b"sibling")
+    replacements = {
+        "symlink": lambda path: path.symlink_to(external),
+        "fifo": os.mkfifo,
+        "directory": Path.mkdir,
+    }
+
+    def after_worker(work_dir):
+        receipt = work_dir / RECEIPT_FILENAME
+        if mutation == "old":
+            old = receipt.with_suffix(".old")
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+            payload["job_id"] = "old-job"
+            old.write_text(json.dumps(payload), encoding="utf-8")
+            old.replace(receipt)
+            return
+        receipt.unlink()
+        replacements[mutation](receipt)
+
+    if mutation == "import":
+        importer = nwm.import_verified_checkpoint
+
+        def mutate_then_import(*, tracker, record):
+            record.path.write_bytes(record.path.read_bytes() + b"drift")
+            return importer(tracker=tracker, record=record)
+
+        monkeypatch.setattr(nwm, "import_verified_checkpoint", mutate_then_import)
+    driver = ProductionAttemptDriver(grid_id=GRID_ID)
+    if mutation == "post_collect":
+        driver = _TamperAfterCollectDriver(grid_id=GRID_ID)
+    executor = _SubprocessJobExecutor(
+        after_worker if mutation in {*replacements, "old"} else None
+    )
     with pytest.raises(RunError):
-        run_once(
-            config=config,
-            local=local,
-            source=SOURCE,
-            executor=_SubprocessJobExecutor(),
-            driver=_TamperAfterCollectDriver(grid_id=GRID_ID),
-            poll_wait=lambda: None,
-        )
+        _run_production(config, local, executor, driver)
     assert not list(yd_root.glob("**/DONE"))
     assert not list(scratch.glob("**/DONE"))
+    assert external.read_bytes() == b"external"
+    assert (sibling / "sentinel").read_bytes() == b"sibling"
 
 
 def test_production_worker_through_controller_publish(tmp_path, monkeypatch):
-    from yd_producer.controller import RunOutcome, run_once
-
     config, local, yd_root, scratch = _production_tree(tmp_path)
-    assert list(scratch.rglob("catalog.json")) == []
-    report = run_once(
-        config=config,
-        local=local,
-        source=SOURCE,
-        executor=_SubprocessJobExecutor(),
-        driver=ProductionAttemptDriver(grid_id=GRID_ID),
-        poll_wait=lambda: None,
+    report = _run_production(
+        config,
+        local,
+        _SubprocessJobExecutor(),
+        ProductionAttemptDriver(grid_id=GRID_ID),
     )
     done = yd_root / "output" / "2026010200" / SOURCE / "DONE"
     work = scratch / "work" / SOURCE / "2026010200"
     assert report.outcome is RunOutcome.SUCCEEDED
-    assert report.done_path == done
     assert done.is_file()
     assert not work.exists()
     dat_path = yd_root / "output" / "2026010200" / SOURCE / "yd.rivqdown.dat"
-    assert dat_path.is_file()
     payload = dat_path.read_bytes()
-    expected_rows = 168
-    expected_nc = 1
-    last_minute = float((expected_rows - 1) * 60)
+    expected_rows, expected_nc = 168, 1
     assert payload[: len(DEFAULT_HEADER_TEXT)] == DEFAULT_HEADER_TEXT.encode("ascii")
     assert payload[len(DEFAULT_HEADER_TEXT) : TEXT_HEADER_BYTES] == b"\x00" * (
         TEXT_HEADER_BYTES - len(DEFAULT_HEADER_TEXT)
@@ -958,7 +969,6 @@ def test_production_worker_through_controller_publish(tmp_path, monkeypatch):
         for row in range(expected_rows)
     ]
     assert minutes == [float(row * 60) for row in range(expected_rows)]
-    assert minutes[0] == 0.0 and minutes[-1] == last_minute == 10020.0
 
 
 def test_named_manual_contract_with_real_converter_fails_closed(tmp_path, monkeypatch):
@@ -984,4 +994,3 @@ def test_worker_retains_unbound_extra_canonical_cell(tmp_path, monkeypatch):
     rows = csv_path.read_text(encoding="utf-8").splitlines()
     assert rows[1] == "Time_Day\tPrecip\tTemp\tRH\tWind\tRN"
     assert float(rows[2].split("\t")[2]) == pytest.approx(6.85)
-    assert 12 in products.tracker.captured

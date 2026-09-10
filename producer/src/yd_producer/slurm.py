@@ -377,8 +377,8 @@ class SlurmJobExecutor:
 
 
 def build_exit_code_sacct_command(job_id: str) -> tuple[str, ...]:
-    """Assemble the #47 one-shot ExitCode query. Poll columns stay untouched."""
-    return ("sacct", "-j", job_id, "-n", "-P", "--format=ExitCode")
+    """Assemble the allocation-only #47 ExitCode query; poll columns stay untouched."""
+    return ("sacct", "-j", job_id, "-X", "-n", "-P", "--format=ExitCode")
 
 
 def parse_exit_code_field(stdout: str, job_id: str) -> str:
@@ -413,7 +413,7 @@ def query_failure_exit_code(
     *,
     runner: Callable[..., str],
 ) -> str:
-    """Query ``sacct -j <job_id> -n -P --format=ExitCode`` once for FAILED/TIMEOUT."""
+    """Query allocation-only ExitCode once for FAILED/TIMEOUT."""
     job_id = record.job_id
     if record.state not in (JobState.FAILED, JobState.TIMEOUT):
         raise ExecutorError(
