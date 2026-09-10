@@ -13,6 +13,7 @@
 """
 
 import argparse
+import os
 from pathlib import Path
 
 import pytest
@@ -557,6 +558,58 @@ def test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes(
     err = capsys.readouterr().err
     assert str(yd_root / "input" / "models" / "yd_gfs") in err
     assert "Traceback" not in err
+
+
+def test_top_level_staging_residue_exits_one_with_sorted_paths(
+    monkeypatch, capsys, tmp_path
+):
+    """CLI：顶层混合残留必须 exit 1（不是 3），stderr 含排序绝对路径与 docs/agent-ops.md。"""
+    monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
+    argv = _prepare_argv(tmp_path)
+    yd_root = tmp_path.resolve() / "yd"
+    prefix = prepare_module._STAGING_PREFIX
+    outside = tmp_path.resolve() / "outside"
+    outside.mkdir()
+    real_dir = outside / "dir"
+    real_dir.mkdir()
+    real_file = outside / "file"
+    real_file.write_bytes(b"keep-file\n")
+    (yd_root / f"{prefix}-zzz").mkdir()
+    (yd_root / f"{prefix}-file").write_bytes(b"keep\n")
+    (yd_root / f"{prefix}-link-dir").symlink_to(real_dir)
+    (yd_root / f"{prefix}-link-file").symlink_to(real_file)
+    (yd_root / f"{prefix}-dangling").symlink_to(outside / "missing")
+    os.mkfifo(yd_root / f"{prefix}-fifo")
+    (yd_root / prefix).write_bytes(b"exact-prefix\n")
+    (yd_root / f"{prefix}Xsuffix").write_bytes(b"non-hyphen\n")
+    decoy = yd_root / f"keep{prefix}-inside"
+    decoy.mkdir()
+    matches = sorted(
+        str(path)
+        for path in (
+            yd_root / prefix,
+            yd_root / f"{prefix}-dangling",
+            yd_root / f"{prefix}-fifo",
+            yd_root / f"{prefix}-file",
+            yd_root / f"{prefix}-link-dir",
+            yd_root / f"{prefix}-link-file",
+            yd_root / f"{prefix}-zzz",
+            yd_root / f"{prefix}Xsuffix",
+        )
+    )
+
+    assert _exit_code(argv, env={}) == 1
+
+    err = capsys.readouterr().err
+    path_lines = err.rsplit("：\n", 1)[-1].splitlines()
+    assert path_lines == matches
+    assert str(decoy) not in err
+    assert not decoy.name.startswith(prefix)
+    assert prefix in decoy.name
+    assert "docs/agent-ops.md" in err
+    assert "人工清理" in err
+    assert "Traceback" not in err
+    assert "归属 M4" not in err
 
 
 def test_prepare_delegates_resolved_baseline_path(monkeypatch, tmp_path):

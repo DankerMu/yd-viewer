@@ -16,6 +16,7 @@ agent-ops §4.1/§4.2；`test_cli.py:220-222` 已就此立过约定）。本文�
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -318,6 +319,181 @@ def test_existing_viewer_geojson_is_refused_byte_for_byte(env, name):
     assert (viewer / name).read_bytes() == known
     assert not (env.yd_root / "input" / "models").exists()
     assert_untouched(env, before, builder)
+
+
+# --- #83 启动时拒绝遗留 staging ---------------------------------------------
+
+
+def _nofollow_tree_snapshot(root: Path) -> dict[str, tuple[object, ...]]:
+    snapshot: dict[str, tuple[object, ...]] = {}
+    if not os.path.lexists(root):
+        return snapshot
+
+    def add(rel: str, path: Path) -> None:
+        info = os.lstat(path)
+        kind = stat.S_IFMT(info.st_mode)
+        if stat.S_ISLNK(kind):
+            snapshot[rel] = ("symlink", info.st_mode, os.readlink(path))
+            return
+        if stat.S_ISREG(kind):
+            snapshot[rel] = ("reg", info.st_mode, path.read_bytes())
+            return
+        if not stat.S_ISDIR(kind):
+            snapshot[rel] = ("other", kind, info.st_mode, info.st_size)
+            return
+        snapshot[rel] = ("dir", info.st_mode)
+        for name in sorted(os.listdir(path)):
+            child = name if rel == "." else f"{rel}/{name}"
+            add(child, path / name)
+
+    add(".", root)
+    return snapshot
+
+
+def _plant_mixed_staging_residue(yd_root: Path) -> tuple[list[Path], Path]:
+    """顶层混合残留：目录/文件/链到目录/链到文件/断链/FIFO/精确前缀/非连字符后缀。
+
+    对照项名字含相似子串但不以前缀开头，不得出现在拒绝名单里。
+    """
+    prefix = prepare_module._STAGING_PREFIX
+    outside = yd_root.parent / "outside-of-yd-root"
+    outside.mkdir()
+    real_dir = outside / "real-dir"
+    real_dir.mkdir()
+    (real_dir / "payload").write_bytes(b"link-to-dir-target\n")
+    real_file = outside / "real-file"
+    real_file.write_bytes(b"link-to-file-target\n")
+    (yd_root / f"{prefix}-zzz-dir").mkdir()
+    (yd_root / f"{prefix}-zzz-dir" / "keep").write_bytes(b"directory-payload\n")
+    (yd_root / f"{prefix}-file").write_bytes(b"regular-file-payload\n")
+    (yd_root / f"{prefix}-link-dir").symlink_to(real_dir)
+    (yd_root / f"{prefix}-link-file").symlink_to(real_file)
+    (yd_root / f"{prefix}-dangling").symlink_to(outside / "missing-target")
+    os.mkfifo(yd_root / f"{prefix}-fifo")
+    (yd_root / prefix).mkdir()
+    (yd_root / prefix / "keep").write_bytes(b"exact-prefix-payload\n")
+    (yd_root / f"{prefix}Xnohyphen").write_bytes(b"non-hyphen-suffix\n")
+    decoy = yd_root / f"keep{prefix}-inside"
+    decoy.mkdir()
+    (decoy / "keep").write_bytes(b"decoy-payload\n")
+    matches = sorted(
+        [
+            yd_root / prefix,
+            yd_root / f"{prefix}-dangling",
+            yd_root / f"{prefix}-fifo",
+            yd_root / f"{prefix}-file",
+            yd_root / f"{prefix}-link-dir",
+            yd_root / f"{prefix}-link-file",
+            yd_root / f"{prefix}-zzz-dir",
+            yd_root / f"{prefix}Xnohyphen",
+        ]
+    )
+    return matches, decoy
+
+
+def test_mixed_top_level_staging_residue_is_refused_before_any_work(env, monkeypatch):
+    """顶层混合 `_STAGING_PREFIX*` 一律拒绝：排序列出全部绝对路径，零工作。"""
+    matches, decoy = _plant_mixed_staging_residue(env.yd_root)
+    outside = env.yd_root.parent / "outside-of-yd-root"
+    before_yd = _nofollow_tree_snapshot(env.yd_root)
+    before_scratch = _nofollow_tree_snapshot(env.scratch_root)
+    before_outside = _nofollow_tree_snapshot(outside)
+    builder = make_builder(env)
+    probe = _probe_rename(monkeypatch)
+    listed = [str(path) for path in matches]
+    variant_calls: list[str] = []
+    created: list[Path] = []
+    real_variant_targets = prepare_module.variant_targets
+
+    def tracking_variant_targets(*args, **kwargs):
+        variant_calls.append("variant_targets")
+        return real_variant_targets(*args, **kwargs)
+
+    def refuse_ensure_directory(path, created_entries, *, lower_bound=None):
+        del created_entries, lower_bound
+        created.append(Path(path))
+        raise AssertionError(f"scratch/staging directory created: {path}")
+
+    monkeypatch.setattr(prepare_module, "variant_targets", tracking_variant_targets)
+    monkeypatch.setattr(prepare_module, "_ensure_directory", refuse_ensure_directory)
+
+    with pytest.raises(PrepareError) as captured:
+        run(env, builder)
+
+    message = str(captured.value)
+    path_lines = message.rsplit("：\n", 1)[-1].splitlines()
+    assert path_lines == listed
+    assert str(decoy) not in message
+    assert not decoy.name.startswith(prepare_module._STAGING_PREFIX)
+    assert prepare_module._STAGING_PREFIX in decoy.name
+    assert probe.count == 0
+    assert variant_calls == []
+    assert created == []
+    assert _nofollow_tree_snapshot(env.yd_root) == before_yd
+    assert _nofollow_tree_snapshot(outside) == before_outside
+    assert _nofollow_tree_snapshot(env.scratch_root) == before_scratch
+    assert builder.count == 0
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError(errno.EACCES, "permission denied"),
+        OSError(errno.EIO, "input/output error"),
+        OSError(errno.ESTALE, "stale file handle"),
+        safe_fs.SafeFilesystemError("injected list failure", kind="io"),
+    ],
+    ids=["EACCES", "EIO", "ESTALE", "SafeFilesystemError"],
+)
+def test_staging_residue_discovery_failure_is_a_typed_refusal(env, monkeypatch, error):
+    """顶层枚举 EACCES/EIO/ESTALE/`SafeFilesystemError` 一律 `PrepareError`，零工作。"""
+    before = tree_snapshot(env.yd_root)
+    builder = make_builder(env)
+    probe = _probe_rename(monkeypatch)
+    listed: list[Path] = []
+    variant_calls: list[str] = []
+    real_variant_targets = prepare_module.variant_targets
+
+    def boom(path, *args, **kwargs):
+        listed.append(Path(path))
+        raise error
+
+    def tracking_variant_targets(*args, **kwargs):
+        variant_calls.append("variant_targets")
+        return real_variant_targets(*args, **kwargs)
+
+    monkeypatch.setattr(prepare_module.safe_fs, "list_directory_no_follow", boom)
+    monkeypatch.setattr(prepare_module, "variant_targets", tracking_variant_targets)
+
+    with pytest.raises(PrepareError) as captured:
+        run(env, builder)
+
+    assert listed == [env.yd_root]
+    assert not isinstance(captured.value, BuilderUnavailableError)
+    assert str(env.yd_root) in str(captured.value)
+    assert probe.count == 0
+    assert variant_calls == []
+    assert_untouched(env, before, builder)
+
+
+def test_nested_or_non_prefix_staging_names_do_not_block_prepare(env):
+    """仅嵌套前缀名或非前缀名不得挡住注入 builder 的成功路径。"""
+    nested_parent = env.yd_root / "input"
+    nested_parent.mkdir()
+    nested = nested_parent / f"{prepare_module._STAGING_PREFIX}-nested"
+    nested.mkdir()
+    (nested / "keep").write_bytes(b"nested-only\n")
+    decoy = env.yd_root / "staging-lookalike"
+    decoy.mkdir()
+    (decoy / "keep").write_bytes(b"non-prefix\n")
+    builder = make_builder(env)
+
+    report = run(env, builder)
+
+    assert report.variants
+    assert (nested / "keep").read_bytes() == b"nested-only\n"
+    assert (decoy / "keep").read_bytes() == b"non-prefix\n"
+    assert tree_snapshot(env.scratch_root) == {}
 
 
 # --- 变体相对路径的 fail-closed 闸门 ----------------------------------------

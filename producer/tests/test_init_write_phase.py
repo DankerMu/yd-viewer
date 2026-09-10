@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -665,6 +667,62 @@ def test_bootstrap_is_not_idempotent_and_refuses_on_second_run(
     assert first.refusal is None
     assert second.refusal is InitRefusal.STATES_NOT_EMPTY
     assert snapshot(tree.states) == before_states
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["directory", "file", "link", "fifo"],
+)
+def test_init_ignores_top_level_prepare_staging_on_fresh_lanes(
+    tmp_path: Path, kind: str
+) -> None:
+    """#83：init 在 states/output 仍全新时忽略根级 `_STAGING_PREFIX*`，不认领不删除。"""
+    from yd_producer import prepare as prepare_module
+
+    tree = Tree(tmp_path)
+    prefix = prepare_module._STAGING_PREFIX
+    entry = tree.yd_root / f"{prefix}-{kind}"
+    if kind == "directory":
+        entry.mkdir()
+        (entry / "keep").write_bytes(b"staging-dir\n")
+    elif kind == "file":
+        entry.write_bytes(b"staging-file\n")
+    elif kind == "link":
+        target = tmp_path.resolve() / "outside-link-target"
+        target.write_bytes(b"link-target\n")
+        entry.symlink_to(target)
+    else:
+        os.mkfifo(entry)
+    before_states = snapshot(tree.states)
+    before_output = snapshot(tree.output)
+    existed = os.path.lexists(entry)
+    mode = entry.lstat().st_mode
+    link = os.readlink(entry) if kind == "link" else None
+    payload = None
+    if kind == "directory":
+        payload = (entry / "keep").read_bytes()
+    elif kind == "file":
+        payload = entry.read_bytes()
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, datetime(2026, 8, 25, 0, tzinfo=UTC))
+
+    report = tree.run()
+
+    assert report.refusal is None
+    assert len(report.written) == len(WRITE_ORDER)
+    assert os.path.lexists(entry) is existed
+    if kind == "directory":
+        assert (entry / "keep").read_bytes() == payload == b"staging-dir\n"
+    elif kind == "file":
+        assert entry.read_bytes() == payload == b"staging-file\n"
+    elif kind == "link":
+        assert entry.is_symlink()
+        assert os.readlink(entry) == link
+    else:
+        assert stat.S_ISFIFO(entry.lstat().st_mode)
+        assert entry.lstat().st_mode == mode
+    assert snapshot(tree.states) != before_states
+    assert snapshot(tree.output) == before_output
 
 
 # --- 跨 issue 兼容：#22 的前沿函数读 init 写出的首态 ------------------------
