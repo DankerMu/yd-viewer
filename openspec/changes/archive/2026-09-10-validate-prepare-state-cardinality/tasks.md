@@ -5,4 +5,4 @@
 ## 2. Verification and review
 - [x] 2.1 Parent batched pre-change red (missing count diagnostic, not generic rejection) and focused green/public smoke; calibrated mutants existing-name-only, accept-first/nonempty, recursive scan each killed with honest independent guard accounting.
 - [x] 2.2 Parent producer/viewer pytest, Ruff/check-format, OpenSpec strict/all, stage anchor and merge-result pass; cold import prepare/init/controller in both orders succeeds. Leaves skip all validation.
-- [ ] 2.3 Four high-risk reviewer seats plus final independent review, CI/evidence gate and preauthorized merge.
+- [x] 2.3 Four high-risk reviewer seats plus final independent review, CI/evidence gate and preauthorized merge.

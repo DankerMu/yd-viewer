@@ -1171,3 +1171,7 @@ Loop audit remains DECIDABLE (33 multi-round PRs, core=127, rotated=96). Decisio
 ## PR #196 accountability checkpoint (2026-09-10)
 
 DECIDABLE rotation attribution unchanged: 33 multi-round PRs, core=127, rotated=96. Decision deferred to maintainer because #196 adds only a clean single-round sample. Retain existing keep policy; no automatic narrowing.
+
+## PR #198 accountability checkpoint (2026-09-10)
+
+DECIDABLE rotation attribution remains 33 multi-round PRs, core=127, rotated=96. Decision deferred to maintainer: this single-round clean PR supplies no new rotation evidence. Retain existing keep policy; no automatic narrowing.
