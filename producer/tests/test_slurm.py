@@ -22,6 +22,7 @@ import yd_producer.slurm as slurm_module
 from yd_producer.executor import (
     ExecutorError,
     JobExecutor,
+    JobRecord,
     JobSpec,
     JobState,
     StepClock,
@@ -31,10 +32,13 @@ from yd_producer.slurm import (
     SBATCH_FLAGS,
     SLURM_STATE_MAP,
     SlurmJobExecutor,
+    build_exit_code_sacct_command,
     build_sacct_command,
     build_sbatch_command,
+    parse_exit_code_field,
     parse_sacct_record,
     parse_sbatch_job_id,
+    query_failure_exit_code,
     subprocess_runner,
 )
 
@@ -645,13 +649,15 @@ def test_subprocess_runner_default_expression_references_config_symbol_and_expor
         "SBATCH_FLAGS",
         "SLURM_STATE_MAP",
         "SlurmJobExecutor",
+        "build_exit_code_sacct_command",
         "build_sacct_command",
         "build_sbatch_command",
+        "parse_exit_code_field",
         "parse_sacct_record",
         "parse_sbatch_job_id",
+        "query_failure_exit_code",
         "subprocess_runner",
     ]
-    assert "_DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS" not in slurm_module.__all__
 
 
 @pytest.mark.parametrize(
@@ -809,3 +815,103 @@ def test_translation_table_covers_the_five_site_fields():
     assert SBATCH_FLAGS["cpus"] == "--cpus-per-task"
     assert SBATCH_FLAGS["memory"] == "--mem"
     assert SBATCH_FLAGS["walltime"] == "--time"
+
+
+def _terminal_record(state: JobState, job_id: str = "12345") -> JobRecord:
+    return JobRecord(
+        job_id=job_id,
+        name="yd-gfs-2026082800",
+        state=state,
+        resources=SITE_RESOURCES,
+        submitted_at=T0,
+        started_at=T0 + STEP,
+        ended_at=T0 + 2 * STEP,
+    )
+
+
+def test_exit_code_command_is_exactly_the_pinned_argv():
+    assert build_exit_code_sacct_command("12345") == (
+        "sacct",
+        "-j",
+        "12345",
+        "-n",
+        "-P",
+        "--format=ExitCode",
+    )
+    assert build_sacct_command("12345")[-1] == "--format=JobID,State,Start,End"
+
+
+@pytest.mark.parametrize("state", [JobState.FAILED, JobState.TIMEOUT])
+@pytest.mark.parametrize("stdout,expected", [("0:0", "0:0"), ("1:0|", "1:0")])
+def test_exit_code_provider_returns_unique_nonempty_field(state, stdout, expected):
+    runner = RecordingRunner([stdout])
+    record = _terminal_record(state)
+    assert query_failure_exit_code(record, runner=runner) == expected
+    assert runner.count == 1
+    assert runner.calls[0][0] == build_exit_code_sacct_command(record.job_id)
+
+
+@pytest.mark.parametrize(
+    "state", [JobState.PENDING, JobState.RUNNING, JobState.SUCCEEDED]
+)
+def test_exit_code_provider_rejects_non_failure_terminal_states(state):
+    runner = RecordingRunner([])
+    ended = None if not state.is_terminal else T0 + 2 * STEP
+    started = None if state is JobState.PENDING else T0 + STEP
+    record = JobRecord(
+        job_id="12345",
+        name="yd-gfs-2026082800",
+        state=state,
+        resources=SITE_RESOURCES,
+        submitted_at=T0,
+        started_at=started,
+        ended_at=ended,
+    )
+    with pytest.raises(ExecutorError) as excinfo:
+        query_failure_exit_code(record, runner=runner)
+    assert excinfo.value.job_id == "12345"
+    assert runner.count == 0
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ["", "   \n", "0:0\n1:0\n", "0:0|1:0", "0:0|1:0|"],
+)
+def test_exit_code_provider_rejects_empty_multiline_or_multifield(stdout):
+    runner = RecordingRunner([stdout])
+    with pytest.raises(ExecutorError) as excinfo:
+        query_failure_exit_code(_terminal_record(JobState.FAILED), runner=runner)
+    assert excinfo.value.job_id == "12345"
+    assert runner.count == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        subprocess.CalledProcessError(1, ["sacct"]),
+        OSError("sacct missing"),
+        subprocess.TimeoutExpired(["sacct"], 37),
+    ],
+)
+def test_exit_code_provider_translates_command_errors_without_retry(error):
+    runner = RecordingRunner([error])
+    with pytest.raises(ExecutorError) as captured:
+        query_failure_exit_code(_terminal_record(JobState.TIMEOUT), runner=runner)
+    assert captured.value.job_id == "12345"
+    assert captured.value.__cause__ is error
+    assert runner.count == 1
+
+
+def test_parse_exit_code_field_keeps_original_including_trailing_pipe():
+    assert parse_exit_code_field("42:7|\n", "99") == "42:7"
+
+
+def test_exit_code_timeout_is_job_bound_and_does_not_retry():
+    timeout = subprocess.TimeoutExpired(["sacct"], 37)
+    runner = RecordingRunner([timeout])
+    with pytest.raises(ExecutorError) as captured:
+        query_failure_exit_code(_terminal_record(JobState.FAILED), runner=runner)
+    assert captured.value.job_id == "12345"
+    assert captured.value.__cause__ is timeout
+    assert runner.count == 1
+    assert runner._outputs == []
