@@ -5880,10 +5880,10 @@ Project profile: yd-viewer
 3. `SlurmJobExecutor` 的资源键集与值来自 `config.slurm.required_fields` / `local.slurm`，后者不含 #69 策略键。生产入口用 `partial(subprocess_runner, command_timeout_seconds=local.slurm_command_timeout_seconds)` 恰构造一份无状态 bounded runner，并把同一 callable 注入两份 executor 与两个 ExitCode provider；因此 `sbatch`、普通 `sacct` 和 #47 失败查询都显式使用同一时限。provider 仍逐源独立且只执行钉死的一次 `sacct -j <job_id> -n -P --format=ExitCode`；轮询与退出码查询不得合并，`JobRecord` 七字段不变。
 4. PR #129 留给 M4 的生产 `AttemptDriver`/worker/receipt 现在由本任务认领，不能只接一个不存在的对象。最小实现 MUST 是既有 `AttemptDriver` 协议的生产适配器：`prepare` 只生成 identity、精确 worker argv 与 work 内 DAT 终名；重 canonical/forcing/assemble/SHUD/tracker/recovery 在 Slurm job 内执行；`collect` 只读取该 job 原子提交、checksum/identity 绑定的 work-local receipt，并据此交回既有 `AttemptProducts`。receipt 必须绑定 source/cycle/work/job ID、`WorkIdentity`、`RunDirectory`、DAT、merged log 与已验证 T+12 checkpoint；不得扫描规范文件名、改写私有 `_captured`、在登录节点补跑 SHUD，或用测试 terminal hook 伪装生产 worker。`collect` 在完整验证 receipt 信封后 MUST 调用 #136 已落地的 tracker-owned `import_verified_checkpoint(*, tracker, record)`，由 tracker 对五字段与 current canonical bytes 重验后恢复同一对象 authority；随后既有 controller 仍调用 `ensure_twelve_hour_checkpoint` 做第二次 point-of-use 重验。driver 不得直接写 `_captured`、拿值相等对象替换 record、从旧 receipt/文件名恢复，或绕过任一层。
 
-   `WorkIdentity` 的唯一来源为：`source_id`/`cycle_time` 逐字取 `AttemptRequest.source`/`.cycle`；`project_name` 只从 `prepare.calibrated_state_path(request.variant_dir)` 指向、prepare 已验证的率定状态文件名仅移除末尾一次 `.cfg.ic` 后取得，绝不取变体目录 basename；`model_id`、`basin_id`、`basin_version_id`、`river_network_version_id` 逐字取 #171 `load_prepared_variant_handoff` 返回的同一 prepared-variant 稳定版本标识。driver 不得逐 attempt 随机生成、写入 config/local、内置生产字符串或从资产内容补值；四值只在本 attempt 的 scratch registry → forcing → assemble → receipt 链中使用，M4 以真实 node-22 builder/site v1 artifact 对账。`DirectGridForcingContract`、opaque `yd.binding` bytes 与 manifest 明示 `.sp.att` bytes 也只取同一次 loader 返回值；driver 将该模型级 immutable snapshot 与 `AttemptRequest` 的 source/cycle/work 绑定后写入已认领 work，worker 使用前重验。receipt 必须逐字记录同一 `WorkIdentity` 及 binding/`.sp.att` checksum。禁止从 TOML、环境、`DATABASE_URL`、NWM PostgreSQL/服务型 registry、目录扫描、variant basename、`yd.binding` 内容或测试 fixture 推导上述任一值/路径/bytes。`contract.binding_uri`/`contract.sp_att_path` 仅是 registry commit 后的 work-local relative keys，不能拿来发现 prepared asset；missing/invalid v1 handoff 必须在 submit 前 fail closed。
+   `WorkIdentity` 的唯一来源为：`source_id`/`cycle_time` 逐字取 `AttemptRequest.source`/`.cycle`；`project_name` 只从 `prepare.calibrated_state_path(request.variant_dir)` 指向、prepare 已验证的率定状态文件名仅移除末尾一次 `.cfg.ic` 后取得，绝不取变体目录 basename；`model_id`、`basin_id`、`basin_version_id`、`river_network_version_id` 逐字取 #171 `load_prepared_variant_handoff` 返回的同一 prepared-variant 稳定版本标识。driver 不得逐 attempt 随机生成、写入 config/local、内置生产字符串或从资产内容补值；四值只在本 attempt 的 scratch registry → forcing → assemble_staged → receipt 链中使用，M4 以真实 node-22 builder/site v1 artifact 对账。登录侧 driver 用 #171 loader 的模型级 snapshot 与 controller 已提交的 #177 snapshot 对账；attempt handoff 只携带匹配后的 staged manifest digest、source/cycle/work 与 work-local 引用，不能重新复制 NFS 输入或序列化父进程 inode/capability。worker 重新调用 `load_staged_work_inputs`，从 `staged.prepared` 取得同源 `DirectGridForcingContract`、opaque `yd.binding` bytes、manifest 明示 `.sp.att` bytes 和四个模型 IDs，然后在作业内运行 registry/canonical/forcing/`assemble_staged`。receipt 必须逐字记录同一 `WorkIdentity` 及 binding/`.sp.att` checksum。禁止从 TOML、环境、`DATABASE_URL`、NWM PostgreSQL/服务型 registry、目录扫描、variant basename、`yd.binding` 内容或测试 fixture 推导上述任一值/路径/bytes。`contract.binding_uri`/`contract.sp_att_path` 仅是 registry commit 后的 work-local relative keys，不能拿来发现 prepared asset；missing/invalid v1 handoff 必须在 submit 前 fail closed。
 5. poll wait MUST 是会实际等待的生产 callable，不能 busy-loop；等待策略固定为版本化常量 `POLL_INTERVAL_SECONDS = 10`，生产 callable 每次调用恰执行 `time.sleep(POLL_INTERVAL_SECONDS)`。这是调度查询节律而非现场资源值，不新增 TOML 字段。它只控制两次非终态 `sacct` 轮询之间的等待，不是作业 watchdog、总超时、重试或取消。
 6. `run` 的退出码逐字为：`0` = 锁竞争成功跳过，或控制器返回且两源全部报告均为 `SUCCEEDED`；`3` = 任一报告为 `STOPPED` 或 `JOB_FAILED`。`SUCCEEDED_CLEANUP_PENDING`、`RunSourcesError` 及其它运行期 controller/executor/driver/provider 错误也不是“全部成功”，统一返回 `3` 并向 stderr 输出可定位信息，不打印 traceback。`RunSourcesError` 的单份人读文本必须按 `ifs,gfs` 固定顺序包含每个底层 `RunError` 及其每条 `__notes__`，每项恰一次；CLI 把该完整文本输出一次，不得沿用不含 notes 的旧聚合摘要或另行重复打印而丢失/复制 #108 startup-cleanup 清单。参数解析错误及 `run` 的 `ConfigError`/配置装配错误返回 `2`；`prepare`/`init` 既有退出码不因本任务改变。当前 `run_sources` 的实时追赶合同正常会以首次非 `SUCCEEDED` 末项结束，因此 raw 缺口的 `STOPPED` 按本裁决确实返回 `3`；入口不得把“追到当前 raw 尽头”静默改算成 `0`，也不得为制造 `0` 增加追赶 cap。
-7. `build_parser()` 仍且只暴露三个子命令，`run --config/--local` 参数形态不变；不新增公开 `worker` 子命令。若生产 worker 需要入口，只能是包内私有 module/console target，且 argv 由 production driver 精确构造，不通过 shell 拼接。
+7. `build_parser()` 仍且只暴露三个子命令，`run --config/--local` 参数形态不变；不新增公开 `worker` 子命令。生产 worker 私有入口只落既有 `producer/src/yd_producer/nwm.py`，由 production driver 以 yd 自己的解释器和精确 argv 启动本仓模块，不通过 shell 拼接；不得新增第七个模块、console-script 配置或修改 `pyproject.toml`。NWM 指定解释器/cwd/PYTHONPATH 规则仅约束既有 mapping-builder 薄外壳，日常 worker 不借用 NWM 环境。
 8. 这条裁决解决 `docs/design.md`「CLI 未实现前禁止手工拼生产流程」与 PR #129 把 CLI/worker/receipt 推给 M4 的冲突：代码接线属于 M2；M4 只负责 node-22 真实 Slurm/NFS/SHUD receipt、现场值与 cron 安装，不再负责补写 CLI 业务体。
 
 **Required evidence（input → expected）**：
@@ -5892,17 +5892,19 @@ Project profile: yd-viewer
 - 锁已被另一实例持有 -> 退出 `0`，`run_sources`、bounded runner、四类工厂与任何 subprocess/discovery/文件写入均零调用；锁释放后同一入口可真正执行。
 - 参数化报告矩阵：两源全 `SUCCEEDED` -> `0`；任一 `STOPPED`、任一 `JOB_FAILED`、任一 `SUCCEEDED_CLEANUP_PENDING` -> `3`；`RunSourcesError`/driver/provider/ExecutorError -> `3` 且 stderr 指名 source/phase/job（可用字段存在时），无 traceback。聚合错误的两源底层 `RunError` 各带互异 note、其中一条含不在正文里的 #108 startup source/cycle/path 清单 -> `str(RunSourcesError)` 按 `ifs,gfs` 含每个错误和每条 note 恰一次，stderr 对整份文本也恰一次；恢复不含 notes 的旧摘要、漏 note、CLI 二次逐项导致重复或集合无序遍历的变异必红。
 - 缺/坏 `--config`、`--local`、生产装配字段，或 `command_timeout_seconds` 为 bool/float/string/非正整数 -> `2`，在锁、bounded runner、driver、executor、controller 之前失败；省略 timeout 则绑定 60。`prepare`/`init` 的既有退出码用例逐项不变。
-- **#132 M2-only 合成资产 oracle（非生产事实，且不复用既有测试 fixture 字面量）**：生产 driver 的端到端合成子进程 fixture（不是 terminal hook）固定下列独立字节/identity；`stage_work_registry(..., max_asset_bytes=4096)` 必须能消费它们：
+- **#132 M2-only 合成资产 oracle（非生产事实，且不复用既有测试 fixture 字面量）**：生产 driver 的端到端合成子进程 fixture（不是 terminal hook）固定下列独立字节/identity。以下父进程片段的 `tmp_path` 是由测试/临时脚本提供的独占空目录；它只构造源、claim/stage 与 handoff，不在登录侧创建 registry/forcing/model。独立消费进程须在源删除后通过 `load_staged_work_inputs` 重建本进程 capability，随后执行 `stage_work_registry(..., max_asset_bytes=4096)` 与 `assemble_staged`：
 
   ```python
   import json
+  import shutil
   from datetime import UTC, datetime
   from hashlib import sha256
 
-  from yd_producer.assemble import WorkIdentity, stage_work_registry
+  from yd_producer._work_claim import claim_exact_work
   from yd_producer.prepare import calibrated_state_path
   from yd_producer.prepare_handoff import load_prepared_variant_handoff
   from yd_producer.state import parse as parse_cfg_ic
+  from yd_producer.staged_inputs import stage_work_inputs
 
   source = "gfs"
   cycle_time = datetime(2026, 1, 2, 0, tzinfo=UTC)
@@ -5964,10 +5966,14 @@ Project profile: yd-viewer
       "source_id": source,
       "sp_att_asset_name": "explicit-synthetic.sp.att",
   }
-  work_root = tmp_path / "work"
-  attempt_work = work_root / "gfs" / "2026010200"
-  attempt_work.mkdir(parents=True)
-  variant_dir = tmp_path / "variant"
+  source_root = tmp_path.resolve() / "source-only"
+  source_root.mkdir()
+  work_root = tmp_path.resolve() / "work"
+  claim = claim_exact_work(
+      work_root=work_root, source=source, cycle=cycle_time,
+      cycle_name=cycle_time.strftime("%Y%m%d%H"),
+  )
+  variant_dir = source_root / "variant"
   variant_dir.mkdir()
   calibrated_state_path(variant_dir).write_bytes(VALID_SYNTHETIC_CFG_IC)
   (variant_dir / "yd.para").write_bytes(b"# m2 synthetic parameters\n")
@@ -5987,26 +5993,199 @@ Project profile: yd-viewer
       max_manifest_bytes=4096,
       max_asset_bytes=4096,
   )
-  identity = WorkIdentity(
-      source_id=source, cycle_time=cycle_time,
-      model_id=prepared.model_id, basin_id=prepared.basin_id,
-      basin_version_id=prepared.basin_version_id,
-      river_network_version_id=prepared.river_network_version_id,
-      project_name=prepared.project_name,
+  state_path = source_root / "states" / source / "2026010200.cfg.ic"
+  state_path.parent.mkdir(parents=True)
+  minute = round(cycle_time.timestamp() / 60)
+  cycle_state = VALID_SYNTHETIC_CFG_IC.replace(
+      b"1 6 0 0\n", f"1 6 0 {minute}\n".encode(), 1,
   )
-  registry = stage_work_registry(
-      work_root=work_root, identity=identity, contract=prepared.contract,
-      binding_content=prepared.binding_content,
-      sp_att_content=prepared.sp_att_content,
-      max_asset_bytes=4096,
+  assert cycle_state != VALID_SYNTHETIC_CFG_IC
+  state_path.write_bytes(cycle_state)
+  staged = stage_work_inputs(
+      claim=claim, source_variant_dir=variant_dir, source_state_path=state_path,
+      source=source, cycle=cycle_time, project_name=prepared.project_name,
+      grid_id="m2-synthetic-gfs-grid", max_manifest_bytes=4096,
+      max_asset_bytes=4096, max_state_bytes=4096,
   )
-  assert registry.identity == identity
+  assert staged.prepared == prepared
+  assert staged.variant_dir == claim.work_dir / "input" / "variant"
+  assert staged.state_path == claim.work_dir / "input/states/gfs/2026010200.cfg.ic"
+  worker_input = {
+      "work_dir": str(claim.work_dir), "source": source,
+      "cycle": cycle_time.isoformat(), "project_name": prepared.project_name,
+      "grid_id": "m2-synthetic-gfs-grid", "max_manifest_bytes": 4096,
+      "max_asset_bytes": 4096, "max_state_bytes": 4096,
+      "manifest_checksum": staged.manifest_checksum,
+      "state_checksum": "sha256:" + sha256(cycle_state).hexdigest(),
+  }
+  worker_json = json.dumps(worker_input, sort_keys=True, separators=(",", ":"))
+  assert str(source_root) not in worker_json
+  assert "work_identity" not in worker_json
+  shutil.rmtree(source_root)
+  assert not source_root.exists()
   ```
 
-  fixture 在 `prepare.calibrated_state_path(variant_dir)` 返回的 `yd.cfg.ic` 安装独立有效的合成率定状态，写入固定 manifest、opaque `yd.binding` 与 manifest 明示的同目录 `.sp.att`，再以 #171 唯一 loader 取得模型级 immutable snapshot；绝不从 `contract.sp_att_path`、目录扫描或测试默认值推导。上述 `binding_uri`/`sp_att_path` 是 `stage_work_registry` 的提交后 work-local keys，不是 prepared variant 的来源路径。返回的 `registry` MUST 进入同一独立 worker 的真实 `FileForcingRepository -> ForcingProducer -> assemble` 链：独立 canonical catalog 的每个 required GFS product 都使用同一 source/cycle、`m2-synthetic-gfs-grid`、一格 `SYNTHETIC_GRID_DEFINITION`、上面的 `GRID_SIGNATURE`、以及 contract station 的 `m2-synthetic-cell`；NetCDF 的自描述 identity 必须与各 catalog 行相同。其它 canonical/SHUD/tracker 输入可以是独立构造的合成工件，但不得以测试 fixture 取代本段由 public loader 验证的 contract/binding/`.sp.att` handoff。该 `yd` 与四个 `m2-synthetic-*` 只行使 M2 synthetic seam，不声明 project/site 生产值；synthetic `.sp.att` 只行使 UTF-8、SHA-256 与单一 `FORC=1` 对应单一 station 的最小既有校验，不把该字面量或局部语法宣称为真实 `.sp.att` layout/parser。driver 在 claimed work 内把 loader snapshot 与 `AttemptRequest` source/cycle/work 绑定，worker 独立进程重验后写原子 receipt，`collect` 再逐项重验 source/cycle/work/job/identity/checksum 后构造 `AttemptProducts`。篡改 prepared manifest/asset/contract/identifier 由 #171 loader 在 submit 前拒绝；篡改 attempt handoff/receipt、路径越 work、checkpoint checksum、job ID、链内 identity/checksum 则由 #132 driver/worker/collect 拒绝；两类均零 `DONE`。
+  将下段保存为临时 `oracle_worker.py`，父进程片段完成并删除源后，以 `[sys.executable, oracle_worker_path, worker_json]` 启动**新的**本仓 yd Python 进程；测试不得通过 pickle 传父进程 capability、root inode 或 NFS 路径。下段仅是本地合成 oracle，不是提前实现生产 `nwm.py` worker/SHUD/receipt。生产实现仍必须满足后文独立 worker 与 collect 全链验收。
+
+  ```python
+  import json
+  import sys
+  import tempfile
+  from datetime import datetime, timedelta
+  from hashlib import sha256
+  from pathlib import Path
+
+  import xarray as xr
+
+  from yd_producer.assemble import WorkIdentity, stage_work_registry
+  from yd_producer.forcing import ForcingProducer, ForcingProducerConfig
+  from yd_producer.forcing.file_store import FileForcingRepository
+  from yd_producer.staged_inputs import load_staged_work_inputs, assemble_staged
+  from yd_producer.store.object_store import LocalObjectStore
+
+  payload = json.loads(sys.argv[1])
+  expected_manifest = payload.pop("manifest_checksum")
+  expected_state = payload.pop("state_checksum")
+  payload["cycle"] = datetime.fromisoformat(payload["cycle"])
+  staged = load_staged_work_inputs(**payload)
+  assert staged.manifest_checksum == expected_manifest
+  prepared = staged.prepared
+  identity = WorkIdentity(
+      source_id=staged.source, cycle_time=staged.cycle,
+      project_name=prepared.project_name, model_id=prepared.model_id,
+      basin_id=prepared.basin_id, basin_version_id=prepared.basin_version_id,
+      river_network_version_id=prepared.river_network_version_id,
+  )
+  registry = stage_work_registry(
+      work_root=staged.work_dir.parent.parent, identity=identity,
+      contract=prepared.contract, binding_content=prepared.binding_content,
+      sp_att_content=prepared.sp_att_content, max_asset_bytes=4096,
+  )
+  store = LocalObjectStore(registry.object_store_root)
+  cycle_id = staged.cycle.strftime("%Y%m%d%H")
+  grid_key = "canonical/gfs/grid/m2-synthetic-gfs-grid/grid.json"
+  grid = {"cells": [{"grid_cell_id": "m2-synthetic-cell", "longitude": 0.0, "latitude": 0.0}]}
+  store.write_bytes_atomic(grid_key, json.dumps(grid).encode())
+  # Independent synthetic values; not imported from tests or production defaults.
+  variables = {
+      "prcp_rate_or_amount": ("mm/day", 2.5),
+      "air_temperature_2m": ("degC", 12.25),
+      "relative_humidity_2m": ("0-1", 0.65),
+      "wind_u_10m": ("m/s", 1.25), "wind_v_10m": ("m/s", 2.75),
+      "pressure_surface": ("Pa", 100500.0), "shortwave_down": ("W/m2", 175.0),
+  }
+  products = []
+  for variable, (unit, value) in variables.items():
+      lead = 3 if variable in {"prcp_rate_or_amount", "shortwave_down"} else 0
+      valid = staged.cycle + timedelta(hours=lead)
+      identifier = f"gfs_{cycle_id}_{variable}_f{lead:03d}"
+      key = f"canonical/gfs/{cycle_id}/{variable}/{identifier}.nc"
+      attrs = {"cycle_time": staged.cycle.isoformat(), "valid_time": valid.isoformat(),
+               "lead_time_hours": lead, "unit": unit, "grid_id": staged.grid_id}
+      with xr.Dataset(
+          {variable: ("point", [value])},
+          coords={"point": ["m2-synthetic-cell"], "longitude": ("point", [0.0]),
+                  "latitude": ("point", [0.0])}, attrs=attrs,
+      ) as dataset, tempfile.TemporaryDirectory(dir=staged.work_dir) as directory:
+          path = Path(directory) / "oracle.nc"
+          dataset.to_netcdf(path, engine="netcdf4", format="NETCDF4")
+          content = path.read_bytes()
+      store.write_bytes_atomic(key, content)
+      products.append(dict(
+          attrs, canonical_product_id=identifier, source_id="gfs", source_version=cycle_id,
+          variable=variable, grid_definition_uri=grid_key, native_time_resolution="3h",
+          native_spatial_resolution="synthetic-one-point", object_uri=key,
+          checksum="sha256:" + sha256(content).hexdigest(), quality_flag="ok", lineage_json={},
+      ))
+  store.write_bytes_atomic(
+      f"canonical/gfs/{cycle_id}/_catalog/catalog.json",
+      json.dumps({"schema_version": "nhms.canonical.product_catalog.v1", "source_id": "gfs",
+                  "cycle_time": staged.cycle.isoformat(), "products": products}).encode(),
+  )
+  forcing = ForcingProducer(
+      config=ForcingProducerConfig(workspace_root=staged.work_dir,
+                                  object_store_root=registry.object_store_root, object_store_prefix=""),
+      repository=FileForcingRepository(store, registry.registry_manifest), object_store=store,
+  ).produce(source_id=identity.source_id, cycle_time=identity.cycle_time,
+            model_id=identity.model_id, basin_id=identity.basin_id,
+            basin_version_id=identity.basin_version_id,
+            river_network_version_id=identity.river_network_version_id)
+  assert forcing.status == "forcing_ready"
+  run = assemble_staged(registry=registry, staged_inputs=staged, forcing=forcing)
+  assert run.path == staged.work_dir / "model"
+  assert "sha256:" + sha256(run.state_path.read_bytes()).hexdigest() == expected_state
+  assert run.forcing_index_path.is_file()
+  assert [p.name for p in run.forcing_csv_paths] == ["m2-synthetic-station.csv"]
+  print("PASS: staged loader -> registry -> real forcing -> assemble_staged after source removal")
+  ```
+
+  父进程 fixture 以 #171 唯一 loader 校验独立 exact-five 资产，再以 `claim_exact_work -> stage_work_inputs` 提交 exact T 状态与六份 checksum；`tmp_path/source-only` 删除后才启动独立消费进程。只有消费进程调用 `load_staged_work_inputs -> stage_work_registry -> FileForcingRepository -> ForcingProducer -> assemble_staged`，registry 输入逐字来自该进程重新验证的 `staged.prepared`；不得把 `work/input` 路径传给 legacy `assemble(...)`，不得复制第二套 assembler 或取消旧 outside-work guard。把消费改回 legacy `assemble` 的变异 MUST 在 validate 阶段拒绝且零 model；handoff 传 NFS path 或跨进程传 `work_identity` 的变异 MUST 被独立进程判别器拒绝。
+
+  独立 canonical catalog 的每个 required GFS product 都使用同一 source/cycle、`m2-synthetic-gfs-grid`、一格 `SYNTHETIC_GRID_DEFINITION`、上述 `GRID_SIGNATURE` 和 `m2-synthetic-cell`；NetCDF 自描述 identity 与 catalog 行相同。上例只证明 #171/#177 到真实 forcing/staged assembly 的可执行性，不替代本 issue 生产 worker 的 canonical 转换、SHUD/tracker/recovery、原子 receipt 和 collect 验收。其它 canonical/SHUD/tracker 输入可以是独立合成工件，但不得以测试 fixture 取代本段通过 public loader 验证的 contract/binding/`.sp.att`。`yd` 和四个 `m2-synthetic-*` 不声明现场值；synthetic `.sp.att` 只验证 UTF-8/SHA-256/单一 `FORC=1`，不冒充真实 layout/parser。`contract.binding_uri`/`contract.sp_att_path` 仍是 registry 提交后的 keys，不是 prepared asset 来源。
+
+  生产 driver 在登录侧重载 #171 source 并与 controller 已提交的 #177 snapshot 对账，只把 staged manifest digest、work/source/cycle 和 work-local 引用写入 attempt handoff；worker 独立进程重验后执行重计算并提交原子 receipt，collect 再逐项重验 source/cycle/work/job/identity/checksum 后构造 `AttemptProducts`。篡改 prepared manifest/asset/contract/identifier 由 #171 loader 在 submit 前拒绝；篡改 staged layout/manifest/内容由 #177 loader/assemble_staged 拒绝；篡改 attempt handoff/receipt、越界路径、checkpoint checksum、job ID或链内 identity/checksum 由 #132 driver/worker/collect 拒绝，均零 `DONE`。
 - M2 证据只证明上述本地合成进程、checksum/identity/no-follow handoff 与 receipt 交接；M4 必须另用真实 node-22 builder/site artifact 核验 `.sp.att` layout/parser、四个 registry identifier、Slurm/NFS/SHUD 与真实 receipt，不能用 M2 fixture 代替。
 - 源码/结构守卫：`cli.run` 不含 `_unimplemented`；生产默认 import 不含 `FakeJobExecutor` 或 tests fixture；timeout 数字字面量 60 只在 `yd_producer.config._DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS` 出现，`slurm.py` 引用该内部常量、CLI 只读配置字段，`config.__all__` 不扩；parser 子命令集合仍恰为三项；`controller.run_sources`、`run_once`、`catch_up_source` 与 `JobRecord` 公共签名不改。
 - `cd producer && uv run pytest -q`、ruff/format、frozen sync 与 `openspec validate m2-producer-core --strict --no-interactive` 全绿。
+
+**Issue #132 上游合同修复（用户授权，保留第三次 revise 历史）**：
+
+- Suggested fixture level: expanded；effective `high`，理由为真实 subprocess、同一 attempt 证据提交、路径/权限、锁、失败日志及整树删除的边界组合。
+- Minimal mergeable slice: 已合并 #171/#177 之后的一条生产 run 装配链；产品仍严格六文件 `cli.py`、`nwm.py`、`slurm.py` 及对应三份测试。不得以合成假实现或永远pre-submit失败的driver代替闭环。
+- 已关闭的前置缺口：#171 拥有长期 exact-five prepared handoff；#177 拥有controller NFS-to-claimed-work staging与`assemble_staged`。本任务只消费两者，不复制parser/assembler，不另建scratch输入namespace。
+- 私有worker入口必须落既有`nwm.py`模块内，通过精确argv启动yd自己的解释器和本仓模块；不增第七模块、`pyproject.toml` console target或公开`worker`子命令。NWM指定解释器规则仍只适用于`check_interpreter`/`invoke_mapping_builder`；日常worker不得import NWM checkout或借用NWM环境。
+- `prepare`只读NFS source以重载#171并与#177 staged snapshot对账；worker/receipt只引用work-local inputs。worker重新加载#177 capability，创建同一work的registry/canonical/forcing/assembly，collect不在登录节点补跑重计算。
+- 原source/header/model/contract/identity/receipt/checksum/size/no-follow裁决全部保留；不以fd/inode序列化跨节点，不让同bytes路径clone替代当前进程root authority。
+
+**Must preserve / unchanged consumers**：
+
+- `nwm.check_interpreter`与`invoke_mapping_builder`既有签名、指定解释器/cwd/PYTHONPATH/失败策略不变；#45仍独立。
+- `SlurmJobExecutor`已有submit/poll签名、七字段`JobRecord`、资源投影与client timeout不变；只增加独立失败provider。
+- `prepare`/`init`既有入口/退出码及parse前DATABASE_URL存在即拒绝保持；`run`按本节新0/2/3裁决，不静默bootstrap或修改states权限；#44/#95非本issue修复范围。
+- `WorkClaim`、`AttemptRequest/PreparedAttempt/AttemptProducts`、controller run/catch-up/run_sources、tracker import/recovery、publisher与viewer DONE合同不变。
+
+**Risk packs（全部考虑）**：
+
+- Public API/CLI/script entry: selected — cli.run、生产driver和私有worker；证据为锁/工厂/三子命令/退出码矩阵。
+- Config/project setup: selected —资源来自config/local，timeout37/缺省60与坏值在任何运行前拒绝；不新增schema或identity字段。
+- File IO/path safety/overwrite: selected —attempt handoff/receipt与DAT/log/checkpoint只在exact work、bounded/no-follow、原子提交、no-clobber/identity；证据为篡改/越界/partial矩阵。
+- Schema/columns/units/field names: selected —receipt identity/content与现有数据类；只消费既有state/native与v2合同。
+- Auth/permissions/secrets: selected —配置路径/worker证据不可读拒绝、DATABASE_URL不读取或回显值；不得修改权限或带NFS/秘密入worker。
+- Concurrency/shared state/ordering: selected —整tick锁、双源独立、真实sleep10、失败query一次、receipt-last及log-before-delete。
+- Resource limits/large input/discovery: selected —bounded JSON/stream checksum、client timeout、固定证据路径零扫描；不引入watchdog/retry。
+- Legacy compatibility/examples: selected —旧prepare/init/NWM wrapper/Slurm executor/controller/tracker/viewer通过完整回归。
+- Error handling/rollback/partial outputs: selected —source/phase/job/notes保留，unknown timeout/crash留work，明确失败先日志后删除。
+- Release/packaging/dependencies: selected —私有模块入口但不增依赖/console配置；六文件各标准格式化后<1000，无large-file豁免。
+- Documentation/migration notes: selected —本次docs-first修复高风险fixture；不变更YD_ROOT产品格式。
+- Domain Geospatial/CRS: not selected —grid ID/signature只作为已有契约消费，不做投影算法变更。
+- Domain time-series/forcing: selected —同source/cycle的真实canonical→forcing链，10秒仅poll节律不改数值时间。
+- Domain state-chain/warm start: selected —T状态经#177输入、T+12由worker tracker/recovery与collect import双重验证。
+- Domain NWM provenance/DB-free: selected —仅本仓快照，mapping-builder旧接口不变，日常worker零NWM运行时/DB耦合。
+
+**Invariant Matrix / boundary-surface checklist**：
+
+- Governing invariant: 一个持锁tick只装配真实双源生产依赖；每个成功collect的产物必须来自同一source/cycle/exact-work/Slurm-job/WorkIdentity的已原子提交且点用重验的worker receipt，任何错配或不确定失败不得产生DONE或越权删除。
+- Source of truth: AttemptRequest source/cycle/work，#171 prepared IDs/contract，#177 staged manifest及六checksum；Slurm terminal JobRecord拥有job ID；tracker公开import拥有captured authority。
+- Producers: cli锁内依赖工厂、nwm driver.prepare与worker；Slurm submit/poll与独立ExitCode provider。
+- Validators/preflight: config loader/装配校验、#171/#177 loader、固定receipt信封/path/size/checksum、tracker import及controller二次重验。
+- Storage/cache/query: exact work内handoff/receipt/DAT/log/checkpoint；无DB、跨tickregistry、NFS worker读写或目录扫描恢复。
+- Public entrypoints: cli.main/run、既有AttemptDriver prepare/collect；worker为nwm内私有入口；Slurm provider窄callable。
+- Frontend/downstream: controller/runlock/cleanup/publish/tracker与viewer DONE读取者不修改。
+- Failure/rollback/stale: lock竞争零工厂；partial receipt不可用；submit/provider timeout保留work；明确终态失败log提交后既有owner整树删；无自动重试/scancel。
+- Shared helper roots: config、runlock、store/safe_fs、_work_claim、prepare_handoff、staged_inputs、canonical/forcing、tracker只消费；缺seam必须报告，不能六文件外偷偷补。
+- Read/write boundaries: prepare只读NFS对账；worker所有数据面局限claimed work；collect只验证已声明receipt成员，不从规范名字重建authority。
+- Regression valid: 独立子进程消费合成#171/#177资产，真实file repository/forcing/assemble_staged链，原子receipt后collect成功并由真实controller完成发布。
+- Regression adversarial: source/cycle/work/job/IDs/checksum/unsafe path/非普通/oversize/partial/旧receipt任一错配 → typed运行失败、零DONE、无越root mutation。
+- Regression failure: terminal provider唯一字段 →真实失败日志先提交后删exact work；provider timeout/坏输出 →source/job可定位、原work保留、兄弟源不取消。
+- Regression compatibility: prepare/init/NWM wrapper/Slurm已有测试不改语义；只有run依照本节合同更新退出码。
+
+**补充 Required evidence**：
+
+- ExitCode provider矩阵：FAILED/TIMEOUT合法record与唯一非空field（可有尾部`|`）返回原值；非terminal/SUCCEEDED、空输出、多行/多field、命令非零、OSError/timeout均绑定job ID响亮`ExecutorError`，无第二查询/无重试。不从state猜退出码，不污染正常poll列。
+- 实际poll callable调用时精确执行`time.sleep(POLL_INTERVAL_SECONDS)`且常量10；锁竞争时sleep/工厂/runner均零调用。
+- 真实provider接真实run_sources/finalize_failed_job的失败链：非默认ExitCode进入已原子提交日志后才删除同claim exact work；兄弟成功可继续，provider timeout保留原work。
+- 至少一个bad receipt在load/collect与controller二次checkpoint重验之间篡改 →零DONE；parser只读且不写`_captured`，必须调用公开import。
+- 每类selected pack映射上述真实seam或既有Required evidence；所有未改sibling与非目标在implementer报告和最终审计点名，不将M2 synthetic当作M4 receipt。
 
 **Non-goals**：
 

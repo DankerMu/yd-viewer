@@ -128,6 +128,8 @@
 
 `AttemptRequest` 的 frozen kw-only 字段与公开 `AttemptDriver` 协议 MUST 保持不变。`request.variant_dir/state_path` 仍是两个 NFS source 路径，只供运行在登录节点的 production `driver.prepare` 独立调用 #171 source loader并与 `request.work_dir/input` 的 public staged loader结果对账；controller/fake 不得把字段改为 staged path而丢失 source authority。production driver 构造的 worker argv/环境/attempt handoff，及 worker receipt、compute-side canonical/forcing/assemble输入，MUST NOT包含这两个 NFS 路径，只允许 exact work-local relative paths、canonical staged-manifest checksum与已验证内容/identity。计算节点不得访问 `YD_ROOT`，登录节点不得为规避该约束提前运行 canonical/forcing/assemble/SHUD。
 
+独立 worker MUST 通过 `load_staged_work_inputs` 重建本进程 capability 并复核 attempt handoff 绑定的 manifest digest，从 `staged.prepared` 创建同一 work 的 registry/forcing，调用 `assemble_staged`；MUST NOT 把 work-relative 输入根送给 legacy `assemble` 或序列化 controller 的 fd/inode 代替点用验证。worker 入口仍在 #132 六文件边界内的 `nwm.py`，不得为消费本 capability 增加新模块、console-script 或公开子命令。
+
 staging 任一失败 MUST 变成保留 cause/notes 的 `RunError(phase="prepare", source, cycle, job_id=None)`，driver/executor零调用、零`DONE`。由于 raw 已成功写入，同一 exact work作为未验证 residue保留，不运行 raw 的 empty-root release，也不按 pathname细粒度删除 input；下一 tick继续由既有 `UNVERIFIED_WORK_RESIDUE` 停源。成功 publish与明确 FAILED/TIMEOUT failure finalizer仍按现有顺序整树删除，因 containment自动包含 input；submit/poll timeout、未知 worker崩溃与其它证据保留路径继续保留整树。不得新增 work 外 sibling staging、input sweeper、自动 crash recovery或第二套 cleanup owner。
 
 #### Scenario: controller staging 顺序与登录/计算节点边界
@@ -141,6 +143,14 @@ staging 任一失败 MUST 变成保留 cause/notes 的 `RunError(phase="prepare"
 #### Scenario: staged input 生命周期只跟随 exact work
 - **WHEN** staged capability成功后分别发生submit timeout、poll timeout、未知worker崩溃、明确FAILED/TIMEOUT finalizer成功、或publish成功
 - **THEN**前三类按既有证据政策连同整棵work保留且下一tick停源，后两类由既有failure/publish owner整树删除；work外零variant/state副本且没有input单独删除调用
+
+#### Scenario: 新 worker 进程重验 staged capability 而不读取 NFS
+- **WHEN** controller 已成功提交 staged input，登录侧 driver 对账后将 work-local handoff 交给新的 worker 进程，且原 NFS source 已删除或不可读
+- **THEN** worker 在既有 `nwm.py` 私有入口通过 `load_staged_work_inputs` 重建本进程 capability 并复核 manifest digest，从 `staged.prepared` 创建 registry/forcing 后调用 `assemble_staged`；不新增入口/module/console-script，不传 NFS source 或 fd/inode，不放宽 legacy `assemble` 对 work-relative 根的拒绝
+
+#### Scenario: worker 点用错误的 staged 证据即停止发布
+- **WHEN** worker 或 collect 点用时 staged manifest digest、source/cycle/work、layout、内容 checksum 或本进程 root identity 与本 attempt 的已验证输入不一致
+- **THEN** 当前阶段 fail closed 且零 `DONE`，不采用 legacy `assemble`、目录扫描或登录侧补跑绕过校验，不写删 replacement work
 
 ### Requirement: 作业提交经执行器抽象且身份可追溯
 run MUST 经作业执行器抽象为每源提交至多一个作业；提交参数（partition、account、CPU、内存、walltime）MUST 全部取自 `local.toml`，代码 MUST NOT 为这些资源内置任何默认值；每次提交的 job ID、partition、终态与起止时间 MUST 记入本次运行报告，失败源的日志 MUST 含同一 job ID。真实 `sbatch`/`sacct` 行为归 M4 oracle，本地以注入 fake 验证。
