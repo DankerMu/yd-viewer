@@ -2,6 +2,8 @@
 
 任务组按依赖排序（每组的"依赖"行给出真实前置，未列即可与前面各组并行）；全部落 `producer/`，本地测试是唯一门禁。每组尾部标注 compute-loop §13.1 归属行。
 
+当前生产合同增量：#202 的 [native-yd-model-input](../native-yd-model-input/tasks.md) 已按用户确认的单流域精简方案定义完整 native 文件与真实 prepare driver。它取代下文历史 fixture 的 five-only/v1、平铺 native 输入、`yd.para`、builder-unavailable/M4-driver 与 obsolete module 开关细节；这些旧 fixture 保留为各自历史提交的验收记录，不要求新实现继续复现已替代的表示或未实现状态。状态数值、work owner、cleanup/publish 和独立 legacy external-root assembly 行为不变；原 #132 review ledger 不重置。新 native 实现与对应回归以该 change 的两条具体路径为准，不增加通用资产/registry/审批框架。
+
 ## 1. cli-config：配置装载与 CLI 骨架
 
 - [x] 1.1 实现 `config.toml` 类型化装载与 fail-closed 校验（业务规则字段全集含 `reach_count`，spec cli-config）

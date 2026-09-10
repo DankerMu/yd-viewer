@@ -43,11 +43,11 @@ worker 只可消费由 prepare 同一 loader 验证、再由 controller `stage_w
 - **THEN** `run_sources` 在锁内恰调用一次，四份按源 mapping 均恰含 `{ifs,gfs}`，两源 executor/driver 实例互不相同，poll wait 会实际等待，失败 provider 遵守独立一次 `sacct -j <job_id> -X -n -P --format=ExitCode` 契约；两 executor 与两 provider 消费同一 bounded runner，sbatch/普通 sacct/ExitCode sacct 的底层 timeout 都为 37，资源映射与 sbatch argv 不含策略键
 
 #### Scenario: production driver 拒绝未明示的 direct-grid 资产
-- **WHEN** driver 遇到缺失/非法 prepared-variant v1 manifest 或其明示 `.sp.att`，将 `contract.sp_att_path` 当作变体发现路径，从变体 basename/TOML/环境/数据库/目录扫描/`yd.binding` 内容/测试 fixture 推导任一 identity 或 asset，任一 handoff leaf/ancestor 是 symlink 或非普通文件、超过显式 limit，或任一 schema/bytes/SHA-256/source/project/grid/contract 不一致
+- **WHEN** driver 遇到缺失/非法 prepared-variant v2 manifest 或其明示 `.sp.att`，将 `contract.sp_att_path` 当作变体发现路径，从变体 basename/TOML/环境/数据库/目录扫描/`yd.binding` 内容/测试 fixture 推导任一 identity 或 asset，任一 handoff leaf/ancestor 是 symlink 或非普通文件、超过显式 limit，或任一 schema/bytes/SHA-256/source/project/grid/contract 不一致
 - **THEN** 在 `sbatch` 前 fail closed，零 worker receipt、零 DAT、零 `DONE`；M2 独立进程 fixture 使用 #171 source loader 与 #177 controller-staged capability，以 `AttemptRequest.source`/`.cycle/work` 绑定 attempt identity；真实 builder `.sp.att` layout/parser 与 site 值仍由 M4 核验
 
 #### Scenario: 独立 worker 在源断开后只消费 staged capability
-- **WHEN** controller 通过 `stage_work_inputs` 提交合法 exact-five variant 与 exact T state 后删除或禁止访问 NFS source，新的 worker 进程只收到 work-local handoff
+- **WHEN** controller 通过 `stage_work_inputs` 提交合法 完整 native v2 variant 与 exact T state 后删除或禁止访问 NFS source，新的 worker 进程只收到 work-local handoff
 - **THEN** worker 通过 `load_staged_work_inputs` 重建本进程 capability 并校验 manifest digest，执行真实 registry/forcing/`assemble_staged`，state bytes 保持 exact T；worker argv、环境、handoff、receipt 不含 NFS source 路径或跨进程 inode，legacy `assemble` 对 work-relative 根的拒绝保持
 
 #### Scenario: staged 点用漂移不得进入发布
@@ -63,7 +63,7 @@ worker 只可消费由 prepare 同一 loader 验证、再由 controller `stage_w
 - **THEN** `RunSourcesError` 的单份文本按 IFS/GFS 顺序包含每个底层错误及每条 note 恰一次；`run` 返回 `3` 并把该文本输出到 stderr 一次，不含 traceback，不丢失或重复清理审计
 
 ### Requirement: config.toml 装载与校验
-装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构、NWM mapping-builder module 点分名 `nwm_mapping_builder_module` 与每 source 的 NWM canonical grid 标识 `nwm_canonical_grid_id.gfs`/`.ifs`（两者均为版本化快照事实，非现场值）；任何必需字段缺失或类型错误 MUST fail closed。
+装载器 MUST 解析版本化 `config.toml` 的全部业务规则字段：cycle 固定 00/12、IFS/GFS raw 完整性规则（变量、bundle 文件模式、f000 特例）、两个模型变体相对路径、`forecast_days=7`、`output_interval_minutes=60`、`checkpoint_hours=[12]`、`reach_count`（生产配置为 3988，products-contract §5）、Slurm 资源字段结构、每 source 的 NWM canonical grid 标识 `nwm_canonical_grid_id.gfs`/`.ifs`（版本化快照事实，非现场值）；任何必需字段缺失或类型错误 MUST fail closed。
 
 装载器 MUST 且只 MUST 认领四类取值域：`cycle.hours` 的每个值都属于 `{0,12}`、`forecast_days > 0`、`checkpoint_hours` 的每个值满足 `0 <= hour < 24 * forecast_days`，以及 `raw.ifs.variables` / `raw.gfs.variables` 各自在 source 内单射。前三类违反时抛 `ConfigError`，其结构化 `path` 分别为 `cycle.hours`、`forecast_days`、`checkpoint_hours`；variables 同一 source 内出现重复精确字符串时同样抛 `ConfigError`，`path` 精确为对应的 `raw.<source>.variables`。跨 source 同名与同一 source 内大小写不同的字符串不构成重复；不得大小写归一或静默去重。其它取值域仍归既有下游 owner，不得借本 Requirement 擅自迁入装载器。
 
@@ -120,7 +120,7 @@ worker 只可消费由 prepare 同一 loader 验证、再由 controller `stage_w
 
 #### Scenario: 以精确解释器调用
 - **WHEN** 解释器路径指向可执行文件（测试用假解释器脚本）
-- **THEN** 薄外壳以该路径调用 `config.toml` 的 `nwm_mapping_builder_module` 所指 module，调用命令中不出现其它解释器，module 解析上下文（cwd/`PYTHONPATH`）来自 `local.toml` 的 NWM checkout 字段
+- **THEN** 薄外壳以该精确 venv 路径执行 yd 随包分发的 prepare driver 绝对脚本路径，cwd/PYTHONPATH 只来自明确 NWM checkout；去掉 DATABASE_URL/PYTHONHOME 和继承 PYTHONPATH，不做解释器 fallback。旧 nwm_mapping_builder_module 字段及其生产使用删除。
 
 ### Requirement: prepare 的清理告警与残留证据 MUST 到达运维
 `prepare` 收集到的清理/回滚失败是总不变量被破坏时的**唯一证据**（agent-ops §8.1 要求每次 `prepare` 调用留 receipt）。CLI MUST 把它们打到 stderr：失败路径上 MUST 渲染在途异常的 `__notes__`（`str(exc)` 不含 notes），成功路径上 MUST 渲染报告的 `cleanup_warnings`。退出码 MUST NOT 因此改变，且 MUST NOT 打印 traceback。
