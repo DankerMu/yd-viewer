@@ -638,10 +638,34 @@ def _copy_tree_publish(
 # --- 产物校验 ----------------------------------------------------------------
 
 
+def _require_calibrated_state_cardinality(source: str, variant_root: Path) -> None:
+    """Count top-level ``*.cfg.ic`` via init's locator; identity stays ``yd.cfg.ic``."""
+    from yd_producer.init import _DiscoveryUnreadable, _locate_calibration_state
+
+    _wrap_fs(
+        lambda: safe_fs.verify_directory_no_follow(variant_root),
+        f"{source} 变体目录无法按 no-follow 打开：{variant_root}",
+    )
+    try:
+        located = _locate_calibration_state(variant_root)
+    except _DiscoveryUnreadable as exc:
+        raise PrepareError(
+            f"{source} 变体率定末态探测失败：{variant_root}（{exc.detail}）"
+        ) from exc
+    if isinstance(located, Path):
+        return
+    listed = "、".join(str(path) for path in located) or "（无）"
+    raise PrepareError(
+        f"{source} 的变体目录 {variant_root} 顶层的 `.cfg.ic` 普通文件"
+        f"命中 {len(located)} 个，必须恰好 1 个：{listed}"
+    )
+
+
 def _validate_variant(
     source: str, variant_root: Path, config: Config
 ) -> PreparedVariantHandoff:
-    """验证率定态与唯一 v1 handoff，返回 immutable scratch snapshot。"""
+    """Cardinality, then fixed-name handoff/state/reach; return scratch snapshot."""
+    _require_calibrated_state_cardinality(source, variant_root)
     state_path = calibrated_state_path(variant_root)
     project_name = state_path.name.removesuffix(".cfg.ic")
     try:
@@ -685,24 +709,12 @@ def _validate_variant(
 
 
 def _verify_root(field_name: str, value: Path | str) -> Path:
-    """运行根的入口闸门（I3）：MUST 为绝对路径、MUST 为已存在的目录。
+    """运行根入口闸门（I3）：绝对且已存在的目录。
 
-    绝对性这一条同时关掉两个洞：`~/yd` 这类拼写会让守卫的 `os.path.lexists` 与
-    `geometry` 看字面量 `~`，而 `safe_fs` 的每个原语都先 `expanduser()`——同一个配置值
-    在三个消费者眼里是两个不同的文件系统对象，回滚会去删真实 `$HOME/yd` 里的既有内容；
-    普通相对路径同理（`safe_fs` 拿 `Path.cwd()` 锚定，另外两者不锚）。
-
-    "已存在"这一条关掉影子根：`yd_root` 打错一个字（或 NFS 未挂载）时，若默许创建，
-    整棵运行根会被凭空造出来、运行**返回成功**、产物躺在 viewer 永远读不到的地方
-    （agent-ops §4.1/§4.2）。`safe_fs.verify_directory_no_follow` 逐层 no-follow 打开，
-    顺带拒掉任何 symlink 组件，并返回它自己解析后的路径——本模块之后一律用这个返回值，
-    保证三个消费者拿的是同一个拼写。
-
-    校验落在这里而不是装载器：`specs/cli-config/spec.md` 把 `local.toml` 的装载钉死为
-    只做存在性与类型检查，往 `config.py` 里加文件系统探测会越过那条规范。
-
-    pinned: test_non_absolute_run_roots_are_refused_before_any_builder_call、
-    test_tilde_run_root_never_touches_the_real_home（真 `$HOME` 不被触碰）、
+    绝对性避免 `~`/相对路径让 lexists、geometry、safe_fs 看到不同对象；已存在避免
+    影子根。`verify_directory_no_follow` 拒 symlink。不放装载器（cli-config 只做类型
+    检查）。pinned: test_non_absolute_run_roots_are_refused_before_any_builder_call、
+    test_tilde_run_root_never_touches_the_real_home、
     test_missing_run_roots_are_refused_before_any_builder_call、
     test_symlinked_run_root_is_refused。
     """
@@ -773,22 +785,18 @@ def run_prepare(
 ) -> PrepareReport:
     """执行一次 `prepare` 编排，严格按 fixture 钉死的顺序。
 
-    0. **运行根预检**：`local.yd_root` 与 `local.scratch_root` MUST 是绝对路径且是已存在
-       的目录（见 `_verify_root`；I3）；
-    1. **遗留 staging 守卫（#83）**：一次 no-follow 顶层枚举，名字以 `_STAGING_PREFIX`
-       开头的任何类型即 `PrepareError`，列出绝对路径并指向 `docs/agent-ops.md`（pinned:
+    0. 运行根预检：`yd_root`/`scratch_root` 绝对且已存在（`_verify_root`；I3）；
+    1. #83 遗留 staging：顶层 `_STAGING_PREFIX*` 即拒绝（pinned:
        test_mixed_top_level_staging_residue_is_refused_before_any_work、
        test_staging_residue_discovery_failure_is_a_typed_refusal）；
-    2. **拒绝覆盖**：四个终名任一 `lexists` 即 `PrepareError`；此时 MUST NOT 创建
-       scratch、MUST NOT 调 builder（`prepare` 不幂等、无 `--force`，compute-loop §6.1；
-       pinned: test_existing_variant_directory_is_refused、
-       test_existing_viewer_geojson_is_refused_byte_for_byte——两者都断言 builder 零调用）；
-    3. 在 `local.scratch_root` 下建本次运行专属工作目录（名字含 pid + 随机 token，
-       避免并发/重跑互相覆写；pinned:
-       test_two_runs_get_distinct_scratch_and_staging_names——常量 token 变异即变红）；
-    4. 对 `("gfs", "ifs")` 各建一个此前不存在的 `variant_root`，各调 `builder` 一次；
-    5. 逐变体产物校验（目录存在、条目集合精确、率定末态可解析、river 段存在且行数等于
-       `config.reach_count`）；
+    2. 拒绝覆盖：四终名任一 lexists 即拒，零 scratch/builder（pinned:
+       test_existing_variant_directory_is_refused、
+       test_existing_viewer_geojson_is_refused_byte_for_byte）；
+    3. scratch 下建 pid+token 工作目录（pinned:
+       test_two_runs_get_distinct_scratch_and_staging_names）；
+    4. 对 `("gfs", "ifs")` 各建空 `variant_root` 并调 `builder` 一次；
+    5. 逐变体：no-follow 根 + 顶层 ``*.cfg.ic`` 基数恰 1（init 定位谓词）+ 固定名
+       handoff/率定解析/river 行数等于 `reach_count`；
     6. 把校验通过的两棵变体树按发布权限复制进 `YD_ROOT` 内本次专属 staging；
     7. `geometry.write_viewer_geojson` 直接写进该 staging（**不经 scratch**，唯一落点）；
     8. 四个终名**再探一次**拒绝覆盖（TOCTOU 窄化，见 `_refuse_existing_targets`），随后
@@ -796,21 +804,13 @@ def run_prepare(
     9. 无论成败删除 `YD_ROOT` 内 staging 与 scratch 工作目录；提交阶段失败时**同时**回滚
        本次已提交的终名与本次为提交新建的父目录，使 `YD_ROOT` 回到执行前的条目集合。
 
-    步骤 9 不用 `finally`（I1）。`finally` 里抛出的清理失败会在**成功路径**上抢在
-    `return PrepareReport(...)` 之前逃逸，把一次四个终名全部提交完成的运行报成失败，而
-    重跑又被拒绝覆盖守卫挡住；在**失败路径**上它则替换掉正在传播的原始异常，
-    `BuilderUnavailableError` 被降级成 `PrepareError`，`cli` 的退出码 `3` 变成 `1`。故
-    分成 `except` / `else` 两条显式路径：清理步骤各自独立执行、失败被收集，失败路径上
-    以 `add_note` 附到原始异常（`raise` 裸重抛，异常对象与 traceback 都不动），成功路径上
-    进 `PrepareReport.cleanup_warnings`（pinned:
-    test_success_survives_a_staging_cleanup_failure 钉成功路径不被清理失败翻成失败、
-    test_builder_unavailable_survives_a_cleanup_failure 钉失败路径异常类不被降级、
-    test_keyboard_interrupt_from_the_builder_still_rolls_back 钉这里收的是 `BaseException`
-    而非 `Exception`）。清理顺序也钉死为「先 `YD_ROOT` 内 staging、后本地 scratch」：前者
-    承载不变量（留在 `YD_ROOT` 里就是 viewer 能看见的中间态），后者只是一次性本地垃圾，
-    不该反过来卡住前者（等价变异，不可判别：两步互不取消，交换次序不改变任何可观测结果；
-    round-2 已裁定，另见 test_scratch_cleanup_failure_does_not_gate_the_staging_cleanup 钉
-    住"不互相卡住"这一半）。
+    步骤 9 不用 `finally`（I1）：成功路径上清理失败不得抢在 return 前把已提交报成失败；
+    失败路径上不得替换原始异常（`BuilderUnavailableError` 退出码 3）。`except`/`else`
+    收集清理失败：失败 `add_note` 裸重抛，成功进 `cleanup_warnings`。先清 `YD_ROOT`
+    staging、后清 scratch（pinned: test_success_survives_a_staging_cleanup_failure、
+    test_builder_unavailable_survives_a_cleanup_failure、
+    test_keyboard_interrupt_from_the_builder_still_rolls_back、
+    test_scratch_cleanup_failure_does_not_gate_the_staging_cleanup）。
     """
     # 步骤 0：运行根预检（在任何路径拼接、任何写入、任何 builder 调用之前）。
     yd_root = _verify_root("yd_root", local.yd_root)
