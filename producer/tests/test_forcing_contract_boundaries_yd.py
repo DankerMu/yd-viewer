@@ -7,10 +7,10 @@ not values derived from the production implementation.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
-import sys
 import types
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -834,23 +834,36 @@ def test_open_canonical_netcdf_closes_fd_when_dataset_close_raises(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from yd_producer.forcing import netcdf_open
+
+    monkeypatch.setattr(netcdf_open, "sys", types.SimpleNamespace(platform="linux"))
     store = LocalObjectStore(tmp_path)
     object_key = "canonical/gfs/2026050700/air_temperature_2m/fake.nc"
     store.write_bytes_atomic(object_key, b"not a NetCDF file")
     captured: dict[str, Path] = {}
+    real_lstat = os.lstat
+
+    def linux_alias_lstat(
+        path: str | os.PathLike[str], *args: Any, **kwargs: Any
+    ) -> os.stat_result:
+        text = os.fspath(path)
+        if text.startswith("/proc/self/fd/"):
+            return os.fstat(int(Path(text).name))
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(netcdf_open.os, "lstat", linux_alias_lstat)
 
     class CloseRaises:
         def close(self) -> None:
             raise RuntimeError("dataset close injection")
 
-    fake_xarray = types.ModuleType("xarray")
+    import xarray as xr
 
-    def open_dataset(alias: Path) -> CloseRaises:
+    def open_dataset(alias: Path, *args: Any, **kwargs: Any) -> CloseRaises:
         captured["alias"] = alias
         return CloseRaises()
 
-    fake_xarray.open_dataset = open_dataset  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "xarray", fake_xarray)
+    monkeypatch.setattr(xr, "open_dataset", open_dataset)
 
     with (
         pytest.raises(RuntimeError, match="dataset close injection"),
@@ -860,13 +873,57 @@ def test_open_canonical_netcdf_closes_fd_when_dataset_close_raises(
 
     alias = captured["alias"]
     assert alias != store.resolve_path(object_key)
-    assert str(alias).startswith(("/proc/self/fd/", "/dev/fd/"))
+    assert str(alias).startswith("/proc/self/fd/")
     file_fd = int(alias.name)
-    try:
-        with pytest.raises(OSError):
-            os.fstat(file_fd)
-    finally:
-        try:
-            os.close(file_fd)
-        except OSError:
-            pass
+    with pytest.raises(OSError) as closed:
+        os.fstat(file_fd)
+    assert closed.value.errno == errno.EBADF
+
+
+def test_darwin_dataset_close_failure_closes_native_and_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import netCDF4
+    import xarray as xr
+    from netcdf_fixture import encode_test_netcdf4
+
+    from yd_producer.forcing import netcdf_open
+
+    monkeypatch.setattr(netcdf_open, "sys", types.SimpleNamespace(platform="darwin"))
+    store = LocalObjectStore(tmp_path)
+    object_key = "canonical/gfs/2026050700/air_temperature_2m/value.nc"
+    store.write_bytes_atomic(
+        object_key,
+        encode_test_netcdf4("tmp2m", 0, values=[1.25, 2.5, 3.75], source="gfs"),
+    )
+    captured: dict[str, Any] = {}
+    original_open = netcdf_open.open_file_no_follow
+    real_store = xr.backends.NetCDF4DataStore
+
+    def capturing_open(path: Path, *, containment_root: Path | None = None) -> int:
+        file_fd = original_open(path, containment_root=containment_root)
+        captured["fd"] = file_fd
+        return file_fd
+
+    class CloseRaisesStore(real_store):  # type: ignore[valid-type,misc]
+        def close(self, **kwargs: Any) -> None:
+            raise RuntimeError("dataset close injection")
+
+    def capturing_store(native: netCDF4.Dataset, *args: Any, **kwargs: Any) -> Any:
+        captured["native"] = native
+        return CloseRaisesStore(native, *args, **kwargs)
+
+    monkeypatch.setattr(netcdf_open, "open_file_no_follow", capturing_open)
+    monkeypatch.setattr(xr.backends, "NetCDF4DataStore", capturing_store)
+
+    with (
+        pytest.raises(RuntimeError, match="dataset close injection"),
+        open_canonical_netcdf(store, object_key),
+    ):
+        pass
+
+    assert not captured["native"].isopen()
+    with pytest.raises(OSError) as closed:
+        os.fstat(captured["fd"])
+    assert closed.value.errno == errno.EBADF

@@ -449,7 +449,12 @@ def test_produce_rejects_no_follow_canonical_leaf_kinds(
 def test_produce_rejects_descriptor_alias_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from types import SimpleNamespace
+
+    from yd_producer.forcing import netcdf_open
+
     producer, repository, store = _prepared_file_seam(tmp_path)
+    monkeypatch.setattr(netcdf_open, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(
         "yd_producer.forcing.netcdf_open.descriptor_alias_path",
         lambda fd: (_ for _ in ()).throw(OSError("no alias")),
