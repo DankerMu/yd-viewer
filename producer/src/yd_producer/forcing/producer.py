@@ -1,11 +1,14 @@
 # NWM@8ae9b8f2 workers/forcing_producer/producer.py
 """File-backed direct-grid forcing producer.
 
-Deviations from the NWM pin (inventory §1 row 36 / issue #14):
+Deviations from the NWM pin (inventory §1 producer/src/yd_producer/forcing/producer.py / issue #14):
 - no grid-registry/bbox preflight, no env factory, no IDW path
 - grid identity is checked by the yd-authored helper
 - Time_Day=0 is anchored to the explicit cycle_time
 - canonical NetCDF is opened through a no-follow descriptor alias
+- #119: format_shud_forcing_package station-index Lon/Lat/X/Y/Z use
+  repr(float(...)) shortest-roundtrip; field selection, coercion, and
+  negative-z stay; _format_number and Time_Day/time-series/debug stay
 """
 
 from __future__ import annotations
@@ -2487,11 +2490,11 @@ def format_shud_forcing_package(
             "\t".join(
                 [
                     str(forcing_index),
-                    _format_number(station.longitude),
-                    _format_number(station.latitude),
-                    _format_number(float(props.get("x", 0.0) or 0.0)),
-                    _format_number(float(props.get("y", 0.0) or 0.0)),
-                    _format_number(float(props.get("z", station.elevation_m) or 0.0)),
+                    repr(float(station.longitude)),
+                    repr(float(station.latitude)),
+                    repr(float(props.get("x", 0.0) or 0.0)),
+                    repr(float(props.get("y", 0.0) or 0.0)),
+                    repr(float(props.get("z", station.elevation_m) or 0.0)),
                     filename,
                 ]
             )
