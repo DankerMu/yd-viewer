@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,14 @@ from yd_producer.forcing.direct_grid_contract import (
 from yd_producer.forcing.file_store import FileForcingRepository, ForcingStoreError
 from yd_producer.forcing.grid_identity import grid_identity_hash, grid_identity_tuples
 from yd_producer.forcing.netcdf_open import descriptor_alias_path
+from yd_producer.forcing.producer import (
+    ForcingTimeseriesRow,
+    _met_stations_from_direct_grid_contract,
+    format_shud_forcing_package,
+)
+from yd_producer.forcing.shud_forcing_contract import (
+    CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+)
 from yd_producer.store.object_store import sha256_bytes
 
 # --- canonical_json ---------------------------------------------------------
@@ -363,3 +371,79 @@ def test_file_repository_has_no_independent_asset_byte_limit() -> None:
             FileForcingRepository.load_direct_grid_validation_assets
         ).parameters
     )
+
+
+# --- station-index geometry precision ---------------------------------------
+
+
+def test_format_shud_forcing_package_preserves_full_precision_station_geometry() -> (
+    None
+):
+    manifest = _base_manifest()
+    first = dict(manifest["station_bindings"][0])
+    first.update(
+        longitude=116.1234567890123,
+        latitude=39.87654321098765,
+        x=1540123.4567890123,
+        y=4123456.789012345,
+        z=3375.123456789012,
+    )
+    second = {
+        "station_id": "forc_002",
+        "shud_forcing_index": 2,
+        "forcing_filename": "X2.csv",
+        "longitude": 100.0,
+        "latitude": 30.0,
+        "x": 1.0,
+        "y": 2.0,
+        "z": -12.345678901234,
+        "grid_id": first["grid_id"],
+        "grid_cell_id": "1",
+    }
+    manifest["station_bindings"] = [first, second]
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+    stations = _met_stations_from_direct_grid_contract(
+        contract, basin_version_id="basin_v1"
+    )
+    cycle_time = datetime(2026, 5, 7, tzinfo=UTC)
+    rows = tuple(
+        ForcingTimeseriesRow(
+            forcing_version_id="forcing_v1",
+            basin_version_id="basin_v1",
+            station_id=station.station_id,
+            valid_time=cycle_time,
+            source_id="gfs",
+            variable="PRCP",
+            value=116.1234567890123,
+            unit="mm/day",
+            native_resolution=None,
+        )
+        for station in stations
+    )
+    files = format_shud_forcing_package(rows, stations=stations, cycle_time=cycle_time)
+    expected_index = (
+        b"2 20260507\n"
+        b"shud\n"
+        b"ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        b"1\t116.1234567890123\t39.87654321098765\t1540123.4567890123"
+        b"\t4123456.789012345\t3375.123456789012\tX1.csv\n"
+        b"2\t100.0\t30.0\t1.0\t2.0\t-12.345678901234\tX2.csv\n"
+    )
+    expected_csv = (
+        b"1\t6\t20260507\t20260507\n"
+        b"Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        b"0\t116.1234568\t0\t0\t0\t0\n"
+    )
+    index_text = files[CANONICAL_SHUD_FORCING_INDEX_MEMBER]
+    assert index_text.encode("utf-8") == expected_index
+    for line, binding in zip(
+        index_text.splitlines()[3:], contract.stations, strict=True
+    ):
+        _index, lon, lat, x, y, z, _filename = line.split("\t")
+        assert float(lon) == binding.longitude
+        assert float(lat) == binding.latitude
+        assert float(x) == binding.x
+        assert float(y) == binding.y
+        assert float(z) == binding.z
+    assert files["shud/X1.csv"].encode("utf-8") == expected_csv
+    assert files["shud/X2.csv"].encode("utf-8") == expected_csv
