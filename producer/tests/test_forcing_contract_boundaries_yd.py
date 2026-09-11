@@ -337,7 +337,22 @@ def test_catalog_product_row_identity_matches_requested_envelope_and_public_requ
 ) -> None:
     producer, repository, store = _prepared_file_seam(tmp_path)
     payload = _catalog_payload(store)
-    payload["products"][0][field] = replacement
+    if field == "source_id":
+        canonical_products_for_cycle(
+            store,
+            source_id="ifs",
+            cycle_text=CYCLE_00Z,
+            grid_id="ifs_0p25",
+            grid_signature=DEFAULT_GRID_SIGNATURE,
+        )
+        ifs_catalog = json.loads(
+            store.read_bytes("canonical/ifs/2026050700/_catalog/catalog.json").decode(
+                "utf-8"
+            )
+        )
+        payload["products"][0] = ifs_catalog["products"][0]
+    else:
+        payload["products"][0][field] = replacement
     _write_catalog(store, payload)
 
     _assert_catalog_refused(producer, repository, store)
