@@ -1,0 +1,51 @@
+## Context
+Project profile yd-viewer. Test-only coverage restoration, fixture expanded (numerical/unit/lineage contract), repair intensity medium. Upstream suggested level absent. Source pin resolved locally to full40SHA; NWM working tree is dirty and remains untouched, read only immutable git objects. No DB/environment/remote service used.
+## Goals / Non-Goals
+Migrate all15 original scenarios, preserve literal numerical/quality/lineage expectations (including RH approx[0.525] abs1e-3 and method magnus_formula), make small/significant/consecutive precipitation independent collected cases. Restore documented coverage, not change algorithms or claim scientific/M4 validation.
+Non-goals: GFS/ERA5 coverage, new runtime features/refactors, changes to three existing yd IFS unit assertions, #102/#103/#104 fixes, DB reconstruction, node22/node27 operations.
+## Decisions
+RouteA. Snapshot module `producer/tests/test_ifs_canonical.py`, first-line provenance `# NWM@8ae9b8f2 tests/test_ifs_canonical.py`, full source commit in ledger. Copy pinned15 tests+helper closure then only registered adaptations. `default_ifs_value` and build_ifs_manifest preserve the pinned inputs/oracles. `encode_test_netcdf4` reuses existing netcdf_fixture.py, not a second encoder.
+Delete FakeCanonicalRepository and every repository argument/construction. build_converter supplies workspace_root, object_store_root, object_store_prefix explicitly. Product lookup reads real canonical/ifs/2026050100/_catalog/catalog.json and indexes its persisted rows, not a fake runtime facade. Canonical product IDs/paths lowercase (yd contract); raw/IFS and incoming source_id IFS retain pin form. Keep readback helper for actual NetCDF product values.
+Missing-ssr scenario cannot observe DB fail rows in yd: preserve missing-variable domain rejection (both ssr->net_radiation and ssr->shortwave_down diagnostic), assert zero canonical products/catalog, rename test to match. This is the DB-free cutpoint, not a lost runnable product oracle; do not reintroduce DB state. Use CanonicalConversionError rather than broad Exception at existing error assertions.
+Original combined precipitation test becomes one parametrized test with explicit small/significant/consecutive IDs (15test functions,17collected cases); preserve all pinned values/quality/counters, add small anomaly type per issue requirement. RH coverage remains indirect product readback plus lineage, exactly as pin—not falsely described as a direct RH unit test.
+New snapshot row is registered as pending before code, then marked landed when test file exists. Inventory original exclusion mention amended to point to this new row. Existing production/test files otherwise unchanged. Module head lists adaptation points.
+## Risk packs
+Selected: Public API (existing convert_manifest via tests), Schema/units/fields (pinned values+lineage), Legacy compatibility (all15pin scenarios), Error/partial-output (missing ssr DB-free cutpoint), Documentation (case map/inventory/known loss), Time-series/forcing (3h/6h deaccumulation/shortwave), NWM provenance/DB-free (head+real catalog, no external imports), Resource limits (pin stream-by-hour guard retained; no new resource policy).
+Not selected: Config/setup, File IO safety/overwrite, Auth/secrets, Concurrency, Release/dependencies, Geospatial/CRS, State/warm-start — no production changes on those surfaces; existing helpers only reused by isolated synthetic tests.
+## Evidence contract
+Full AST case-name/line map below proves no scenario omitted. No runtime source diff allowed. Parent mutation harness loads each one-line-mutated converter in an isolated process with confirmed module/export binding; no working-tree source edits, no NWM execution. Existing full producer suite excluding new module must pass for each selected mutant; new module must fail for the relevant oracle. Use positive-control mutant to prove injection and record all commands/results. If an old test already kills a proposed mutant, report that fact and select a different one in the same required branch; never claim survival falsely.
+Mutation rows: small precipitation anomaly type; significant precipitation quality; third-consecutive escalation; small shortwave anomaly type; significant shortwave warn; Magnus RH value; Magnus lineage method; wind lineage operation. Preserve unrelated old tests and exact numeric oracle. Baseline unmutated new17 cases must pass; mutation kills are the red proof for this tests-only issue.
+## Risks / Trade-offs
+Adaptation needs explicit no-DB observations and lower stored IDs; no permissive fake repository. Tests use synthetic NetCDF fallback as pin does, not a new true-IFS-GRIB or live-production correctness claim. Pin missing-ssr DB record assertions become no-output assertions because that persistence surface intentionally does not exist.
+
+## Fifteen-scenario preservation map
+- `test_ifs_variable_mapping_uses_surface_pressure` (pin L136-140) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_missing_ssr_records_shortwave_down_fail_product` (pin L143-157) -> `test_missing_ssr_rejects_without_products_or_catalog` (DB failure rows become domain error + zero catalog/products).
+- `test_temperature_rh_wind_and_pressure_conversion` (pin L160-197) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_precipitation_cumulative_m_to_mm_per_step` (pin L200-222) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_ifs_canonical_prcp_unit_contract_is_mm_day` (pin L225-245) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_negative_precipitation_handling_all_cases` (pin L248-265) -> `test_negative_precipitation_handling_all_cases` parametrized small/significant/consecutive; three independently collected cases, adding required small-anomaly assertion.
+- `test_ifs_precip_grib_quantization_noise_stays_ok` (pin L268-278) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_radiation_cumulative_diff_to_w_m2` (pin L281-303) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_ifs_shortwave_rejects_nonfinite_accumulated_values` (pin L306-308) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_ifs_precipitation_rejects_nonfinite_accumulated_values` (pin L311-313) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_ifs_shortwave_significant_negative_delta_is_warn_lineage_not_silent_ok` (pin L316-328) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_ifs_shortwave_quantization_noise_negative_delta_stays_ok` (pin L331-344) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_ifs_shortwave_negative_delta_writes_warn_product_with_lineage` (pin L347-364) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_ifs_convert_manifest_streams_by_group_without_read_records` (pin L367-382) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+- `test_lineage_json_structure_for_each_variable_type` (pin L385-408) -> same named yd test; retain numerical/quality/lineage oracle, read persisted catalog instead of fake DB.
+
+Runtime DB-free evidence reuses the existing test_canonical_db_free.no_outbound_sockets fixture for this module via pytest usefixtures; no second socket guard implementation. The inventory row explicitly permits that fixture import.
+
+## Exact mutation manifest (baseline 55d15d4, test-only issue keeps line anchors stable)
+| ID | Isolated one-line replacement | Scope / old-suite survival basis |
+|---|---|---|
+| precip-small | converter.py:967 `"small_negative_ifs_precipitation_delta"` → `"missing_small_ifs_delta"` | new independent small branch anomaly; no prior small-IFS anomaly assertion; survival is a hypothesis until parent old-suite run |
+| precip-significant | converter.py:976 `"warning_negative_precip"` → `"ok"` | only IFS significant-negative quality; prior GFS flags unchanged; survival is a hypothesis until parent old-suite run |
+| precip-consecutive | converter.py:978 `"error_precip_accumulation"` → `"warning_negative_precip"` | only generated third-consecutive IFS quality; prior readiness-string tests unchanged; survival is a hypothesis until parent old-suite run |
+| shortwave-noise | converter.py:1081 `"small_negative_ifs_shortwave_delta"` → `"missing_small_shortwave_delta"` | only IFS shortwave small anomaly; no prior assertion; survival is a hypothesis until parent old-suite run |
+| shortwave-warn | converter.py:1089 `"warn"` → `"ok"` | IFS negative-delta arm only, not GFS flags or shared tolerance; survival is a hypothesis until parent old-suite run |
+| rh-value | converter.py:913 `return clamp(e_d / e_s, 0.0, 1.0)` → `return clamp(e_d / e_s, 0.0, 1.0) * 0.9` | IFS Magnus return only, generic GFS helper untouched; old IFS e2e lacks RH value; survival is a hypothesis until parent old-suite run |
+| rh-method | converter.py:2219 `"magnus_formula"` → `"missing_magnus_method"` | top-level lineage_updates method only, not conversion_params; pin asserts humidity[method]; survival is a hypothesis until parent old-suite run |
+| wind-lineage | converter.py:2236 `"pass_through"` → `"missing_wind_operation"` | IFS wind_u conversion_params only; GFS mapping and other variables untouched; survival is a hypothesis until parent old-suite run |
+Positive control: converter.py:742 in convert_units_with_metadata, `value - 273.15` → `value + 273.15`; existing test_unit_conversion_boundaries MUST fail. Parent harness asserts mutated module __file__, source-marker and canonical package exported-class bindings; equal-size mutants run as exec source in fresh processes, never pyc reuse. The eight branch mutants leave shared constants and all production files untouched.
