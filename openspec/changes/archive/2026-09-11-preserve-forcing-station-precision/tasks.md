@@ -5,4 +5,4 @@
 ## 2. Verification and delivery
 - [x] 2.1 Parent runs new geometry oracle on old producer (red) then fixed(green), and direct formatter smoke confirms contract geometry.
 - [x] 2.2 Existing test_forcing_producer.py and round2boundary suite, then serial fullproducer/viewer/ruff/OpenSpec/stage log green; edited yd test under1000lines.
-- [ ] 2.3 Fixture review+strict validation; comprehensive/final review, CI, frozen-tip preauthorized merge+archive/log tracked in PR evidence.
+- [x] 2.3 Fixture review+strict validation; comprehensive/final review, CI, frozen-tip preauthorized merge+archive/log tracked in PR evidence.
