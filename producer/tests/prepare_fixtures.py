@@ -261,11 +261,25 @@ def write_baseline_package(
         root / "gis",
         river_count=river_count,
         unit_count=unit_count,
-        rivers_stem="rivers",
+        rivers_stem="river",
         domain_stem="domain",
     )
     hydro_param = root / BASELINE_HYDRO_PARAM_NAME
     hydro_param.write_bytes(BASELINE_HYDRO_PARAM_BYTES)
+    att_rows = "\n".join(
+        f"{index}\t1\t1\t11\t{index}\t1\t0\t0\t0" for index in range(1, unit_count + 1)
+    )
+    (root / "yd.sp.att").write_text(
+        f"{unit_count}\t9\nINDEX\tSOIL\tGEOL\tLC\tFORC\tMF\tBC\tSS\tLAKE\n{att_rows}\n",
+        encoding="utf-8",
+    )
+    riv_rows = "\n".join(
+        f"{index}\t-3\t1\t0.01\t1.0\t0" for index in range(1, river_count + 1)
+    )
+    (root / "yd.sp.riv").write_text(
+        f"{river_count}\t6\nIndex\tDown\tType\tSlope\tLength\tBC\n{riv_rows}\n",
+        encoding="utf-8",
+    )
     return SyntheticBaselinePackage(
         root=root,
         gis=gis,

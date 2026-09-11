@@ -73,7 +73,6 @@ from yd_producer.prepare import (
     VARIANT_BINDING_NAME,
     VARIANT_CALIBRATED_STATE_NAME,
     VARIANT_HYDRO_PARAM_NAME,
-    BuilderUnavailableError,
     PrepareError,
     run_prepare,
 )
@@ -130,10 +129,6 @@ def test_public_structure_is_exact():
         VARIANT_HYDRO_PARAM_NAME,
         VARIANT_BINDING_NAME,
     ) == ("yd.cfg.ic", "yd.cfg.para", "yd.binding")
-    assert (
-        inspect.signature(run_prepare).parameters["builder"].default
-        is prepare_module.default_builder
-    )
 
 
 def test_valid_loader_returns_independent_frozen_snapshot(tmp_path):
@@ -835,7 +830,7 @@ def test_legacy_three_file_variant_has_no_fallback(tmp_path):
         run(env, builder)
     assert VARIANT_HANDOFF_NAME in str(captured.value) or "gfs" in str(captured.value)
     assert_untouched(env, before)
-    with pytest.raises(BuilderUnavailableError):
+    with pytest.raises(PrepareError):
         run_prepare(local=env.local, config=env.config, baseline_root=env.package.root)
 
 

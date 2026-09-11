@@ -5,10 +5,6 @@ checkpoint_hours = [12]
 
 # 河网规模：docs/products-contract.md §5.1。
 reach_count = 3988
-
-# NWM@8ae9b8f2 快照事实：openspec/changes/m2-producer-core/nwm-snapshot-inventory.md §3.1；pin workers/mapping_builder/cli.py。
-nwm_mapping_builder_module = "workers.mapping_builder.cli"
-
 # NWM@8ae9b8f2 canonical grid 身份：inventory §3.1；pin canonical/gfs/grid/gfs_0p25/grid.json 与 canonical/IFS/grid/ifs_0p25/grid.json。
 [nwm_canonical_grid_id]
 gfs = "gfs_0p25"

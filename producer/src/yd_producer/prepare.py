@@ -25,10 +25,9 @@ test_every_commit_renames_within_yd_root_on_one_device）是 best-effort 的排�
 **清理/回滚不变量（I1）**：任何一步清理或回滚 MUST NOT 取消其余步骤，也 MUST NOT 替换、
 掩盖或降级正在传播的异常，更 MUST NOT 把一次已完成的提交报成失败（pinned:
 test_one_failing_rollback_step_does_not_cancel_the_others、
-test_scratch_cleanup_failure_does_not_gate_the_staging_cleanup）。故清理不是裸序列：
 每步各自独立执行（`_run_cleanup_steps`），失败被**收集**——失败路径上作为 `add_note`
-附到原始异常上（`BuilderUnavailableError` 因此仍是 `BuilderUnavailableError`，退出码 `3`
-不被降级成 `1`；pinned: test_builder_unavailable_survives_a_cleanup_failure），成功路径上
+附到原始异常上（失败路径上的 `PrepareError` 类型不被降级；pinned:
+test_injected_builder_failure_survives_a_cleanup_failure），成功路径上
 作为 `PrepareReport.cleanup_warnings` 返回（已提交就是已提交，清理残留不改变这个事实；
 pinned: test_success_survives_a_staging_cleanup_failure）。两条证据面都由 `cli` 渲染到
 stderr 且都不改退出码（spec `cli-config`「prepare 的清理告警与残留证据 MUST 到达运维」；
@@ -68,20 +67,19 @@ pinned: test_commit_survives_a_filesystem_that_refuses_cross_device_rename、
 test_every_commit_renames_within_yd_root_on_one_device、
 test_published_entries_do_not_inherit_scratch_modes。
 
-**异常契约**：本模块对外只有 `PrepareError` 及其子类 `BuilderUnavailableError`。三处
-外来异常一律包装并保留 `__cause__`——`state.cfg_ic.parse` 的 `ValueError`、
-`geometry.*` 的 `GeometryError`、`store.safe_fs.*` 的 `SafeFilesystemError`。三处各自的
-钉子逐一对应，不通用（pinned: test_unparsable_calibrated_state_refuses_commit 钉
-`ValueError` 那一处、test_geometry_failure_rolls_back_validated_variants 钉
-`GeometryError` 那一处、test_first_commit_failure_leaves_no_new_entries 钉
-`SafeFilesystemError` 那一处）。第三处最易漏：`SafeFilesystemError` 是
-**`RuntimeError` 子类而非 `OSError`**（`store/safe_fs.py:11`），`except OSError` 兜不住
-它——注意 `_wrap_fs` 里紧邻的 `except OSError` 一支由
-test_missing_run_roots_are_refused_before_any_builder_call 钉（见 `_wrap_fs` docstring），
-它钉的**不是**本处这条 `SafeFilesystemError` 通道，删掉
-`except safe_fs.SafeFilesystemError` 后它仍绿。注入 builder 抛出的任何异常
-同样包装（`BuilderUnavailableError` 除外——它必须原样上浮，`cli` 靠它区分退出码 `3`；
-pinned: test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes）。
+**异常契约**：本模块对外只有 `PrepareError`。三处外来异常一律包装并保留
+`__cause__`——`state.cfg_ic.parse` 的 `ValueError`、`geometry.*` 的
+`GeometryError`、`store.safe_fs.*` 的 `SafeFilesystemError`。三处各自的钉子逐一对应，
+不通用（pinned: test_unparsable_calibrated_state_refuses_commit 钉 `ValueError`
+那一处、test_geometry_failure_rolls_back_validated_variants 钉 `GeometryError`
+那一处、test_first_commit_failure_leaves_no_new_entries 钉 `SafeFilesystemError`
+那一处）。第三处最易漏：`SafeFilesystemError` 是 **`RuntimeError` 子类而非
+`OSError`**（`store/safe_fs.py:11`），`except OSError` 兜不住它——注意 `_wrap_fs`
+里紧邻的 `except OSError` 一支由
+test_missing_run_roots_are_refused_before_any_builder_call 钉（见 `_wrap_fs`
+docstring），它钉的**不是**本处这条 `SafeFilesystemError` 通道，删掉
+`except safe_fs.SafeFilesystemError` 后它仍绿。注入 builder 抛出的任何异常同样包装
+（pinned: test_injected_builder_failure_survives_a_cleanup_failure）。
 
 **文件系统原语**：一律复用 `store.safe_fs`，本模块不另写一套。**恰有两处豁免**，两处的
 理由同源——`safe_fs` 的公共面确无对应原语，而扩它属 #24/#25 发布面的归属：
@@ -94,12 +92,8 @@ pinned: test_prepare_rejection_and_unimplemented_binding_use_different_exit_code
    `safe_fs.open_directory_no_follow` 逐层 no-follow 打开，`os.rmdir` 只在那个 fd 上按
    条目名执行。
 
-「恰有两处豁免」这一条本身是代码组织约束、不是行为选择（等价变异，不可判别：多写一处
-豁免不改变任何可观测行为）。
 
-**合成约定**：基线包内部布局（`BASELINE_*`）与变体内文件名（`VARIANT_*`）是本 issue 的
-fixture 定义的合成约定，以模块常量暴露给 11.1 消费；真实外部基线模型包的现场布局与读取
-归 M4（tasks.md 组 10）——现场布局归 M4，本阶段不声明。
+**原生布局**：`BASELINE_*` / `VARIANT_*` 使用固定 yd 文件名；GIS 为 `gis/river.shp` 与 `gis/domain.shp`。
 """
 
 from __future__ import annotations
@@ -111,7 +105,11 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
-from yd_producer._native_input import PREPARED_VARIANT_FIXED_FILENAMES
+from yd_producer._native_input import (
+    PREPARED_VARIANT_FIXED_FILENAMES,
+    NativeSupportError,
+    reject_unsupported_native_physics,
+)
 from yd_producer.config import Config, LocalConfig, variant_relative_violation
 from yd_producer.geometry import GeometryError, write_viewer_geojson
 from yd_producer.prepare_handoff import (
@@ -139,7 +137,6 @@ __all__ = [
     "VARIANT_HYDRO_PARAM_NAME",
     "VARIANT_REQUIRED_ENTRIES",
     "VIEWER_GEOJSON_NAMES",
-    "BuilderUnavailableError",
     "PrepareError",
     "PrepareReport",
     "VariantBuildRequest",
@@ -157,12 +154,12 @@ __all__ = [
 #: test_every_commit_renames_within_yd_root_on_one_device
 SOURCE_IDS = ("gfs", "ifs")
 
-#: 基线包内部布局（合成约定，真实布局归 M4）
+#: 基线包内部布局：模型目录直接含 `yd.*` 与 `gis/river.shp`/`gis/domain.shp`。
 BASELINE_GIS_DIRNAME = "gis"
-BASELINE_RIVERS_SHP_NAME = "rivers.shp"
+BASELINE_RIVERS_SHP_NAME = "river.shp"
 BASELINE_DOMAIN_SHP_NAME = "domain.shp"
 
-#: 变体内文件名（合成约定，11.1 消费其中的率定末态）
+#: 固定 native 变体文件名；11.1 从其中的率定末态建链。
 VARIANT_CALIBRATED_STATE_NAME = PREPARED_VARIANT_CALIBRATED_STATE_FILENAME
 VARIANT_HYDRO_PARAM_NAME = PREPARED_VARIANT_PARAMETER_FILENAME
 VARIANT_BINDING_NAME = PREPARED_VARIANT_BINDING_FILENAME
@@ -197,24 +194,9 @@ _VARIANT_FORBIDDEN_RELATIVE_DIRS = (
 _STAGING_PREFIX = ".yd-prepare-staging"
 _SCRATCH_PREFIX = "prepare"
 
-#: 发布归属：真实 builder 绑定所需的 NWM 侧 driver 归此阶段（见 `default_builder`）。
-#: 消息必须**指名**归属（不是自指地断言常量出现过）；pinned:
-#: test_production_binding_names_its_owner_with_a_literal（断言字面量 "归属 M4"）
-BUILDER_OWNER = "M4（node-22 真计算，docs/design.md §10）"
-
 
 class PrepareError(Exception):
-    """`prepare` 编排的公开异常**基类**；`cli.main` 捕获后走退出码 `1`。"""
-
-
-class BuilderUnavailableError(PrepareError):
-    """生产 builder 绑定尚未可用；`cli.main` 先于基类捕获它并走退出码 `3`。
-
-    与基类**不得合并**：把"配置/产物不合法"（改配置能修）与"这条路还没通"（等 M4）
-    报成同一个码，运维无从判断该做哪一件（pinned:
-    test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes、
-    test_builder_unavailable_is_a_prepare_error_subclass）。
-    """
+    """`prepare` 编排的公开异常；`cli.main` 捕获后走退出码 `1`。"""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -255,23 +237,24 @@ class PrepareReport:
 
 
 Builder = Callable[[VariantBuildRequest], None]
+LocalBoundBuilder = Callable[[LocalConfig, VariantBuildRequest], None]
 
 
 # --- 基线包 / 变体内的合成布局 ----------------------------------------------
 
 
 def baseline_rivers_shp(baseline_root: Path | str) -> Path:
-    """基线 GIS 河网图层路径（合成约定）。"""
+    """基线 GIS 河网图层路径（`gis/river.shp`）。"""
     return Path(baseline_root) / BASELINE_GIS_DIRNAME / BASELINE_RIVERS_SHP_NAME
 
 
 def baseline_domain_shp(baseline_root: Path | str) -> Path:
-    """基线 GIS domain 单元图层路径（合成约定）。"""
+    """基线 GIS domain 单元图层路径。"""
     return Path(baseline_root) / BASELINE_GIS_DIRNAME / BASELINE_DOMAIN_SHP_NAME
 
 
 def calibrated_state_path(variant_root: Path | str) -> Path:
-    """变体内率定末态 `cfg.ic` 路径（合成约定；11.1 的首态建链从这里读）。"""
+    """变体内率定末态 `cfg.ic` 路径；11.1 的首态建链从这里读取。"""
     return Path(variant_root) / VARIANT_CALIBRATED_STATE_NAME
 
 
@@ -392,41 +375,66 @@ def variant_targets(local: LocalConfig, config: Config) -> dict[str, Path]:
     return targets
 
 
-# --- 生产 builder 绑定（fail-closed）----------------------------------------
+# --- 生产 builder 绑定 -------------------------------------------------------
 
 
-def default_builder(request: VariantBuildRequest) -> None:
-    """生产 builder 绑定：在**发起任何子进程之前**指名归属地失败。
+def _reject_unsupported_physics(baseline_root: Path) -> None:
+    """Prepare-once check: nonzero element BC/SS/LAKE or river BC is unsupported."""
+    try:
+        reject_unsupported_native_physics(Path(baseline_root))
+    except NativeSupportError as cop:
+        raise PrepareError(str(cop)) from cop
+    except OSError as cop:
+        raise PrepareError(
+            f"基线 BC/SS/LAKE/river BC 检查失败：{baseline_root}（{cop}）"
+        ) from cop
+    except UnicodeError as cop:
+        raise PrepareError(
+            f"基线 BC/SS/LAKE/river BC 检查失败：{baseline_root}（{cop}）"
+        ) from cop
 
-    这是对 pin 的只读取证结论，不是"未做"：
 
-    * `workers/mapping_builder/cli.py` 的 argparse `main` 在 pin 上只解析
-      `--package-path` 并输出 resolution JSON，**不驱动 build**（其 docstring 明写
-      SUB-5 未落地），故 `-m workers.mapping_builder.cli` 形态不足以产出变体——这正是
-      tasks.md 组 8 记入 #32 的待确认项，本 issue 以取证结清；
-    * 唯一能建变体的是 `build_direct_grid_variant`，它是 **programmatic-only** 且需调用
-      方预先算好约 24 个关键字参数（`grid_snapshot_loader`/`snapshot_cells`/
-      `grid_snapshot_reference`/`approvals`/`rollback_target`/`distance_qa`/
-      `capacity_report`/`proj_crs_database_version` 等），其中多项来自 NWM grid
-      registry；而 yd MUST NOT 在运行时 import NWM（design.md D6 / agent-ops §7.2），
-      故真实调用需要 NWM 侧另加 driver。
+def default_builder(local: LocalConfig, request: VariantBuildRequest) -> None:
+    """生产 builder：以绑定的 local 调用固定 NWM 解释器与随包 driver。
 
-    因此本绑定 MUST NOT 静默成功、MUST NOT 先起子进程再失败——后者会拿到退出码 0 的
-    resolution JSON，随后在 reach 校验处报出一条**归属谎报**的错误（"reach 数不符"，
-    而真因是"这条路还没通"）。pinned:
-    test_production_builder_binding_fails_before_any_subprocess（`subprocess.run`/`Popen`
-    与 `nwm.invoke_mapping_builder` 三处探针的调用列表必须为空）、
-    test_production_binding_names_its_owner_with_a_literal。
+    解释器/checkout 预检失败抛 `ConfigError`（零 runner 调用）。子进程非零退出保留
+    实际 stderr，包装为 `PrepareError`。
     """
-    raise BuilderUnavailableError(
-        f"生产 mapping-builder 绑定尚未可用，归属 {BUILDER_OWNER}："
-        f"NWM@8ae9b8f2 的 `build_direct_grid_variant` 是 programmatic-only、需约 24 个"
-        "来自 grid registry 的关键字参数，而 yd 运行时 MUST NOT import NWM"
-        "（design.md D6 / agent-ops §7.2），真实调用需 NWM 侧另加 driver；"
-        "`-m <nwm_mapping_builder_module>` 形态的 CLI 在该 pin 上只输出 resolution "
-        "JSON、不驱动 build。本次请求"
-        f"（source_id={request.source_id}、grid_id={request.grid_id}）未发起任何子进程"
+    from yd_producer.nwm import invoke_mapping_builder
+
+    completed = invoke_mapping_builder(
+        local,
+        (
+            "--source",
+            request.source_id,
+            "--grid-id",
+            request.grid_id,
+            "--baseline",
+            str(request.baseline_root),
+            "--output",
+            str(request.variant_root),
+        ),
     )
+    if completed.returncode == 0:
+        return
+    stderr = ""
+    if completed.stderr:
+        stderr = (
+            completed.stderr.decode("utf-8", errors="replace")
+            if isinstance(completed.stderr, bytes)
+            else str(completed.stderr)
+        ).strip()
+    detail = stderr or f"exit {completed.returncode}"
+    raise PrepareError(f"builder 构建 {request.source_id} 变体失败：{detail}")
+
+
+def _bind_default_builder(local: LocalConfig) -> Builder:
+    """Bind local into the production builder without using globals or env."""
+
+    def bound(request: VariantBuildRequest) -> None:
+        default_builder(local, request)
+
+    return bound
 
 
 # --- 文件系统助手（全部由 safe_fs 原语构成）---------------------------------
@@ -579,8 +587,7 @@ def _run_cleanup_steps(steps: Iterable[Callable[[], None]]) -> list[str]:
     """逐步执行清理，**每一步彼此独立**，返回失败描述列表（I1）。
 
     裸序列的清理有两个致命形态：第一步抛出会取消后面所有步骤（已提交的终名回滚不掉、
-    本次新建的父目录被搁浅），而抛出的清理异常还会替换掉正在传播的原始异常
-    （`BuilderUnavailableError` 被降级成 `PrepareError`，`cli` 的退出码 `3` 变成 `1`）。
+    本次新建的父目录被搁浅），而抛出的清理异常还会替换掉正在传播的原始异常。
 
     收 `Exception` 而非只收 `PrepareError`：清理原语内部任何未被翻译的 `OSError`
     （`os.close`/`os.rmdir`）同样会取消后续步骤，那正是本函数要消除的形态。
@@ -782,7 +789,7 @@ def run_prepare(
     local: LocalConfig,
     config: Config,
     baseline_root: Path | str,
-    builder: Builder = default_builder,
+    builder: Builder | None = None,
 ) -> PrepareReport:
     """执行一次 `prepare` 编排，严格按 fixture 钉死的顺序。
 
@@ -806,10 +813,10 @@ def run_prepare(
        本次已提交的终名与本次为提交新建的父目录，使 `YD_ROOT` 回到执行前的条目集合。
 
     步骤 9 不用 `finally`（I1）：成功路径上清理失败不得抢在 return 前把已提交报成失败；
-    失败路径上不得替换原始异常（`BuilderUnavailableError` 退出码 3）。`except`/`else`
-    收集清理失败：失败 `add_note` 裸重抛，成功进 `cleanup_warnings`。先清 `YD_ROOT`
-    staging、后清 scratch（pinned: test_success_survives_a_staging_cleanup_failure、
-    test_builder_unavailable_survives_a_cleanup_failure、
+    失败路径上不得替换原始异常。`except`/`else` 收集清理失败：失败 `add_note` 裸重抛，
+    成功进 `cleanup_warnings`。先清 `YD_ROOT` staging、后清 scratch（pinned:
+    test_success_survives_a_staging_cleanup_failure、
+    test_injected_builder_failure_survives_a_cleanup_failure、
     test_keyboard_interrupt_from_the_builder_still_rolls_back、
     test_scratch_cleanup_failure_does_not_gate_the_staging_cleanup）。
     """
@@ -824,6 +831,8 @@ def run_prepare(
     viewer = viewer_targets(local)
     labelled_targets = list(variants.items()) + list(viewer.items())
     _refuse_existing_targets(labelled_targets, phase="执行前")
+    _reject_unsupported_physics(baseline)
+    active_builder = _bind_default_builder(local) if builder is None else builder
 
     token = f"{os.getpid()}-{uuid.uuid4().hex}"
     work_dir = scratch_root / f"{_SCRATCH_PREFIX}-{token}"
@@ -848,15 +857,7 @@ def run_prepare(
             )
             requests[source] = request
             try:
-                builder(request)
-            except BuilderUnavailableError:
-                # 归属信息就在这条异常里，重新包装会把退出码 3 降级成 1。
-                # 等价变异，不可判别：删掉本分支后紧邻的 `except PrepareError: raise`
-                # 照样把子类原样上浮，可观测行为完全相同（本分支只是把意图写明）。
-                # "不重新包装"这条性质本身由
-                # test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes
-                # 与 test_production_builder_binding_fails_before_any_subprocess 钉住。
-                raise
+                active_builder(request)
             except PrepareError:
                 raise
             except Exception as exc:
@@ -957,11 +958,11 @@ def run_prepare(
         # 可能是本次产物；父目录一律非递归（见 `_remove_created_directory`）。
         #
         # 每一步互不取消，失败**收集**而非抛出：抛出会取消其余撤回步骤，并把原始异常
-        # （可能是 `BuilderUnavailableError`）替换成一条清理错误。失败以 `add_note` 附
-        # 在原始异常上——`raise` 是裸重抛，异常类型、`__cause__` 与 traceback 都不动。
+        # 替换成一条清理错误。失败以 `add_note` 附在原始异常上——`raise` 是裸重抛，
+        # 异常类型、`__cause__` 与 traceback 都不动。
         # pinned: test_late_commit_failure_rolls_back_already_committed_targets（撤回顺序
         # 与完整性）、test_one_failing_rollback_step_does_not_cancel_the_others（互不取消）、
-        # test_builder_unavailable_survives_a_cleanup_failure（异常类不被替换）、
+        # test_injected_builder_failure_survives_a_cleanup_failure（异常类不被替换）、
         # test_keyboard_interrupt_from_the_builder_still_rolls_back（这里收的是
         # `BaseException`；改成 `Exception` 即变红）
         failures = _run_cleanup_steps(

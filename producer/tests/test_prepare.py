@@ -47,9 +47,7 @@ from yd_producer.prepare import (
     VARIANT_BINDING_NAME,
     VARIANT_CALIBRATED_STATE_NAME,
     VARIANT_HYDRO_PARAM_NAME,
-    BuilderUnavailableError,
     PrepareError,
-    run_prepare,
     variant_targets,
     viewer_targets,
 )
@@ -465,7 +463,6 @@ def test_staging_residue_discovery_failure_is_a_typed_refusal(env, monkeypatch, 
         run(env, builder)
 
     assert listed == [env.yd_root]
-    assert not isinstance(captured.value, BuilderUnavailableError)
     assert str(env.yd_root) in str(captured.value)
     assert probe.count == 0
     assert variant_calls == []
@@ -782,36 +779,39 @@ def test_late_commit_failure_rolls_back_already_committed_targets(
     assert_untouched(env, before)
 
 
-# --- 生产 builder 绑定 fail-closed ------------------------------------------
+# --- 生产 builder 绑定 -------------------------------------------------------
 
 
-def test_production_builder_binding_fails_before_any_subprocess(env, monkeypatch):
+def test_default_builder_invokes_packaged_driver_with_bound_local(env, monkeypatch):
     import subprocess
 
-    from yd_producer import nwm
+    from yd_producer.nwm import PREPARE_DRIVER_SCRIPT
 
     calls: list[tuple] = []
-    monkeypatch.setattr(
-        nwm, "invoke_mapping_builder", lambda *a, **k: calls.append(("shell", a))
+
+    def fake_invoke(local, args=(), runner=None):
+        calls.append((local, list(args), runner))
+        return subprocess.CompletedProcess(
+            [str(PREPARE_DRIVER_SCRIPT), *args], 0, stderr=""
+        )
+
+    monkeypatch.setattr("yd_producer.nwm.invoke_mapping_builder", fake_invoke)
+    request = prepare_module.VariantBuildRequest(
+        source_id="gfs",
+        grid_id="fixture-grid-gfs",
+        baseline_root=env.package.root,
+        variant_root=env.scratch_root / "gfs",
     )
-    monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: calls.append(("subprocess", a))
-    )
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: calls.append(("popen", a)))
-    before = tree_snapshot(env.yd_root)
 
-    with pytest.raises(BuilderUnavailableError) as excinfo:
-        run_prepare(local=env.local, config=env.config, baseline_root=env.package.root)
+    prepare_module.default_builder(env.local, request)
 
-    assert prepare_module.BUILDER_OWNER in str(excinfo.value)
-    assert calls == []
-    assert_untouched(env, before)
-
-
-def test_builder_unavailable_is_a_prepare_error_subclass():
-    """两级异常不得合并，但基类捕获仍须覆盖它（`cli` 靠先后顺序分码）。"""
-    assert issubclass(BuilderUnavailableError, PrepareError)
-    assert BuilderUnavailableError is not PrepareError
+    assert len(calls) == 1
+    local, args, _runner = calls[0]
+    assert local is env.local
+    assert args[:2] == ["--source", "gfs"]
+    assert "--grid-id" in args and "fixture-grid-gfs" in args
+    assert str(env.package.root) in args
+    assert str(env.scratch_root / "gfs") in args
 
 
 # --- 终名纯函数 --------------------------------------------------------------
@@ -897,12 +897,8 @@ def test_one_failing_rollback_step_does_not_cancel_the_others(env, monkeypatch):
     assert rivers.is_file()
 
 
-def test_builder_unavailable_survives_a_cleanup_failure(env, monkeypatch):
-    """清理失败 MUST NOT 把 `BuilderUnavailableError` 降级成基类（I1 / cand-02）。
-
-    这是今天唯一生产可达的那一支：`cli` 传的就是生产 `default_builder`。降级即退出码
-    从 `3` 掉到 `1`，运维会去改一份没有问题的配置。
-    """
+def test_injected_builder_failure_survives_a_cleanup_failure(env, monkeypatch):
+    """清理失败 MUST NOT 替换正在传播的 `PrepareError`（I1）。"""
 
     def refuse(parent, name, **kwargs):
         raise safe_fs.SafeFilesystemError(
@@ -912,11 +908,14 @@ def test_builder_unavailable_survives_a_cleanup_failure(env, monkeypatch):
     monkeypatch.setattr(prepare_module.safe_fs, "remove_tree_allow_symlinks", refuse)
     before = tree_snapshot(env.yd_root)
 
-    with pytest.raises(BuilderUnavailableError) as excinfo:
-        run_prepare(local=env.local, config=env.config, baseline_root=env.package.root)
+    def failing_builder(request):
+        raise PrepareError("injected mapping failure")
 
-    assert type(excinfo.value) is BuilderUnavailableError
-    assert "归属 M4" in str(excinfo.value)
+    with pytest.raises(PrepareError) as excinfo:
+        run(env, failing_builder)
+
+    assert type(excinfo.value) is PrepareError
+    assert "injected mapping failure" in str(excinfo.value)
     notes = getattr(excinfo.value, "__notes__", [])
     assert any("injected cleanup failure" in note for note in notes)
     assert tree_snapshot(env.yd_root) == before
@@ -987,8 +986,7 @@ def test_keyboard_interrupt_in_a_cleanup_step_is_not_swallowed(env, monkeypatch)
 
     注入落在**最后**一步（scratch 删除）：更早的步骤被 KI 打断时，后续步骤在 HEAD 上
     同样不会执行，"其余步骤照跑"在那里本来就不成立，断言会失真。
-    收窄成 `except BaseException` 的实现在这条上必红——运维按下的 Ctrl-C 被吞成一条
-    告警，上浮的会是 `BuilderUnavailableError`。
+    告警，上浮的会是原始 `PrepareError`。
     """
 
     def interrupt(*args, **kwargs):
@@ -997,7 +995,7 @@ def test_keyboard_interrupt_in_a_cleanup_step_is_not_swallowed(env, monkeypatch)
     monkeypatch.setattr(prepare_module.safe_fs, "remove_tree_allow_symlinks", interrupt)
 
     with pytest.raises(KeyboardInterrupt):
-        run_prepare(local=env.local, config=env.config, baseline_root=env.package.root)
+        run(env, make_builder(env))
 
 
 def test_untranslated_oserror_in_a_cleanup_step_does_not_cancel_the_rest(
@@ -1406,16 +1404,50 @@ def test_each_final_name_receives_its_own_source_content(env):
     assert b"source_id=ifs" in ifs_bytes
 
 
-def test_production_binding_names_its_owner_with_a_literal(env):
-    """归属断言取**字面量**，不取模块常量（cand-14）。
+def test_nonzero_element_and_river_support_columns_are_rejected(env):
+    """element BC/SS/LAKE 与 river BC 非零必须一次性拒绝，不得 silently omit。"""
+    before = tree_snapshot(env.yd_root)
+    att = env.package.root / "yd.sp.att"
+    riv = env.package.root / "yd.sp.riv"
+    original_att = att.read_text(encoding="utf-8")
+    original_riv = riv.read_text(encoding="utf-8")
 
-    `assert prepare_module.BUILDER_OWNER in str(exc)` 是自指的：把 `BUILDER_OWNER` 置空
-    并删掉消息里的归属子句，该断言照样绿。
-    """
-    with pytest.raises(BuilderUnavailableError) as excinfo:
-        run_prepare(local=env.local, config=env.config, baseline_root=env.package.root)
+    cases = (
+        ("BC", att, original_att.replace("\t0\t0\t0", "\t1\t0\t0", 1), "element BC"),
+        ("SS", att, original_att.replace("\t0\t0\t0", "\t0\t2\t0", 1), "element SS"),
+        (
+            "LAKE",
+            att,
+            original_att.replace("\t0\t0\t0", "\t0\t0\t3", 1),
+            "element LAKE",
+        ),
+        ("river BC", riv, original_riv.replace("\t0\n", "\t4\n", 1), "river BC"),
+    )
+    for _name, path, mutated, label in cases:
+        path.write_text(mutated, encoding="utf-8")
+        with pytest.raises(PrepareError) as cop:
+            run(env, make_builder(env))
+        assert label.split()[-1] in str(cop.value)
+        assert_untouched(env, before)
+        att.write_text(original_att, encoding="utf-8")
+        riv.write_text(original_riv, encoding="utf-8")
 
-    assert "归属 M4" in str(excinfo.value)
+
+def test_malformed_element_count_header_is_prepare_error_without_bare_valueerror(env):
+    """A non-integer yd.sp.att count becomes PrepareError at the caller boundary."""
+    before = tree_snapshot(env.yd_root)
+    att = env.package.root / "yd.sp.att"
+    original = att.read_text(encoding="utf-8")
+    att.write_text(
+        original.replace(original.splitlines()[0], "not-an-integer\t9", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(PrepareError) as captured:
+        run(env, make_builder(env))
+    assert "not-an-integer" in str(captured.value)
+    assert captured.value.__cause__ is not None
+    assert_untouched(env, before)
+    att.write_text(original, encoding="utf-8")
 
 
 def test_two_runs_get_distinct_scratch_and_staging_names(env):

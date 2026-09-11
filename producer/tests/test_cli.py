@@ -432,78 +432,42 @@ def _prepare_argv(tmp_path, **kwargs):
     return _argv("prepare", tmp_path, python=script, **kwargs)
 
 
-def test_prepare_with_executable_interpreter_reaches_production_builder_binding(
+def test_prepare_with_executable_interpreter_reaches_real_builder(
     monkeypatch, capsys, tmp_path
 ):
-    """正控制：可执行解释器下越过预检，进入生产 builder 绑定并以退出码 `3` 停。
+    """正控制：可执行解释器下越过预检，进入真实 builder 并以退出码 `1` 停。
 
-    预检不代替调用：绑定在**发起任何子进程之前**失败，故薄外壳零调用。
+    假解释器不会写出十四文件，handoff 校验失败必须走 `PrepareError`，不得回到
+    unavailable/exit 3。
     """
     runner = Recorder(result=None)
     monkeypatch.setattr(nwm, "invoke_mapping_builder", runner)
 
-    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 1
 
     err = capsys.readouterr().err
-    assert prepare_module.BUILDER_OWNER in err  # 指名归属
-    # 归属断言取字面量：只断言模块常量出现在消息里是自指的（把常量置空并删掉归属子句
-    # 仍然全绿），测不出"消息里到底有没有指名归属"。
-    assert "归属 M4" in err
     assert "Traceback" not in err
+    assert "归属 M4" not in err
     assert runner.count == 0
-
-
-def test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code(
-    monkeypatch, capsys, tmp_path
-):
-    """清理失败 MUST NOT 把退出码 `3` 降级成 `1`（issue #20 复核 cand-02）。
-
-    这是今天唯一生产可达的那一支：`cli` 传的就是生产 `default_builder`，绑定抛
-    `BuilderUnavailableError` 之后清理 scratch；清理失败若替换掉正在传播的异常，`main`
-    的 `except BuilderUnavailableError` 就不再匹配，运维拿到 `1` 会去改一份没问题的配置。
-    """
-    monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
-
-    def refuse(*args, **kwargs):
-        raise prepare_module.safe_fs.SafeFilesystemError(
-            "injected cleanup failure", kind="io"
-        )
-
-    # 两个删除原语一起注入：编排改用哪一个来清 scratch 都不影响本用例要钉的性质。
-    monkeypatch.setattr(prepare_module.safe_fs, "remove_tree_allow_symlinks", refuse)
-    monkeypatch.setattr(prepare_module.safe_fs, "rmtree_no_follow", refuse)
-
-    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
-
-    err = capsys.readouterr().err
-    assert "归属 M4" in err
-    assert "Traceback" not in err
 
 
 def test_cleanup_failure_text_reaches_stderr_on_the_failure_path(
     monkeypatch, capsys, tmp_path
 ):
-    """清理失败的**文本**必须到达运维，不只是退出码（cand-r2-A1）。
+    """清理失败的**文本**必须到达运维，不只是退出码（cand-r2-A1）。"""
 
-    上一条用例只断言退出码没被降级，对"证据是否可见"恒绿：`str(exc)` 不含
-    `__notes__`，而 `prepare` 的回滚失败只以 `add_note` 附在原始异常上。渲染缺失时
-    `YD_ROOT`/scratch 里的残留在 agent-ops §8.1 的 receipt 上没有任何痕迹。
-    """
-    monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
+    def raising(**kwargs):
+        cop = prepare_module.PrepareError("injected mapping failure")
+        cop.add_note("回滚/清理未完成：injected cleanup failure")
+        raise cop
 
-    def refuse(*args, **kwargs):
-        raise prepare_module.safe_fs.SafeFilesystemError(
-            "injected cleanup failure", kind="io"
-        )
+    monkeypatch.setattr(cli, "run_prepare", raising)
 
-    monkeypatch.setattr(prepare_module.safe_fs, "remove_tree_allow_symlinks", refuse)
-    monkeypatch.setattr(prepare_module.safe_fs, "rmtree_no_follow", refuse)
-
-    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 1
 
     err = capsys.readouterr().err
-    assert "归属 M4" in err  # 原始异常还在，没被清理失败顶掉
-    assert "injected cleanup failure" in err  # 清理失败也在
+    assert "injected mapping failure" in err
+    assert "injected cleanup failure" in err
     assert "Traceback" not in err
 
 
@@ -533,24 +497,13 @@ def test_success_path_cleanup_warnings_reach_stderr_without_changing_the_exit_co
         assert warning in err
 
 
-def test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes(
+def test_existing_variant_target_exits_one_without_unimplemented_branch(
     monkeypatch, capsys, tmp_path
 ):
-    """同一组参数：干净根 -> `3`（这条路还没通）；终名已存在 -> `1`（拒绝执行）。
-
-    两码可区分是硬要求——合并成一个码，运维无从判断该改配置还是该等 M4。
-    """
+    """终名已存在 -> `1`（拒绝执行），不得走 unimplemented/exit 3。"""
     monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
     argv = _prepare_argv(tmp_path)
     yd_root = tmp_path.resolve() / "yd"
-
-    # 第一段：干净根。同一份 `argv` 走到生产 builder 绑定，以 `3` 停。这一段是本用例的
-    # 判别力所在——缺了它，把 `EXIT_UNIMPLEMENTED` 并进 `EXIT_GUARD` 仍然全绿。
-    assert _exit_code(argv, env={}) == 3
-
-    capsys.readouterr()  # 排空第一段的 stderr，下面只断言第二段的输出
-
-    # 第二段：终名已存在。同一份 `argv`，只改 `YD_ROOT` 的状态，以 `1` 停。
     (yd_root / "input" / "models" / "yd_gfs").mkdir(parents=True)
 
     assert _exit_code(argv, env={}) == 1
@@ -558,6 +511,7 @@ def test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes(
     err = capsys.readouterr().err
     assert str(yd_root / "input" / "models" / "yd_gfs") in err
     assert "Traceback" not in err
+    assert "归属 M4" not in err
 
 
 def test_top_level_staging_residue_exits_one_with_sorted_paths(

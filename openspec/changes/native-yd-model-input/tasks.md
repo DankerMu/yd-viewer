@@ -18,10 +18,10 @@ Width exception: merged-tasks - 1.1–1.5 同属一个完整 native 输入格式
 
 Implementation issue: #208
 
-- [ ] 2.1 实现随 yd 分发的薄 driver：从固定 NWM grid 文件调用 DB-free reader/snapshot preparation，复用 mapping/index、sp.att 重写、Z sampler 和 binding emitter，输出组 1 的两个完整 source 变体；不调用 resolution-only CLI，不构造 NWM 平台审批/QA/UUID/evidence 记录。
-- [ ] 2.2 将 `prepare.default_builder` 接入真实 driver，由 run_prepare 显式绑定 local；`invoke_mapping_builder(local, args, runner)` 使用固定解释器/脚本，移除仅为旧 module 使用的 Config 参数；执行 #45 的既有 exec/env 义务，删除 obsolete module 配置、builder-unavailable 代码并迁移调用者。
-- [ ] 2.3 baseline GIS 改用模型目录的 `gis/river.shp`/`domain.shp` 与 sidecar；沿用现有 GeoJSON writer 和四终名事务；仅在 prepare 检查当前 yd 不支持的非零 BC/SS/LAKE，不引入条件资产解释器。
-- [ ] 2.4 从真实 CLI prepare 路径证明两个 source 的真实 binding/重写/native 文件/GeoJSON 和一个真实 mapping 失败不发布；本地对固定 NWM 库执行 smoke，禁止用 shell 假成功代替 driver。运行 project-profile 门禁。
+- [x] 2.1 实现随 yd 分发的薄 driver：从固定 NWM grid 文件调用 DB-free reader/snapshot preparation，复用 mapping/index、sp.att 重写、Z sampler 和 binding emitter，输出组 1 的两个完整 source 变体；不调用 resolution-only CLI，不构造 NWM 平台审批/QA/UUID/evidence 记录。
+- [x] 2.2 将 `prepare.default_builder` 接入真实 driver，由 run_prepare 显式绑定 local；`invoke_mapping_builder(local, args, runner)` 使用固定解释器/脚本，移除仅为旧 module 使用的 Config 参数；执行 #45 的既有 exec/env 义务，删除 obsolete module 配置、builder-unavailable 代码并迁移调用者。
+- [x] 2.3 baseline GIS 改用模型目录的 `gis/river.shp`/`domain.shp` 与 sidecar；沿用现有 GeoJSON writer 和四终名事务；仅在 prepare 检查当前 yd 不支持的非零 BC/SS/LAKE，不引入条件资产解释器。
+- [x] 2.4 从真实 CLI prepare 路径证明两个 source 的真实 binding/重写/native 文件/GeoJSON 和一个真实 mapping 失败不发布；本地对固定 NWM 库执行 smoke，禁止用 shell 假成功代替 driver。运行 project-profile 门禁。
 
 Depends on #207
 Refs #45
