@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 import run_once_fixtures as fixtures
-from assembly_fixtures import PARAMETER_EXPECTED, write_forcing_package
+from assembly_fixtures import NATIVE_PARAMETER_EXPECTED, write_forcing_package
 
 from yd_producer._assemble_io import BoundAssemblyIO
 from yd_producer._work_claim import _FILE_READ_FLAGS
@@ -206,7 +206,9 @@ def test_overlapping_assemble_staged_calls_keep_distinct_root_fds(
     assert "b" not in errors
     assert isinstance(errors.get("a"), AssemblyError)
     assert results["b"].path == claim_b.work_dir / "model"
-    assert (claim_b.work_dir / "model" / "yd.para").read_bytes() == PARAMETER_EXPECTED
+    assert (
+        claim_b.work_dir / "model" / "input" / "yd" / "yd.cfg.para"
+    ).read_bytes() == NATIVE_PARAMETER_EXPECTED
     assert not (claim_a.work_dir / "model").exists()
     assert list(claim_a.work_dir.glob(".model.assemble-stage-*")) == []
     assert (old_a / "model").is_dir() or list(old_a.glob(".model.assemble-stage-*"))
@@ -336,7 +338,7 @@ def test_assemble_staged_post_bind_fifo_device_and_inode_swap_are_rejected(
     def bind(*args, **kwargs):
         nonlocal fifo_identity
         bound = real_bind(*args, **kwargs)
-        path = staged.variant_dir / "yd.para"
+        path = staged.variant_dir / "yd.cfg.para"
         content = path.read_bytes()
         if kind == "fifo":
             path.unlink()
@@ -350,13 +352,15 @@ def test_assemble_staged_post_bind_fifo_device_and_inode_swap_are_rejected(
 
         def swapping_open(target, flags, *rest, **extra):
             leaf = target if isinstance(target, str) else getattr(target, "name", None)
-            if leaf != "yd.para":
+            if leaf != "yd.cfg.para":
                 return real_open(target, flags, *rest, **extra)
             if kind == "device":
                 fd = real_open(os.devnull, os.O_RDONLY)
                 device_fds.add(fd)
                 return fd
-            named = os.stat("yd.para", dir_fd=extra["dir_fd"], follow_symlinks=False)
+            named = os.stat(
+                "yd.cfg.para", dir_fd=extra["dir_fd"], follow_symlinks=False
+            )
             fd = real_open(target, flags, *rest, **extra)
             replacement = path.parent / "replacement.para"
             replacement.write_bytes(content)

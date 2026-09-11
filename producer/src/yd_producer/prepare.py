@@ -111,6 +111,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
+from yd_producer._native_input import PREPARED_VARIANT_FIXED_FILENAMES
 from yd_producer.config import Config, LocalConfig, variant_relative_violation
 from yd_producer.geometry import GeometryError, write_viewer_geojson
 from yd_producer.prepare_handoff import (
@@ -165,7 +166,7 @@ BASELINE_DOMAIN_SHP_NAME = "domain.shp"
 VARIANT_CALIBRATED_STATE_NAME = PREPARED_VARIANT_CALIBRATED_STATE_FILENAME
 VARIANT_HYDRO_PARAM_NAME = PREPARED_VARIANT_PARAMETER_FILENAME
 VARIANT_BINDING_NAME = PREPARED_VARIANT_BINDING_FILENAME
-#: 旧公开常量保留三项值；合法 v1 exact-five 集合只由 handoff loader 持有。
+#: 公开三项终名仍由 prepare 持有；合法十四文件集合由 handoff loader 校验。
 VARIANT_REQUIRED_ENTRIES = frozenset(
     {VARIANT_CALIBRATED_STATE_NAME, VARIANT_HYDRO_PARAM_NAME, VARIANT_BINDING_NAME}
 )
@@ -337,7 +338,7 @@ def variant_targets(local: LocalConfig, config: Config) -> dict[str, Path]:
        这两棵子树是 viewer 的读取面（products-contract §2/§7），而 §2 明写
        `input/viewer/` 恰只有两个文件。`variants.gfs = "input/viewer/yd_gfs"` 是两个
        GeoJSON 终名的**兄弟**：两两互异过、互为祖先过、两个 `lexists` 也过，于是变体的
-       `yd.cfg.ic`/`yd.para`/`yd.binding` 直接落到 viewer 的读取面上；
+       `yd.cfg.ic`/`yd.cfg.para`/`yd.binding` 直接落到 viewer 的读取面上；
     3. **四个终名两两互异、且任一 MUST NOT 是另一终名的祖先**。把 `variants.gfs` 与
        `variants.ifs` 抄成同一值是普通的配置笔误，而装载器只校验存在性与类型、不拦；
        两个 `lexists` 守卫也全过（两者都不存在），于是 `gfs` 提交成功、第二次 rename 撞
@@ -609,9 +610,9 @@ def _copy_tree_publish(
     lower_bound: Path,
     file_limits: Mapping[str, int],
 ) -> None:
-    """按发布权限复制已验证的五文件变体；race 增长也只读到 cap+1。"""
+    """按发布权限复制已验证的十四文件变体；race 增长也只读到 cap+1。"""
     names = _wrap_fs(
-        lambda: safe_fs.list_directory_no_follow_limited(source, max_entries=5),
+        lambda: safe_fs.list_directory_no_follow_limited(source, max_entries=14),
         f"读取目录失败：{source}",
     )
     if set(names) != set(file_limits):
@@ -885,12 +886,8 @@ def run_prepare(
                     PREPARED_VARIANT_HANDOFF_FILENAME: MAX_PREPARED_VARIANT_MANIFEST_BYTES,
                     **{
                         name: MAX_PREPARED_VARIANT_ASSET_BYTES
-                        for name in (
-                            VARIANT_CALIBRATED_STATE_NAME,
-                            VARIANT_HYDRO_PARAM_NAME,
-                            VARIANT_BINDING_NAME,
-                            snapshots[source].sp_att_asset_name,
-                        )
+                        for name in PREPARED_VARIANT_FIXED_FILENAMES
+                        if name != PREPARED_VARIANT_HANDOFF_FILENAME
                     },
                 },
             )

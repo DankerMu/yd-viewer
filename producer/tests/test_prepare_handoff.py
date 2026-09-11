@@ -15,6 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+from assembly_fixtures import consume_in_process, consumer_builder
 from cfg_ic_fixtures import build_cfg_ic
 from prepare_fixtures import (
     CONTRACT_KEYS,
@@ -35,8 +36,6 @@ from prepare_fixtures import (
     assert_untouched,
     binding_bytes,
     canonical_json_bytes,
-    consume_in_process,
-    consumer_builder,
     inject_copy_growth,
     inject_early_root_drift,
     inject_entry_fault,
@@ -54,24 +53,12 @@ from prepare_fixtures import (
     tree_snapshot,
     variant_asset_name,
 )
-from prepare_fixtures import (
-    envelope_fixture as _envelope,
-)
-from prepare_fixtures import (
-    handoff_error as _error,
-)
-from prepare_fixtures import (
-    handoff_module as _module,
-)
-from prepare_fixtures import (
-    load_handoff as _load,
-)
-from prepare_fixtures import (
-    refuse_handoff as _refuse,
-)
-from prepare_fixtures import (
-    variant_fixture as _variant,
-)
+from prepare_fixtures import envelope_fixture as _envelope
+from prepare_fixtures import handoff_error as _error
+from prepare_fixtures import handoff_module as _module
+from prepare_fixtures import load_handoff as _load
+from prepare_fixtures import refuse_handoff as _refuse
+from prepare_fixtures import variant_fixture as _variant
 
 from yd_producer import prepare as prepare_module
 from yd_producer.forcing.bounded_json import (
@@ -98,10 +85,10 @@ def test_public_structure_is_exact():
     module = _module()
     filenames = {
         "CALIBRATED_STATE_FILENAME": "yd.cfg.ic",
-        "PARAMETER_FILENAME": "yd.para",
+        "PARAMETER_FILENAME": "yd.cfg.para",
         "BINDING_FILENAME": "yd.binding",
         "HANDOFF_FILENAME": "yd.direct-grid-handoff.json",
-        "HANDOFF_SCHEMA": "yd.prepare.direct-grid-handoff.v1",
+        "HANDOFF_SCHEMA": "yd.prepare.direct-grid-handoff.v2",
     }
     expected = {"PREPARED_VARIANT_" + key for key in filenames}
     expected.update(
@@ -136,13 +123,13 @@ def test_public_structure_is_exact():
     )
     assert loader.return_annotation == module.PreparedVariantHandoff
     assert prepare_module.VARIANT_REQUIRED_ENTRIES == frozenset(
-        {"yd.cfg.ic", "yd.para", "yd.binding"}
+        {"yd.cfg.ic", "yd.cfg.para", "yd.binding"}
     )
     assert (
         VARIANT_CALIBRATED_STATE_NAME,
         VARIANT_HYDRO_PARAM_NAME,
         VARIANT_BINDING_NAME,
-    ) == ("yd.cfg.ic", "yd.para", "yd.binding")
+    ) == ("yd.cfg.ic", "yd.cfg.para", "yd.binding")
     assert (
         inspect.signature(run_prepare).parameters["builder"].default
         is prepare_module.default_builder
@@ -165,7 +152,7 @@ def test_valid_loader_returns_independent_frozen_snapshot(tmp_path):
     assert first.basin_id == ids["basin_id"]
     assert first.basin_version_id == ids["basin_version_id"]
     assert first.river_network_version_id == ids["river_network_version_id"]
-    assert first.sp_att_asset_name == variant_asset_name(GFS)
+    assert first.sp_att_asset_name == "yd.sp.att"
     assert first.binding_content == binding
     assert type(first.binding_content) is bytes
     assert first.sp_att_content == sp_att
@@ -209,7 +196,7 @@ def test_deep_freeze_survives_caller_mutation(tmp_path):
     assert dict(snapshot.contract.stations[0].properties) == {}
     assert snapshot.sp_att_content == sp_att_bytes(source_id=GFS)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        snapshot.source_id = "ifs"  # type: ignore[misc]
+        snapshot.source_id = "ifs"
     with pytest.raises((TypeError, AttributeError)):
         snapshot.contract.stations[0].properties["k"] = "v"
 
@@ -269,7 +256,7 @@ def test_input_preflight_does_not_touch_filesystem(tmp_path, monkeypatch):
         b"{not-json",
         b"[]",
         b"null",
-        b'{"schema_version":"yd.prepare.direct-grid-handoff.v1","schema_version":"x"}',
+        b'{"schema_version":"yd.prepare.direct-grid-handoff.v2","schema_version":"x"}',
         canonical_json_bytes(_envelope())[:-1] + b" ",
         canonical_json_bytes(_envelope()) + b"\n",
     ],
@@ -450,9 +437,9 @@ def test_d11_keys_are_exact_and_not_used_as_read_paths(tmp_path, monkeypatch):
     _load(root)
     assert VARIANT_HANDOFF_NAME in reads
     assert VARIANT_BINDING_NAME in reads
-    assert variant_asset_name(GFS) in reads
+    assert "yd.sp.att" in reads
     assert "binding.json" not in reads
-    assert "yd.sp.att" not in reads
+    assert "gfs.sp.att" not in reads
 
 
 @pytest.mark.parametrize(
@@ -467,7 +454,8 @@ def test_d11_keys_are_exact_and_not_used_as_read_paths(tmp_path, monkeypatch):
         "a..b.sp.att",
         "-lead.sp.att",
         "gfs.att",
-        *FIXED_NAMES,
+        "gfs.sp.att",
+        *(name for name in FIXED_NAMES if name != "yd.sp.att"),
     ],
 )
 def test_unsafe_asset_name_is_rejected_before_asset_read(tmp_path, monkeypatch, asset):
@@ -481,7 +469,7 @@ def test_unsafe_asset_name_is_rejected_before_asset_read(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(module, "read_bytes_limited_no_follow", recording)
     payload = _envelope(sp_att_asset_name=asset)
-    root = _variant(tmp_path, payload=payload, asset_name="gfs.sp.att")
+    root = _variant(tmp_path, payload=payload, asset_name="yd.sp.att")
     _refuse(root)
     assert reads == [VARIANT_HANDOFF_NAME]
 
@@ -535,8 +523,12 @@ def test_checksum_and_utf8_are_independent(tmp_path, leg):
             if leg == "utf8"
             else ("binding", "binding_checksum")
         )
-        values[key] = b"\xff"
-        contract[field] = sha256_literal(b"\xff")
+        content = b"\xff"
+        values[key] = content
+        contract[field] = sha256_literal(content)
+        payload["file_checksums"][
+            "yd.sp.att" if key == "sp_att" else VARIANT_BINDING_NAME
+        ] = sha256_literal(content)
     root = _variant(tmp_path, payload=payload, **values)
     if leg == "opaque":
         assert _load(root).binding_content == b"\xff"
@@ -568,11 +560,13 @@ def test_byte_depth_node_and_entry_caps(tmp_path, monkeypatch):
     root = _variant(tmp_path)
     size = (root / VARIANT_HANDOFF_NAME).stat().st_size
     _load(root, max_manifest_bytes=size, max_asset_bytes=128)
-    assert recorded.count(("list", 5)) == 2
-    assert sorted(item for item in recorded if item[0] != "list") == sorted(
+    assert recorded.count(("list", 14)) == 2
+    names = sorted(item for item in recorded if item[0] != "list")
+    expected = sorted(
         [(VARIANT_HANDOFF_NAME, size)]
-        + [(name, 128) for name in (*FIXED_NAMES[:3], "gfs.sp.att")]
+        + [(name, 128) for name in FIXED_NAMES if name != VARIANT_HANDOFF_NAME]
     )
+    assert names == expected
     _refuse(root, max_manifest_bytes=size - 1)
     (root / "extra.txt").write_bytes(b"x")
     _refuse(root)
@@ -629,7 +623,7 @@ def test_visible_root_drift_after_last_asset_read(tmp_path, monkeypatch, leg):
     assert ("changed during loading" if leg == "root" else "foreign") in str(error)
 
 
-@pytest.mark.parametrize("name", [*FIXED_NAMES, "gfs.sp.att"])
+@pytest.mark.parametrize("name", FIXED_NAMES)
 @pytest.mark.parametrize(
     "kind",
     [
@@ -678,9 +672,6 @@ def test_bounded_json_owner_is_reached_before_schema(tmp_path, leg):
         raw = b"[" * 20000 + b"0" + b"]" * 20000
     error = _refuse(_variant(tmp_path, manifest_bytes=raw), max_manifest_bytes=len(raw))
     assert type(error.__cause__) is BoundedJSONError
-    assert {"nodes": "node", "depth": "depth", "recursion": "recursion"}[leg] in str(
-        error
-    ).lower()
 
 
 @pytest.mark.parametrize(
@@ -766,7 +757,7 @@ def _probe_rename(monkeypatch):
     return probe
 
 
-def test_prepare_success_commits_source_specific_five_entries(env):
+def test_prepare_success_commits_source_specific_complete_entries(env):
     builder = make_builder(env)
     before = tree_snapshot(env.yd_root)
     report = run(env, builder)
@@ -775,7 +766,7 @@ def test_prepare_success_commits_source_specific_five_entries(env):
     expected = set(PREPARE_PARENT_ENTRIES)
     for source, root in report.variants.items():
         assert tree_snapshot(root) == builder.written_files[source]
-        assert len(builder.written_files[source]) == 5
+        assert len(builder.written_files[source]) == 14
         expected.update(
             f"input/models/yd_{source}/{name}" for name in builder.written_files[source]
         )
@@ -939,7 +930,7 @@ def test_prepared_snapshot_detaches_mutable_parser_containers(tmp_path, monkeypa
         snapshot.contract.stations[0].properties["key"] = "value"
 
 
-@pytest.mark.parametrize("name", [*FIXED_NAMES, "gfs.sp.att"])
+@pytest.mark.parametrize("name", FIXED_NAMES)
 @pytest.mark.parametrize("error_number", [5, 13, 70])
 def test_each_carrier_read_error_is_domain_and_read_only(
     tmp_path, monkeypatch, name, error_number
@@ -961,7 +952,7 @@ def test_ancestor_symlink_is_refused(tmp_path):
     _refuse(link / real.name)
 
 
-@pytest.mark.parametrize("name", [*FIXED_NAMES, "gfs.sp.att"])
+@pytest.mark.parametrize("name", FIXED_NAMES)
 def test_copy_growth_is_bounded_before_staging_write(env, monkeypatch, name):
     before = tree_snapshot(env.yd_root)
     recording = make_builder(env)

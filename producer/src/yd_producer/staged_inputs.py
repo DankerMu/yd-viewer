@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from yd_producer._assemble_io import AssemblyInputs, bind_work_io
+from yd_producer._native_input import (
+    NATIVE_MODEL_FILENAMES,
+    PREPARED_VARIANT_FIXED_FILENAMES,
+    STAGED_FILE_COUNT,
+    STAGED_VARIANT_FILE_COUNT,
+)
 from yd_producer._work_claim import (
     ClaimLostError,
     WorkClaim,
@@ -34,7 +40,6 @@ from yd_producer.forcing import ForcingProductionResult
 from yd_producer.forcing.bounded_json import BoundedJSONError, load_bounded_json
 from yd_producer.prepare_handoff import (
     PREPARED_VARIANT_BINDING_FILENAME,
-    PREPARED_VARIANT_CALIBRATED_STATE_FILENAME,
     PREPARED_VARIANT_HANDOFF_FILENAME,
     PREPARED_VARIANT_PARAMETER_FILENAME,
     PreparedVariantHandoff,
@@ -64,7 +69,7 @@ __all__ = [
     "stage_work_inputs",
 ]
 
-STAGED_INPUTS_SCHEMA = "yd.run.staged-inputs.v1"
+STAGED_INPUTS_SCHEMA = "yd.run.staged-inputs.v2"
 STAGED_INPUT_DIRNAME = "input"
 STAGED_VARIANT_DIRNAME = "variant"
 STAGED_STATES_DIRNAME = "states"
@@ -76,14 +81,9 @@ _MANIFEST_KEYS = frozenset(
 _INPUT_ENTRIES = frozenset(
     {STAGED_VARIANT_DIRNAME, STAGED_STATES_DIRNAME, STAGED_INPUTS_MANIFEST_FILENAME}
 )
-_FIXED_VARIANT_FILENAMES = frozenset(
-    {
-        PREPARED_VARIANT_CALIBRATED_STATE_FILENAME,
-        PREPARED_VARIANT_PARAMETER_FILENAME,
-        PREPARED_VARIANT_BINDING_FILENAME,
-        PREPARED_VARIANT_HANDOFF_FILENAME,
-    }
-)
+_FIXED_VARIANT_FILENAMES = PREPARED_VARIANT_FIXED_FILENAMES
+_STAGED_FILE_COUNT = STAGED_FILE_COUNT
+_STAGED_VARIANT_FILE_COUNT = STAGED_VARIANT_FILE_COUNT
 _COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CHECKSUM = re.compile(r"^sha256:[0-9a-f]{64}$")
 _VARIANT_FILE_KEY = re.compile(
@@ -227,7 +227,7 @@ def load_staged_work_inputs(
     max_asset_bytes: int,
     max_state_bytes: int,
 ) -> StagedWorkInputs:
-    """Load one canonical v1 staged-input tree without discovering candidate paths."""
+    """Load one canonical v2 staged-input tree without discovering candidate paths."""
     try:
         return _load(
             work_dir=work_dir,
@@ -251,7 +251,7 @@ def assemble_staged(
     staged_inputs: StagedWorkInputs,
     forcing: ForcingProductionResult,
 ) -> RunDirectory:
-    """Assemble from the checksum-bound exact-six staged capability."""
+    """Assemble from the checksum-bound native staged capability."""
     try:
         if type(staged_inputs) is not StagedWorkInputs:
             raise TypeError("staged_inputs must be an exact StagedWorkInputs.")
@@ -284,18 +284,14 @@ def assemble_staged(
             f"{STAGED_INPUT_DIRNAME}/{STAGED_STATES_DIRNAME}/"
             f"{reloaded.source}/{cycle_id(reloaded.cycle)}{STATE_SUFFIX}"
         )
-        passthrough_names = (
-            PREPARED_VARIANT_BINDING_FILENAME,
-            PREPARED_VARIANT_HANDOFF_FILENAME,
-            reloaded.prepared.sp_att_asset_name,
-        )
         passthrough = tuple(
             (
                 Path(name),
                 reloaded.variant_dir / name,
                 checksums[f"{variant_key}/{name}"],
             )
-            for name in passthrough_names
+            for name in NATIVE_MODEL_FILENAMES
+            if name != parameter_name
         )
         parameter_checksum = checksums[f"{variant_key}/{parameter_name}"]
         state_checksum = checksums[state_key]
@@ -499,10 +495,10 @@ def _load(
         work, variant_dir, states_dir, declared, caller
     )
     prepared_first = _load_prepared(variant_dir, caller)
-    expected_entries = _FIXED_VARIANT_FILENAMES | {prepared_first.sp_att_asset_name}
+    expected_entries = _FIXED_VARIANT_FILENAMES
     if declared.variant_names != expected_entries:
         raise ValueError(
-            "staged variant entries do not equal the v1 exact five-entry set."
+            "staged variant entries do not equal the v2 fourteen-file set."
         )
     contents, file_checksums = _read_declared(work, declared, files, caller)
     prepared = _load_prepared(variant_dir, caller)
@@ -636,7 +632,7 @@ def _capture_source(
         max_asset_bytes=caller.max_asset_bytes,
     )
     identity = directory_identity_no_follow(variant_root)
-    expected_entries = _FIXED_VARIANT_FILENAMES | {prepared.sp_att_asset_name}
+    expected_entries = _FIXED_VARIANT_FILENAMES
     names = _list_exact(variant_root, expected_entries, root=variant_root)
     contents: list[tuple[str, bytes]] = []
     for name in sorted(names):
@@ -675,8 +671,8 @@ def _capture_source(
 
 
 def _declared_files(files: dict[str, Any], caller: _Caller) -> _DeclaredFiles:
-    if len(files) != 6:
-        raise ValueError("staged-inputs files must contain exactly six keys.")
+    if len(files) != _STAGED_FILE_COUNT:
+        raise ValueError("staged-inputs files must contain exactly fifteen keys.")
     state_key = _state_file_key(caller)
     variant_names: set[str] = set()
     keys: list[str] = []
@@ -694,12 +690,19 @@ def _declared_files(files: dict[str, Any], caller: _Caller) -> _DeclaredFiles:
         variant_names.add(matched.group(1))
     if state_key not in files:
         raise ValueError("staged-inputs files must include the exact cycle state key.")
-    if len(variant_names) != 5:
-        raise ValueError("staged-inputs files must include exactly five variant keys.")
+    if len(variant_names) != _STAGED_VARIANT_FILE_COUNT:
+        raise ValueError(
+            "staged-inputs files must include exactly fourteen variant keys."
+        )
     missing_fixed = _FIXED_VARIANT_FILENAMES - variant_names
     if missing_fixed:
         raise ValueError(
             f"staged variant keys are missing fixed files: {sorted(missing_fixed)!r}."
+        )
+    extra = variant_names - _FIXED_VARIANT_FILENAMES
+    if extra:
+        raise ValueError(
+            f"staged variant keys include unsupported files: {sorted(extra)!r}."
         )
     return _DeclaredFiles(
         keys=tuple(sorted(keys)), variant_names=frozenset(variant_names)

@@ -7,8 +7,6 @@ import hashlib
 import importlib
 import json
 import os
-import subprocess
-import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -24,21 +22,35 @@ from yd_producer.config import Config, LocalConfig, load_config, load_local
 from yd_producer.prepare import (
     VARIANT_BINDING_NAME,
     VARIANT_CALIBRATED_STATE_NAME,
-    VARIANT_HYDRO_PARAM_NAME,
     VariantBuildRequest,
     run_prepare,
 )
 from yd_producer.store import safe_fs
 
-BASELINE_HYDRO_PARAM_NAME = "yd.para"
+BASELINE_HYDRO_PARAM_NAME = "yd.cfg.para"
 
 BASELINE_HYDRO_PARAM_BYTES = b"# synthetic hydrologic parameters\nKsatH 1.0e-4\n"
 
 SYNTHETIC_MESH_COUNT = 2
 
 VARIANT_HANDOFF_NAME = "yd.direct-grid-handoff.json"
-VARIANT_HANDOFF_SCHEMA = "yd.prepare.direct-grid-handoff.v1"
+VARIANT_HANDOFF_SCHEMA = "yd.prepare.direct-grid-handoff.v2"
 SYNTHETIC_PROJECT_NAME = "yd"
+NATIVE_VARIANT_FILES = (
+    "yd.cfg.ic",
+    "yd.cfg.para",
+    "yd.cfg.calib",
+    "yd.sp.mesh",
+    "yd.sp.att",
+    "yd.sp.riv",
+    "yd.sp.rivseg",
+    "yd.para.lc",
+    "yd.para.soil",
+    "yd.para.geol",
+    "yd.tsd.lai",
+    "yd.tsd.mf",
+)
+NATIVE_CHECKSUM_FILES = (*NATIVE_VARIANT_FILES, "yd.binding")
 
 
 def binding_bytes(*, grid_id: str, source_id: str) -> bytes:
@@ -50,7 +62,11 @@ def sp_att_bytes(*, source_id: str) -> bytes:
 
 
 def variant_asset_name(source_id: str) -> str:
-    return f"{source_id}.sp.att"
+    return "yd.sp.att"
+
+
+def native_placeholder(name: str) -> bytes:
+    return f"synthetic {name}\n".encode()
 
 
 def sha256_hex(content: bytes) -> str:
@@ -131,8 +147,14 @@ def handoff_payload(
     asset_name: str | None = None,
     ids: Mapping[str, str] | None = None,
     contract: Mapping[str, Any] | None = None,
+    checksums: Mapping[str, bytes] | None = None,
 ) -> dict[str, Any]:
     names = dict(ids or synthetic_variant_ids(source_id))
+    files = dict(checksums or {})
+    files.setdefault("yd.binding", binding)
+    files.setdefault("yd.sp.att", sp_att)
+    for name in NATIVE_VARIANT_FILES:
+        files.setdefault(name, native_placeholder(name))
     return {
         "basin_id": names["basin_id"],
         "basin_version_id": names["basin_version_id"],
@@ -146,6 +168,9 @@ def handoff_payload(
             binding=binding,
             sp_att=sp_att,
         ),
+        "file_checksums": {
+            name: sha256_literal(files[name]) for name in NATIVE_CHECKSUM_FILES
+        },
         "model_id": names["model_id"],
         "project_name": project_name,
         "river_network_version_id": names["river_network_version_id"],
@@ -180,24 +205,32 @@ def write_prepared_variant(
     )
     sp_content = sp_att if sp_att is not None else sp_att_bytes(source_id=source_id)
     asset = asset_name or variant_asset_name(source_id)
-    envelope = payload or handoff_payload(
-        source_id=source_id,
-        project_name=project_name,
-        grid_id=grid_id,
-        binding=binding_content,
-        sp_att=sp_content,
-        asset_name=asset,
-    )
-    files = {
-        VARIANT_CALIBRATED_STATE_NAME: state,
-        VARIANT_HYDRO_PARAM_NAME: parameter,
-        VARIANT_BINDING_NAME: binding_content,
-        VARIANT_HANDOFF_NAME: manifest_bytes
-        if manifest_bytes is not None
-        else canonical_json_bytes(envelope),
-        asset: sp_content,
+    files: dict[str, bytes] = {
+        name: native_placeholder(name) for name in NATIVE_VARIANT_FILES
     }
-    files.update(extra or {})
+    files["yd.cfg.ic"] = state
+    files["yd.cfg.para"] = parameter
+    files["yd.sp.att"] = sp_content
+    files[VARIANT_BINDING_NAME] = binding_content
+    if extra:
+        files.update(extra)
+    envelope = (
+        payload
+        if payload is not None
+        else handoff_payload(
+            source_id=source_id,
+            project_name=project_name,
+            grid_id=grid_id,
+            binding=binding_content,
+            sp_att=sp_content,
+            asset_name=asset,
+            checksums=files,
+        )
+    )
+    files[VARIANT_HANDOFF_NAME] = (
+        manifest_bytes if manifest_bytes is not None else canonical_json_bytes(envelope)
+    )
+    files[asset] = sp_content
     for name, content in files.items():
         if name in omit:
             continue
@@ -314,38 +347,24 @@ class RecordingBuilder:
             if script.sp_att_content is not None
             else sp_att_bytes(source_id=request.source_id)
         )
-        asset = script.asset_name or variant_asset_name(request.source_id)
-        manifest = (
-            script.manifest_bytes
-            if script.manifest_bytes is not None
-            else canonical_json_bytes(
-                handoff_payload(
-                    source_id=request.source_id,
-                    project_name=SYNTHETIC_PROJECT_NAME,
-                    grid_id=request.grid_id,
-                    binding=binding,
-                    sp_att=sp_content,
-                    asset_name=asset,
-                )
-            )
+        state = (
+            b"\xff\xfe truncated-not-utf8" if script.corrupt_state else document.payload
         )
-        payload = {
-            VARIANT_HYDRO_PARAM_NAME: self._package.hydro_param.read_bytes(),
-            VARIANT_BINDING_NAME: binding,
-            VARIANT_CALIBRATED_STATE_NAME: (
-                b"\xff\xfe truncated-not-utf8"
-                if script.corrupt_state
-                else document.payload
-            ),
-            VARIANT_HANDOFF_NAME: manifest,
-            asset: sp_content,
+        root = write_prepared_variant(
+            root,
+            source_id=request.source_id,
+            grid_id=request.grid_id,
+            binding=binding,
+            sp_att=sp_content,
+            asset_name=script.asset_name,
+            state=state,
+            parameter=self._package.hydro_param.read_bytes(),
+            manifest_bytes=script.manifest_bytes,
+            omit=script.omit_entries,
+        )
+        written = {
+            path.name: path.read_bytes() for path in root.iterdir() if path.is_file()
         }
-        written: dict[str, bytes] = {}
-        for name, content in payload.items():
-            if name in script.omit_entries:
-                continue
-            (root / name).write_bytes(content)
-            written[name] = content
         for name in script.extra_entries:
             (root / name).write_bytes(b"residue\n")
             written[name] = b"residue\n"
@@ -490,6 +509,7 @@ ENVELOPE_KEYS = (
     "river_network_version_id",
     "direct_grid_forcing_contract",
     "sp_att_asset_name",
+    "file_checksums",
 )
 CONTRACT_KEYS = (
     "forcing_mapping_mode",
@@ -504,8 +524,7 @@ CONTRACT_KEYS = (
     "station_bindings",
 )
 FIXED_NAMES = (
-    VARIANT_CALIBRATED_STATE_NAME,
-    VARIANT_HYDRO_PARAM_NAME,
+    *NATIVE_VARIANT_FILES,
     VARIANT_BINDING_NAME,
     VARIANT_HANDOFF_NAME,
 )
@@ -559,131 +578,13 @@ def envelope_fixture(**overrides) -> dict:
         grid_id=GFS_GRID,
         binding=binding,
         sp_att=sp_att,
+        checksums={
+            "yd.cfg.ic": b"calibrated-state\n",
+            "yd.cfg.para": BASELINE_HYDRO_PARAM_BYTES,
+        },
     )
     payload.update(overrides)
     return payload
-
-
-CONSUMER_SCRIPT = r"""
-import sys
-from pathlib import Path
-from datetime import UTC, datetime
-from yd_producer.prepare_handoff import load_prepared_variant_handoff
-from yd_producer.assemble import WorkIdentity, stage_work_registry, assemble
-from yd_producer.forcing import ForcingProducer, ForcingProducerConfig
-from yd_producer.forcing.file_store import FileForcingRepository
-from yd_producer.store.object_store import LocalObjectStore
-from assembly_fixtures import write_file_repository_canonical_catalog, write_state
-variant, root, source, grid = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
-h = load_prepared_variant_handoff(variant_root=variant, source_id=source,
-    project_name="yd", grid_id=grid, max_manifest_bytes=65536, max_asset_bytes=65536)
-i = WorkIdentity(source_id=source, cycle_time=datetime(2026,5,7,tzinfo=UTC),
-    project_name=h.project_name, model_id=h.model_id, basin_id=h.basin_id,
-    basin_version_id=h.basin_version_id, river_network_version_id=h.river_network_version_id)
-(root/source/"2026050700").mkdir(parents=True)
-r = stage_work_registry(work_root=root, identity=i, contract=h.contract,
-    binding_content=h.binding_content, sp_att_content=h.sp_att_content, max_asset_bytes=65536)
-store = LocalObjectStore(r.object_store_root)
-write_file_repository_canonical_catalog(store, i)
-import json
-import xarray as xr
-catalog_path = store.resolve_path(f"canonical/{source}/2026050700/_catalog/catalog.json")
-catalog = json.loads(catalog_path.read_bytes())
-for row in catalog["products"]:
-    row["grid_id"] = grid
-    path = store.resolve_path(row["object_uri"])
-    with xr.open_dataset(path) as original:
-        ds = original.load()
-    if source == "ifs":
-        if row["variable"] == "pressure_surface":
-            ds = ds.rename({"pressure_surface": "surface_pressure"})
-            row["variable"] = "surface_pressure"
-        row["lead_time_hours"] = 0
-        row["valid_time"] = row["cycle_time"]
-        ds.attrs["lead_time_hours"] = 0
-        ds.attrs["valid_time"] = i.cycle_time.isoformat()
-        identifier = f"ifs_2026050700_{row['variable']}_f000"
-        row["canonical_product_id"] = identifier
-        row["object_uri"] = f"canonical/ifs/2026050700/{row['variable']}/{identifier}.nc"
-        path = store.resolve_path(row["object_uri"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-    ds.attrs["grid_id"] = grid
-    ds.to_netcdf(path, engine="netcdf4")
-    import hashlib
-    row["checksum"] = hashlib.sha256(path.read_bytes()).hexdigest()
-catalog_path.write_text(json.dumps(catalog))
-repo = FileForcingRepository(store, r.registry_manifest)
-f = ForcingProducer(config=ForcingProducerConfig(workspace_root=r.work_dir,
-    object_store_root=r.object_store_root, object_store_prefix=""),
-    repository=repo, object_store=store).produce(source_id=source, cycle_time=i.cycle_time,
-    model_id=i.model_id, basin_id=i.basin_id, basin_version_id=i.basin_version_id,
-    river_network_version_id=i.river_network_version_id)
-assert f.status == "forcing_ready"
-state = write_state(root/"states", i)
-result = assemble(registry=r, variant_dir=variant, forcing=f,
-    states_root=root/"states", state_path=state)
-assert result.identity == i
-assert len(result.forcing_csv_paths) == 2
-assert (r.object_store_root/h.contract.binding_uri).read_bytes() == h.binding_content
-print("prepared-handoff-to-real-forcing-assemble", source, h.model_id)
-"""
-
-
-def consumer_builder(env):
-    points = [["cell-one", 1.0, 2.0], ["cell-two", 6.0, 7.0]]
-    signature = hashlib.sha256(
-        canonical_json_bytes({"grid_points": points})
-    ).hexdigest()
-    recording = make_builder(env)
-
-    def builder(request):
-        recording(request)
-        path = request.variant_root / VARIANT_HANDOFF_NAME
-        payload = json.loads(path.read_bytes())
-        contract = payload["direct_grid_forcing_contract"]
-        contract["grid_signature"] = signature
-        contract["station_bindings"] = [
-            {
-                "station_id": name,
-                "shud_forcing_index": index,
-                "forcing_filename": f"X{index}.csv",
-                "longitude": lon,
-                "latitude": lat,
-                "x": lon + 2,
-                "y": lat + 2,
-                "z": 5.0,
-                "grid_id": request.grid_id,
-                "grid_cell_id": name,
-            }
-            for index, (name, lon, lat) in enumerate(points, 1)
-        ]
-        from prepare_fixtures import sha256_literal
-
-        sp = b"2 1\nTRI\tA\tB\tC\tFORC\n1\t0\t0\t0\t1\n2\t0\t0\t0\t2\n"
-        (request.variant_root / payload["sp_att_asset_name"]).write_bytes(sp)
-        contract["sp_att_checksum"] = sha256_literal(sp)
-        path.write_bytes(canonical_json_bytes(payload))
-
-    return builder
-
-
-def consume_in_process(env, report, source):
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            CONSUMER_SCRIPT,
-            str(report.variants[source]),
-            str(env.scratch_root / "consumer"),
-            source,
-            getattr(env.config.nwm_canonical_grid_id, source),
-        ],
-        cwd=Path(__file__).parent,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return completed
 
 
 def inject_entry_fault(monkeypatch, root, name, kind, original, outside):
@@ -780,22 +681,23 @@ def inject_staging_drift(monkeypatch, field):
     def copy_write(path, content, **kwargs):
         result = real_write(path, content, **kwargs)
         path = Path(path)
-        if path.name == "yd.para" and path.parent.name == "ifs":
+        if path.name == "yd.cfg.para" and path.parent.name == "ifs":
             fired.append(path)
             manifest_path = path.parent / VARIANT_HANDOFF_NAME
             payload = json.loads(manifest_path.read_bytes())
             contract = payload["direct_grid_forcing_contract"]
             if field in {"binding", "sp_att"}:
-                name = VARIANT_BINDING_NAME if field == "binding" else "ifs.sp.att"
-                (path.parent / name).write_bytes(b"changed but checksum-valid")
-                contract[field + "_checksum"] = sha256_literal(
-                    b"changed but checksum-valid"
-                )
+                name = VARIANT_BINDING_NAME if field == "binding" else "yd.sp.att"
+                content = b"changed but checksum-valid"
+                (path.parent / name).write_bytes(content)
+                checksum = sha256_literal(content)
+                contract[field + "_checksum"] = checksum
+                payload["file_checksums"][name] = checksum
             elif field == "noncanonical":
                 manifest_path.write_bytes(manifest_path.read_bytes() + b"\n")
                 return result
             elif field == "missing":
-                (path.parent / "ifs.sp.att").unlink()
+                (path.parent / "yd.sp.att").unlink()
             elif field == "extra":
                 (path.parent / "foreign").write_bytes(b"unexpected")
             else:
@@ -900,9 +802,12 @@ LOADER_FIELDS = [
 
 
 def inject_copy_growth(monkeypatch, env, recording, name):
-    limits = {VARIANT_HANDOFF_NAME: 2048}
+    manifest_cap = 8192
+    limits = {VARIANT_HANDOFF_NAME: manifest_cap}
     limit = limits.get(name, 1024)
-    monkeypatch.setattr(prepare_module, "MAX_PREPARED_VARIANT_MANIFEST_BYTES", 2048)
+    monkeypatch.setattr(
+        prepare_module, "MAX_PREPARED_VARIANT_MANIFEST_BYTES", manifest_cap
+    )
     monkeypatch.setattr(prepare_module, "MAX_PREPARED_VARIANT_ASSET_BYTES", 1024)
     evidence = {"limit": limit, "reads": [], "writes": []}
     real_mkdir, real_open, real_read, real_close = os.mkdir, os.open, os.read, os.close
