@@ -168,7 +168,6 @@ VALID_CONFIG: dict[str, Any] = {
     "output_interval_minutes": 60,
     "checkpoint_hours": [12],
     "reach_count": 3988,
-    "nwm_mapping_builder_module": "workers.mapping_builder.cli",
     # 逐 source 的 NWM canonical grid 标识（issue #20）。两个值刻意不同：`prepare` 的
     # "两次 grid_id 不同"这条断言在两者相同时退化成永真式。
     "nwm_canonical_grid_id": {"gfs": "fixture-grid-gfs", "ifs": "fixture-grid-ifs"},
@@ -227,7 +226,6 @@ VALID_CONFIG_B: dict[str, Any] = {
     "output_interval_minutes": 30,
     "checkpoint_hours": [6, 30, 90],
     "reach_count": 1777,
-    "nwm_mapping_builder_module": "alternate.mapping.builder",
     "nwm_canonical_grid_id": {
         "gfs": "alternate-grid-gfs-1km",
         "ifs": "alternate-grid-ifs-9km",
@@ -272,7 +270,6 @@ EXPECTED_CONFIG_A = Config(
     output_interval_minutes=60,
     checkpoint_hours=(12,),
     reach_count=3988,
-    nwm_mapping_builder_module="workers.mapping_builder.cli",
     nwm_canonical_grid_id=CanonicalGridConfig(
         gfs="fixture-grid-gfs",
         ifs="fixture-grid-ifs",
@@ -306,7 +303,6 @@ EXPECTED_CONFIG_B = Config(
     output_interval_minutes=30,
     checkpoint_hours=(6, 30, 90),
     reach_count=1777,
-    nwm_mapping_builder_module="alternate.mapping.builder",
     nwm_canonical_grid_id=CanonicalGridConfig(
         gfs="alternate-grid-gfs-1km",
         ifs="alternate-grid-ifs-9km",
@@ -418,15 +414,11 @@ VALID_LOCAL_B: dict[str, Any] = {
     },
 }
 
-# spec cli-config 反引号钉死的顶层 key，MUST NOT 被加上表前缀
 SPEC_PINNED_TOP_LEVEL_KEYS = (
     "forecast_days",
     "output_interval_minutes",
     "checkpoint_hours",
     "reach_count",
-    # spec cli-config「config.toml 装载与校验」Requirement 已用反引号把该 key 钉在顶层，
-    # 与上面四个同判据（issue #3 fixture 记录下来的决定，非默认）。
-    "nwm_mapping_builder_module",
 )
 
 # --- 第二本账：从 fixture 手工转录的必需 key 全集 ----------------------------
@@ -456,8 +448,6 @@ PINNED_CONFIG_KEYS = (
     "output_interval_minutes",
     "checkpoint_hours",
     "reach_count",
-    # issue #3 fixture 的 TOML key schema 在 `reach_count` 之后加入本键（#32 三步之第 1 步）
-    "nwm_mapping_builder_module",
     # issue #20 fixture「Must add/change」在其后加入本表（`nwm_canonical_grid_id` 表 ->
     # `CanonicalGridConfig(gfs, ifs)`）；spec cli-config 以 `nwm_canonical_grid_id.gfs`
     # /`.ifs` 逐字钉死其点分名，故表本身与两个叶子都是必需 key。
@@ -742,7 +732,6 @@ def test_production_config_matches_issue_29_literal_ledger():
     assert config.output_interval_minutes == 60
     assert config.checkpoint_hours == (12,)
     assert config.reach_count == 3988
-    assert config.nwm_mapping_builder_module == "workers.mapping_builder.cli"
     assert config.nwm_canonical_grid_id.gfs == "gfs_0p25"
     assert config.nwm_canonical_grid_id.ifs == "ifs_0p25"
     assert config.cycle.hours == (0, 12)
@@ -904,7 +893,7 @@ def _dataclass_leaf_values(value: object, prefix: str = "") -> dict[str, object]
 @pytest.mark.parametrize(
     ("expected_a", "expected_b", "expected_leaf_count"),
     [
-        pytest.param(EXPECTED_CONFIG_A, EXPECTED_CONFIG_B, 19, id="config"),
+        pytest.param(EXPECTED_CONFIG_A, EXPECTED_CONFIG_B, 18, id="config"),
         pytest.param(EXPECTED_LOCAL_A, EXPECTED_LOCAL_B, 10, id="local"),
     ],
 )
@@ -934,30 +923,11 @@ def test_load_config_returns_all_fields(tmp_path, data, expected):
     assert config == expected
 
 
-def test_mapping_builder_module_follows_fixture_value(tmp_path):
-    """module 名取自 `config.toml`，而非装载器里的常量。
-
-    `test_load_config_returns_all_fields` 的那条 round-trip 断言拦不住这一类：期望值就是
-    fixture 里的唯一取值，一个"照常 `_require_str` 校验、结果丢掉、存回字面量"的实现
-    （缺 key 仍报错、类型错仍报错，两本账都杀不掉）照样绿。判别力只能来自第二个值。
-
-    刻意写字面量而不从 `cli_fixtures` 导入：本文件的 fixture 与那份**刻意不共用**（见
-    `cli_fixtures` 模块头），共用即两本账共享同一个盲区。
-    """
-    data = _with(VALID_CONFIG, "nwm_mapping_builder_module", "other.builder.entry")
-
-    config = _loaded_config(tmp_path, data)
-
-    assert VALID_CONFIG["nwm_mapping_builder_module"] != "other.builder.entry"
-    assert config.nwm_mapping_builder_module == "other.builder.entry"
-
-
 def test_canonical_grid_ids_follow_fixture_values(tmp_path):
     """两个 `grid_id` 都取自 `config.toml`，而非装载器里的常量或彼此的副本。
 
-    与 `test_mapping_builder_module_follows_fixture_value` 同判据：判别力只能来自第二组
-    值。这里逐 source 各换一个新值，一个"两个 source 共用同一个 grid_id"或"把 grid_id
-    存回字面量"的实现都会红。
+    判别力只能来自第二组值。这里逐 source 各换一个新值，一个"两个 source 共用同一个
+    grid_id"或"把 grid_id 存回字面量"的实现都会红。
     """
     data = _with(VALID_CONFIG, "nwm_canonical_grid_id.gfs", "alt-grid-gfs")
     data = _with(data, "nwm_canonical_grid_id.ifs", "alt-grid-ifs")

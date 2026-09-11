@@ -83,9 +83,9 @@ class CanonicalGridConfig:
 
     `prepare` 把它逐字传给 mapping-builder 的 `grid_id`（NWM@8ae9b8f2
     `workers/mapping_builder/cli.py:601-602` 的 `build_direct_grid_variant` 同名关键字
-    参数）。与 `nwm_mapping_builder_module` 同纪律：随 NWM 快照固定、不随现场变化，故
-    落 `config.toml` 而非 `local.toml`；装载层只校验存在性与 `str` 类型，**不校验该
-    grid 是否存在于 NWM registry**（那需要活的 NWM 环境，归 prepare 编排与 M4）。
+    参数）。随 NWM 快照固定、不随现场变化，故落 `config.toml` 而非 `local.toml`；
+    装载层只校验存在性与 `str` 类型，**不校验该 grid 是否存在于 NWM registry**
+    （那需要活的 NWM 环境，归 prepare 编排与 M4）。
     """
 
     gfs: str
@@ -141,12 +141,8 @@ class Config:
     output_interval_minutes: int
     checkpoint_hours: tuple[int, ...]
     reach_count: int
-    # NWM@8ae9b8f2 `workers/mapping_builder/cli.py` 的点分 module 名：随快照固定的版本化
-    # 事实，非现场值（归属裁决见 #32）。装载层与其它标量同等待遇——只校验存在性与 `str`
-    # 类型，不校验该 module 是否可导入（那需要活的 NWM 环境，归 prepare 编排）。
-    nwm_mapping_builder_module: str
     # 逐 source 的 NWM canonical grid 标识（spec cli-config「`nwm_canonical_grid_id.gfs`
-    # /`.ifs`」逐字钉死的表名）；与上一字段同为版本化快照事实，取值复核归 #29。
+    # /`.ifs`」逐字钉死的表名）；随快照固定的版本化事实，取值复核归 #29。
     nwm_canonical_grid_id: CanonicalGridConfig
     cycle: CycleConfig
     variants: VariantsConfig
@@ -444,7 +440,6 @@ def _build_config(data: Mapping[str, Any]) -> Config:
         output_interval_minutes=_require_int(data, "output_interval_minutes"),
         checkpoint_hours=_require_int_list(data, "checkpoint_hours"),
         reach_count=_require_int(data, "reach_count"),
-        nwm_mapping_builder_module=_require_str(data, "nwm_mapping_builder_module"),
         nwm_canonical_grid_id=_build_canonical_grid(
             _require_table(data, "nwm_canonical_grid_id")
         ),
