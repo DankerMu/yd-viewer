@@ -12,4 +12,4 @@
 ## 2. Evidence and delivery
 - [x] 2.1 Parent oldreader red/fixedgreen deterministic alias regression; directactualreader smoke values/attrs/FD lifecycle.
 - [x] 2.2 Existing canonical admission/checksum/size/caller suites and full serial producer/viewer/ruff/OpenSpec/stage matrix green; no weakened rejection/numeric oracle.
-- [ ] 2.3 Approved high fixture/invariantmatrix; four-seat review, independentfinal, frozenSHA/CI/evidence, preauthorizedmerge/archive/log.
+- [x] 2.3 Approved high fixture/invariantmatrix; four-seat review, independentfinal, frozenSHA/CI/evidence, preauthorizedmerge/archive/log.

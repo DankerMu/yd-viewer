@@ -5784,7 +5784,7 @@ Minimal mergeable slice: 只交付任务 14.4（原 14.3）；14.1 与 14.3 已�
 **已关闭裁决 / routed deferrals**：
 
 - 已关闭裁决 #108：post-DONE 硬杀/cleanup-pending 留下的历史 scratch work 由本任务每源 startup hygiene 处理；它不是已知限制或后续 owner。
-- Routed deferral #127：Darwin `/dev/fd/FD_NUMBER` descriptor alias 瞬时不可用；测试只串行 synthetic heavy terminal hook，不为生产 controller 增加 forcing/collect 全局锁。
+- 已关闭 deferral #127（PR #217）：Darwin canonical reader 已改为同一 no-follow FD 的有界不可变内存交接，不再依赖 `/dev/fd`；Linux `/proc/self/fd` 成功路径不变。synthetic heavy terminal hook 的测试串行模型保留，生产 controller 未增加 forcing/collect 全局锁。
 - M4：真实 worker/receipt、`sacct ExitCode` 输出的现场复核、跨进程活作业查询与人工操作 receipt、cron、node-22/NFS 真运行；Slurm 退出码 provider 本身及 CLI 注入由 M2 收尾任务实现。
 
 **Non-goals**：
