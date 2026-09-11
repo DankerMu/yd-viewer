@@ -7,7 +7,7 @@
 - [ ] 1.6 Remove exactlythree requested large-file excludes; every18old/new snapshotfile strictly<1000, otherexcludes/max unchanged.
 ## 2. Proof and delivery
 - [ ] 2.1 Parent verifies baseline imports/signatures/aliasidentity, protectedpatches, exactordered17IDs, one-to-one callableAST/state/constants and acyclic imports.
-- [ ] 2.2 Parent runs all53 inherited mutationlegs with current#104/#127 anchors, actual rednodes and byte-restoration; weightcalibration and restoredbaselinegreen, no weakened oracle.
+- [ ] 2.2 Strengthen the existing row-source companion input with a coherent realIFS catalog row (same assertions/IDs, row-cycle untouched), then parent runs all53 inherited mutationlegs with current#104/#127 anchors, actual rednodes and byte-restoration; weightcalibration and restoredbaselinegreen, no weakened oracle.
 - [ ] 2.3 Direct realfixture forcing smoke plus focusedforcing/provenance and full serialproducer/viewer/ruff/OpenSpec/stage matrix pass.
 - [ ] 2.4 Stage all old/new snapshotfiles and guardconfig; actual large-file guard accepts naturally, independentstrict<1000 audit.
 - [ ] 2.5 Approved broad-expanded fixture, fourseatreview/independentfinal, frozenSHA/CI/evidence, preauthorizedmerge/archive/log.
