@@ -3,10 +3,8 @@
 权威：compute-loop §6.1、products-contract §2/§6、spec `prepare-variants`、
 tasks.md「Issue #20 fixture（任务 10.3）」。
 
-**契约标注约定**（本模块与 `cli` 通用）：凡以散文声明的行为选择（带 `MUST` / `MUST NOT` /
-`刻意` / `钉死` / `不做…兜底`）都就地标注它的判别性证据——`（pinned: <test id>）` 指出把该
-选择改回去时会变红的用例；确实无法判别的标 `（等价变异，不可判别：<理由>）`；本阶段不声明
-的标 `（归 M4/<issue>，本阶段不声明）`。审查因此是一次 grep，而不是一次全套变异扫描。
+**契约标注约定**（本模块与 `cli` 通用）：散文行为选择就地标
+`（pinned: <test id>）` / `（等价变异，不可判别：<理由>）` / `（归 M4/<issue>，本阶段不声明）`。
 
 **总不变量（全有或全无）**：本模块对 `YD_ROOT` 的效果要么是「四个终名（两个变体目录 +
 两份 GeoJSON）全部由本次运行新建」，要么是「`YD_ROOT` 回到执行前的条目集合，既有内容
@@ -67,19 +65,21 @@ pinned: test_commit_survives_a_filesystem_that_refuses_cross_device_rename、
 test_every_commit_renames_within_yd_root_on_one_device、
 test_published_entries_do_not_inherit_scratch_modes。
 
-**异常契约**：本模块对外只有 `PrepareError`。三处外来异常一律包装并保留
-`__cause__`——`state.cfg_ic.parse` 的 `ValueError`、`geometry.*` 的
-`GeometryError`、`store.safe_fs.*` 的 `SafeFilesystemError`。三处各自的钉子逐一对应，
-不通用（pinned: test_unparsable_calibrated_state_refuses_commit 钉 `ValueError`
-那一处、test_geometry_failure_rolls_back_validated_variants 钉 `GeometryError`
-那一处、test_first_commit_failure_leaves_no_new_entries 钉 `SafeFilesystemError`
-那一处）。第三处最易漏：`SafeFilesystemError` 是 **`RuntimeError` 子类而非
-`OSError`**（`store/safe_fs.py:11`），`except OSError` 兜不住它——注意 `_wrap_fs`
-里紧邻的 `except OSError` 一支由
-test_missing_run_roots_are_refused_before_any_builder_call 钉（见 `_wrap_fs`
-docstring），它钉的**不是**本处这条 `SafeFilesystemError` 通道，删掉
-`except safe_fs.SafeFilesystemError` 后它仍绿。注入 builder 抛出的任何异常同样包装
-（pinned: test_injected_builder_failure_survives_a_cleanup_failure）。
+**异常契约**：本模块对外以 `PrepareError` 为主；builder 边界上的 `ConfigError`
+原样上抛（pinned: test_run_prepare_preserves_checkout_config_error）。三处外来
+异常一律包装并保留 `__cause__`——`state.cfg_ic.parse` 的 `ValueError`、
+`geometry.*` 的 `GeometryError`、`store.safe_fs.*` 的 `SafeFilesystemError`。
+三处各自的钉子逐一对应，不通用（pinned:
+test_unparsable_calibrated_state_refuses_commit 钉 `ValueError` 那一处、
+test_geometry_failure_rolls_back_validated_variants 钉 `GeometryError` 那一处、
+test_first_commit_failure_leaves_no_new_entries 钉 `SafeFilesystemError` 那一处）。
+第三处最易漏：`SafeFilesystemError` 是 **`RuntimeError` 子类而非 `OSError`**
+（`store/safe_fs.py:11`），`except OSError` 兜不住它——注意 `_wrap_fs` 里紧邻的
+`except OSError` 一支由 test_missing_run_roots_are_refused_before_any_builder_call
+钉（见 `_wrap_fs` docstring），它钉的**不是**本处这条 `SafeFilesystemError` 通道，
+删掉 `except safe_fs.SafeFilesystemError` 后它仍绿。注入 builder 抛出的非
+`PrepareError`/`ConfigError` 异常同样包装（pinned:
+test_injected_builder_failure_survives_a_cleanup_failure）。
 
 **文件系统原语**：一律复用 `store.safe_fs`，本模块不另写一套。**恰有两处豁免**，两处的
 理由同源——`safe_fs` 的公共面确无对应原语，而扩它属 #24/#25 发布面的归属：
@@ -92,8 +92,6 @@ docstring），它钉的**不是**本处这条 `SafeFilesystemError` 通道，�
    `safe_fs.open_directory_no_follow` 逐层 no-follow 打开，`os.rmdir` 只在那个 fd 上按
    条目名执行。
 
-
-**原生布局**：`BASELINE_*` / `VARIANT_*` 使用固定 yd 文件名；GIS 为 `gis/river.shp` 与 `gis/domain.shp`。
 """
 
 from __future__ import annotations
@@ -110,7 +108,12 @@ from yd_producer._native_input import (
     NativeSupportError,
     reject_unsupported_native_physics,
 )
-from yd_producer.config import Config, LocalConfig, variant_relative_violation
+from yd_producer.config import (
+    Config,
+    ConfigError,
+    LocalConfig,
+    variant_relative_violation,
+)
 from yd_producer.geometry import GeometryError, write_viewer_geojson
 from yd_producer.prepare_handoff import (
     MAX_PREPARED_VARIANT_ASSET_BYTES,
@@ -154,7 +157,7 @@ __all__ = [
 #: test_every_commit_renames_within_yd_root_on_one_device
 SOURCE_IDS = ("gfs", "ifs")
 
-#: 基线包内部布局：模型目录直接含 `yd.*` 与 `gis/river.shp`/`gis/domain.shp`。
+#: 基线 GIS 布局：`gis/river.shp` 与 `gis/domain.shp`。
 BASELINE_GIS_DIRNAME = "gis"
 BASELINE_RIVERS_SHP_NAME = "river.shp"
 BASELINE_DOMAIN_SHP_NAME = "domain.shp"
@@ -175,11 +178,8 @@ VIEWER_GEOJSON_NAMES = {
 }
 _VIEWER_RELATIVE_DIR = Path("input") / "viewer"
 
-#: 变体终名 MUST NOT 落入的 `YD_ROOT` 相对子树（词法闸门，见 `variant_targets`）：
-#: `input/viewer/` 是 products-contract §2 钉死的「恰两个文件」目录，`output/` 是同一类
-#: 的 viewer 读取面（§2/§7）。变体终名落进去只是普通配置笔误，但既有的两两互异 /
-#: 互为祖先闸门都拦不住它——变体目录是两个 GeoJSON 的**兄弟**。
-#: pinned: test_variant_target_on_the_viewer_read_surface_is_refused、
+#: 变体终名 MUST NOT 落入 `input/viewer/` 或 `output/`（词法闸门）。pinned:
+#: test_variant_target_on_the_viewer_read_surface_is_refused、
 #: test_output_subtree_variant_target_is_refused
 _VARIANT_FORBIDDEN_RELATIVE_DIRS = (
     _VIEWER_RELATIVE_DIR,
@@ -858,7 +858,7 @@ def run_prepare(
             requests[source] = request
             try:
                 active_builder(request)
-            except PrepareError:
+            except (PrepareError, ConfigError):
                 raise
             except Exception as exc:
                 raise PrepareError(f"builder 构建 {source} 变体失败：{exc}") from exc

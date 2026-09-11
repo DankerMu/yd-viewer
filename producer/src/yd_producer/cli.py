@@ -260,10 +260,10 @@ def _print_notes(exc: BaseException) -> None:
     1. `PrepareError`（退出码 `1`）pinned:
        test_cleanup_note_reaches_stderr_on_the_exit_one_path（cand-r3-1；用例里的 note 文本
        与 `str(exc)` 无公共子串，否则 `_fail` 单独即可满足断言、不具判别性）；
-    2. `ConfigError`（退出码 `1`）是**防御性声明**，今天按构造挂不上 note：
-       `nwm.check_interpreter` 跑在 `run_prepare` 之前、builder 抛出的 `ConfigError` 在
-       `prepare.py` 里被包装成 `PrepareError`、装载期的 `ConfigError` 由更早一个 handler
-       接走。（等价变异，不可判别：无可达输入能让它渲染出任何东西。）
+    2. `ConfigError`（退出码 `1`）：`nwm.check_interpreter` 跑在 `run_prepare` 之前；
+       builder 预检抛出的 `ConfigError`（缺失/非目录 checkout）经 `run_prepare` 原样
+       上抛后由本 handler 接住；装载期的 `ConfigError` 由更早一个 handler 接走。
+       回滚/清理失败仍以 `add_note` 附在该 `ConfigError` 上。
     """
     for note in getattr(exc, "__notes__", ()):
         print(note, file=sys.stderr)

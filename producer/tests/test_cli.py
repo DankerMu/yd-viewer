@@ -13,11 +13,13 @@
 """
 
 import argparse
+import json
 import os
 from pathlib import Path
 
 import pytest
 from cli_fixtures import write_config, write_fake_interpreter, write_local
+from prepare_fixtures import write_baseline_package
 
 from yd_producer import cli, nwm
 from yd_producer import prepare as prepare_module
@@ -432,23 +434,32 @@ def _prepare_argv(tmp_path, **kwargs):
     return _argv("prepare", tmp_path, python=script, **kwargs)
 
 
-def test_prepare_with_executable_interpreter_reaches_real_builder(
-    monkeypatch, capsys, tmp_path
-):
+def test_prepare_with_executable_interpreter_reaches_real_builder(capsys, tmp_path):
     """正控制：可执行解释器下越过预检，进入真实 builder 并以退出码 `1` 停。
 
-    假解释器不会写出十四文件，handoff 校验失败必须走 `PrepareError`，不得回到
-    unavailable/exit 3。
+    假解释器成功退出但不会写出十四文件，handoff 校验失败必须走 `PrepareError`，
+    不得回到 unavailable/exit 3。
     """
-    runner = Recorder(result=None)
-    monkeypatch.setattr(nwm, "invoke_mapping_builder", runner)
+    from yd_producer.nwm import PREPARE_DRIVER_SCRIPT
 
-    assert _exit_code(_prepare_argv(tmp_path), env={}) == 1
+    checkout = tmp_path.resolve() / "nwm" / "checkout"
+    checkout.mkdir(parents=True)
+    write_baseline_package(tmp_path / "baseline")
+    argv = _prepare_argv(tmp_path, checkout_root=checkout)
+    record = tmp_path.resolve() / "record.json"
+    yd_root = tmp_path.resolve() / "yd"
+
+    assert _exit_code(argv, env={}) == 1
 
     err = capsys.readouterr().err
     assert "Traceback" not in err
-    assert "归属 M4" not in err
-    assert runner.count == 0
+    assert "尚未落地" not in err
+    recorded = json.loads(record.read_text(encoding="utf-8"))
+    assert str(PREPARE_DRIVER_SCRIPT) in recorded["argv"]
+    assert not (yd_root / "input" / "models" / "yd_gfs").exists()
+    assert not (yd_root / "input" / "models" / "yd_ifs").exists()
+    assert not (yd_root / "input" / "viewer" / "rivers.geojson").exists()
+    assert not (yd_root / "input" / "viewer" / "boundary.geojson").exists()
 
 
 def test_cleanup_failure_text_reaches_stderr_on_the_failure_path(

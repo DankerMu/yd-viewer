@@ -19,12 +19,14 @@ from __future__ import annotations
 import errno
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from cli_fixtures import (
     ALT_CANONICAL_GRID_IDS,
     CANONICAL_GRID_IDS,
+    write_fake_interpreter,
 )
 from geometry_fixtures import write_bowtie_domain_layer
 from prepare_fixtures import (
@@ -42,7 +44,9 @@ from prepare_fixtures import (
     tree_snapshot,
 )
 
+from yd_producer import nwm
 from yd_producer import prepare as prepare_module
+from yd_producer.config import ConfigError
 from yd_producer.prepare import (
     VARIANT_BINDING_NAME,
     VARIANT_CALIBRATED_STATE_NAME,
@@ -812,6 +816,54 @@ def test_default_builder_invokes_packaged_driver_with_bound_local(env, monkeypat
     assert "--grid-id" in args and "fixture-grid-gfs" in args
     assert str(env.package.root) in args
     assert str(env.scratch_root / "gfs") in args
+
+
+@pytest.mark.parametrize("case", ["missing", "non-directory"])
+def test_run_prepare_preserves_checkout_config_error(env, monkeypatch, tmp_path, case):
+    """Public run_prepare keeps checkout ConfigError and does not start a process."""
+    interpreter = write_fake_interpreter(
+        tmp_path / "fake-python", tmp_path / "record.json"
+    )
+    checkout = tmp_path / "invalid-checkout"
+    if case == "non-directory":
+        checkout.write_text("not a checkout directory\n", encoding="utf-8")
+    local = replace(
+        env.local,
+        nwm=replace(
+            env.local.nwm,
+            python=str(interpreter),
+            checkout_root=str(checkout),
+        ),
+    )
+    before = tree_snapshot(env.yd_root)
+    runner_calls: list = []
+
+    def forbidden_runner(*args, **kwargs):
+        runner_calls.append(args)
+        raise AssertionError("invalid checkout reached process execution")
+
+    real_invoke = nwm.invoke_mapping_builder
+
+    monkeypatch.setattr(
+        nwm,
+        "invoke_mapping_builder",
+        lambda local_config, args=(): real_invoke(
+            local_config, args, runner=forbidden_runner
+        ),
+    )
+
+    with pytest.raises(ConfigError) as captured:
+        prepare_module.run_prepare(
+            local=local,
+            config=env.config,
+            baseline_root=env.package.root,
+            builder=None,
+        )
+
+    assert captured.value.path == "nwm.checkout_root"
+    assert runner_calls == []
+    assert tree_snapshot(env.yd_root) == before
+    assert tree_snapshot(env.scratch_root) == {}
 
 
 # --- 终名纯函数 --------------------------------------------------------------

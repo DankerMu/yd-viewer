@@ -74,7 +74,6 @@ from yd_producer.prepare import (
     VARIANT_CALIBRATED_STATE_NAME,
     VARIANT_HYDRO_PARAM_NAME,
     PrepareError,
-    run_prepare,
 )
 from yd_producer.store import safe_fs
 from yd_producer.store.object_store import MAX_OBJECT_MANIFEST_BYTES
@@ -830,8 +829,6 @@ def test_legacy_three_file_variant_has_no_fallback(tmp_path):
         run(env, builder)
     assert VARIANT_HANDOFF_NAME in str(captured.value) or "gfs" in str(captured.value)
     assert_untouched(env, before)
-    with pytest.raises(PrepareError):
-        run_prepare(local=env.local, config=env.config, baseline_root=env.package.root)
 
 
 @pytest.mark.parametrize(
