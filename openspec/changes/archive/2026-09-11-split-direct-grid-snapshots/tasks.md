@@ -10,4 +10,4 @@
 - [x] 2.2 Strengthen the existing row-source companion input with a coherent realIFS catalog row (same assertions/IDs, row-cycle untouched), then parent runs all53 inherited mutationlegs with current#104/#127 anchors, actual rednodes and byte-restoration; weightcalibration and restoredbaselinegreen, no weakened oracle.
 - [x] 2.3 Direct realfixture forcing smoke plus focusedforcing/provenance and full serialproducer/viewer/ruff/OpenSpec/stage matrix pass.
 - [x] 2.4 Stage all old/new snapshotfiles and guardconfig; actual large-file guard accepts naturally, independentstrict<1000 audit.
-- [ ] 2.5 Approved broad-expanded fixture, fourseatreview/independentfinal, frozenSHA/CI/evidence, preauthorizedmerge/archive/log.
+- [x] 2.5 Approved broad-expanded fixture, fourseatreview/independentfinal, frozenSHA/CI/evidence, preauthorizedmerge/archive/log.

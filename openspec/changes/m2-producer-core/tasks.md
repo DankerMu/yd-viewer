@@ -2780,9 +2780,9 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 
 **PR 边界与落点裁决**：
 - 本 issue **只做 8.1**。公开验收 seam 是 `yd_producer.forcing.ForcingProducer.produce(...) -> ForcingProductionResult`；design.md D10 覆盖旧草图 `forcing.build(...)`。不新增 build facade，不生成临时 registry，不组装 SHUD 运行目录。
-- 快照目标按 `nwm-snapshot-inventory.md` §1 第 36/37/38/42/43/53 行落地：`forcing/{producer,file_store,canonical_json,direct_grid_contract,shud_forcing_contract}.py` 与抽取式 `tests/test_forcing_producer.py`；`forcing/__init__.py`、grid-identity/no-follow 适配 helper 与 yd 验收测试为本仓自撰，不带 NWM 溯源头。
+- 快照目标按 `nwm-snapshot-inventory.md` §1 的目标路径定位：`forcing/{producer,file_store,canonical_json,direct_grid_contract,shud_forcing_contract}.py` 与抽取式 `tests/test_forcing_producer.py`；#114 的同源拆分归宿由已登记的新目标和 placement 对照承接。`forcing/__init__.py`、grid-identity/no-follow 适配 helper 与 yd 验收测试为本仓自撰，不带 NWM 溯源头。
 - 上述六条清单行的 `落地状态` 必须与对应文件在**同一实现提交**翻为 `本 issue 落地`；fixture-first 文档提交仍保持 `待落地`。
-- `producer.py`、`file_store.py`、抽取式 `test_forcing_producer.py` 保持 pin 文件边界。实际超过 1000 行时只允许把这三份逐文件加入 `.large-file-guard.json`；yd 自撰测试/helper 必须拆分在 1000 行内。若发生豁免，Phase 8 路由一条规模 follow-up；不扩大既有 glob/目录豁免。
+- #14 原允许三份 pin 文件边界的临时逐文件规模豁免；该授权已由 **#114 / PR #218** 的结构拆分撤销。`producer.py`、`file_store.py`、`test_forcing_producer.py` 现在保留兼容 façade/收集入口，定义归宿见归档 `split-direct-grid-snapshots/placement.json`；原路径与全部拆分产物均严格 `<1000` 行，不得重加这三项或扩大 glob/目录豁免。
 - 不改 `config.py`/`cli.py`/`controller.py`/`assemble`、viewer、依赖版本或 lockfile。构造参数由测试/后继编排显式提供；config 接线归 #15/#26。
 
 **Must preserve**：
@@ -2889,7 +2889,7 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 - canonical converter 自身的 unbounded read 与 path-follow 分别由 #102/#103 跟踪；本 PR 只保证 forcing 新读面不复制缺陷，不修改 canonical 源码。
 - #104 已关闭 IFS grid-definition URI 大小写裂口；本 PR 按 catalog 中唯一小写 URI 消费，不保留旧大写别名。
 - file-backend handoff package 的完整 parser/receipt 覆盖按 inventory 风险 12 归 #15；本 PR 只钉 forcing package 本身与直接 JSON identity，不恢复 2777 行校验器。
-- 若三份 snapshot 文件触发 large-file exclude，Phase 8 由 issue-scribe 建立/去重规模债 follow-up；#100/#107 仅覆盖既有 rawcopy/canonical 文件，不能假称已覆盖本 PR 新文件。
+- 规模债 **#114 已由 PR #218 关闭**：三项 forcing snapshot large-file exclude 已移除，18份原/拆分模块均严格 `<1000` 行，原13种子/17node-id及53腿变异判别保留。#100/#107 的 rawcopy/canonical 边界仍各自独立，不与本 forcing 拆分混记。
 - 真实 IFS/GFS 数值与 node-22 运行属 M4；本 PR 只声明合成 fixture 下的结构、映射、时间和 IO 安全。
 
 **Non-goals**：
