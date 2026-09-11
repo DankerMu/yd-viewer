@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from assembly_fixtures import BINDING, PARAMETER_TEMPLATE, SP_ATT
+from assembly_fixtures import BINDING, NATIVE_PARAMETER_TEMPLATE, SP_ATT
 from cfg_ic_fixtures import build_cfg_ic
 from dat_fixtures import build_dat_bytes
 
@@ -83,7 +83,7 @@ RELATIVE_MINUTE = "720.000000"
 REACH_COUNT = 8
 #: `config.forecast_days * 24`。
 EXPECTED_ROWS = 168
-#: 变体/项目名：`<project>.cfg.ic` / `<project>.para` / `<project>.tsd.forc`。
+#: 变体/项目名：`<project>.cfg.ic` / `<project>.cfg.para` / nested native index。
 PROJECT = "yd"
 #: 提交作业名：`yd-<source>-<cycle>`（tasks.md ownership 6 的字面形态）。
 JOB_NAME = "yd-gfs-2026082612"
@@ -201,12 +201,7 @@ def make_config(*, source: str = "gfs") -> Config:
 
 
 def make_multi_gfs_config() -> Config:
-    """`make_config` 的多变量 GFS 变体：≥2 变量 × ≥2 lead（fanout 判别器）。
-
-    只替换 `raw.gfs` 的 `variables`（`lead_hours` 与 `bundles` 不变），因此
-    `rawscan.judge` 的预期集与 `rawcopy.stage_raw` 的扇出与 `write_raw_cycle(
-    leads=MULTI_GFS_LEADS, variables=MULTI_GFS_VARIABLES)` 逐字一致。
-    """
+    """Return the multi-variable GFS fanout discriminator."""
     from dataclasses import replace
 
     base = make_config(source="gfs")
@@ -247,96 +242,94 @@ def write_config_local(
 
 
 def variant_dir(local: LocalConfig, source: str = "gfs") -> Path:
-    return (
-        Path(local.yd_root)
-        / "input"
-        / "models"
-        / ("yd_gfs" if source == "gfs" else "yd_ifs")
-    )
+    name = "yd_gfs" if source == "gfs" else "yd_ifs"
+    return Path(local.yd_root) / "input" / "models" / name
 
 
 def _sha256_literal(content: bytes) -> str:
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
-def _handoff_bytes(source: str) -> bytes:
+def _handoff_payload(source: str, *, state: bytes) -> dict[str, object]:
+    from prepare_fixtures import handoff_payload
+
     grid_id = f"fixture-grid-{source}"
     model_id = "demo_model"
     stations = [
         {
-            "forcing_filename": "X1.csv",
-            "grid_cell_id": "cell-one",
+            "forcing_filename": f"X{index}.csv",
+            "grid_cell_id": cell,
             "grid_id": grid_id,
-            "latitude": 2.0,
-            "longitude": 1.0,
-            "shud_forcing_index": 1,
-            "station_id": "station-one",
-            "x": 3.0,
-            "y": 4.0,
-            "z": 5.0,
-        },
-        {
-            "forcing_filename": "X2.csv",
-            "grid_cell_id": "cell-two",
-            "grid_id": grid_id,
-            "latitude": 7.0,
-            "longitude": 6.0,
-            "shud_forcing_index": 2,
-            "station_id": "station-two",
-            "x": 8.0,
-            "y": 9.0,
-            "z": 10.0,
-        },
+            "latitude": lat,
+            "longitude": lon,
+            "shud_forcing_index": index,
+            "station_id": station_id,
+            "x": x,
+            "y": y,
+            "z": z,
+        }
+        for index, (station_id, cell, lon, lat, x, y, z) in enumerate(
+            (
+                ("station-one", "cell-one", 1.0, 2.0, 3.0, 4.0, 5.0),
+                ("station-two", "cell-two", 6.0, 7.0, 8.0, 9.0, 10.0),
+            ),
+            1,
+        )
     ]
-    signature = "2590e223a612804271336c8a20691d7cfcc412955c8740ea7734ba838263c11f"
-    payload = {
-        "basin_id": "basin_a",
-        "basin_version_id": "basin_v1",
-        "direct_grid_forcing_contract": {
+    return handoff_payload(
+        source_id=source,
+        project_name=PROJECT,
+        grid_id=grid_id,
+        binding=BINDING,
+        sp_att=SP_ATT,
+        ids={
+            "model_id": model_id,
+            "basin_id": "basin_a",
+            "basin_version_id": "basin_v1",
+            "river_network_version_id": "rivnet_v1",
+        },
+        contract={
             "applicable_source_ids": [source],
             "binding_checksum": _sha256_literal(BINDING),
             "binding_uri": f"models/{model_id}/direct-grid/binding.json",
             "forcing_mapping_mode": "direct_grid",
             "grid_id": grid_id,
-            "grid_signature": signature,
+            "grid_signature": "2590e223a612804271336c8a20691d7cfcc412955c8740ea7734ba838263c11f",
             "model_input_package_id": "model-input-v1",
             "sp_att_checksum": _sha256_literal(SP_ATT),
             "sp_att_path": f"input/{PROJECT}.sp.att",
             "station_bindings": stations,
         },
-        "model_id": model_id,
-        "project_name": PROJECT,
-        "river_network_version_id": "rivnet_v1",
-        "schema_version": "yd.prepare.direct-grid-handoff.v1",
-        "source_id": source,
-        "sp_att_asset_name": f"{source}.sp.att",
-    }
-    return json.dumps(
-        payload,
-        allow_nan=False,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+        checksums={
+            "yd.cfg.ic": state,
+            "yd.cfg.para": NATIVE_PARAMETER_TEMPLATE,
+            "yd.binding": BINDING,
+            "yd.sp.att": SP_ATT,
+        },
+    )
 
 
 def write_variant(local: LocalConfig, *, source: str = "gfs") -> Path:
-    """写合法 #171 exact-five，保留原生率定态与既有参数/opaque asset 字节。"""
+    """Write a valid fourteen-file variant with its original source contract."""
+    from prepare_fixtures import write_prepared_variant
+
     root = variant_dir(local, source)
-    root.mkdir(parents=True, exist_ok=True)
-    files = {
-        f"{PROJECT}.cfg.ic": build_cfg_ic(
-            mesh_count=2,
-            river_count=REACH_COUNT,
-            minute=f"{ABSOLUTE_MINUTE}.000000",
-        ).payload,
-        f"{PROJECT}.para": PARAMETER_TEMPLATE,
-        "yd.binding": BINDING,
-        "yd.direct-grid-handoff.json": _handoff_bytes(source),
-        f"{source}.sp.att": SP_ATT,
-    }
-    for name, content in files.items():
-        (root / name).write_bytes(content)
+    state = build_cfg_ic(
+        mesh_count=2,
+        river_count=REACH_COUNT,
+        minute=f"{ABSOLUTE_MINUTE}.000000",
+    ).payload
+    write_prepared_variant(
+        root,
+        source_id=source,
+        grid_id=f"fixture-grid-{source}",
+        project_name=PROJECT,
+        binding=BINDING,
+        sp_att=SP_ATT,
+        state=state,
+        parameter=NATIVE_PARAMETER_TEMPLATE,
+        payload=_handoff_payload(source, state=state),
+    )
     return root
 
 
@@ -654,15 +647,25 @@ class InProcessDriver:
             max_asset_bytes=STAGED_ASSET_CAP,
             max_state_bytes=STAGED_STATE_CAP,
         )
+        native_names = (
+            "yd.cfg.ic",
+            "yd.cfg.para",
+            "yd.cfg.calib",
+            "yd.sp.mesh",
+            "yd.sp.att",
+            "yd.sp.riv",
+            "yd.sp.rivseg",
+            "yd.para.lc",
+            "yd.para.soil",
+            "yd.para.geol",
+            "yd.tsd.lai",
+            "yd.tsd.mf",
+            "yd.binding",
+            "yd.direct-grid-handoff.json",
+        )
         expected = {
             f"input/variant/{name}": (request.variant_dir / name).read_bytes()
-            for name in (
-                f"{PROJECT}.cfg.ic",
-                f"{PROJECT}.para",
-                "yd.binding",
-                "yd.direct-grid-handoff.json",
-                f"{request.source}.sp.att",
-            )
+            for name in native_names
         }
         expected[
             f"input/states/{request.source}/{cycle_text(request.cycle)}.cfg.ic"
@@ -674,7 +677,7 @@ class InProcessDriver:
             raise RuntimeError("staged #171 snapshot differs from login-node source")
         if staged.file_checksums != expected_checksums:
             raise RuntimeError(
-                "staged six checksums differ from login-node source bytes"
+                "staged fifteen checksums differ from login-node source bytes"
             )
         for key, content in expected.items():
             if request.work_dir.joinpath(*key.split("/")).read_bytes() != content:
@@ -795,6 +798,11 @@ def make_terminal_hook(
             sp_att_content=staged_inputs.prepared.sp_att_content,
             max_asset_bytes=4096,
         )
+        registry_binding = (
+            registry.object_store_root / staged_inputs.prepared.contract.binding_uri
+        ).read_bytes()
+        if registry_binding != staged_inputs.prepared.binding_content:
+            raise RuntimeError("registry binding differs from staged prepared bytes")
         repository = FileForcingRepository(store, registry.registry_manifest)
         producer = ForcingProducer(
             config=ForcingProducerConfig(
@@ -819,8 +827,8 @@ def make_terminal_hook(
             forcing=forcing,
         )
         state.assembled_assets = tuple(
-            (name, (run_directory.path / name).read_bytes())
-            for name in ("yd.binding", f"{request.source}.sp.att")
+            (name, (run_directory.path / "input" / "yd" / name).read_bytes())
+            for name in ("yd.cfg.para", "yd.sp.att")
         )
         tracker = CheckpointTracker(
             run_dir=run_directory.path,
@@ -912,33 +920,6 @@ class HookedExecutor:
 
     def inflight(self):
         return self._executor.inflight()
-
-
-def bind_terminal_hook(
-    driver: InProcessDriver,
-    state: HookState,
-    fake: FakeJobExecutor,
-    *,
-    on_terminal=None,
-    before_worker=None,
-) -> HookedExecutor:
-    """多轮可复用，并可在 worker 首读前断开测试自有 NFS 源。"""
-    request_slot: dict[str, object] = {}
-    original_prepare = driver.prepare
-
-    def capturing_prepare(*, request):
-        request_slot["request"] = request
-        return original_prepare(request=request)
-
-    driver.prepare = capturing_prepare  # type: ignore[method-assign]
-
-    def make_hook(*, job_id):
-        request = request_slot["request"]
-        make_terminal_hook(request, state, before_worker=before_worker)()
-        if on_terminal is not None:
-            on_terminal(request, job_id)
-
-    return HookedExecutor(fake, make_hook)
 
 
 # --- publish 三态注入 ---------------------------------------------------------
