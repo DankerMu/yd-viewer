@@ -7,4 +7,4 @@
 - [x] 2.1 Baseline new17cases green and all15scenario mapping confirmed; no NWM/DB runtime dependencies or outbound connections.
 - [x] 2.2 Parent runs eight single-line branch mutants: old full producer suite excluding new file green, new tests red, exact commands/results per row; positive control proves module/export binding.
 - [x] 2.3 Parent profile matrix serial producer/viewer pytest, ruff/OpenSpec/stage log green; runtime source diff exactly empty.
-- [ ] 2.4 Fixture review+strict validation before implementation; comprehensive/final review/CI/evidence/preauthorized merge+archive/log tracked in PR.
+- [x] 2.4 Fixture review+strict validation before implementation; comprehensive/final review/CI/evidence/preauthorized merge+archive/log tracked in PR.
