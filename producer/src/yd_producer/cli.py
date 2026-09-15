@@ -14,16 +14,10 @@ test_database_url_guard_wins_before_parsing、test_run_rejects_missing_states_di
 - `2`：argparse 用法错误（未知子命令、缺子命令、缺必需参数），由 argparse 自身产生；
 - `1`：守卫或配置失败（`DATABASE_URL`、`ConfigError`、`states/` 缺失或为空、NWM 解释器
   fail-closed、`prepare` 编排的 `PrepareError`）；
-- `3`：分阶段未实现的业务体，stderr 指名归属任务号；`prepare` 的
-  `BuilderUnavailableError`（生产 mapping-builder 绑定尚未可用）同属此码——它必须与
-  `1` 可区分，否则运维分不清该改配置还是该等 M4
-  （pinned: test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes、
-  test_prepare_with_executable_interpreter_reaches_production_builder_binding、
-  test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code；后两条同时钉住
-  `except BuilderUnavailableError` 必须先于 `except PrepareError`）。「归属**任务号**」
-  这一措辞对 `prepare` 已由 33edb44 放宽为「无编号任务时指名承接阶段」（本模块此处的
-  措辞滞后，不在本轮改动范围；`init` 自任务 11.1 落地后已不再走此码，`run` 一支仍是
-  任务号，pinned: test_run_with_non_empty_states_reaches_staged_unimplemented）。
+- `3`：分阶段未实现的业务体，stderr 指名归属任务号。`prepare` 的真实 builder 失败走
+  退出码 `1`（pinned: test_prepare_error_becomes_exit_one、
+  test_cleanup_note_reaches_stderr_on_the_exit_one_path）。`run` 一支仍是任务号
+  （pinned: test_run_with_non_empty_states_reaches_staged_unimplemented）。
 
 **守卫位置**：`DATABASE_URL` 检查是 `main()` 的第一件事，先于 `parse_args` 与任何配置
 装载（agent-ops §2.2 把"不连 NWM 数据库"列为硬约束，环境本身有缺陷时最 fail-closed 的
@@ -63,7 +57,7 @@ from yd_producer.config import Config, ConfigError, LocalConfig, load_config, lo
 # 只导入 `bootstrap` 这一个符号：`from yd_producer import init` 会用模块对象遮蔽本模块
 # 的 `init()` 委托目标，`main` 的按名解析随即失效。
 from yd_producer.init import bootstrap
-from yd_producer.prepare import BuilderUnavailableError, PrepareError, run_prepare
+from yd_producer.prepare import PrepareError, run_prepare
 
 __all__ = ["build_parser", "main"]
 
@@ -150,10 +144,8 @@ def prepare(local: LocalConfig, config: Config, baseline_root: Path) -> int:
 
     `run_prepare` 以**模块级名字**解析（不在导入时冻结），与三个委托目标同纪律，使入口
     层测试能注入 fake 断言"未被调用"这类负面证据（pinned:
-    test_prepare_delegates_resolved_baseline_path，`fake.count == 1` 是正面证据）。编排的
-    两级失败由 `main` 分码：`BuilderUnavailableError` -> `3`，其余 `PrepareError` -> `1`
-    （pinned: test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes、
-    test_prepare_error_becomes_exit_one）。
+    test_prepare_delegates_resolved_baseline_path，`fake.count == 1` 是正面证据）。
+    编排失败由 `main` 转成退出码 `1`（pinned: test_prepare_error_becomes_exit_one）。
 
     成功路径上报告里的 `cleanup_warnings` MUST 打到 stderr（spec cli-config「prepare 的
     清理告警与残留证据 MUST 到达运维」）：它记的是 scratch 或 `YD_ROOT` 内 staging 的
@@ -254,31 +246,24 @@ def _print_notes(exc: BaseException) -> None:
     就等于把"`YD_ROOT` 里还有残留"这条证据丢掉。
     （"不打 traceback"pinned: test_config_error_becomes_exit_one_without_traceback、
     test_run_rejects_states_path_that_is_a_regular_file、
-    test_prepare_with_executable_interpreter_reaches_production_builder_binding、
-    test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code、
-    test_cleanup_failure_text_reaches_stderr_on_the_failure_path、
-    test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes、
     test_prepare_error_becomes_exit_one、
-    test_cleanup_note_reaches_stderr_on_the_exit_one_path——八条各断言
+    test_cleanup_note_reaches_stderr_on_the_exit_one_path——各断言
     `"Traceback" not in err`。）
 
-    三个分派 handler 各调一次，而不是塞进 `_fail`：`BuilderUnavailableError` 那支退出码
-    是 `3`、根本不经 `_fail`，只改 `_fail` 覆不全。`run_prepare` 的 `except BaseException`
-    按类型无差别地给在途异常挂 note，故三支都可能拿到证据——但 `ConfigError` 那支今天按
-    构造不可达，见下面第 3 条。
+    两个分派 handler 各调一次，而不是塞进 `_fail`：`run` 的未实现分支退出码是 `3`、
+    根本不经 `_fail`，只改 `_fail` 覆不全。`run_prepare` 的 `except BaseException`
+    按类型无差别地给在途异常挂 note，故两支都可能拿到证据。
 
-    三个调用点逐个交代（spec cli-config「prepare 的清理告警与残留证据 MUST 到达运维」的
-    失败路径子句没有退出码限定，故三支都要有交代）：
+    两个调用点逐个交代（spec cli-config「prepare 的清理告警与残留证据 MUST 到达运维」的
+    失败路径子句没有退出码限定）：
 
-    1. `BuilderUnavailableError`（退出码 `3`）pinned:
-       test_cleanup_failure_text_reaches_stderr_on_the_failure_path；
-    2. `PrepareError`（退出码 `1`）pinned:
+    1. `PrepareError`（退出码 `1`）pinned:
        test_cleanup_note_reaches_stderr_on_the_exit_one_path（cand-r3-1；用例里的 note 文本
        与 `str(exc)` 无公共子串，否则 `_fail` 单独即可满足断言、不具判别性）；
-    3. `ConfigError`（退出码 `1`）是**防御性声明**，今天按构造挂不上 note：
-       `nwm.check_interpreter` 跑在 `run_prepare` 之前、builder 抛出的 `ConfigError` 在
-       `prepare.py` 里被包装成 `PrepareError`、装载期的 `ConfigError` 由更早一个 handler
-       接走。（等价变异，不可判别：无可达输入能让它渲染出任何东西。）
+    2. `ConfigError`（退出码 `1`）：`nwm.check_interpreter` 跑在 `run_prepare` 之前；
+       builder 预检抛出的 `ConfigError`（缺失/非目录 checkout）经 `run_prepare` 原样
+       上抛后由本 handler 接住；装载期的 `ConfigError` 由更早一个 handler 接走。
+       回滚/清理失败仍以 `add_note` 附在该 `ConfigError` 上。
     """
     for note in getattr(exc, "__notes__", ()):
         print(note, file=sys.stderr)
@@ -332,15 +317,6 @@ def main(
         if args.command == "init":
             return init(local, config)
         return run(local, config)
-    except BuilderUnavailableError as exc:
-        # 必须先于 `PrepareError` 捕获：它是后者的子类，反序会把"这条路还没通"报成
-        # 退出码 1，运维会去改一份没有问题的配置。
-        # pinned: test_prepare_with_executable_interpreter_reaches_production_builder_binding、
-        # test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code、
-        # test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes
-        print(f"错误：{exc}", file=sys.stderr)
-        _print_notes(exc)
-        return EXIT_UNIMPLEMENTED
     except PrepareError as exc:
         code = _fail(str(exc))
         _print_notes(exc)

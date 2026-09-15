@@ -6,6 +6,11 @@ import re
 from pathlib import Path
 from typing import Literal
 
+
+class NativeSupportError(ValueError):
+    """Malformed or unsupported native BC/SS/LAKE/river-BC input."""
+
+
 PREPARED_VARIANT_CALIBRATED_STATE_FILENAME = "yd.cfg.ic"
 PREPARED_VARIANT_PARAMETER_FILENAME = "yd.cfg.para"
 PREPARED_VARIANT_CALIB_FILENAME = "yd.cfg.calib"
@@ -35,6 +40,13 @@ NATIVE_MODEL_FILENAMES = (
     PREPARED_VARIANT_GEOL_FILENAME,
     PREPARED_VARIANT_LAI_FILENAME,
     PREPARED_VARIANT_MF_FILENAME,
+)
+_ELEMENT_SUPPORT_COLUMNS = ("BC", "SS", "LAKE")
+_RIVER_SUPPORT_COLUMN = "BC"
+_RIVER_IDENTITY_FILENAMES = (
+    PREPARED_VARIANT_MESH_FILENAME,
+    PREPARED_VARIANT_RIV_FILENAME,
+    PREPARED_VARIANT_RIVSEG_FILENAME,
 )
 PREPARED_VARIANT_CHECKSUM_FILENAMES = frozenset(
     (*NATIVE_MODEL_FILENAMES, PREPARED_VARIANT_BINDING_FILENAME)
@@ -218,3 +230,102 @@ def _render_native(lines: list[str], *, end: str, ending: str) -> bytes:
         for key in missing:
             result.append(f"{key}\t{values[key]}{ending}")
     return "".join(result).encode("utf-8")
+
+
+def _column_index(header: list[str], name: str, path: Path) -> int:
+    try:
+        return header.index(name)
+    except ValueError as exc:
+        raise NativeSupportError(
+            f"{path} is missing required column {name!r}; got {list(header)!r}"
+        ) from exc
+
+
+def _nonzero_token(token: str) -> bool:
+    text = token.strip()
+    if not text:
+        return False
+    try:
+        return float(text) != 0.0
+    except ValueError:
+        return text not in {"0", "0.0", "+0", "-0"}
+
+
+def _declared_count(line: str, path: Path, label: str) -> int:
+    tokens = line.split()
+    if not tokens:
+        raise NativeSupportError(f"{path} is missing the {label} count header")
+    try:
+        return int(tokens[0])
+    except ValueError as cop:
+        raise NativeSupportError(
+            f"{path} {label} count is not an integer: {tokens[0]!r}"
+        ) from cop
+
+
+def _read_utf8_lines(path: Path) -> list[str]:
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except OSError as cop:
+        raise NativeSupportError(f"{path} could not be read: {cop}") from cop
+    except UnicodeDecodeError as cop:
+        raise NativeSupportError(f"{path} is not valid UTF-8") from cop
+
+
+def reject_unsupported_native_physics(baseline_root: Path) -> None:
+    """Reject nonzero element BC/SS/LAKE or river BC; classify parse errors."""
+    att_path = Path(baseline_root) / PREPARED_VARIANT_SP_ATT_FILENAME
+    if not att_path.is_file():
+        raise NativeSupportError(f"baseline is missing {att_path}")
+    att_lines = _read_utf8_lines(att_path)
+    if len(att_lines) < 2:
+        raise NativeSupportError(f"{att_path} is too short to inspect BC/SS/LAKE")
+    n_rows = _declared_count(att_lines[0], att_path, "element")
+    att_header = att_lines[1].split()
+    att_indexes = {
+        name: _column_index(att_header, name, att_path)
+        for name in _ELEMENT_SUPPORT_COLUMNS
+    }
+    att_data = att_lines[2 : 2 + n_rows]
+    if len(att_data) != n_rows:
+        raise NativeSupportError(
+            f"{att_path} declared {n_rows} rows but has {len(att_data)}"
+        )
+    for row_number, raw in enumerate(att_data, start=1):
+        tokens = raw.split()
+        if len(tokens) < len(att_header):
+            raise NativeSupportError(
+                f"{att_path} row {row_number} is shorter than the declared schema"
+            )
+        for name, index in att_indexes.items():
+            if _nonzero_token(tokens[index]):
+                raise NativeSupportError(
+                    "unsupported model input: nonzero element "
+                    f"{name}={tokens[index]!r} in {att_path} row {row_number}"
+                )
+
+    riv_path = Path(baseline_root) / PREPARED_VARIANT_RIV_FILENAME
+    if not riv_path.is_file():
+        raise NativeSupportError(f"baseline is missing {riv_path}")
+    riv_lines = _read_utf8_lines(riv_path)
+    if len(riv_lines) < 2:
+        raise NativeSupportError(f"{riv_path} is too short to inspect river BC")
+    n_reaches = _declared_count(riv_lines[0], riv_path, "river")
+    riv_header = riv_lines[1].split()
+    bc_index = _column_index(riv_header, _RIVER_SUPPORT_COLUMN, riv_path)
+    riv_data = riv_lines[2 : 2 + n_reaches]
+    if len(riv_data) != n_reaches:
+        raise NativeSupportError(
+            f"{riv_path} declared {n_reaches} river rows but has {len(riv_data)}"
+        )
+    for row_number, raw in enumerate(riv_data, start=1):
+        tokens = raw.split()
+        if len(tokens) < len(riv_header):
+            raise NativeSupportError(
+                f"{riv_path} row {row_number} is shorter than the declared schema"
+            )
+        if _nonzero_token(tokens[bc_index]):
+            raise NativeSupportError(
+                "unsupported model input: nonzero river "
+                f"BC={tokens[bc_index]!r} in {riv_path} row {row_number}"
+            )

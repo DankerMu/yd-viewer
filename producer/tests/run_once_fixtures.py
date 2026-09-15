@@ -176,7 +176,6 @@ def make_config(*, source: str = "gfs") -> Config:
         output_interval_minutes=60,
         checkpoint_hours=(12,),
         reach_count=REACH_COUNT,
-        nwm_mapping_builder_module="workers.mapping_builder.cli",
         nwm_canonical_grid_id=CanonicalGridConfig(
             gfs="fixture-grid-gfs", ifs="fixture-grid-ifs"
         ),
