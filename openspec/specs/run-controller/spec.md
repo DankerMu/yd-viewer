@@ -54,7 +54,7 @@ Define ordered forecast progression, attempt ownership, Slurm execution, checkpo
 - **THEN** 只删除 IFS 侧的残留，GFS 的状态与产物不受影响
 
 ### Requirement: 残留清单绑定声明身份
-公开 `ResiduePlan` MUST 在构造时将 yd_root resolve 并绑定非空单分量 source、合法 retained cycle 及每条删除路径。state_files MUST 词法等于该根的 `states/<source>/<cycle>.cfg.ic` 且 cycle 严格晚于 retained；half_product_dirs MUST 词法等于该根的 `output/<retained>/<source>`。执行器 MUST 在任何删除之前复验全部字段与全部条目；任一身份越界以 `SafeFilesystemError(kind="unsafe")` 拒绝整份清单且零删除。合法 tuple 规范化排序去重。不得用目标 realpath 消除词法越界；既有 safe_fs no-follow 继续负责文件系统使用点安全，合法清单的 IO 拒绝不承诺回滚。
+公开 `ResiduePlan` MUST 在构造时消费配置构造已解析的 canonical yd_root，不得再次 resolve；并绑定非空单分量 source、合法 retained cycle 及每条删除路径。state_files MUST 词法等于该根的 `states/<source>/<cycle>.cfg.ic` 且 cycle 严格晚于 retained；half_product_dirs MUST 词法等于该根的 `output/<retained>/<source>`。执行器 MUST 在任何删除之前复验全部字段与全部条目；任一身份越界以 `SafeFilesystemError(kind="unsafe")` 拒绝整份清单且零删除。合法 tuple 规范化排序去重。不得用目标 realpath 消除词法越界；既有 safe_fs no-follow 继续负责文件系统使用点安全，合法清单的 IO 拒绝不承诺回滚。
 
 #### Scenario: 手构清单不能删除兄弟源
 - **WHEN** source=ifs 的手构计划带有 GFS output（含 DONE）或 GFS state，或跨根/lane/retained cycle 的条目
