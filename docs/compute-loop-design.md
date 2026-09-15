@@ -189,7 +189,7 @@ controller staging 边界沿用既有 descriptor-bound/no-follow 读取与 O_EXC
 
 `AttemptRequest.variant_dir`/`state_path` 仍逐字保留 NFS source 路径，只供登录节点 `prepare` 把自己通过 #171 loader 取得的 source snapshot 与 controller-staged snapshot 对账；不得把这两个字段放入 worker argv、环境、attempt handoff 或 receipt。production driver 把匹配后的 work-local capability 与 `AttemptRequest.source/cycle/work` 加入 #132 的 attempt handoff；Slurm worker 使用前仍重验 staged-input capability 与 attempt handoff，worker receipt 必须绑定同一 `WorkIdentity`、source/cycle/work/job 与两份 direct-grid asset checksum。不得从环境、`DATABASE_URL`、NWM PostgreSQL/服务型 registry、目录扫描、variant basename、`yd.binding` 内容或测试 fixture 推导任何 identity、contract、路径或 bytes。
 
-`contract.binding_uri` 与 `contract.sp_att_path` 仍是 D11 work registry 的相对 key，不是 prepared 文件路径。真实 prepare driver 与 native assembly 均归 M2；本地证明必须实际行使 NWM mapping 库与 native 文件路径，不能只用写 DAT 的 shell double。M4 负责真实 baseline/binary 的数值、Slurm/NFS 与 00Z/12Z receipt，不再补缺失业务代码。详细单流域合同见 [native-yd-model-input](../openspec/changes/native-yd-model-input/design.md)。
+`contract.binding_uri` 与 `contract.sp_att_path` 仍是 D11 work registry 的相对 key，不是 prepared 文件路径。真实 prepare driver 与 native assembly 均归 M2；本地证明必须实际行使 NWM mapping 库与 native 文件路径，不能只用写 DAT 的 shell double。M4 负责真实 baseline/binary 的数值、Slurm/NFS 与 00Z/12Z receipt，不再补缺失业务代码。详细单流域合同见 [native-yd-model-input](../openspec/changes/archive/2026-09-15-native-yd-model-input/design.md)。
 
 ## 6. CLI
 
