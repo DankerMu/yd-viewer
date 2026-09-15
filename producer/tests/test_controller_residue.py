@@ -554,14 +554,14 @@ def test_constructor_refuses_a_state_file_outside_the_containment_root(
     assert snapshot_tree(root) == before
 
 
-def test_symlinked_yd_root_is_resolved_before_use(tmp_path: pathlib.Path) -> None:
-    """`YD_ROOT` 经 symlink 到达时判定与执行都成功（裁决 6 增补，round 1 B1）。
+def test_canonical_root_alias_residue_uses_resolved_tree(
+    tmp_path: pathlib.Path,
+) -> None:
+    """经配置构造解析过的根别名，残留判定与执行都作用在 realpath 树上。"""
+    from dataclasses import replace
 
-    `safe_fs._open_directory_no_follow` 把 `containment_root` **自身**的每个分量从 `/`
-    重新过一遍 `O_NOFOLLOW`，而判定侧（`os.stat` / `iterdir`）跟随 symlink。不 `resolve()`
-    的话，根上任一 symlink 分量（NFS 挂载点、macOS 的 `/var`）会让每个 tick 都「判定出
-    非空清单、执行必抛」——带误导消息的永久停源。删除结果 MUST 与直接用实路径一致。
-    """
+    from init_bootstrap_fixtures import make_local
+
     real = tmp_path.resolve() / "real"
     real.mkdir()
     link = tmp_path.resolve() / "link"
@@ -569,13 +569,14 @@ def test_symlinked_yd_root_is_resolved_before_use(tmp_path: pathlib.Path) -> Non
     root = real / "yd"
     root.mkdir()
     builder = _crash_residue_tree(root)
+    local = make_local(root, raw_root=tmp_path.resolve() / "raw")
+    local = replace(local, yd_root=str(link / "yd"))
 
-    unresolved = link / "yd"
     plan = residue.plan_residue(
-        yd_root=unresolved,
+        yd_root=local.yd_root,
         source="ifs",
         decision=controller.decide_frontier(
-            yd_root=unresolved,
+            yd_root=local.yd_root,
             source="ifs",
             raw_complete=RecordingRawComplete(set(_ALL_CYCLES)),
         ),
@@ -591,6 +592,34 @@ def test_symlinked_yd_root_is_resolved_before_use(tmp_path: pathlib.Path) -> Non
     assert not builder.source_output_dir(T, "ifs").exists()
     assert builder.state_path(T, "ifs").is_file()
     assert builder.source_output_dir(D, "ifs").joinpath("DONE").is_file()
+
+
+def test_canonical_directory_replaced_by_symlink_refuses_residue_without_outside_mutation(
+    tmp_path: pathlib.Path,
+) -> None:
+    """配置构造后把 canonical 根换成 symlink：残留执行拒绝，根外字节不变。
+
+    判别的是下游不得再 resolve：再 resolve 会把替换后的链接授权成新根。
+    """
+    root = _yd_root(tmp_path)
+    builder = _crash_residue_tree(root)
+    plan = _plan(builder, "ifs")
+    assert plan is not None
+    outside = tmp_path.resolve() / "outside"
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("outside the yd root\n", encoding="utf-8")
+    backup = tmp_path.resolve() / "yd-backup"
+    root.rename(backup)
+    root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SafeFilesystemError):
+        residue.execute_residue_plan(plan)
+
+    assert marker.read_text(encoding="utf-8") == "outside the yd root\n"
+    assert list(outside.iterdir()) == [marker]
+    assert root.is_symlink()
+    assert (backup / "states" / "ifs" / f"{T_PLUS_12}.cfg.ic").is_file()
 
 
 def test_constructor_refuses_a_dotdot_entry_name(tmp_path: pathlib.Path) -> None:

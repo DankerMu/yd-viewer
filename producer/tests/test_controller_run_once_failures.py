@@ -25,7 +25,7 @@ from run_once_fixtures import (
 )
 
 from yd_producer import controller
-from yd_producer.config import Config, LocalConfig
+from yd_producer.config import Config, ConfigError, LocalConfig
 from yd_producer.controller import RunError, RunOutcome, run_once
 from yd_producer.executor import FakeJobExecutor, FakeOutcome, JobState
 
@@ -178,7 +178,6 @@ def _replace_slurm_local(local: LocalConfig, mapping) -> LocalConfig:
         "checkpoint_hours",
         "reach_le",
         "source",
-        "relative_yd",
         "relative_scratch",
         "relative_raw",
         "relative_shud",
@@ -202,8 +201,6 @@ def test_product_preflight_fails_before_driver_and_executor(
         config = _replace_config(config, reach_count=0)
     elif variant == "source":
         pass  # 由下面 source="era5" 触发
-    elif variant == "relative_yd":
-        local = _replace_yd(local, "relative/root")
     elif variant == "relative_scratch":
         local = _replace_scratch(local, "relative/scratch")
     elif variant == "relative_raw":
@@ -252,8 +249,6 @@ def test_product_preflight_fails_before_driver_and_executor(
         assert "checkpoint_hours 必须恰为 (12,)" in message
     elif variant == "reach_le":
         assert "reach_count 必须为正整数" in message
-    elif variant == "relative_yd":
-        assert "yd_root" in message and "绝对路径" in message
     elif variant == "relative_scratch":
         assert "scratch_root" in message and "绝对路径" in message
     elif variant == "relative_raw":
@@ -276,6 +271,26 @@ def _replace_yd(local: LocalConfig, value) -> LocalConfig:
     from dataclasses import replace
 
     return replace(local, yd_root=value)
+
+
+def test_relative_yd_root_fails_at_configuration_before_preflight(
+    tmp_path: pathlib.Path,
+) -> None:
+    """相对 yd_root 在 replace/构造期以 ConfigError 拒绝，零 driver、零写入。"""
+    _config, local = write_config_local(tmp_path)
+    write_variant(local)
+    write_state(local)
+    write_raw_cycle(local)
+    before = _tree_snapshot(pathlib.Path(local.yd_root))
+    driver = _CountingDriver()
+
+    with pytest.raises(ConfigError) as cop:
+        _replace_yd(local, "relative/root")
+
+    assert cop.value.path == "yd_root"
+    assert "绝对路径" in str(cop.value)
+    assert driver.prepare_calls == 0
+    assert _tree_snapshot(pathlib.Path(local.yd_root)) == before
 
 
 def _replace_scratch(local: LocalConfig, value) -> LocalConfig:

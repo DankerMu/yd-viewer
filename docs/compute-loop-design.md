@@ -173,6 +173,8 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 - `[slurm].command_timeout_seconds`：每次 `sbatch`/`sacct` 客户端子进程的正整数秒时限，缺席时版本化默认 60；它从资源映射剥离，不是作业 walltime；
 - cron lock 与日志位置；其中 lock 必须是 node-22 本地文件系统上的专属长期哨兵路径，不能放在任何 NFS 挂载或清理根内。
 
+`yd_root` 在每份 `LocalConfig` 构造（含 `load_local`）时先检查绝对路径拼写，再以 `Path.resolve(strict=False)` 解析一次；同名字段只保存 canonical `Path`，成为 prepare/init/run、清理与发布的唯一根权威。根自身或祖先的合法 symlink 别名可接受；装载后改指向原别名不改变该配置的运行根，消费侧不得重新解析别名。相对路径、`~` 拼写或解析失败均以 `ConfigError(path="yd_root")` 拒绝；装载不要求根已存在，也不创建目录。这是 #110 用户裁决对 #32 归属账的明确增量，其它现场路径的域与归属不变。根内链接与 canonical 路径被替换成链接仍受既有 safe_fs no-follow 闸门约束，不授权放宽它。
+
 项目不维护动态 registry。复制来的 file backend 如要求 NWM 结构的 registry/model manifest，production attempt driver 依据控制器显式交入的本轮 `AttemptRequest` 与 §5.1 已验证 prepared-variant handoff，在本轮 work 内临时生成，用完随 work 删除；TOML 只提供既有业务规则和路径，不能生成或填充 `WorkIdentity`。
 
 ### 5.1 production driver 的 WorkIdentity 与 direct-grid 资产权威

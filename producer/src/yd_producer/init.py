@@ -520,8 +520,8 @@ def _first_foreign_component(yd_root: Path, directory: Path) -> Path | None:
     发，而 FIFO 载体上第三路会点名一个盘上并不存在的 `states/<source>`，使「点名被占住的那
     个路径本身」在下一层再次为假。故必须逐级走查并返回**真正被占住的那一级**。
 
-    走查自 `yd_root` **本身**起（而非自 `states/` 起）：`yd_root` 自己是 symlink 时同样让整
-    条写入路径恒失败，不含它则该载体仍落第二路。
+    走查自 `yd_root` **本身**起（而非自 `states/` 起）：配置构造后 canonical 根被替换成
+    symlink 时同样让整条写入路径恒失败，不含它则该载体仍落第二路。
 
     - **探到非目录条目**（symlink——含悬垂、FIFO、普通文件）→ 返回该分量，走第三路。这类条
       目不是本次写入产生，不移除它就重跑，必然以同样理由再次失败。
@@ -627,7 +627,7 @@ def bootstrap(*, local: LocalConfig, config: Config, now: datetime) -> InitRepor
     """
     now_utc = _normalize_now(now)
     window_start = now_utc - SCAN_WINDOW
-    yd_root = Path(local.yd_root)
+    yd_root = local.yd_root
     states_root = yd_root / "states"
     output_root = yd_root / "output"
 

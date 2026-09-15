@@ -866,9 +866,14 @@ def test_unexpected_output_lane_shape_is_a_stable_error(
         assert stat.S_ISFIFO(lane.lstat().st_mode)
 
 
-def test_symlinked_yd_root_plans_and_executes_against_the_real_path(
+def test_canonical_yd_root_alias_plans_and_executes_against_the_real_path(
     tmp_path: Path,
 ) -> None:
+    """配置构造解析过的根别名，保留清理作用在 realpath 树上。"""
+    from dataclasses import replace
+
+    from init_bootstrap_fixtures import make_local
+
     real = _base(tmp_path) / "real"
     real.mkdir()
     link = _base(tmp_path) / "link"
@@ -882,11 +887,14 @@ def test_symlinked_yd_root_plans_and_executes_against_the_real_path(
     doomed_dir.mkdir(parents=True)
     (doomed_dir / "yd.rivqdown.dat").write_text("old\n", encoding="utf-8")
     doomed_log = _write_log(root, SOURCE, D_MINUS_14D_12H, b"old-log\n")
-    unresolved = link / "yd"
+    local = replace(
+        make_local(root, raw_root=_base(tmp_path) / "raw"),
+        yd_root=str(link / "yd"),
+    )
 
-    plan = cleanup.plan_retention(unresolved, SOURCE)
+    plan = cleanup.plan_retention(local.yd_root, SOURCE)
     assert plan.yd_root == root
-    assert plan.yd_root != unresolved
+    assert plan.yd_root == local.yd_root
     assert plan.output_dirs == (doomed_dir,)
     assert plan.log_files == (doomed_log,)
     cleanup.execute_retention_plan(plan)
@@ -896,7 +904,7 @@ def test_symlinked_yd_root_plans_and_executes_against_the_real_path(
     cleaned = snapshot_tree(root)
     cleanup.execute_retention_plan(plan)
     assert snapshot_tree(root) == cleaned
-    replayed = cleanup.plan_retention(unresolved, SOURCE)
+    replayed = cleanup.plan_retention(local.yd_root, SOURCE)
     assert replayed.output_dirs == ()
     assert replayed.log_files == ()
     cleanup.execute_retention_plan(replayed)

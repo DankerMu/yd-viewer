@@ -28,10 +28,10 @@ r"""NFS 发布器：一轮成功计算的正式提交（任务 13.1，issue #24�
 
 `containment_root` 前置条件（承 issue #23 裁决 6）：`safe_fs` 会把容纳根**自身**的每个
 分量重新过一遍 `O_NOFOLLOW`（`store/safe_fs.py:824-843`），而
-`safe_fs._relative_parts_under_root`（`:944-960`）是纯词法 `relative_to`。故 NFS 侧的根在
-:class:`PublishInputs` 入口 **一次性** `Path(yd_root).resolve()`，`output/` 与 `states/`
-两棵子树的全部路径都由该已解析值派生；scratch work 侧的容纳根由调用方显式交来
-（`work_root`），MUST NOT 由 `work_dir` 的父链反推。
+`safe_fs._relative_parts_under_root`（`:944-960`）是纯词法 `relative_to`。故 NFS 侧的根
+MUST 是配置构造时解析过的 canonical `Path`（`LocalConfig.yd_root`）；本模块不再
+`resolve()` 该根。`output/` 与 `states/` 两棵子树的全部路径都由该已解析值派生；scratch
+work 侧的容纳根由调用方显式交来（`work_root`），MUST NOT 由 `work_dir` 的父链反推。
 
 **scratch 侧的 symlink 策略只有一条（裁决 14）：入口解析祖先、保留叶子**。
 :class:`PublishInputs` 的五个 scratch 字段（`scratch_dat`、`scratch_checkpoint`、
@@ -228,8 +228,9 @@ def _resolved_ancestors(path: Path) -> Path:
 class PublishInputs:
     """一轮发布的**全部**输入。发布器零发现：这里没有的东西，发布器不去找。
 
-    `yd_root` 在入口一次性 `resolve()`，结果落在 :attr:`root`；`output/` 与 `states/` 的
-    全部路径都由 :attr:`root` 派生（见模块头的 `containment_root` 前置条件）。
+    `yd_root` MUST 已是配置构造时解析过的 canonical 根；结果落在 :attr:`root`，本入口
+    不再 `resolve()`。`output/` 与 `states/` 的全部路径都由 :attr:`root` 派生（见模块头
+    的 `containment_root` 前置条件）。
 
     scratch 侧的五个字段在入口按「解析祖先、保留叶子」就地归一（模块头的 symlink 策略），
     故调用方**不必**先自行 `resolve()`，但也不能指望本类保留原始字面路径。
@@ -264,13 +265,13 @@ class PublishInputs:
     #: DAT 第 0 列相对分钟步长。additive 默认 60 只保旧位置兼容；controller MUST 显式传入。
     output_interval_minutes: int = 60
 
-    #: `Path(yd_root).resolve()`：NFS 侧全部路径与 `containment_root` 的唯一来源。
+    #: 配置构造时解析过的 canonical 根：NFS 侧全部路径与 `containment_root` 的唯一来源。
     root: Path = field(init=False)
 
     def __post_init__(self) -> None:
         _require_path_component(self.source, label="source")
         object.__setattr__(self, "cycle", _normalize_cycle(self.cycle))
-        object.__setattr__(self, "root", Path(self.yd_root).resolve())
+        object.__setattr__(self, "root", Path(self.yd_root))
         for name in ("scratch_dat", "scratch_checkpoint", "merged_log", "work_dir"):
             object.__setattr__(self, name, _resolved_ancestors(getattr(self, name)))
         object.__setattr__(self, "work_root", Path(self.work_root).resolve())

@@ -32,7 +32,7 @@ import stat
 import struct
 import tracemalloc
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -52,6 +52,7 @@ from frontier_fixtures import (
     parse_cycle,
     snapshot_tree,
 )
+from init_bootstrap_fixtures import make_local
 
 from yd_producer import controller, publish, residue
 from yd_producer.state import (
@@ -98,8 +99,12 @@ class Scene:
     yd_root_arg: Path
 
     def make_inputs(self, **overrides: object) -> publish.PublishInputs:
+        local = replace(
+            make_local(self.root, raw_root=self.root.parent / "raw"),
+            yd_root=str(self.yd_root_arg),
+        )
         kwargs: dict[str, object] = {
-            "yd_root": self.yd_root_arg,
+            "yd_root": local.yd_root,
             "source": SOURCE,
             "cycle": parse_cycle(T_TEXT),
             "scratch_dat": self.dat,
@@ -881,16 +886,24 @@ def test_publish_module_never_copies_metadata() -> None:
 def test_publish_succeeds_when_yd_root_is_reached_through_symlink(
     tmp_path: Path,
 ) -> None:
-    """含 symlink 分量的 `yd_root`：五个终名照常落地（裁决 5 的入口 resolve）。
+    """含 symlink 分量的 `yd_root`：经 LocalConfig 解析后五个终名照常落地。
 
-    `tmp_path.resolve()` 对这条没有判别力——它已经是解析后的路径，所以必须单列。
+    构造后再改别名指向：发布仍写原树，新目标零变更。
     """
     scene = build_scene(
         tmp_path, old_state_cycles=(T_MINUS_12,), yd_root_via_symlink=True
     )
     assert scene.yd_root_arg != scene.root
+    inputs = scene.make_inputs()
+    assert inputs.root == scene.root
 
-    result = publish.publish(scene.make_inputs())
+    real_b = scene.root.parent / "real_b"
+    real_b.mkdir()
+    link = scene.yd_root_arg.parent
+    link.unlink()
+    link.symlink_to(real_b, target_is_directory=True)
+
+    result = publish.publish(inputs)
 
     assert (
         result.dat_path == scene.root / "output" / T_TEXT / SOURCE / "yd.rivqdown.dat"
@@ -901,6 +914,38 @@ def test_publish_succeeds_when_yd_root_is_reached_through_symlink(
         f"{T_PLUS_12}.cfg.ic",
     ]
     assert not scene.work_dir.exists()
+    assert snapshot_tree(real_b) == {}
+
+
+def test_canonical_directory_replaced_by_symlink_refuses_publish_without_outside_mutation(
+    tmp_path: Path,
+) -> None:
+    """配置构造后把 canonical 根换成 symlink：发布拒绝，根外字节不变。
+
+    判别的是下游不得再 resolve：再 resolve 会把替换后的链接授权成新根。
+    """
+    scene = build_scene(tmp_path, old_state_cycles=(T_MINUS_12,))
+    inputs = scene.make_inputs()
+    outside = tmp_path.resolve() / "outside"
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("outside the yd root\n", encoding="utf-8")
+    backup = tmp_path.resolve() / "yd-backup"
+    scene.root.rename(backup)
+    scene.root.symlink_to(outside, target_is_directory=True)
+    before_outside = snapshot_tree(outside)
+
+    with pytest.raises(publish.PublishError):
+        publish.publish(inputs)
+
+    assert snapshot_tree(outside) == before_outside
+    assert marker.read_text(encoding="utf-8") == "outside the yd root\n"
+    assert list(outside.iterdir()) == [marker]
+    assert scene.root.is_symlink()
+    assert (backup / "states" / SOURCE / f"{T_TEXT}.cfg.ic").is_file()
+    assert (backup / "states" / SOURCE / f"{T_MINUS_12}.cfg.ic").is_file()
+    assert scene.work_dir.exists()
+    assert (scene.work_dir / "canonical" / "forcing.csv").exists()
 
 
 # --- 失败面 ---

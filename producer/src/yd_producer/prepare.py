@@ -42,17 +42,15 @@ pinned: test_mid_chain_directory_creation_failure_leaves_no_new_entries）；
 目录在回滚时可证为空，行为不变；而并发写入者落进来的内容会让 `rmdir` 响亮地失败，而不是
 被静默递归删掉。
 
-**同一路径拼写不变量（I3）**：拒绝覆盖守卫 `os.path.lexists` 看的路径、`geometry` 写的
-路径、`safe_fs` 操作的路径 MUST 是同一个文件系统对象。`safe_fs._expand_path` 会
-`expanduser()` 而另外两者不会，故 `yd_root = "~/yd"` 会让守卫看 `./~/yd` 而删除落在真实
-`$HOME/yd`。闸门在 `run_prepare` 入口（步骤 1 之前）：`local.yd_root` 与
-`local.scratch_root` MUST 是绝对路径（这一条同时拒掉 `~` 与任何相对拼写）且 MUST 是**已
-存在**的目录（`safe_fs.verify_directory_no_follow` 顺带拒掉 symlink 组件）。pinned:
-test_non_absolute_run_roots_are_refused_before_any_builder_call、
+**同一路径拼写不变量（I3）**：lexists、geometry、safe_fs 必须看到同一对象。
+`local.yd_root` 已在配置构造时解析为 canonical 绝对 Path；`scratch_root` 仍由本入口
+校验绝对拼写。两者 MUST 是已存在目录（`verify_directory_no_follow` 拒 symlink）。
+pinned: test_non_absolute_yd_root_is_refused_at_configuration、
+test_non_absolute_scratch_root_is_refused_before_any_builder_call、
 test_tilde_run_root_never_touches_the_real_home、
 test_missing_run_roots_are_refused_before_any_builder_call、
-test_symlinked_run_root_is_refused。装载器那边不加校验：`specs/cli-config/spec.md` 把它
-钉死为只做存在性与类型检查（该句是对装载层规范的转述，不是本模块的行为选择）。
+test_symlinked_scratch_root_is_refused。相对/`~` 的 `yd_root` 在构造期即以
+`ConfigError` 拒绝；本入口仍做存在性与 no-follow 预检。
 
 **为什么不是「scratch 目录直接 rename 到 `YD_ROOT`」**：生产上 `yd_root` 在 NFS
 （`/ghdc/data/yd`，agent-ops §4.1）而 `scratch_root` 在本地盘（`/scratch/.../yd-loop/`，
@@ -266,7 +264,7 @@ def viewer_targets(local: LocalConfig) -> dict[str, Path]:
 
     pinned: test_viewer_targets_are_the_contract_literals。
     """
-    root = Path(local.yd_root)
+    root = local.yd_root
     return {
         key: root / _VIEWER_RELATIVE_DIR / name
         for key, name in VIEWER_GEOJSON_NAMES.items()
@@ -338,7 +336,7 @@ def variant_targets(local: LocalConfig, config: Config) -> dict[str, Path]:
     test_nested_variant_paths_are_refused_before_any_write、
     test_variant_ancestor_of_viewer_directory_is_refused。
     """
-    yd_root = Path(local.yd_root)
+    yd_root = local.yd_root
     targets = {
         source: _resolve_variant_relative(
             f"variants.{source}", getattr(config.variants, source), yd_root
@@ -719,12 +717,12 @@ def _validate_variant(
 def _verify_root(field_name: str, value: Path | str) -> Path:
     """运行根入口闸门（I3）：绝对且已存在的目录。
 
-    绝对性避免 `~`/相对路径让 lexists、geometry、safe_fs 看到不同对象；已存在避免
-    影子根。`verify_directory_no_follow` 拒 symlink。不放装载器（cli-config 只做类型
-    检查）。pinned: test_non_absolute_run_roots_are_refused_before_any_builder_call、
+    `yd_root` 绝对拼写已由配置构造拒绝；本闸门覆盖 `scratch_root` 以及两根的
+    存在性/no-follow。pinned: test_non_absolute_yd_root_is_refused_at_configuration、
+    test_non_absolute_scratch_root_is_refused_before_any_builder_call、
     test_tilde_run_root_never_touches_the_real_home、
     test_missing_run_roots_are_refused_before_any_builder_call、
-    test_symlinked_run_root_is_refused。
+    test_symlinked_scratch_root_is_refused。
     """
     path = Path(value)
     if not path.is_absolute():
@@ -793,7 +791,7 @@ def run_prepare(
 ) -> PrepareReport:
     """执行一次 `prepare` 编排，严格按 fixture 钉死的顺序。
 
-    0. 运行根预检：`yd_root`/`scratch_root` 绝对且已存在（`_verify_root`；I3）；
+    0. 运行根预检：canonical `yd_root` 与绝对 `scratch_root` 均已存在（I3）；
     1. #83 遗留 staging：顶层 `_STAGING_PREFIX*` 即拒绝（pinned:
        test_mixed_top_level_staging_residue_is_refused_before_any_work、
        test_staging_residue_discovery_failure_is_a_typed_refusal）；

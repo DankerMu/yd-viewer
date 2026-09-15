@@ -195,7 +195,7 @@ class FailureInputs:
                     "失败收尾只接受 FAILED 或 TIMEOUT，"
                     f"实得 {self.job_record.state.value}"
                 )
-            root = Path(self.yd_root).resolve()
+            root = Path(self.yd_root)
             work_root = Path(self.work_root).resolve()
             object.__setattr__(self, "root", root)
             object.__setattr__(self, "resolved_work_root", work_root)
@@ -516,15 +516,8 @@ def _bind_retention_plan(plan: RetentionPlan) -> None:
         _require_source_component(plan.source)
     except ValueError as error:
         raise CleanupError(str(error), phase="validate", path=None) from error
-    try:
-        resolved = Path(plan.yd_root).resolve()
-    except (OSError, ValueError) as error:
-        raise CleanupError(
-            f"yd_root 无法 resolve：{error}",
-            phase="validate",
-            path=Path(plan.yd_root),
-        ) from error
-    object.__setattr__(plan, "yd_root", resolved)
+    root = Path(plan.yd_root)
+    object.__setattr__(plan, "yd_root", root)
 
     latest = plan.latest_done
     cutoff = plan.cutoff
@@ -557,12 +550,12 @@ def _bind_retention_plan(plan: RetentionPlan) -> None:
             path=None,
         )
     for directory in plan.output_dirs:
-        _require_output_identity(directory, resolved, plan.source, cutoff)
+        _require_output_identity(directory, root, plan.source, cutoff)
     for log_file in plan.log_files:
-        _require_log_identity(log_file, resolved, plan.source, cutoff)
+        _require_log_identity(log_file, root, plan.source, cutoff)
     _require_sorted_unique(plan.output_dirs, label="output_dirs")
     _require_sorted_unique(plan.log_files, label="log_files")
-    _require_current_retention_anchor(resolved, plan.source, latest)
+    _require_current_retention_anchor(root, plan.source, latest)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -925,7 +918,7 @@ def plan_retention(yd_root: Path, source: str) -> RetentionPlan:
     except ValueError as error:
         raise CleanupError(str(error), phase="validate", path=None) from error
     try:
-        return _plan_retention(Path(yd_root).resolve(), source)
+        return _plan_retention(Path(yd_root), source)
     except CleanupError:
         raise
     except _WRAP_ERRORS as error:
