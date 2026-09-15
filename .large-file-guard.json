@@ -2,7 +2,7 @@
   "enabled": true,
   "maxLines": 1000,
   "exclude": [
-    "openspec/changes/m2-producer-core/tasks.md",
+    "openspec/changes/archive/2026-09-15-m2-producer-core/tasks.md",
     "producer/src/yd_producer/canonical/converter.py",
     "producer/src/yd_producer/rawcopy.py",
     "producer/tests/test_canonical_converter.py",
