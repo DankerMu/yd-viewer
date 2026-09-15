@@ -2,7 +2,7 @@
 
 ## Context
 
-业务规则已由 [docs/compute-loop-design.md](../../../docs/compute-loop-design.md) 全文钉死（cycle/来源/warm start/发布顺序/清理均"已拍板"），本设计只补文档未覆盖的工程决策。M2 的 oracle 是本地测试（design.md §10：阶段门禁 = compute-loop §13.1 七项全绿）；direct-grid/SHUD/T+12/Slurm 的最终 oracle 在 M4，本阶段一律以合成 fixture 与注入式假执行器验证。
+业务规则已由 [docs/compute-loop-design.md](../../../../docs/compute-loop-design.md) 全文钉死（cycle/来源/warm start/发布顺序/清理均"已拍板"），本设计只补文档未覆盖的工程决策。M2 的 oracle 是本地测试（design.md §10：阶段门禁 = compute-loop §13.1 七项全绿）；direct-grid/SHUD/T+12/Slurm 的最终 oracle 在 M4，本阶段一律以合成 fixture 与注入式假执行器验证。
 
 ## Goals / Non-Goals
 
@@ -91,7 +91,7 @@ PR #181 的 root-identity 修复由用户授权新增私有 `_assemble_io.py`：
 
 `AttemptRequest` 字段/签名保持不变：其中 NFS `variant_dir/state_path` 只传给登录节点 production `driver.prepare`，用于把 driver 的 #171 source snapshot 与 controller staged snapshot 对账；worker argv/环境、attempt handoff、receipt 与 compute-side assemble 入参不得含 NFS 路径，只引用 work-local capability。成功 publish/明确 FAILED/TIMEOUT finalizer 的既有 exact-work tree delete自然包含 `input/`；submit/poll timeout、未知 crash 与其它保留证据路径继续保留整棵 work并由下一 tick 停源，不新增细粒度或 work 外清理。禁止 compute 直读 NFS、登录节点提前做 canonical/forcing/assemble、work 外 sibling staging、第二套 assemble/parser、或从 env/DB/dirname/opaque binding 猜 identity。
 
-**D21 #202 单流域 native 输入与真实 prepare driver**：以 [native-yd-model-input](../native-yd-model-input/design.md) 的固定文件/两 source 方案为当前生产合同，替代旧 prepare-unavailable/M4-driver 归属。prepare-only driver 使用指定 NWM 解释器直接调用库，不引入 NWM 平台审批、snapshot UUID、DB、通用资产角色或多层整包验证；日常 run 仍只使用 yd。旧 issue fixture 的 five-only/flat/未实现分支约束仅解释对应历史提交，不要求新实现继续保留错误布局；原 state、cleanup、publish、WorkClaim 与 #132 review ledger 不变。格式迁移与真实 builder 两个前置切片完成后才继续 #132 合并。
+**D21 #202 单流域 native 输入与真实 prepare driver**：以 [native-yd-model-input](../2026-09-15-native-yd-model-input/design.md) 的固定文件/两 source 方案为当前生产合同，替代旧 prepare-unavailable/M4-driver 归属。prepare-only driver 使用指定 NWM 解释器直接调用库，不引入 NWM 平台审批、snapshot UUID、DB、通用资产角色或多层整包验证；日常 run 仍只使用 yd。旧 issue fixture 的 five-only/flat/未实现分支约束仅解释对应历史提交，不要求新实现继续保留错误布局；原 state、cleanup、publish、WorkClaim 与 #132 review ledger 不变。格式迁移与真实 builder 两个前置切片完成后才继续 #132 合并。
 
 为让 rawcopy/canonical/forcing/registry 共用同一 `LocalObjectStore`，14.1 把 `stage_raw` 的 `work_dir` 实参明确取为 `<attempt-work>/object-store`：raw 落 `object-store/raw/`，本轮 manifest 落 `object-store/raw-manifest.json`，canonical/forcing/models 同根。`stage_raw` 自身的 standalone 合同与 local key `raw/...` 不改；这是 controller 的接线选择。整棵 `<work_root>/<source>/<T>` 仍是一次 attempt 的唯一回收单元。
 

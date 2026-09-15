@@ -43,10 +43,13 @@ __all__ = [
     "SBATCH_FLAGS",
     "SLURM_STATE_MAP",
     "SlurmJobExecutor",
+    "build_exit_code_sacct_command",
     "build_sacct_command",
     "build_sbatch_command",
+    "parse_exit_code_field",
     "parse_sacct_record",
     "parse_sbatch_job_id",
+    "query_failure_exit_code",
     "subprocess_runner",
 ]
 
@@ -371,3 +374,63 @@ class SlurmJobExecutor:
             if stderr:
                 message = f"{message}\nstderr: {str(stderr).strip()}"
             raise ExecutorError(message, job_id) from exc
+
+
+def build_exit_code_sacct_command(job_id: str) -> tuple[str, ...]:
+    """Assemble the allocation-only #47 ExitCode query; poll columns stay untouched."""
+    return ("sacct", "-j", job_id, "-X", "-n", "-P", "--format=ExitCode")
+
+
+def parse_exit_code_field(stdout: str, job_id: str) -> str:
+    """Accept one nonempty ExitCode field, optionally with a trailing ``|``."""
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise ExecutorError(
+            f"sacct ExitCode for job `{job_id}` expected exactly 1 line, "
+            f"got {len(lines)}",
+            job_id,
+        )
+    columns = lines[0].split("|")
+    if len(columns) == 2 and columns[1] == "":
+        columns = columns[:1]
+    if len(columns) != 1:
+        raise ExecutorError(
+            f"sacct ExitCode for job `{job_id}` expected a unique field, "
+            f"got {len(columns)} fields: {lines[0]!r}",
+            job_id,
+        )
+    field = columns[0].strip()
+    if not field:
+        raise ExecutorError(
+            f"sacct ExitCode for job `{job_id}` was empty",
+            job_id,
+        )
+    return field
+
+
+def query_failure_exit_code(
+    record: JobRecord,
+    *,
+    runner: Callable[..., str],
+) -> str:
+    """Query allocation-only ExitCode once for FAILED/TIMEOUT."""
+    job_id = record.job_id
+    if record.state not in (JobState.FAILED, JobState.TIMEOUT):
+        raise ExecutorError(
+            f"ExitCode query only accepts FAILED or TIMEOUT, "
+            f"got `{record.state.value}`",
+            job_id,
+        )
+    argv = build_exit_code_sacct_command(job_id)
+    env = {**os.environ, **SACCT_ENV}
+    try:
+        stdout = runner(argv, env=env)
+    except ExecutorError:
+        raise
+    except Exception as exc:
+        message = f"执行 `{argv[0]}` 失败：{exc.__class__.__name__}: {exc}"
+        stderr = getattr(exc, "stderr", None)
+        if stderr:
+            message = f"{message}\nstderr: {str(stderr).strip()}"
+        raise ExecutorError(message, job_id) from exc
+    return parse_exit_code_field(stdout, job_id)

@@ -2,7 +2,7 @@
 
 ## Why
 
-[docs/design.md](../../../docs/design.md) §10 里程碑 M2 要求交付 node-22 producer 的全部本地可验证代码；这是 M4 node-22 真计算的前置（agent-ops §8.1：CLI 未实现并通过本地测试前，禁止手工拼出等价生产流程）。业务规则已由 [docs/compute-loop-design.md](../../../docs/compute-loop-design.md) 定稿，本 change 把它落为可实现、可审核的 spec 与任务。
+[docs/design.md](../../../../docs/design.md) §10 里程碑 M2 要求交付 node-22 producer 的全部本地可验证代码；这是 M4 node-22 真计算的前置（agent-ops §8.1：CLI 未实现并通过本地测试前，禁止手工拼出等价生产流程）。业务规则已由 [docs/compute-loop-design.md](../../../../docs/compute-loop-design.md) 定稿，本 change 把它落为可实现、可审核的 spec 与任务。
 
 ## What Changes
 
@@ -38,7 +38,7 @@
 - 代码：全部落在 `producer/`（包 `yd_producer`）；`viewer/` 不受影响。
 - 依赖：canonical/forcing 快照模块引入 numpy/xarray/cfgrib 等运行依赖，随对应 issue 加入 `producer/pyproject.toml`；骨架当前 `dependencies = []` 为刻意留空。
 - 外部系统：仅代码引用 NWM 公开仓 pin commit；不连接 NWM 数据库/scheduler/display API（agent-ops §2.2 禁区）。
-- 不改变 `YD_ROOT` 产物契约（[docs/products-contract.md](../../../docs/products-contract.md) 保持 v1）。
+- 不改变 `YD_ROOT` 产物契约（[docs/products-contract.md](../../../../docs/products-contract.md) 保持 v1）。
 
 ## Non-goals
 

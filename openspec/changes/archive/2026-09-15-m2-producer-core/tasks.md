@@ -2,7 +2,7 @@
 
 任务组按依赖排序（每组的"依赖"行给出真实前置，未列即可与前面各组并行）；全部落 `producer/`，本地测试是唯一门禁。每组尾部标注 compute-loop §13.1 归属行。
 
-当前生产合同增量：#202 的 [native-yd-model-input](../native-yd-model-input/tasks.md) 已按用户确认的单流域精简方案定义完整 native 文件与真实 prepare driver。它取代下文历史 fixture 的 five-only/v1、平铺 native 输入、`yd.para`、builder-unavailable/M4-driver 与 obsolete module 开关细节；这些旧 fixture 保留为各自历史提交的验收记录，不要求新实现继续复现已替代的表示或未实现状态。状态数值、work owner、cleanup/publish 和独立 legacy external-root assembly 行为不变；原 #132 review ledger 不重置。新 native 实现与对应回归以该 change 的两条具体路径为准，不增加通用资产/registry/审批框架。
+当前生产合同增量：#202 的 [native-yd-model-input](../2026-09-15-native-yd-model-input/tasks.md) 已按用户确认的单流域精简方案定义完整 native 文件与真实 prepare driver。它取代下文历史 fixture 的 five-only/v1、平铺 native 输入、`yd.para`、builder-unavailable/M4-driver 与 obsolete module 开关细节；这些旧 fixture 保留为各自历史提交的验收记录，不要求新实现继续复现已替代的表示或未实现状态。状态数值、work owner、cleanup/publish 和独立 legacy external-root assembly 行为不变；原 #132 review ledger 不重置。新 native 实现与对应回归以该 change 的两条具体路径为准，不增加通用资产/registry/审批框架。
 
 ## 1. cli-config：配置装载与 CLI 骨架
 
@@ -1611,7 +1611,7 @@ Regression rows:
 - [x] 4.2 实现结构检查（缺段、行数与 header 不符、数值区损坏）
 - [x] 4.3 实现重戳到目标 cycle 绝对时间（只改 header、数据不变；服务 init 首态与发布前 T+12 定戳两条路径）
 - [x] 4.4 快照负残差归零与域均修正阈值检查纯函数
-- [ ] 4.5 关闭 issue #67 的 state `ValueError` 契约缺口：确定性 UTC 归一、替换输入预检与 bytes-like 解析
+- [x] 4.5 关闭 issue #67 的 state `ValueError` 契约缺口：确定性 UTC 归一、替换输入预检与 bytes-like 解析（已由 PR #168 合并；2026-09-15 补齐完成记录）
 
 依赖：组 2（勘察清单定原路径）
 §13.1 归属：state
@@ -5265,7 +5265,7 @@ Review focus:
 ## 14. run-controller（三）：主循环集成
 
 - [x] 14.1 单源单轮 `run_once` 骨架打通：发现 → 组装 → 提交 fake → 发布 → work 清理；job ID/partition/终态/起止时间进运行报告；`local.toml` 缺 Slurm 字段即停
-- [ ] 14.2 `yd-producer run` 接线：`cli.run` 调用 `controller.run_sources`，注入 Slurm executor、生产 attempt driver、poll wait 与独立 `sacct ExitCode` provider；退出码 0/2/3
+- [x] 14.2 `yd-producer run` 接线：`cli.run` 调用 `controller.run_sources`，注入 Slurm executor、生产 attempt driver、poll wait 与独立 `sacct ExitCode` provider；退出码 0/2/3
 - [x] 14.3 多轮追赶与缺口停等：raw 一次补齐 T/T+12h/T+24h 时序推进、每源在途提交计数 ≤1、缺轮停在缺口（原任务 14.2；§13.1：同源顺序/raw 缺口）
 - [x] 14.4 双源并行、单源失败隔离与崩溃恢复端到端：IFS 失败 GFS 继续、失败日志与 work 清理、无 DONE 残留下次重跑（原任务 14.3；§13.1：双源并行/单源失败/无 DONE 崩溃恢复）
 - [x] 14.5 `RunSourcesError` 按固定源顺序保留每个底层 `RunError` 正文与 `__notes__`（14.2 前置；issue #137）

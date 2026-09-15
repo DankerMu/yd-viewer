@@ -32,10 +32,18 @@ INVENTORY = (
     REPO_ROOT
     / "openspec"
     / "changes"
-    / "m2-producer-core"
+    / "archive"
+    / "2026-09-15-m2-producer-core"
     / "nwm-snapshot-inventory.md"
 )
-TASKS = REPO_ROOT / "openspec" / "changes" / "m2-producer-core" / "tasks.md"
+TASKS = (
+    REPO_ROOT
+    / "openspec"
+    / "changes"
+    / "archive"
+    / "2026-09-15-m2-producer-core"
+    / "tasks.md"
+)
 
 PIN_SHORT = "8ae9b8f2"
 PROVENANCE_MARKER = f"NWM@{PIN_SHORT}"

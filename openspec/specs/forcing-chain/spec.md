@@ -1,0 +1,235 @@
+# forcing-chain Specification
+
+## Purpose
+Define DB-free canonical conversion, source-specific direct-grid forcing, work-local input handoffs and native assembly with preserved ownership and provenance.
+## Requirements
+### Requirement: 共享文件读取保留主因与取消
+三条 read helper（`read_bytes_no_follow`、`read_bytes_limited_no_follow`、`read_tail_bytes_limited_no_follow`）MUST 对取得的文件 fd 在 finally 中恰好尝试 close 一次，不重试；read/fstat/lseek 与文件 close 的 OSError MUST 收敛为 SafeFilesystemError(kind=io)，读主因不得被次级 close 替换；取消 MUST 保持原对象，close 只作 note。取得 fd 前的既有缺失文件/准入分型与 no-follow 契约不变。
+
+#### Scenario: 读取与关闭双失败
+- **WHEN** 任一 reader 的读取失败，随后文件 close 又报告 OSError
+- **THEN** 外层是 io 模块错误，cause 保留读取主因，close 记为次级 note；若仅读取成功而 close 失败，close 成为 io 模块错误的 cause
+
+#### Scenario: 取消与关闭失败
+- **WHEN** 任一 reader 在读循环抛出 KeyboardInterrupt 或 SystemExit，随后 close 失败
+- **THEN** 原取消对象继续传播并携带 close note，fd 只尝试关闭一次；finally 不捕获 BaseException
+
+### Requirement: 目录创建拒绝保持资源与错误分型
+`ensure_directory_no_follow` MUST 在成功与拒绝退出时释放本次 walk 持有的目录 fd；MUST 保留 no-follow 与 containment，永久几何拒绝的 unsafe 与操作失败的 io 不得因自身 fd 泄漏或次生关闭错误互相翻转。
+
+#### Scenario: 深层永久拒绝反复发生
+- **WHEN** 在根下第二层或更深位置遇到普通文件或符号链接，并在隔离进程的 soft RLIMIT_NOFILE=64 下重复尝试 200 次
+- **THEN** 每次返回 unsafe，所有本次目录 fd 关闭，不因 EMFILE 变成 io
+
+#### Scenario: I/O 主因与清理错误并发
+- **WHEN** walk 遇到真实或注入的 I/O 失败，清理目录 fd 又报告关闭错误
+- **THEN** 返回 io 并保留操作主因；若主因是几何拒绝，则仍返回 unsafe，且继续尝试释放其它本次目录 fd
+
+### Requirement: 原子写失败的资源清理
+`atomic_write_bytes_no_follow` MUST 在非 OSError（含 BaseException）退出时关闭本次写 fd，并只清理尚未 replace 的本次临时文件；MUST 保留原异常，不能把中断改为业务错误。此本仓分叉按快照清单登记，不要求重新 pin。
+
+#### Scenario: 原子写被中断
+- **WHEN** 默认 tmp 或 part 后缀的原子写在 replace 前遭遇 TypeError、MemoryError 或 KeyboardInterrupt
+- **THEN** 本次写 fd 关闭、本次点前缀临时文件删除，旧目标和外来文件保持不变，原异常传播
+
+#### Scenario: 发布后出现中断
+- **WHEN** replace 完成后的目录 fsync 遭遇 KeyboardInterrupt
+- **THEN** 原中断传播，已发布目标保留，清理不得删除目标
+
+### Requirement: DB-free canonical 转换（NWM 快照）
+canonical converter MUST 以同一 `LocalObjectStore` 根内的本轮临时 raw manifest 与 `raw/` 副本为输入，并在该根内生成 canonical NetCDF 与 catalog；任务 14.1 的根逐字为 `<attempt-work>/object-store`。IFS 网格定义对象的唯一 URI MUST 为 `canonical/ifs/grid/ifs_0p25/grid.json`，converter 的写入/存在性/签名检查与每条 catalog 行 MUST 共用该值；MUST NOT 保留 `canonical/IFS/...` 别名或大小写 fallback。converter MUST NOT 依赖 PostgreSQL、NWM registry 服务或 NWM checkout import。
+
+#### Scenario: 合成 raw 到 canonical
+- **WHEN** 对合成 raw fixture 与对应 manifest 运行 converter
+- **THEN** work object-store 内生成 canonical NetCDF 与 catalog，且过程无任何数据库连接
+
+#### Scenario: 真实 GRIB 读路径被覆盖
+- **WHEN** 对**合成 GRIB2 样本**（非 NetCDF 替身）与携带 `metadata.grib_short_name` 的 manifest entry 运行 converter
+- **THEN** converter 经 cfgrib 后端读取该样本并产出 canonical NetCDF 与 catalog；**MUST NOT** 静默回退到 netcdf4 后端——回退是生产路径未被覆盖的假绿形态，测试 MUST 能把回退判红
+
+#### Scenario: IFS 网格定义 URI 统一小写
+- **WHEN** 对完整 IFS manifest 执行转换并读取生成的 catalog
+- **THEN** 网格定义对象写在 `canonical/ifs/grid/ifs_0p25/grid.json`，每条 product row 的 `grid_definition_uri` 逐字等于该值；字符串级断言 MUST 能在大小写不敏感文件系统上判红旧值 `canonical/IFS/grid/ifs_0p25/grid.json`
+
+#### Scenario: 运行期无出站连接
+- **WHEN** 在拦截出站 socket 连接的闸门下执行完整的 manifest 转换（读 raw → 转换 → 写产物 → 写 catalog）
+- **THEN** 闸门一次都不被触发；converter 的构造签名内**不存在** repository 形参，模块内**不存在** `CanonicalRepository` 协议
+
+### Requirement: source-specific direct-grid forcing
+forcing 生产 MUST 将 direct-grid binding 声明的 canonical `grid_cell_id` 直接作为 SHUD forcing 站点（每个站点/变量恰一条 mapping，权重恒为 1，不走 105 站 IDW）；输出站点集合 MUST 与 binding 的 grid-cell 集合一一对应，未被 binding 引用的 canonical 额外格点不得成为站点。生成的 forcing 首行 `Time_Day=0` MUST 锚定显式传入的 cycle 时刻；IFS 与 GFS MUST 使用各自 canonical grid 的 binding，不得跨 source 复用。
+
+#### Scenario: 合成 canonical 到 forcing 包
+- **WHEN** 对包含两个 bound grid cells 与一个 unbound extra cell 的合成 canonical fixture 运行 direct-grid forcing 生产，其中两站风分量分别为 `(u,v)=(3,4)` 与 `(6,8)`
+- **THEN** 生成的 forcing 包恰有两个站点，站点值逐项等于各自绑定 canonical cell 的值，每个站点/变量只有一条 `method="direct_grid"`、`weight=1.0` mapping，且不读取或输出额外格点
+- **THEN** 每份 station CSV 第 1 行为 `<row-count>\t6\t<start-date>\t<end-date>`，第 2 行逐字为 `Time_Day\tPrecip\tTemp\tRH\tWind\tRN`，第 3 行是首个数据行且两站该行 Wind 分别为手算值 `5` 与 `10`，Press 不进入 SHUD CSV
+
+#### Scenario: source-specific binding 隔离
+- **WHEN** 以同一 cycle 分别对 grid id/cell id 可区分的 GFS 与 IFS 合成 canonical 和 binding 运行 forcing 生产
+- **THEN** 两个 forcing 包各自只包含本 source binding 的站点、grid-cell 值与 lineage，任一 source 的 binding 都不被另一 source 复用
+
+#### Scenario: repository 返回值不得绕过 source 隔离
+- **WHEN** 注入式 repository 返回一份由 source-less parser 或 direct constructor 产生、同时声明 GFS/IFS 的 contract
+- **THEN** `ForcingProducer` 在 repository 返回边界再次验证当前 source 单例并在任何 mapping/package 写入前拒绝；该约束不得只由 file parser 保证
+
+#### Scenario: 时间零点锚定 cycle
+- **WHEN** 分别以 UTC 00Z 与 12Z cycle 运行 forcing 生产，并检查每份 SHUD station CSV 的首个数据行
+- **THEN** 首行 `Time_Day=0` 对应显式传入的 cycle 时刻，12Z 不增加 0.5 天偏移
+
+#### Scenario: 缺 cycle 行时拒绝重锚
+- **WHEN** canonical 输入的最早可产出 valid time 晚于显式 cycle
+- **THEN** forcing 生产 fail closed、不得把该 valid time 重标为 `Time_Day=0`，且不得留下 ready forcing package/version
+
+#### Scenario: 绑定格点缺失或身份不匹配
+- **WHEN** binding 引用 canonical 中不存在的 `grid_cell_id`，或 binding 的 source/grid identity 与 canonical 不一致
+- **THEN** forcing 生产在 ready 输出前稳定失败，不回退 IDW，也不留下 ready forcing package/version
+
+#### Scenario: 非法 cycle 不得碰撞合法 ready 状态
+- **WHEN** 已存在合法 12Z ready 后，以 06Z、12:30、非零秒或非零微秒调用公开 forcing seam
+- **THEN** 请求在任何 repository lookup/write/cleanup 前稳定失败，既不得生成非法 cycle 产物，也不得改变原 12Z version、sidecar、handoff 或 cycle-ready 证据
+
+#### Scenario: path identity 与 lead window 在 request boundary fail closed
+- **WHEN** 公开 seam 收到 `model_id="."`、public/repository `basin_version_id="."`，或 `max_lead_hours` 为 string/bool/float/negative；另有一个已 ready 的合法 sibling tuple
+- **THEN** public-only malformed value 在零 repository call 前失败，repository-return path identity 在 `get_forcing_version`/failure-status write/cleanup 前失败，且 sibling 的 record/package/domain/sidecar/handoff/cycle-ready bytes 全部不变
+- **THEN** `max_lead_hours=0`、普通 nonnegative int 与超出可用产品 lead 的任意合法大整数继续按现有可用 lead 截取，不得引入额外上限
+
+#### Scenario: repository 返回 contract 必须重建完整 station/cell 结构语义
+- **WHEN** 注入式 repository 直接构造 frozen `DirectGridForcingContract`，绕过 file parser，并分别给出 duplicate/blank station or cell、bool/zero/gapped index、unsafe/casefold-colliding filename、station/grid mismatch、duplicate cell、non-finite/out-of-range coordinate 或 non-Mapping properties
+- **THEN** parser 与 producer 共用同一个 semantic validator；producer 在 existing lookup、mapping/package write 与 readiness mutation 前稳定拒绝，且不得把 unsafe filename静默替换成 synthetic filename后继续
+- **THEN** source-less parser 仍可保留 pin-compatible multi-source shape，但任何进入指定 source 的生产调用都必须要求 exact current-source singleton
+
+#### Scenario: canonical longitude 经 parser 保持 float 身份
+- **WHEN** JSON direct-grid contract 的 finite longitude 已位于 canonical `[-180,180)`，包括超过十位有效数字的合法值
+- **THEN** shared parser 必须原 float 返回且不得再做模运算制造 ULP 漂移；只允许保留既有 `-0.0 -> 0.0`，legacy `[180,360]` 输入仍按减 360 归一
+
+#### Scenario: request preservation 不得掩盖 authoritative drift
+- **WHEN** 合法 tuple 已 ready 后，当前 catalog、binding/`.sp.att` 或 canonical NetCDF/grid authority 发生 identity/checksum/content drift
+- **THEN** producer 在 existing lookup 后证明旧 ready 已 stale 并撤销其 final evidence；不得为了满足 malformed-request preservation 而返回旧 `already_done`
+
+#### Scenario: catalog row 与 canonical 对象身份联合校验
+- **WHEN** catalog row 的 `object_uri`/checksum 指向另一 source、另一 cycle、另一 variable 或与 row 身份不一致的 NetCDF，或 dataset 的 data variable、`cycle_time`、`valid_time`、`lead_time_hours`、`unit`、`grid_id` 任一不一致
+- **THEN** forcing 生产在读取值与写 ready 前 fail closed；object key MUST 逐字对应 row 的 source/cycle/variable/canonical product id
+
+#### Scenario: catalog row 时间与 product id 必须独立自洽
+- **WHEN** checksum 正确的 catalog row 与 NetCDF 被成对修改，使二者彼此相等但 `valid_time - cycle_time != lead_time_hours`，或 `canonical_product_id` 不等于 `<normalized-source>_<YYYYMMDDHH>_<variable>_f<lead:03d>`
+- **THEN** catalog constructor 在构造 `CanonicalProduct`、lead 过滤与 NetCDF 读取前 fail closed；row/NetCDF 的 pairwise agreement 不构成 identity proof
+
+#### Scenario: canonical NetCDF 累计读取有界
+- **WHEN** catalog 指向大于 536870912 bytes 的 regular/sparse canonical NetCDF
+- **THEN** descriptor-bound gateway 在 xarray 打开与完整 checksum 扫描前按同一 fd 的大小/累计字节上限稳定拒绝、关闭 fd，且不留下 ready 输出
+
+#### Scenario: 输出配置漂移不得复用 ready
+- **WHEN** 同一 source/cycle/model 已 ready 后，`rn_shortwave_factor` 或其它影响 package bytes/shape/path/选择策略的 forcing config 发生变化但 `producer_version` 不变
+- **THEN** stable output-config identity 不匹配，producer 重算或 fail closed，不得返回旧 `already_done`
+
+### Requirement: prepared-variant handoff 是临时 registry 的唯一生产输入
+`prepare` 与后续独立 `run` 的 direct-grid 模型事实 MUST 只通过完整 native 十四文件变体的 `yd.prepare.direct-grid-handoff.v2` 交接。唯一 loader 沿用既有 source/project/grid、limits、parser/semantic validator 与深冻结结果；不在 prepare/driver/assembly 复制 parser。manifest 的 binding_uri/sp_att_path 仍是 D11 work registry keys，prepared sp.att 固定为 `yd.sp.att`，不得把 registry key 当作候选发现路径。v1 只作为需要重新 prepare 的旧输入，不是另一条生产路径。
+
+#### Scenario: prepared handoff 可直接驱动既有 registry seam
+- **WHEN** 对已由 prepare 验证并提交的 source-specific native v2 variant 调用唯一 loader，再把其四个版本标识、contract 与 exact bytes 与当前 `AttemptRequest.source/cycle` 组成 `WorkIdentity` 并交给 `stage_work_registry`
+- **THEN** `FileForcingRepository` 读回同一 source/project/model/basin/contract/assets；全链不需要 config identity 字段、NWM 数据库、外部 registry、目录扫描或第二 parser
+
+### Requirement: controller 把 prepared variant 与 cycle state 安全提交为 work-local capability
+node-22 controller MUST 在取得当前 source/cycle exact-work `WorkClaim`、完成 raw staging 后且在 `driver.prepare` / `sbatch` 前，把唯一 #171 loader 接受的 NFS prepared variant 固定十四文件 与精确 `states/<source>/<T>.cfg.ic` 搬入同一 claimed work 的固定 `input/`。目标布局 MUST 恰为 `input/variant/<fixed native leaves>`、`input/states/<source>/<YYYYMMDDHH>.cfg.ic` 与最后写入的 `input/yd.staged-inputs.json`；`input/`/`states/`/source 目录不得有额外、缺失或非普通成员。源 variant MUST 在一次完整 snapshot 前后重验 root identity、固定 native entry set 与十五份 bytes；源和目标都必须逐分量 descriptor-bound/no-follow，variant handoff 用 caller 显式 manifest/asset caps，cycle state 用显式 `MAX_STATE_IC_BYTES` 等价 cap。目标目录/leaf 只相对同一 claim 创建，文件 O_EXCL，禁止覆盖、symlink、特殊文件、work 外写入或 source/destination 重叠。
+
+`yd.staged-inputs.json` schema MUST 固定为 `yd.run.staged-inputs.v2`，UTF-8 canonical JSON（`allow_nan=False, ensure_ascii=True, sort_keys=True, separators=(",", ":")`），顶层 exact keys MUST 恰为 `schema_version/source_id/cycle_id/work_dir/files`。`cycle_id` 是 UTC 10 位 `YYYYMMDDHH`，`work_dir` 是 exact work 绝对路径；`files` MUST 恰含相对该 work 的十四个 `input/variant/<leaf>` 与一个 `input/states/<source>/<cycle>.cfg.ic` 安全 key，每值逐字为 `sha256:<64 lowercase hex>`。manifest 本身的 checksum 由 loader 返回而不自引用。manifest MUST NOT 携带 NFS source path、job ID、模型四个版本标识、forcing、RunDirectory、checkpoint、DAT 或 receipt 字段；这些分别由 #171 handoff 或 #132 attempt/job receipt 拥有。
+
+唯一 module seam MUST 为 `stage_work_inputs(*, claim, source_variant_dir, source_state_path, source, cycle, project_name, grid_id, max_manifest_bytes, max_asset_bytes, max_state_bytes) -> StagedWorkInputs` 与 `load_staged_work_inputs(*, work_dir, source, cycle, project_name, grid_id, max_manifest_bytes, max_asset_bytes, max_state_bytes) -> StagedWorkInputs`。全部参数 keyword-only、无默认。`StagedWorkInputs` MUST 是 frozen、keyword-only、深冻结 capability，至少绑定 current source/cycle、exact work/variant/state/manifest paths、本进程 no-follow 打开后冻结的 work `(st_dev, st_ino)`、canonical manifest checksum、十五个有序 file checksum、#171 `PreparedVariantHandoff` 与上述显式 expected grid/limits；不得持有 source NFS path、open fd 或 caller 可变 mapping。`WorkClaim.identity` 只授权 controller 当前进程写入，MUST NOT 序列化或被不同节点逐字比较；每个 consumer 独立冻结和复验自己所见 work identity，跨进程只以 manifest digest、source/cycle/work path 与内容 checksum 绑定。
+
+loader MUST 在每次加载与 point-of-use 前后重新验证同一 work/input root identity、exact layout、manifest byte/depth/node/schema/key/type/path/checksum，以及十五个普通文件的 bounded content；调用 #171 唯一 loader并以 caller expected project/grid 重建深冻结 prepared snapshot；cycle state还必须经唯一共享 state validator证明原生分段可解析且绝对时间头对应 T。stager MUST 在所有源验证通过后才开始目标写入、manifest 最后 O_EXCL；完成后用同一 loader 重载 staged tree，要求十五份 checksum 与 source snapshot 相同、prepared snapshot 相等，并在返回前再取得 source snapshot且全对象/bytes checksum 未漂。任一失败时不得提交 readiness manifest、不得 `sbatch`/`DONE`；已写 partial input 只留在同一 exact work 作为未验证 residue，由既有整棵 work owner处理，不另建细粒度或 work 外删除协议。
+
+#### Scenario: NFS 源变成不可达后 worker 仍只消费 work-local input
+- **WHEN** controller 从 valid 完整 native v2 variant 和对应 T state 成功取得 `StagedWorkInputs`，随后测试使两个 NFS source path 不可读或移除，并在独立 consumer 中仅以 exact work/source/cycle/project/grid/limits重载
+- **THEN** loader 与 staged assembler 仍只从 `input/` 成功工作；worker argv、环境、attempt handoff、receipt 与 assembler 入参均不含两个 NFS 路径，且所有最终 model bytes来自 checksum-bound staged files
+
+#### Scenario: staged input 形态、内容或进程本地 root identity 漂移即拒绝
+- **WHEN** `input`/`variant`/`states` 的 leaf/ancestor 为 symlink、FIFO/目录，存在额外/缺失 member、manifest 非 canonical/超限/深宽/malformed/invalid UTF-8，source/cycle/work/path/key/checksum 任一漂移，十五份 file 任一被替换，或 consumer 冻结 work identity 后 named root 被另一 inode替换
+- **THEN** loader/assembler 在读取不受信内容或提交 `<work>/model` 前稳定拒绝，零 `sbatch`/`DONE`，不删除 replacement 或 work 外对象；单一 NFS path、pathname/mtime/inode-only 比较、跨节点 `st_dev` 相等均不能替代内容 checksum
+
+#### Scenario: staging 失败与 timeout/crash 都留在同一 cleanup authority
+- **WHEN** source admission、目标 O_EXCL 写或最终 reload 失败，或完整 input 之后发生 submit/poll timeout、worker crash、明确 FAILED/TIMEOUT 或成功 publish
+- **THEN** staged/partial input 只可能位于同一 claimed exact work；pre-submit/timeout/未知 crash 路径按现有证据政策保留整棵 work并让下一 tick停源，明确 failure 仍由日志提交后的 cleanup owner 删除整棵 work，成功仍由 publish owner 删除整棵 work；不得建立 work 外 sibling、单独 input sweeper或第二套 recovery registry
+
+### Requirement: work 内临时 registry
+快照 file backend 要求 NWM 结构的 registry/model manifest 时，组装层 MUST 依据调用方显式提供的本轮 WorkIdentity、direct-grid contract 与已验证 binding/`.sp.att` bytes，在本轮 work 内的隔离 shadow object-store staging 中以最终相对 key 构造并由真实 `FileForcingRepository` 读回，再把 staged model 子树以同一 work/filesystem 的一次 no-follow rename 提交到 `<work>/object-store/models/<model_id>/`；MUST NOT 从变体 basename、`yd.binding` 文本、环境变量、数据库或外部 registry 服务猜测身份/contract。生产调用的四个版本标识、contract 与 exact asset bytes MUST 来自上述唯一 prepared-variant loader；生成的 registry/model manifest MUST 可由 `FileForcingRepository` 原样消费，且 contract 的 binding/`.sp.att` checksum、source/project/model/basin identity 与本轮 work 必须一致。受支持的生产调用 MUST 在既有 `run_with_lock` 覆盖的 controller 全生命周期内完成，并在裸 POSIX rename 紧前复探终名；该复探只在共同遵守 runlock 的单写模型中保证不覆盖，MUST NOT 被描述成跨不合作写者的原子 rename-noreplace。项目 MUST NOT 维护跨轮动态 registry；整棵 work 的成功/失败清理仍由既有 publish/cleanup owner 负责，组装层不得另建跨 work 删除协议。
+
+#### Scenario: 临时 registry 生命周期
+- **WHEN** 对显式 WorkIdentity、source-specific contract 与 checksum-correct assets 生成临时 file backend
+- **THEN** registry、manifest、binding、`.sp.att` 与 station index 只落在本轮 `<work>/object-store/models/<model_id>/`，`FileForcingRepository` 能读回同一 model/source/contract；station index geometry使用float shortest-roundtrip文本，负z只在该既有file-backend兼容视图中归一为`0.0`且不得反向改写direct-grid contract/forcing station；既有 work 删除后无任何 registry 残留或 work 外副本
+
+#### Scenario: 临时 registry 原子提交与身份拒绝
+- **WHEN** final model root/staging 已存在，或 binding/`.sp.att` checksum、contract URI、source/cycle/model/basin/project identity 任一不一致
+- **THEN** 生成器在 final model root 提交前稳定失败，只清理本次 staging，不覆盖既有条目、不写 work 外路径，也不修改输入 assets
+
+#### Scenario: finalize handoff 的直接 JSON 契约仍可证明
+- **WHEN** 由该临时 file backend 完成一轮 direct-grid forcing finalize
+- **THEN** `forcing_domain_handoff.json` 与 `forcing_domain_package.json` 均落在本轮 object-store，handoff 的 `payloads.station_timeseries.time_lattice` 保留逐时段 `native_resolution`；本项目不恢复 NWM 2777 行 parser 来循环证明这些 JSON
+
+### Requirement: SHUD 输入组装与固定参数
+组装器 MUST 在 work 内由模型变体、checksum 绑定的 forcing package 与本轮 warm-start 状态组装完整 SHUD 运行目录。运行目录终名固定为 `<work>/model`，经同父目录 staging、commit紧前复探与一次 rename 提交；其不覆盖语义依赖既有`run_with_lock`单写模型，不宣称裸renameat提供noreplace。运行目录的初始条件 MUST 为 `states/<source>/<T>.cfg.ic` 的原始 bytes，状态必须是 no-follow 普通文件、可按原生分段格式解析且绝对时间头对应 T；该状态 MUST 覆盖模型变体自带率定末态，MUST NOT 被重戳、修正或回退到变体初态。variant 发现 MUST 严格局限于显式根并以 descriptor-bound streaming 复制普通文件，不得跟随 symlink/读取特殊文件，也不得在无模型包合同依据时另设 entry/depth 业务上限。WorkRegistry point-of-use校验只对registry/model JSON使用16 MiB manifest上限；binding/`.sp.att`依创建时显式上限落盘，后续以descriptor-bound streaming checksum重验。forcing package 只能从 checksum 验证过的 package manifest 的 SHUD role 成员组装：index 在运行目录改名为 `<project_name>.tsd.forc`，station CSV basename 原样保留；debug/payload/handoff/domain-package 产物不得进入模型输入目录。
+
+组装 MUST 在 `<project_name>.para` 上固定覆盖 `START=0`、`END=7`、`DT_QR_DOWN=60`、`Update_IC_STEP=720`、`BINARY_OUTPUT=1`、`ASCII_OUTPUT=0`。参数 writer 只认 `{{KEY}}`、`${KEY}`、`KEY = value` 三种已登记形态：每键零命中则追加，恰一命中则替换，多命中则拒绝；同一行可各含一个不同 key 的 placeholder，后处理的 key 不得恢复前一 key 的旧 placeholder；六项之外的 bytes 保持不变。00Z 与 12Z MUST 使用同一套参数 bytes。
+
+#### Scenario: 参数三形态覆盖与 cycle 无关
+- **WHEN** 对含 placeholder、shell-style placeholder、assignment 与缺失键的合成 `.para` 分别以 00Z/12Z 执行组装
+- **THEN** 运行目录六项参数各恰一处且为固定值，两种 cycle 的参数 bytes 相同，未命中的键按原行尾风格追加，其余输入 bytes 不变
+
+#### Scenario: warm-start 状态覆盖变体初态
+- **WHEN** 以内容可区分、header 对应 T 的状态 fixture 与自带不同率定 `cfg.ic` 的合成变体执行组装
+- **THEN** `<work>/model/<project_name>.cfg.ic` bytes 逐字等于 T 状态、不等于变体率定末态；状态/变体/forcing 三个源保持逐字不变
+
+#### Scenario: 状态身份与类型 fail closed
+- **WHEN** state path 不等于 `<states_root>/<source>/<T>.cfg.ic`，或其 leaf/ancestor 是 symlink、FIFO/目录、不可解析 cfg.ic、相对 720 minute header、其它 cycle 的绝对 header
+- **THEN** 组装在 final `model` 提交前稳定失败，不重戳、不取旧状态、不产生运行目录终名
+
+#### Scenario: forcing manifest 与角色 fail closed
+- **WHEN** `ForcingProductionResult` 与 package manifest 的 checksum/source/cycle/model/version 不一致，result package URI 与 manifest key prefix 不一致，member URI 不等于该 prefix + relative path，或 SHUD index 为零/多份、CSV role/URI/checksum/filename set 与 index 不一致
+- **THEN** 组装在读入不受信 bytes 或提交 final `model` 前拒绝，不要求 package manifest 自身携带它没有定义的 package URI 字段，不回退 debug index、不扫描未声明文件、不留下运行目录终名；index/CSV 校验保持 descriptor-bound streaming，内存不随未声明文件字节增长
+
+#### Scenario: 组装失败保持三源且无终名
+- **WHEN** 复制变体、状态、forcing 或改写参数的任一步骤失败，或 staging 清理本身失败
+- **THEN** final `<work>/model` 不存在，variant/state/forcing package 的全树 bytes/类型快照不变；只允许本次 staging 作为可由整棵 work 清理 owner 回收的残留并把清理失败附到原异常
+
+### Requirement: verified staged capability 使用既有组装内核且不放宽 legacy path guard
+`assemble_staged(*, registry, staged_inputs, forcing) -> RunDirectory` MUST 沿用既有 capability 入口、reload 与共享 kernel，只接受完整 native v2。按 native-yd-model-input 的路径和参数语法将固定 native 文件放入 model/input/yd，当前 T state 覆盖初态，参数使用 native 模式，CSV 留在 model 根、index path 为 .。原有 state/forcing/IO/commit helper 继续复用；不新增第二 assembler 或通用角色系统。
+
+既有 `assemble(*, registry, variant_dir, forcing, states_root, state_path) -> RunDirectory` 的公开签名和 legacy 语义 MUST 保持：外部、绝对、no-follow recursive variant仍合法且不新增 entry/depth cap；任意位于 `registry.work_dir` 内但没有 `StagedWorkInputs` capability 的 `variant_dir`/`states_root` 仍在 validate phase 拒绝且零 final model。不得通过 union/default/additive flag、伪造 capability或删除 outside-work guard 把受信入口扩成任意 work-relative path。
+
+#### Scenario: legacy 与 native staged 共享数值语义与核心 helper
+- **WHEN** 用同一 WorkRegistry、forcing、project parameter、cycle state和内容等价的外部 legacy variant / verified native v2 staged capability分别组装
+- **THEN** 两条路径的六项参数值、warm-state 与 forcing CSV/站点数据一致；native 路径只按新合同改变 native 参数序列化和 index 相对位置，不要求 legacy 平铺表示与 native 表示逐字相同。两者仍共享参数/state/forcing/IO/commit owner，均只提交一次 model；legacy path guard 保持。
+
+#### Scenario: 未验证 work 内路径继续被 public assemble 拒绝
+- **WHEN** caller直接把 `work/inside-variant`、`work/inside-states` 或手工构造的 staged path传给既有 `assemble`，即使目录内容看似合法
+- **THEN** 在 validate phase 拒绝且不写 `model`；只有由 public staged loader返回并在点用时全对象重验的 capability可进入 `assemble_staged`
+
+### Requirement: 快照模块可追溯
+每个从 NWM 复制的模块 MUST 在文件头部记录来源 `NWM@8ae9b8f2` 与原仓相对路径；快照 MUST NOT 包含 DB/scheduler 分支代码。pin 是溯源与差异审计基线，不是逐字冻结：yd MAY 在本仓修复 `store/safe_fs.py`、`store/object_store.py` 与 `canonical/converter.py` 的快照缺陷，但每一处偏离 MUST 先在 `nwm-snapshot-inventory.md` 对应行的「剥离点」列登记一句“问题 + 修法”；未登记的语义偏离 MUST 被拒绝。
+
+#### Scenario: 已登记的本仓缺陷修复
+- **WHEN** 上述三个生产快照模块相对 `NWM@8ae9b8f2` 修复一处缺陷
+- **THEN** 差异审计不要求逐字或 AST 等价，但清单对应行的「剥离点」必须能逐处解释问题与修法；模块头或 PR 说明不得替代该登记
+
+#### Scenario: 溯源头部检查
+- **WHEN** 对 `yd_producer` 内标记为快照的模块运行溯源检查测试
+- **THEN** 每个快照文件的头部（前若干行）内存在一条**独立的 `#` 注释行，其注释内容恰为** `NWM@8ae9b8f2 <原路径>`（允许缩进与行尾空白，不允许路径之后还有其它内容）；写在 docstring 或字符串里不算数。`<原路径>` MUST 是一条**纯仓库相对路径**——与清单 §1 `NWM 原路径` 列同形，只含路径字符，**不带 `:<行号>` 后缀、不带括注或任何说明文字**；紧贴路径粘上的尾随内容（无空格分隔）同样属于「路径之后还有其它内容」，不构成溯源头部
+
+#### Scenario: 未登记快照文件的反向守卫
+- **WHEN** `producer/` 内出现**任意位置**带上述溯源头部形式注释行、但不在快照勘察清单路径表内的文件
+- **THEN** 溯源检查测试失败，指出该文件路径
+
+#### Scenario: 行内引用不触发反向守卫
+- **WHEN** 某个文件在注释里**顺带引用** NWM 的某处，形如 `# NWM@8ae9b8f2 \`x/y.py\` 的某某字段：……`（路径后以空格分隔仍有叙述文字），或 `# NWM@8ae9b8f2 x/y.py:43（逐字移植）`（行号与括注紧贴路径）
+- **THEN** 反向守卫 MUST NOT 因此判它为未登记快照文件——二者都是**行级引用**，不是溯源头部
+
+正反两向 MUST 共用同一条「什么算溯源注释」的谓词（整行即溯源头部形式）；行预算只作用于正向，反向不设行预算。
+
+该谓词是**登记守卫**而非抄袭检测器：它识别的是已声明的头部形式，不是任意的 NWM 提及。**已声明的残留**：真实拷贝若**只以行级引用或 docstring 形式**标注溯源（`路径:行号（说明）`、或把溯源写在模块 docstring 里），反向守卫看不见它。已知实例：`producer/src/yd_producer/state/cfg_ic.py`（issue #8 落地）派生自 pin 的 `packages/common/state_qc.py`，其 10 处 `#` 标记全为 `路径:行号（说明）` 形式（实测 `grep -cE '^[[:space:]]*#.*NWM@'`；先前写 11 是把 docstring 的两行误计在内）、模块级溯源写在 docstring 第 3 行，故不被反向守卫捕获；其登记不一致已另立 issue 归 #8 处置，不在 issue #5 范围内——该行**自相矛盾**：结构列（目标路径 `state/state_qc.py`、`落地状态` `待落地`、`剥离点` `无`）说未落地，而同一行 `备注` 自己写着「落地状态：部分（格式层）」已落在 `cfg_ic.py`、余量归 issue #9。守卫只读结构列（见 §1 序言「`落地状态` 是守卫的期望落地集来源」），散文对它不可见。此残留与「同一 commit 内既降级又删文件」并列记为已知非目标：反向守卫是**登记守卫**，识别的是已声明的头部形式，不是任意 NWM 提及的抄袭检测器。此形式约束由 issue #5 的 round-4 集成红驱动——先前的「任意位置的 `NWM@` 注释」代理量被实测证伪：master 上 `producer/src/yd_producer/config.py` 的一处行内引用被误判为未登记快照文件，从而给所有后续 PR 强加一条它们无法满足的义务（该文件在清单 §1 内既无 `NWM 原路径` 也无 `剥离点`）。
+
+#### Scenario: 快照 DB-free 隔离
+- **WHEN** 对已落地的快照模块目录运行禁区检查
+- **THEN** 无任何数据库驱动/`DATABASE_URL`、scheduler 或 registry 包 import、journal/reservation import 与环境变量读取；检查 MUST 基于 import/调用结构，不得因普通标识符或错误消息含 `scheduler`/`registry` 单词而误报
+
+#### Scenario: work-local manifest adapter 不等于 registry 服务
+- **WHEN** forcing file backend 以显式构造参数读取本轮 work 内的 model manifest 索引
+- **THEN** 该纯文件 adapter 被允许，且不得从环境变量、NWM scheduler 路径、数据库或跨轮动态 registry 发现 manifest
+

@@ -1,7 +1,7 @@
 """失败收尾与 14 天保留清理（任务 13.2/13.3，issue #25）。
 
 契约来源：`docs/compute-loop-design.md` §11.3、§12，
-`openspec/changes/m2-producer-core/specs/run-controller/spec.md` 的
+`openspec/specs/run-controller/spec.md` 的
 「失败处理」与「保留窗口与安全清理」两条 Requirement。
 
 本模块是独立 seam：公开失败一律 `CleanupError`。失败收尾先提交唯一日志再删 work。
