@@ -45,6 +45,12 @@ from yd_producer.rawscan import (
 CYCLE = datetime(2026, 3, 4, 0, tzinfo=UTC)
 CYCLE_DIR = "2026030400"
 
+
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    return tmp_path.resolve()
+
+
 # 入参 source → raw 目录段。**逐字写死**，MUST NOT 从被测模块 import
 # `SOURCE_DIR_NAMES`：两侧共用一个字面量就会同步漂移，把大小写断言变成恒真式。
 # 事实来源：NWM@8ae9b8f2 packages/common/source_identity.py:5-9 的
@@ -322,12 +328,11 @@ def test_symlink_expected_paths_count_as_missing(tmp_path, kind):
     assert verdict.unreadable_files == ()
 
 
-def test_symlink_to_regular_file_counts_as_present(tmp_path):
-    """判据是「**跟随** symlink 后仍须是普通文件」，两半都要取证。
+def test_symlink_to_regular_file_counts_as_unreadable(tmp_path):
+    """预检跟随后是普通文件，读阶段 no-follow 拒绝叶子链接为 unreadable。
 
-    上一个用例只行使了"仍须是普通文件"那一半；这里行使"跟随"那一半：若实现改用
-    `lstat()`，symlink 自身不是普通文件，这个真实存在、真实可读的原件会被误判成缺失。
-    目标文件是 cycle 目录内的一个游离文件，不属预期集（判定期不列目录，故无副作用）。
+    目录目标链接与断链仍由预检归 missing；本条只迁移普通文件目标那一支。
+    目标文件是 cycle 目录内的游离文件，不属预期集。扫描零写入。
     """
     expected = literal_expected(tmp_path, "gfs", GFS_LEADS, GFS_BUNDLES)
     populate(expected)
@@ -337,13 +342,32 @@ def test_symlink_to_regular_file_counts_as_present(tmp_path):
     populate((target,))
     victim.symlink_to(target)
     assert victim.is_symlink()
+    before = tree_snapshot(tmp_path)
+
+    verdict = judge(tmp_path, "gfs", CYCLE, make_config())
+
+    assert verdict.complete is False
+    assert verdict.missing_files == ()
+    assert verdict.unreadable_files == (victim,)
+    assert verdict.expected_files == expected
+    assert tree_snapshot(tmp_path) == before
+    assert os.readlink(victim) == str(target)
+    assert target.read_bytes() == b"GRIB\xff\x00stub"
+
+
+def test_empty_regular_file_counts_as_present(tmp_path):
+    expected = literal_expected(tmp_path, "gfs", GFS_LEADS, GFS_BUNDLES)
+    populate(expected)
+    victim = expected[1]
+    victim.write_bytes(b"")
+    before = tree_snapshot(tmp_path)
 
     verdict = judge(tmp_path, "gfs", CYCLE, make_config())
 
     assert verdict.complete is True
     assert verdict.missing_files == ()
     assert verdict.unreadable_files == ()
-    assert verdict.expected_files == expected
+    assert tree_snapshot(tmp_path) == before
 
 
 @pytest.mark.skipif(
@@ -1295,36 +1319,22 @@ def test_readability_is_decided_by_real_open_not_os_access(tmp_path, monkeypatch
 def test_open_succeeds_but_first_read_fails_is_unreadable(tmp_path, monkeypatch):
     """ "可读"的判据是**真的读出一个字节**，不是"`open` 没报错"。
 
-    生产 raw 根在 NFS 上：陈旧文件句柄（ESTALE）与 EIO 都会让 `open` 成功、首次
-    `read` 失败。这是本地权限位造不出来的形态，故在 `builtins.open` 这个系统边界上
-    做定向注入——只对一个受害路径生效，其余路径走真实 `open`。
+    生产 raw 根在 NFS 上：陈旧文件句柄（ESTALE）与 EIO 都会让打开成功、首次
+    `os.read` 失败。只对受害 inode 注入，其余路径走真实读。
     """
     expected = literal_expected(tmp_path, "gfs", GFS_LEADS, GFS_BUNDLES)
     populate(expected)
     victim = expected[1]
-    real_open = builtins.open
+    victim_id = os.stat(victim, follow_symlinks=False)
+    real_read = os.read
 
-    class _ReadFails:
-        def __init__(self, handle):
-            self._handle = handle
-
-        def __enter__(self):
-            self._handle.__enter__()
-            return self
-
-        def __exit__(self, *exc_info):
-            return self._handle.__exit__(*exc_info)
-
-        def read(self, *args, **kwargs):
+    def fake_read(fd, n):
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) == (victim_id.st_dev, victim_id.st_ino):
             raise OSError(errno.EIO, "Input/output error")
+        return real_read(fd, n)
 
-    def fake_open(file, *args, **kwargs):
-        handle = real_open(file, *args, **kwargs)
-        if os.fspath(file) == os.fspath(victim):
-            return _ReadFails(handle)
-        return handle
-
-    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(os, "read", fake_read)
     try:
         verdict = judge(tmp_path, "gfs", CYCLE, make_config())
     finally:

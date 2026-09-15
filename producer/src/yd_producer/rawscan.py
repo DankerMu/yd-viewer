@@ -5,7 +5,7 @@ bundle 文件模式、GFS f000 特例）、openspec `raw-scan` 的 Requirement�
 完整性判定」。目录布局与文件名形态转录自 NWM pin `8ae9b8f2`（见下方溯源注释）。
 
 设计约束：
-- **纯函数、零写入**：只对预期文件做 `stat()` 与 `open(..., "rb")` 读一个字节，
+- **纯函数、零写入**：只对预期文件做 `stat()` 与 no-follow 有界读一个字节，
   不创建/修改/删除任何路径，不产生 manifest（manifest 归任务 3.2）。
 - **不列目录**：预期文件集严格由 `lead_hours × bundles` 构造。以目录稳定时间、末
   lead 存在或任何动态推断替代逐文件检查是 spec 的 MUST NOT。
@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from yd_producer.config import Config, ConfigError, RawSourceConfig
+from yd_producer.store.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
 
 __all__ = [
     "GFS_F000_UNAVAILABLE_VARIABLES",
@@ -277,16 +278,14 @@ def render_bundle_filename(
 
 
 def _is_readable(path: Path) -> bool:
-    """以真实 `open` 读一个字节为准。
+    """以 no-follow 描述符读一个字节为准。
 
-    不用 `os.access(..., os.R_OK)`：它在部分挂载/权限模型下与真实 `open` 不一致。
-    读到零字节（空文件）也算可读——本 issue 的"可读"只到能发起读为止，GRIB 内容校验
-    归 M4 receipt。
+    不用 `os.access(..., os.R_OK)`：它在部分挂载/权限模型下与真实读不一致。
+    空普通文件仍可读——本 issue 的"可读"只到能发起读为止，GRIB 内容校验归 M4 receipt。
     """
     try:
-        with open(path, "rb") as handle:
-            handle.read(1)
-    except FS_PRIMITIVE_ERRORS:
+        read_bytes_limited_no_follow(path, max_bytes=0)
+    except (SafeFilesystemError, *FS_PRIMITIVE_ERRORS):
         return False
     return True
 
@@ -294,15 +293,11 @@ def _is_readable(path: Path) -> bool:
 def _check(path: Path) -> str:
     """逐文件三态分类：`"ok"` / `"missing"` / `"unreadable"`。
 
-    语义等同 `Path.is_file()`（跟随 symlink，须是普通文件），但**自己做 stat 分类**
-    而不直接调用它：`Path.is_file()` 吞掉哪些 errno 随 CPython 版本变（3.12 只吞
-    ENOENT/ENOTDIR/EBADF/ELOOP，EACCES/EIO/ESTALE 上抛；3.13+ 起吞掉全部 `OSError`），
-    依赖它会让"cycle 目录缺 x 位"这个生产 NFS 上最常见的形态在不同解释器上一会儿以裸
-    `PermissionError` 逃出 `judge`（违反"不完整不是异常"），一会儿被静默记成"缺失"
-    （`unreadable_files` 分支不可达）。这里把「不存在」与「不可访问」显式分开，两者
-    都不外泄异常，且跨版本一致。
+    预检 `stat` 分类保持不变：缺失/ENOTDIR、目录/FIFO、目录目标链接及断链为
+    missing；权限/IO 为 unreadable。读阶段 no-follow、身份、打开、读取或
+    close-only 拒绝为 unreadable。空普通文件仍 ok。
 
-    生产 raw 根是 NFS 上由 NWM 以另一 uid 写入的目录树，权限类失败与 `open` 同样归入
+    生产 raw 根是 NFS 上由 NWM 以另一 uid 写入的目录树，权限类失败与读同样归入
     `unreadable_files`。
     """
     try:
@@ -312,7 +307,7 @@ def _check(path: Path) -> str:
     except FS_PRIMITIVE_ERRORS:
         return "unreadable"
     if not stat_module.S_ISREG(status.st_mode):
-        # 目录、指向目录的 symlink 与其它非普通文件都算缺失（`is_file()` 语义）；
+        # 目录、指向目录的 symlink 与其它非普通文件都算缺失（预检 `is_file()` 语义）；
         # 断链 symlink 的 stat 抛 FileNotFoundError，已落在上一支。
         return "missing"
     return "ok" if _is_readable(path) else "unreadable"
