@@ -1,4 +1,12 @@
-"""Private identity-conditional quarantine-tree deletion for `safe_fs`."""
+# NWM@8ae9b8f2 packages/common/safe_fs.py
+"""Private tree-deletion helpers for `safe_fs`.
+
+Moved snapshot bodies from `packages/common/safe_fs.py`:
+`_verify_tree_no_symlinks_fd`, `_rmtree_contents_fd`, and
+`_remove_tree_contents_allow_symlinks_fd`. `remove_tree_allow_symlinks` and
+`_remove_named_tree` remain yd-authored quarantine glue (identity-conditional
+deletion) and are not pin-equivalent bodies.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +18,6 @@ from yd_producer.store.safe_fs import (
     SafeFilesystemError,
     _open_child_dir,
     _reject_unsafe_entry_name,
-    _remove_tree_contents_allow_symlinks_fd,
     open_directory_no_follow,
 )
 
@@ -140,3 +147,61 @@ def _remove_named_tree(
                 kind="identity_changed",
             ) from error
         raise
+
+
+def _verify_tree_no_symlinks_fd(directory_fd: int, path_label: Path) -> None:
+    for name in os.listdir(directory_fd):
+        entry_path = path_label / name
+        entry_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise SafeFilesystemError(f"Refusing symlink tree entry: {entry_path}")
+        if stat.S_ISDIR(entry_stat.st_mode):
+            child_fd = _open_child_dir(directory_fd, name, entry_path)
+            try:
+                _verify_tree_no_symlinks_fd(child_fd, entry_path)
+            finally:
+                os.close(child_fd)
+
+
+def _rmtree_contents_fd(dir_fd: int, path_label: Path) -> None:
+    for name in os.listdir(dir_fd):
+        entry_path = path_label / name
+        try:
+            entry_stat = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError as error:
+            raise SafeFilesystemError(
+                f"Failed to stat tree entry {entry_path}: {error}", kind="io"
+            ) from error
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise SafeFilesystemError(
+                f"Refusing to remove symlink tree entry: {entry_path}"
+            )
+        if stat.S_ISDIR(entry_stat.st_mode):
+            child_fd = _open_child_dir(dir_fd, name, entry_path)
+            try:
+                _rmtree_contents_fd(child_fd, entry_path)
+            finally:
+                os.close(child_fd)
+            os.rmdir(name, dir_fd=dir_fd)
+        else:
+            os.unlink(name, dir_fd=dir_fd)
+
+
+def _remove_tree_contents_allow_symlinks_fd(dir_fd: int, path_label: Path) -> None:
+    for name in os.listdir(dir_fd):
+        entry_path = path_label / name
+        try:
+            entry_stat = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError as error:
+            raise SafeFilesystemError(
+                f"Failed to stat tree entry {entry_path}: {error}", kind="io"
+            ) from error
+        if stat.S_ISDIR(entry_stat.st_mode):
+            child_fd = _open_child_dir(dir_fd, name, entry_path)
+            try:
+                _remove_tree_contents_allow_symlinks_fd(child_fd, entry_path)
+            finally:
+                os.close(child_fd)
+            os.rmdir(name, dir_fd=dir_fd)
+        else:
+            os.unlink(name, dir_fd=dir_fd)

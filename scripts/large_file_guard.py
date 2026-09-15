@@ -11,9 +11,9 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 
 def count_lines(path: Path) -> int:
@@ -50,7 +50,9 @@ def main() -> int:
             failed = True
             continue
         if lines > maximum:
-            print(f"{name!r}: {lines} lines exceeds maxLines={maximum}", file=sys.stderr)
+            print(
+                f"{name!r}: {lines} lines exceeds maxLines={maximum}", file=sys.stderr
+            )
             failed = True
     if not failed:
         print(f"Large-file guard passed (maxLines={maximum}).")
