@@ -50,6 +50,11 @@ FRESH_NEXT = "2026082012"
 ALL_SOURCES = ("ifs", "gfs")
 
 
+@pytest.fixture
+def tmp_path(tmp_path: pathlib.Path) -> pathlib.Path:
+    return tmp_path.resolve()
+
+
 def _decide(
     builder: YdRootBuilder,
     source: str,
@@ -310,16 +315,21 @@ def test_five_token_header_is_refused_even_though_its_last_token_matches_t(
 # --- 可读性分类 ---
 
 
-def test_state_symlink_to_a_valid_state_is_followed_and_passes(
+def test_state_symlink_to_a_valid_state_is_unreadable(
     tmp_path: pathlib.Path,
 ) -> None:
-    """裁决 4：可读性判定 MUST 跟随 symlink（macOS `/tmp` 本身就是 symlink）。"""
-    builder = YdRootBuilder(tmp_path)
+    """首行读取 no-follow：叶子 symlink 即使目标是合法状态也判 STATE_UNREADABLE。"""
+    root = tmp_path.resolve()
+    builder = YdRootBuilder(root)
     builder.write_done(D, "ifs")
-    target = tmp_path / "elsewhere.cfg.ic"
-    target.write_bytes(state_payload(absolute_minute_text(parse_cycle(T))))
-    builder.write_state_as_symlink_to(T, "ifs", target)
-    _assert_runnable(_decide(builder, "ifs", _all_complete()), T)
+    target = root / "elsewhere.cfg.ic"
+    payload = state_payload(absolute_minute_text(parse_cycle(T)))
+    target.write_bytes(payload)
+    link = builder.write_state_as_symlink_to(T, "ifs", target)
+    decision = _decide(builder, "ifs", _all_complete())
+    _assert_stopped(decision, controller.StopReason.STATE_UNREADABLE)
+    assert os.readlink(link) == str(target)
+    assert target.read_bytes() == payload
 
 
 @pytest.mark.parametrize(

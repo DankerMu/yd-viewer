@@ -197,13 +197,12 @@ def _reconstruct_sources(
 def _reject_symlinks(raw_root: Path, source_path: Path) -> None:
     """源路径自身或其在 `raw_root` 之下的任一祖先段是 symlink 即拒绝，不跟随。
 
-    这里刻意**比任务 3.1 更严**：`rawscan._check` 走 `is_file()` 语义、跟随 symlink，
-    故 `judge` 可能对一个 symlinked bundle 返回 `complete=True`；而本模块钉死的源不
-    可变取证是 `os.lstat`（看链本身、不看目标），两者叠加会留下一个洞——链的元组不变
-    而目标被换掉，取证照样通过。收口方式是**拒绝**而不是改用 `os.stat`：stat 版本要
-    再补目标的 containment 检查与第二个 TOCTOU 窗口，复杂度换不来收益（NWM 经 object
-    store 的 `write_bytes_atomic` 落盘，raw 树内出现 symlink 属异常形态）。该不对称是
-    有意的：3.1 判「NWM 说它在」，3.2 判「yd 愿意复制它并为其身份背书」。
+    这里是 scan 后独立的准入闸：`rawscan._check` 的读阶段已用 no-follow 描述符拒绝叶子
+    或祖先 symlink，故当前含链的树会让 `judge` 不完整；但 `complete` 只证明判定时的
+    物理树，不能为随后换入的链背书。本模块钉死的源不可变取证是 `os.lstat`（看链本身、
+    不看目标），因此收口方式仍是**拒绝**而不是改用 `os.stat`：stat 版本要再补目标的
+    containment 检查与第二个 TOCTOU 窗口，复杂度换不来收益（NWM 经 object store 的
+    `write_bytes_atomic` 落盘，raw 树内出现 symlink 属异常形态）。
 
     `raw_root` 自身不查：它是调用方给的根（生产上 NFS 挂载点、测试里 `/tmp` 一带都
     可能整体是 symlink），查它会把合法调用一并拒掉。

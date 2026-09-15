@@ -189,7 +189,7 @@ class YdRootBuilder:
     def write_state_as_symlink_to(
         self, cycle_text: str, source: str, target: Path
     ) -> Path:
-        """状态文件是**指向另一份合法状态**的 symlink（可读性判定 MUST 跟随）。"""
+        """状态文件是指向另一份合法状态的 symlink（首行读取 MUST 拒绝跟随）。"""
         path = self._prepare(cycle_text, source)
         path.symlink_to(target)
         return path

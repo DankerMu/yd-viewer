@@ -817,10 +817,10 @@ def test_output_symlink_shapes_that_are_not_done_do_not_block(
     assert snapshot(tree.output) == before_output
 
 
-def test_readable_calibration_symlink_to_regular_file_parses_and_restamps(
+def test_readable_calibration_symlink_to_regular_file_refuses_with_zero_writes(
     tmp_path: Path,
 ) -> None:
-    """兄弟面：可读的率定末态普通文件链仍定位、解析并重戳成功。"""
+    """率定末态叶子 symlink 在 parser 读阶段拒绝；两源零写入，链接与目标不变。"""
     tree = Tree(tmp_path)
     for name in WRITE_ORDER:
         tree.write_cycle(name, _FRONTIER)
@@ -829,18 +829,15 @@ def test_readable_calibration_symlink_to_regular_file_parses_and_restamps(
     calibration = tree.calibration["ifs"]
     calibration.unlink()
     calibration.symlink_to(prior)
+    before_states = snapshot(tree.states)
+    before_output = snapshot(tree.output)
 
     report = tree.run()
 
-    assert report.refusal is None
-    expected = tuple(tree.state_path(name, _FRONTIER) for name in WRITE_ORDER)
-    assert report.written == expected
-    assert tree.state_path("ifs", _FRONTIER).read_bytes() == expected_bytes(
-        tree.payloads["ifs"], EPOCH_MINUTES_25_00Z
-    )
-    assert tree.state_path("gfs", _FRONTIER).read_bytes() == expected_bytes(
-        tree.payloads["gfs"], EPOCH_MINUTES_25_00Z
-    )
+    assert report.refusal is InitRefusal.CALIBRATION_STATE_UNREADABLE
+    assert report.written == ()
+    assert str(calibration) in report.detail
+    assert_zero_write(tree, before_states, before_output)
     assert os.readlink(calibration) == str(prior)
     assert prior.read_bytes() == tree.payloads["ifs"]
 

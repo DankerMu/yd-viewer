@@ -43,8 +43,9 @@ cycle」与「raw 缺口阻塞不跳轮」两条 Requirement。
 前沿倒退到已发布 cycle。集合无法枚举 / 条目无法判定归 `DISCOVERY_UNREADABLE`；状态文件
 **自身**读不出来仍归 `STATE_UNREADABLE`。
 
-**状态文件可读性跟随 symlink**（与 `state/cfg_ic.py` 的有界读同一理由：macOS `/tmp` 本身
-是 symlink，no-follow 会误拒合法测试树）。no-follow 的越界拒绝属删除/发布面，归 #24/#25。
+**状态文件首行读取绑定 no-follow 描述符**（与 `state/cfg_ic.py` 同一原语）：叶子或祖先
+是 symlink、打开时身份漂移、FIFO 替换均 `STATE_UNREADABLE`。配置根别名由 #110 解析，
+读端不得自行 resolve。
 
 停止一律经返回值里的 `StopReason` 表达，MUST NOT 以异常逃逸：`OSError`、
 `UnicodeDecodeError`、`ValueError` 与文件名派生值引发的 `OverflowError` 全部被吞成分类
@@ -73,6 +74,7 @@ from yd_producer.state.header_time import (
     cfg_ic_header_minute_time,
     cfg_ic_header_shape,
 )
+from yd_producer.store.safe_fs import SafeFilesystemError, open_file_no_follow
 
 if TYPE_CHECKING:
     from yd_producer.assemble import RunDirectory, WorkIdentity
@@ -395,11 +397,11 @@ def _classify_state(
 ) -> tuple[StopReason | None, str]:
     """返回 `(停止原因, 说明)`；`(None, 说明)` 表示该状态可用于起跑。
 
-    存在性探测用 `os.stat`（跟随 symlink，裁决 4）与 `os.lstat`，**不用** 裸
+    存在性探测用 `os.stat`（跟随 symlink）与 `os.lstat`，**不用** 裸
     `Path.exists()`/`Path.is_symlink()`：后者只吞 `ENOENT/ENOTDIR/EBADF/ELOOP/EINVAL`，
     父目录 `chmod 0o000` 时 `PermissionError` 会直接逃出 `decide_frontier`。元数据探测的
     「无法确定」以 `DiscoveryUnreadableError` 上抛（裁决 9）；文件自身读不出来才是
-    `STATE_UNREADABLE`。
+    `STATE_UNREADABLE`。首行读取本身是 no-follow。
     """
     try:
         info = os.stat(state_path)
@@ -455,69 +457,72 @@ def _classify_state(
 def _read_header_line(state_path: Path, *, size: int) -> str | StopReason | None:
     """有界读出首个非空行；不可读/超界/非 UTF-8 返回 `StopReason.STATE_UNREADABLE`。
 
-    超界由**调用方已经拿到的** `st_size` 判定（`> MAX_STATE_IC_BYTES` 即超界），随后按
-    `_READ_CHUNK_BYTES` 分块读到首个非空行为止，累计读入 MUST NOT 超过
-    `MAX_STATE_IC_BYTES + 1` 字节，且**只保留当前候选行**——上界是 64 MiB，若像旧实现那样
-    `read(MAX+1)` 再 `decode()` 再 `splitlines()`，一份 16 MiB 的合法状态文件峰值会放大
-    到十倍量级（round 1 验证闸门 batch resource-limits cand-04 实测），正好架空
-    `MAX_STATE_IC_BYTES` 自述的 OOM 保护意图。
-
-    **候选行本身也有界**（裁决 4 二次增补，round 2 batch resource-and-coverage-2
-    cand-12）：字节预算只约束「读了多少」，不约束「首行有多长」。首个 `MAX+1` 字节里没有
-    `\n` 时（64 MiB 无换行文本，或截断/预分配出来的**全 NUL** 文件——NUL 是合法 UTF-8 且
-    不是 `str.strip()` 的空白，整个文件成为一个巨大的 header 行），`pending`、
-    `bytes(pending)`、`decode()` 与调用方的 `.split()` 各自实体化一份文件大小的对象，实测
-    端到端 traced peak 576 MiB / `ru_maxrss` 681 MiB。故候选行累计超过
-    `MAX_HEADER_LINE_BYTES` 仍未遇到 `\n` 时**立即**判 `STATE_UNREADABLE` 并停止读取。
-    判定在**两处**：行尾在后续 chunk 里才出现的超长行同样被拒（否则 (cap, cap+chunk] 这段
-    长度会从「读满才判」的那道闸里漏过去）。跳过前导空行时已丢弃的空白**不计入**候选行
-    长度——`pending` 里只留当前这一行。副作用是单独一条**超过上界的空白行**（如 1 MB 空格）
-    也按超界拒绝而非跳过：fail-closed 方向一致，且真实写入侧不产出这种行。
-    这条**改变了可观测行为**：全 NUL 的 64 MiB 状态由 `HEADER_TIME_MISMATCH` 变为
-    `STATE_UNREADABLE`——两者都停源，方向不变。
-
-    行切分只认 `\\n`（不是 `str.splitlines()` 的全套行分隔符）：只读首行的语义下，本仓
-    写入侧只产出 `\\n`，而 `splitlines()` 的 `\\r`/`\\x0b`/`U+2028` 需要先解码整个缓冲区
-    才能定位，与有界读互斥。
-
-    这里**只取 header 行**：缺段、行数不符、数值区损坏等结构检查是任务 4.2 / issue #9
-    的面，前沿不做全量解析。
+    超界由调用方已拿到的 `st_size` 判定。随后按 `_READ_CHUNK_BYTES` 从同一 no-follow
+    fd 流式读到首个非空行；累计读入不超过 `MAX_STATE_IC_BYTES + 1`，候选行不超过
+    `MAX_HEADER_LINE_BYTES`，只认 `\\n`。no-follow/打开/读取/close-only 文件系统拒绝
+    均为 `STATE_UNREADABLE`；已取得的 fd 在全部退出关闭一次，原控制流异常不被 close 替换。
     """
     if size > MAX_STATE_IC_BYTES:
         return StopReason.STATE_UNREADABLE
     budget = MAX_STATE_IC_BYTES + 1
     pending = bytearray()
     try:
-        with open(state_path, "rb") as handle:
-            while budget > 0:
-                chunk = handle.read(min(_READ_CHUNK_BYTES, budget))
-                if not chunk:
+        file_fd = open_file_no_follow(state_path)
+    except (OSError, SafeFilesystemError):
+        return StopReason.STATE_UNREADABLE
+    primary: BaseException | None = None
+    result: str | StopReason | None = None
+    try:
+        while budget > 0:
+            chunk = os.read(file_fd, min(_READ_CHUNK_BYTES, budget))
+            if not chunk:
+                break
+            budget -= len(chunk)
+            pending += chunk
+            while True:
+                newline = pending.find(b"\n")
+                if newline < 0:
                     break
-                budget -= len(chunk)
-                pending += chunk
-                while True:
-                    newline = pending.find(b"\n")
-                    if newline < 0:
-                        break
-                    if newline > MAX_HEADER_LINE_BYTES:
-                        return StopReason.STATE_UNREADABLE
-                    line = _decode_line(bytes(pending[:newline]))
-                    del pending[: newline + 1]
-                    if line is None:
-                        return StopReason.STATE_UNREADABLE
-                    if line.strip():
-                        return line
-                if len(pending) > MAX_HEADER_LINE_BYTES:
-                    return StopReason.STATE_UNREADABLE
-    except OSError:
-        return StopReason.STATE_UNREADABLE
-    if budget <= 0 and pending:
-        # 读满上界仍未见换行：首行本身超界，与整文件超界同类。
-        return StopReason.STATE_UNREADABLE
-    last = _decode_line(bytes(pending))
-    if last is None:
-        return StopReason.STATE_UNREADABLE
-    return last if last.strip() else None
+                if newline > MAX_HEADER_LINE_BYTES:
+                    result = StopReason.STATE_UNREADABLE
+                    break
+                line = _decode_line(bytes(pending[:newline]))
+                del pending[: newline + 1]
+                if line is None:
+                    result = StopReason.STATE_UNREADABLE
+                    break
+                if line.strip():
+                    result = line
+                    break
+            if result is not None:
+                break
+            if len(pending) > MAX_HEADER_LINE_BYTES:
+                result = StopReason.STATE_UNREADABLE
+                break
+        if result is None:
+            if budget <= 0 and pending:
+                result = StopReason.STATE_UNREADABLE
+            else:
+                last = _decode_line(bytes(pending))
+                if last is None:
+                    result = StopReason.STATE_UNREADABLE
+                else:
+                    result = last if last.strip() else None
+    except OSError as error:
+        primary = error
+    except BaseException as error:  # noqa: BLE001 - explicit primary, not sys.exception
+        primary = error
+    finally:
+        try:
+            os.close(file_fd)
+        except OSError as close_error:
+            if primary is None:
+                primary = close_error
+    if primary is not None:
+        if isinstance(primary, (OSError, SafeFilesystemError)):
+            return StopReason.STATE_UNREADABLE
+        raise primary
+    return result
 
 
 def _decode_line(raw: bytes) -> str | None:

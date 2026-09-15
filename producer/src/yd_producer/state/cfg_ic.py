@@ -26,7 +26,7 @@ pin 对应物又未列入的 `raise` 是 `parse` 末尾的 unassigned 全覆盖�
    与 `mesh_rows.append(row)` 这一对) 静默丢弃多余 mesh 行；格式保真根不得静默丢状态行。
 2. **任何分段列头之前出现的数值行抛 `ValueError`**。pin 的分段走查在 `section is None`
    时让该行穿过所有分支被静默丢弃；同 1 的理由，且全覆盖划分不允许存在无归属的行。
-3. **文件不存在/是目录/不可读的 `OSError` 统一封装为 `ValueError`**。pin 的
+3. **文件不存在/是目录/不可读的 `OSError` 与 `SafeFilesystemError` 统一封装为 `ValueError`**。pin 的
    `_read_bytes_limited`(:563-571) 直接抛 `OSError`，由调用方 `except (OSError, ValueError)`
    兜住；本模块收敛为单一异常类型，调用方无需知道两种。仓库级错误封装另属结构检查层。
 4. **分段体内没有 mesh 列头时抛 `ValueError`**。pin 无此检查（它只按 `section` 归行，
@@ -86,6 +86,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from yd_producer.store.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
 
 __all__ = [
     "MAX_STATE_IC_BYTES",
@@ -302,16 +304,15 @@ def parse(
         data = _snapshot_bytes_like(source, max_bytes=max_bytes)
     else:
         path = Path(source)
-        # NWM@8ae9b8f2 packages/common/state_qc.py:431-435（调用点注释逐字保留）
+        # NWM@8ae9b8f2 packages/common/state_qc.py:431-435（调用点注释：有界读语义保留）
         # Bounded read (OOM protection): read at most one byte past the limit so an
-        # oversized file is detected without being slurped whole into memory. The path
-        # here is a trusted local IC file (the snapshot layer stages it before calling),
-        # so a plain bounded read is used rather than the no-follow safe-fs reader
-        # (which would reject legitimate symlinked temp dirs such as macOS /tmp).
+        # oversized file is detected without being slurped whole into memory. Path
+        # reads bind to the existing no-follow descriptor primitive; symlink leaves
+        # and ancestors are refused. Independent parse paths must be physical.
         try:
             data = _read_bytes_limited(path, max_bytes=max_bytes)
-        except OSError as error:
-            # 刻意偏离 pin：OSError 统一封装为 ValueError（见模块头偏离 3）。
+        except (OSError, SafeFilesystemError) as error:
+            # 刻意偏离 pin：OSError/SafeFilesystemError 统一封装为 ValueError（见模块头偏离 3）。
             raise ValueError(f"无法读取 cfg.ic：{path}（{error}）") from error
     if len(data) > max_bytes:
         raise ValueError(f"IC file exceeds size limit of {max_bytes} bytes")
@@ -538,14 +539,13 @@ def render(doc: CfgIcDocument) -> bytes:
 
 
 def _read_bytes_limited(path: Path, *, max_bytes: int) -> bytes:
-    """Read at most ``max_bytes + 1`` bytes from a trusted local IC file.
+    """Read at most ``max_bytes + 1`` bytes from a no-follow regular-file descriptor.
 
     Reading one byte past the limit lets the caller detect (and reject) an oversized
     file without ever materialising more than ``max_bytes + 1`` bytes in memory.
     """
-    # NWM@8ae9b8f2 packages/common/state_qc.py:563-571（逐字移植；OSError 由调用点统一封装）
-    with open(path, "rb") as handle:
-        return handle.read(max_bytes + 1)
+    # NWM@8ae9b8f2 packages/common/state_qc.py:563-571（有界读语义保留；打开走 no-follow）
+    return read_bytes_limited_no_follow(path, max_bytes=max_bytes)
 
 
 def _header_counts(header: Sequence[str]) -> tuple[int, int, int] | None:

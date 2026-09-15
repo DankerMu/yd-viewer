@@ -554,10 +554,10 @@ def _restamped_bytes(inputs: PublishInputs) -> bytes:
 
     MUST NOT 回写 scratch 原文件：那是失败路径要回收的证据。
 
-    读法是 **no-follow 有界读**后再解析 `bytes`（裁决 14(a)）：`state.parse(Path)` 走的是
-    `state/cfg_ic.py:504-513` 刻意保留的裸 `open()`，它**跟随** symlink，于是一份指向
-    scratch 树外的 checkpoint symlink 会被重戳成正式的 `<T+12>.cfg.ic`——而同样构造在
-    `scratch_dat` 上是被拒的。`parse` 的 `bytes` 分支保留 `MAX_STATE_IC_BYTES` 尺寸闸
+    读法是 **no-follow 有界读**后再解析 `bytes`（裁决 14(a)）：本函数不把 `Path` 交给
+    `state.parse`，而是先由 `_scratch_read_limited` 拒绝 checkpoint 的叶子或祖先
+    symlink，随后 `parse(raw)` 只处理已取得的字节。`state.parse(Path)` 的路径分支同样
+    绑定 no-follow 描述符读；其 `bytes` 分支仍保留 `MAX_STATE_IC_BYTES` 尺寸闸
     （`read_bytes_limited_no_follow` 多读一个哨兵字节，超界因此可判）。
     """
     checkpoint = inputs.scratch_checkpoint

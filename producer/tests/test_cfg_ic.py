@@ -44,6 +44,12 @@ from yd_producer.state import cfg_ic
 
 MESH_SIZES = (3, 7)
 
+
+@pytest.fixture
+def tmp_path(tmp_path: pathlib.Path) -> pathlib.Path:
+    return tmp_path.resolve()
+
+
 #: 从 NWM pin 移植的辅助全集：每一个都必须自带溯源注释。
 PORTED_HELPERS = (
     "_read_bytes_limited",
@@ -510,6 +516,39 @@ def test_unreadable_path_raises_value_error(tmp_path: pathlib.Path) -> None:
     finally:
         target.chmod(stat.S_IRUSR | stat.S_IWUSR)
     assert not isinstance(excinfo.value, OSError)
+
+
+def test_symlink_leaf_path_raises_value_error(tmp_path: pathlib.Path) -> None:
+    root = tmp_path.resolve()
+    built = build_cfg_ic(mesh_count=3, river_count=2)
+    real = built.write(root / "real.cfg.ic")
+    link = root / "link.cfg.ic"
+    link.symlink_to(real)
+    with pytest.raises(ValueError) as excinfo:
+        cfg_ic.parse(link)
+    assert not isinstance(excinfo.value, OSError)
+    assert os.readlink(link) == str(real)
+    assert real.read_bytes() == built.payload
+
+
+def test_symlink_ancestor_path_raises_value_error(tmp_path: pathlib.Path) -> None:
+    root = tmp_path.resolve()
+    built = build_cfg_ic(mesh_count=3, river_count=2)
+    real_dir = root / "real"
+    real_dir.mkdir()
+    real = built.write(real_dir / "state.cfg.ic")
+    alias = root / "alias"
+    alias.symlink_to(real_dir, target_is_directory=True)
+    with pytest.raises(ValueError) as excinfo:
+        cfg_ic.parse(alias / "state.cfg.ic")
+    assert not isinstance(excinfo.value, OSError)
+    assert real.read_bytes() == built.payload
+
+
+def test_bytes_like_input_still_parses_without_filesystem() -> None:
+    built = build_cfg_ic(mesh_count=3, river_count=2)
+    doc = cfg_ic.parse(bytearray(built.payload))
+    assert cfg_ic.render(doc) == built.payload
 
 
 def test_empty_file_raises_value_error(tmp_path: pathlib.Path) -> None:
