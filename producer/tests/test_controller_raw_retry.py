@@ -30,6 +30,7 @@ from controller_sources_fixtures import (
 
 from yd_producer import _work_claim as claim_mod
 from yd_producer import rawcopy as rawcopy_module
+from yd_producer import rawscan as rawscan_module
 from yd_producer.controller import RunOutcome, RunSourcesError, StopReason, run_sources
 
 REPLACEMENT_MARKER = b"replacement-work-must-stay\n"
@@ -206,13 +207,31 @@ def test_missing_source_manifest_releases_claimed_root_and_allows_next_tick(
 
 def test_claimed_source_symlink_admission_releases_empty_root(
     tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, local = write_dual_tree(tmp_path)
     raw_cycle = pathlib.Path(local.nwm.raw_root) / "IFS" / "2026082612"
     bundle = raw_cycle / "ifs.t12z.f000.bundle.grib2"
     real = raw_cycle / "real-f000.bundle.grib2"
-    bundle.rename(real)
-    bundle.symlink_to(real)
+    expected_raw_root = pathlib.Path(local.nwm.raw_root).resolve()
+    original_judge = rawscan_module.judge
+    mutation_fired: list[bool] = []
+
+    def judge_then_plant_link(raw_root, source, cycle, active_config):
+        verdict = original_judge(raw_root, source, cycle, active_config)
+        if (
+            pathlib.Path(raw_root).resolve() == expected_raw_root
+            and source == "ifs"
+            and cycle == CYCLE_T
+        ):
+            assert verdict.complete is True
+            assert mutation_fired == []
+            bundle.rename(real)
+            bundle.symlink_to(real)
+            mutation_fired.append(True)
+        return verdict
+
+    monkeypatch.setattr(rawscan_module, "judge", judge_then_plant_link)
     ifs_driver, _, _ = success_driver()
     gfs_driver, gfs_exec = _gfs_two(local)
     work_root = pathlib.Path(local.scratch_root).resolve() / "work"
@@ -226,6 +245,7 @@ def test_claimed_source_symlink_admission_releases_empty_root(
             gfs_driver=gfs_driver,
         )
 
+    assert mutation_fired == [True]
     raw_error = info.value.errors["ifs"]
     _assert_raw_error(
         raw_error,

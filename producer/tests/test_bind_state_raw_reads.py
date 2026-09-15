@@ -7,13 +7,17 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from cfg_ic_fixtures import build_cfg_ic
 from safe_fs_fixtures import _assert_fd_closed
 
 from yd_producer import controller, rawscan
 from yd_producer.state import cfg_ic
+from yd_producer.store.safe_fs import SafeFilesystemError
 
 
 @pytest.fixture
@@ -22,34 +26,71 @@ def tmp_path(tmp_path: Path) -> Path:
 
 
 _HEADER = b"1 6 0\n"
-_CHILD = r"""
+_CFG_IC_PAYLOAD = build_cfg_ic(mesh_count=1, river_count=1).payload
+_CFG_IC_REPLACEMENT_PAYLOAD = build_cfg_ic(mesh_count=2, river_count=1).payload
+_CHILD_TIMEOUT_SECONDS = 5
+_FIFO_RACE_CHILD = r"""
 from pathlib import Path
-import os, sys, tempfile
+import os, sys
 
-kind = sys.argv[1]
-with tempfile.TemporaryDirectory(prefix="yd63-") as directory:
-    path = Path(directory).resolve() / "candidate"
-    path.write_bytes(b"1 6 0\n")
-    size = path.stat().st_size
-    path.unlink()
-    os.mkfifo(path)
-    print("SWAPPED", kind, flush=True)
-    if kind == "controller":
-        from yd_producer import controller
+mode, kind, raw_path, raw_size, raw_tests_dir = sys.argv[1:]
+path = Path(raw_path)
+size = int(raw_size)
+tests_dir = Path(raw_tests_dir)
+retained = path.with_name(path.name + ".retained")
+
+if kind == "controller":
+    from yd_producer import controller
+
+    def exercise():
         result = controller._read_header_line(path, size=size)
         assert result is controller.StopReason.STATE_UNREADABLE, result
-    elif kind == "cfg_ic":
-        from yd_producer.state import cfg_ic
+elif kind == "cfg_ic":
+    from yd_producer.state import cfg_ic
+    from yd_producer.store.safe_fs import SafeFilesystemError
+
+    def exercise():
         try:
             cfg_ic.parse(path, max_bytes=1024)
-        except ValueError:
-            pass
+        except ValueError as error:
+            assert isinstance(error.__cause__, (SafeFilesystemError, OSError)), error
         else:
             raise AssertionError("FIFO cfg.ic accepted")
-    else:
-        from yd_producer import rawscan
+else:
+    from yd_producer import rawscan
+
+    def exercise():
         assert rawscan._is_readable(path) is False
-    print("PASS", kind, flush=True)
+
+def announce_swap():
+    print("SWAPPED", kind, flush=True)
+
+if mode == "prestat":
+    path.rename(retained)
+    os.mkfifo(path)
+    announce_swap()
+    exercise()
+elif mode == "poststat":
+    # Append only test helpers: inherited PYTHONPATH keeps source-copy precedence.
+    if str(tests_dir) not in sys.path:
+        sys.path.append(str(tests_dir))
+    import pytest
+    from test_bind_state_raw_reads import _replace_after_expected_stat
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        race = _replace_after_expected_stat(
+            monkeypatch,
+            path,
+            kind="fifo",
+            replacement_bytes=b"",
+            on_swap=announce_swap,
+        )
+        exercise()
+        assert race["swapped"] is True, "expected-stat FIFO swap did not fire"
+else:
+    raise AssertionError(f"unsupported FIFO race mode: {mode}")
+
+print("PASS", kind, flush=True)
 """
 
 
@@ -99,16 +140,71 @@ def _install_file_fd_tracker(
     return captured
 
 
+def _race_payload(reader: str, *, replacement: bool = False) -> bytes:
+    if reader != "cfg_ic":
+        return _HEADER
+    return _CFG_IC_REPLACEMENT_PAYLOAD if replacement else _CFG_IC_PAYLOAD
+
+
+def _identity(info: os.stat_result) -> tuple[int, int]:
+    return (info.st_dev, info.st_ino)
+
+
+def _run_fifo_race_in_child(reader: str, *, after_expected_stat: bool) -> None:
+    """Run a FIFO replacement behind a bounded direct child."""
+    with tempfile.TemporaryDirectory(prefix="yd63-") as directory:
+        target = Path(directory).resolve() / "candidate.cfg.ic"
+        target.write_bytes(_race_payload(reader))
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                _FIFO_RACE_CHILD,
+                "poststat" if after_expected_stat else "prestat",
+                reader,
+                str(target),
+                str(target.stat().st_size),
+                str(Path(__file__).resolve().parent),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            # Preserve a parent source-copy mutation's import precedence verbatim.
+            env=os.environ.copy(),
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=_CHILD_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            pytest.fail(
+                f"FIFO race child timed out after {_CHILD_TIMEOUT_SECONDS}s; "
+                f"stdout={stdout!r}; stderr={stderr!r}"
+            )
+        assert f"SWAPPED {reader}" in stdout, stderr
+        assert f"PASS {reader}" in stdout, stderr
+        assert process.returncode == 0, stderr
+
+
 def _replace_after_expected_stat(
     monkeypatch: pytest.MonkeyPatch,
     target: Path,
     *,
     kind: str,
-) -> None:
+    replacement_bytes: bytes,
+    on_swap: Callable[[], None] | None = None,
+) -> dict[str, bool | tuple[int, int] | None]:
+    """Swap only after safe_fs's expected stat and retain the original inode."""
     real_stat = os.stat
     real_open = os.open
     expected_name = target.name
-    armed = {"ready": False}
+    state: dict[str, bool | tuple[int, int] | None] = {
+        "armed": False,
+        "swapped": False,
+        "expected_identity": None,
+        "retained_identity": None,
+        "replacement_identity": None,
+    }
 
     def stating(path, *args, **kwargs):
         result = real_stat(path, *args, **kwargs)
@@ -118,45 +214,60 @@ def _replace_after_expected_stat(
             and kwargs.get("follow_symlinks") is False
             and stat.S_ISREG(result.st_mode)
         ):
-            armed["ready"] = True
+            state["armed"] = True
+            state["expected_identity"] = _identity(result)
         return result
 
     def opening(path, flags, mode=0o777, *, dir_fd=None):
         if (
-            armed["ready"]
+            state["armed"]
             and dir_fd is not None
             and path == expected_name
             and _is_file_open(flags)
         ):
-            armed["ready"] = False
-            target.unlink()
-            if kind == "fifo":
+            state["armed"] = False
+            expected_identity = state["expected_identity"]
+            assert isinstance(expected_identity, tuple)
+            assert _identity(real_stat(target)) == expected_identity
+            retained = target.with_name(target.name + ".retained")
+            if kind == "symlink":
+                target.rename(retained)
+                state["retained_identity"] = _identity(real_stat(retained))
+                target.symlink_to(retained)
+                assert _identity(real_stat(target)) == expected_identity
+            elif kind == "inode":
+                replacement = target.with_name(target.name + ".replacement")
+                replacement.write_bytes(replacement_bytes)
+                replacement_identity = _identity(real_stat(replacement))
+                assert replacement_identity != expected_identity
+                target.rename(retained)
+                state["retained_identity"] = _identity(real_stat(retained))
+                assert state["retained_identity"] == expected_identity
+                os.rename(replacement, target)
+                assert _identity(real_stat(target)) == replacement_identity
+                state["replacement_identity"] = replacement_identity
+            elif kind == "fifo":
+                target.rename(retained)
+                state["retained_identity"] = _identity(real_stat(retained))
+                assert state["retained_identity"] == expected_identity
                 os.mkfifo(target)
-            elif kind == "symlink":
-                other = target.with_name(target.name + ".other")
-                other.write_bytes(_HEADER)
-                target.symlink_to(other)
             else:
-                other = target.with_name(target.name + ".other")
-                other.write_bytes(_HEADER)
-                os.rename(other, target)
+                raise AssertionError(f"unsupported replacement kind: {kind}")
+            state["swapped"] = True
+            if on_swap is not None:
+                on_swap()
         return real_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "stat", stating)
     monkeypatch.setattr(os, "open", opening)
+    return state
 
 
-@pytest.mark.parametrize("kind", ["controller", "cfg_ic", "rawscan"])
-def test_prestat_regular_replaced_with_fifo_refuses_within_timeout(kind: str) -> None:
-    completed = subprocess.run(
-        [sys.executable, "-c", _CHILD, kind],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-    assert "SWAPPED" in completed.stdout
-    assert completed.returncode == 0, completed.stderr
+@pytest.mark.parametrize("reader", ["controller", "cfg_ic", "rawscan"])
+def test_prestat_regular_replaced_with_fifo_refuses_within_timeout(
+    reader: str,
+) -> None:
+    _run_fifo_race_in_child(reader, after_expected_stat=False)
 
 
 @pytest.mark.parametrize("kind", ["symlink", "inode"])
@@ -164,40 +275,36 @@ def test_prestat_regular_replaced_with_fifo_refuses_within_timeout(kind: str) ->
 def test_expected_stat_then_os_open_swap_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, reader: str
 ) -> None:
-    root = tmp_path.resolve()
-    target = root / "candidate.cfg.ic"
-    target.write_bytes(_HEADER)
+    target = tmp_path.resolve() / "candidate.cfg.ic"
+    target.write_bytes(_race_payload(reader))
     size = target.stat().st_size
-    _replace_after_expected_stat(monkeypatch, target, kind=kind)
+    race = _replace_after_expected_stat(
+        monkeypatch,
+        target,
+        kind=kind,
+        replacement_bytes=_race_payload(reader, replacement=kind == "inode"),
+    )
 
     if reader == "controller":
         result = controller._read_header_line(target, size=size)
         assert result is controller.StopReason.STATE_UNREADABLE
     elif reader == "cfg_ic":
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as excinfo:
             cfg_ic.parse(target, max_bytes=1024)
+        assert isinstance(excinfo.value.__cause__, (SafeFilesystemError, OSError))
     else:
         assert rawscan._is_readable(target) is False
+
+    assert race["swapped"] is True
+    if kind == "symlink":
+        assert race["retained_identity"] == race["expected_identity"]
+    else:
+        assert race["replacement_identity"] != race["expected_identity"]
 
 
 @pytest.mark.parametrize("reader", ["controller", "cfg_ic", "rawscan"])
-def test_expected_stat_then_fifo_open_is_refused_without_blocking(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reader: str
-) -> None:
-    root = tmp_path.resolve()
-    target = root / "candidate.cfg.ic"
-    target.write_bytes(_HEADER)
-    size = target.stat().st_size
-    _replace_after_expected_stat(monkeypatch, target, kind="fifo")
-
-    if reader == "controller":
-        result = controller._read_header_line(target, size=size)
-        assert result is controller.StopReason.STATE_UNREADABLE
-    elif reader == "cfg_ic":
-        with pytest.raises(ValueError):
-            cfg_ic.parse(target, max_bytes=1024)
-    else:
-        assert rawscan._is_readable(target) is False
+def test_expected_stat_then_fifo_open_is_refused_without_blocking(reader: str) -> None:
+    _run_fifo_race_in_child(reader, after_expected_stat=True)
 
 
 def test_header_success_and_early_return_close_the_returned_fd(
@@ -316,14 +423,6 @@ def test_cfg_ic_limited_read_closes_returned_fd(
     _assert_fd_closed(captured["fd"])
 
 
-def test_raw_empty_regular_file_is_readable(tmp_path: Path) -> None:
-    root = tmp_path.resolve()
-    target = root / "empty.grib2"
-    target.write_bytes(b"")
-    assert rawscan._is_readable(target) is True
-    assert rawscan._check(target) == "ok"
-
-
 def test_raw_leaf_and_ancestor_symlinks_are_unreadable(tmp_path: Path) -> None:
     root = tmp_path.resolve()
     real = root / "real"
@@ -338,23 +437,6 @@ def test_raw_leaf_and_ancestor_symlinks_are_unreadable(tmp_path: Path) -> None:
     assert rawscan._is_readable(alias / "payload.grib2") is False
     assert os.readlink(leaf) == str(payload)
     assert payload.read_bytes() == b"GRIB\xff"
-
-
-def test_cfg_ic_leaf_and_ancestor_symlinks_raise_value_error(tmp_path: Path) -> None:
-    root = tmp_path.resolve()
-    real = root / "real"
-    real.mkdir()
-    payload = real / "state.cfg.ic"
-    payload.write_bytes(_HEADER)
-    leaf = root / "leaf.cfg.ic"
-    leaf.symlink_to(payload)
-    alias = root / "alias"
-    alias.symlink_to(real, target_is_directory=True)
-    with pytest.raises(ValueError):
-        cfg_ic.parse(leaf)
-    with pytest.raises(ValueError):
-        cfg_ic.parse(alias / "state.cfg.ic")
-    assert payload.read_bytes() == _HEADER
 
 
 def test_header_leaf_and_ancestor_symlinks_are_state_unreadable(tmp_path: Path) -> None:

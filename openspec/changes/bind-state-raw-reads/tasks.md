@@ -1,10 +1,10 @@
 ## 1. Implementation
-- [ ] 1.1 Reuse the existing safe_fs open primitive in all three readers with exact descriptor ownership.
-- [ ] 1.2 Preserve streaming/bounded content behavior and classify new no-follow errors at existing public boundaries.
-- [ ] 1.3 Migrate symlink-following tests/callers and add bounded FIFO race, identity and resource-lifetime regressions.
+- [x] 1.1 Reuse the existing safe_fs open primitive in all three readers with exact descriptor ownership.
+- [x] 1.2 Preserve streaming/bounded content behavior and classify new no-follow errors at existing public boundaries.
+- [x] 1.3 Migrate symlink-following tests/callers and add bounded FIFO race, identity and resource-lifetime regressions.
 
 ## 2. Verification
-- [ ] 2.1 Run red/green isolated FIFO and descriptor replacement proofs plus normal-reader smoke.
+- [x] 2.1 Run red/green isolated FIFO and descriptor replacement proofs plus normal-reader smoke.
 - [ ] 2.2 Run producer suite, Ruff, size guard, OpenSpec and CI; close cross-review findings.
 
 ## Risk packs

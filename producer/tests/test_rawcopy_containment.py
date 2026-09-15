@@ -77,13 +77,15 @@ def test_symlinked_bundle_is_refused_although_judge_says_complete(
     base = cycle_dir(raw_root, "gfs")
     target = base / bundle_name("gfs", 3)
     real = base / "real-f003.grib2"
-    target.rename(real)
-    target.symlink_to(real)
     config = make_config()
     verdict = judge(raw_root, "gfs", CYCLE, config)
-    # 3.1/3.2 的有意不对称：judge 走 `is_file()`（跟随 symlink）判完整……
     assert verdict.complete is True
-    # ……而 staging 拒绝为该链背书。
+
+    # Completion is a real physical-tree verdict; staging independently rejects
+    # a source link introduced during the admission-to-copy window.
+    target.rename(real)
+    target.symlink_to(real)
+
     with pytest.raises(RawStagingError) as excinfo:
         stage_raw(verdict, raw_root, work_dir, "gfs", CYCLE, config)
     expect_kind(excinfo, "source-symlink")
@@ -91,20 +93,16 @@ def test_symlinked_bundle_is_refused_although_judge_says_complete(
 
 
 def test_symlinked_cycle_directory_segment_is_refused(tmp_path: Path) -> None:
-    raw_root = tmp_path / "nwm-raw"
-    work_dir = tmp_path / "work"
-    work_dir.mkdir(parents=True)
-    real_cycle = raw_root / "gfs" / "real-2026030400"
-    real_cycle.mkdir(parents=True)
-    for lead in LEADS:
-        (real_cycle / bundle_name("gfs", lead)).write_bytes(bundle_bytes(lead))
-    (real_cycle / SOURCE_MANIFEST_NAME).write_text(
-        json.dumps(source_manifest_payload("gfs")), encoding="utf-8"
-    )
-    (raw_root / "gfs" / CYCLE_DIR).symlink_to(real_cycle, target_is_directory=True)
+    raw_root, work_dir = build_tree(tmp_path)
+    cycle_root = cycle_dir(raw_root, "gfs")
     config = make_config()
     verdict = judge(raw_root, "gfs", CYCLE, config)
     assert verdict.complete is True
+
+    real_cycle = cycle_root.with_name("real-" + cycle_root.name)
+    cycle_root.rename(real_cycle)
+    cycle_root.symlink_to(real_cycle, target_is_directory=True)
+
     with pytest.raises(RawStagingError) as excinfo:
         stage_raw(verdict, raw_root, work_dir, "gfs", CYCLE, config)
     expect_kind(excinfo, "source-symlink")
@@ -240,21 +238,20 @@ def test_symlinked_cycle_directory_is_refused_before_the_manifest_is_read(
     「不跟随」的链）；正确顺序以 `source-symlink` 失败。既有的链 cycle 目录用例背后
     是一份**合法** manifest，两种顺序同样报 `source-symlink`，判别不了顺序。
     """
-    raw_root = tmp_path / "nwm-raw"
-    work_dir = tmp_path / "work"
-    work_dir.mkdir(parents=True)
-    real_cycle = raw_root / "gfs" / "real-2026030400"
-    real_cycle.mkdir(parents=True)
-    for lead in LEADS:
-        (real_cycle / bundle_name("gfs", lead)).write_bytes(bundle_bytes(lead))
-    (real_cycle / SOURCE_MANIFEST_NAME).write_text("{not json", encoding="utf-8")
-    (raw_root / "gfs" / CYCLE_DIR).symlink_to(real_cycle, target_is_directory=True)
-    # 前提取证：链后面那份 manifest 确实不可解析（先读就必然是 source-manifest）。
-    with pytest.raises(json.JSONDecodeError):
-        json.loads((real_cycle / SOURCE_MANIFEST_NAME).read_text(encoding="utf-8"))
+    raw_root, work_dir = build_tree(tmp_path)
+    cycle_root = cycle_dir(raw_root, "gfs")
     config = make_config()
     verdict = judge(raw_root, "gfs", CYCLE, config)
     assert verdict.complete is True
+
+    real_cycle = cycle_root.with_name("real-" + cycle_root.name)
+    cycle_root.rename(real_cycle)
+    (real_cycle / SOURCE_MANIFEST_NAME).write_text("{not json", encoding="utf-8")
+    cycle_root.symlink_to(real_cycle, target_is_directory=True)
+    # 前提取证：链后面那份 manifest 确实不可解析（先读就必然是 source-manifest）。
+    with pytest.raises(json.JSONDecodeError):
+        json.loads((real_cycle / SOURCE_MANIFEST_NAME).read_text(encoding="utf-8"))
+
     with pytest.raises(RawStagingError) as excinfo:
         stage_raw(verdict, raw_root, work_dir, "gfs", CYCLE, config)
     expect_kind(excinfo, "source-symlink")
