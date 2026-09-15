@@ -5265,7 +5265,7 @@ Review focus:
 ## 14. run-controller（三）：主循环集成
 
 - [x] 14.1 单源单轮 `run_once` 骨架打通：发现 → 组装 → 提交 fake → 发布 → work 清理；job ID/partition/终态/起止时间进运行报告；`local.toml` 缺 Slurm 字段即停
-- [ ] 14.2 `yd-producer run` 接线：`cli.run` 调用 `controller.run_sources`，注入 Slurm executor、生产 attempt driver、poll wait 与独立 `sacct ExitCode` provider；退出码 0/2/3
+- [x] 14.2 `yd-producer run` 接线：`cli.run` 调用 `controller.run_sources`，注入 Slurm executor、生产 attempt driver、poll wait 与独立 `sacct ExitCode` provider；退出码 0/2/3
 - [x] 14.3 多轮追赶与缺口停等：raw 一次补齐 T/T+12h/T+24h 时序推进、每源在途提交计数 ≤1、缺轮停在缺口（原任务 14.2；§13.1：同源顺序/raw 缺口）
 - [x] 14.4 双源并行、单源失败隔离与崩溃恢复端到端：IFS 失败 GFS 继续、失败日志与 work 清理、无 DONE 残留下次重跑（原任务 14.3；§13.1：双源并行/单源失败/无 DONE 崩溃恢复）
 - [x] 14.5 `RunSourcesError` 按固定源顺序保留每个底层 `RunError` 正文与 `__notes__`（14.2 前置；issue #137）
