@@ -7,7 +7,7 @@
 - [x] 2.1 Parent checks identicalAST/state/constants/signatures/exportbindings; original3515IDs retained withonlyfiveprovenance additions.
 - [x] 2.2 RealGFS/IFS conversion+staging smoke equals all42baselineartifacthashes, originalrawunchanged; focusedboundary/controller/provenance plus serialfullmatrix green.
 - [x] 2.3 Actualstagedlarge-fileguard andstrictlinecount audit pass withotherexclusions/thresholdunchanged.
-- [ ] 2.4 Fixtureapproval/strictvalidate, v0.36three-seat review/fixgate, CI/frozentip/Chineseevidence, automerge/archive.
+- [x] 2.4 Fixtureapproval/strictvalidate, v0.36three-seat review/fixgate, CI/frozentip/Chineseevidence, automerge/archive.
 ## Risk packs and evidence
 Selected PublicAPI:2.1 exactimports/signatures; Config/setup:1.4+2.1 defaults/routing; IO/path:2.2 existingnofollow/claim tests; Schema/units:2.1AST+2.2bytehashes; Concurrency/state:2.2existingcontroller/rollback; Resource:2.2existingbounds+2.3strictmoduleguard; Legacy:2.1allnodeIDs; Errors/partialoutputs:2.2existingfailuretests; Packaging/dependencies:2.1importsmoke/no dependencychanges; Docs/provenance:1.4/2.2bidirectionalguard.
 Notselected Auth/secrets: nochangedauth/permissions policy; no newcredentials. Scientific/remotevalidation explicitlynotclaimed; unchangedformulaAST andsyntheticoracles only.
