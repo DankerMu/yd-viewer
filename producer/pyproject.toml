@@ -40,6 +40,11 @@ testpaths = ["tests"]
 # NWM@8ae9b8f2 快照文件逐字承接 pin 的 lint 基线（ruff 0.16 默认规则集较 pin 时点扩面）。
 # 只对清单 §1 登记的快照目标生效，yd 自撰代码不豁免。
 "src/yd_producer/canonical/converter.py" = ["BLE001", "C409", "TRY201"]
+"src/yd_producer/canonical/_types.py" = ["BLE001", "C409", "TRY201"]
+"src/yd_producer/canonical/_common.py" = ["BLE001", "C409", "TRY201"]
+"src/yd_producer/canonical/_readiness.py" = ["BLE001", "C409", "TRY201"]
+"src/yd_producer/canonical/_units.py" = ["BLE001", "C409", "TRY201"]
+"src/yd_producer/canonical/_base_methods.py" = ["BLE001", "C409", "TRY201"]
 "tests/test_canonical_converter.py" = ["RUF012", "RUF015"]
 "src/yd_producer/forcing/producer.py" = [
     "B023",
