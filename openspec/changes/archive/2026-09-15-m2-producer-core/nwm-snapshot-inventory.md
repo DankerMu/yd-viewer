@@ -77,8 +77,13 @@ NWM@8ae9b8f2 <原路径>
 | #114 direct-grid 结构拆分 | `tests/test_forcing_producer.py` | `producer/tests/forcing_seed_assets.py` | **#114**：原三份手写快照超限；按 `split-direct-grid-snapshots/placement.json` 从 `producer/tests/test_forcing_producer.py` 机械搬运，承接该原目标已登记的剥离点/修复，不改函数方法 AST、常量或 oracle；仅导入与无状态类壳是 yd 拆分胶水，模块头明示。 | 本 issue 落地 | 原路径保留兼容出口；本目标严格小于1000行，无新增 large-file 豁免。 |
 | #114 direct-grid 结构拆分 | `tests/test_forcing_producer.py` | `producer/tests/forcing_seed_builders.py` | **#114**：原三份手写快照超限；按 `split-direct-grid-snapshots/placement.json` 从 `producer/tests/test_forcing_producer.py` 机械搬运，承接该原目标已登记的剥离点/修复，不改函数方法 AST、常量或 oracle；仅导入与无状态类壳是 yd 拆分胶水，模块头明示。 | 本 issue 落地 | 原路径保留兼容出口；本目标严格小于1000行，无新增 large-file 豁免。 |
 | #114 direct-grid 结构拆分 | `tests/test_forcing_producer.py` | `producer/tests/forcing_seed_repository.py` | **#114**：原三份手写快照超限；按 `split-direct-grid-snapshots/placement.json` 从 `producer/tests/test_forcing_producer.py` 机械搬运，承接该原目标已登记的剥离点/修复，不改函数方法 AST、常量或 oracle；仅导入与无状态类壳是 yd 拆分胶水，模块头明示。 | 本 issue 落地 | 原路径保留兼容出口；本目标严格小于1000行，无新增 large-file 豁免。 |
+| #82 safe-fs 结构拆分 | `packages/common/safe_fs.py` | `producer/src/yd_producer/store/_tree_delete.py` | 从 `store/safe_fs.py` 机械搬运三个私有树遍历 helper，复用既有延迟导入边界；保留公共入口、异常身份、fd 生命周期及原目标已登记的修复，不改算法。 | 待落地 | 既有 yd quarantine 实现保持原样；迁入 helper 带同源溯源头。无新增 large-file 豁免。 |
+| #82 safe-fs 测试拆分 | `tests/test_safe_fs.py` | `producer/tests/test_safe_fs_atomic.py` | 从 `test_safe_fs.py` 机械搬运 atomic-write 场景族及专属 helper，保留参数化与行为 oracle。 | 待落地 | 原目标保留目录身份与只读树检查；各文件不超过1000行。 |
+| #82 safe-fs 测试拆分 | `tests/test_safe_fs.py` | `producer/tests/test_safe_fs_directory.py` | 从 `test_safe_fs.py` 机械搬运目录模式、路径拒绝及目录遍历 fd 生命周期场景族。 | 待落地 | 保留低 RLIMIT 隔离子进程与全部错误分型断言。 |
+| #82 safe-fs 测试拆分 | `tests/test_safe_fs.py` | `producer/tests/test_safe_fs_reads.py` | 从 `test_safe_fs.py` 机械搬运 bounded-read 场景族及专属 helper。 | 待落地 | 保留读取主因、取消身份、close 次数及 object-store 包装边界。 |
+| #82 safe-fs 测试拆分 | `tests/test_safe_fs.py` | `producer/tests/safe_fs_fixtures.py` | 从 `test_safe_fs.py` 抽出目录与读取场景共用的 fd 已关闭断言，定义只留一份，不导入测试函数。 | 待落地 | 测试胶水，不改被测行为。 |
 
-清单共 **44** 行（原29行，加 #114 的15份结构拆分目标；各拆分目标与原路径共享同一 NWM 来源，兼容出口和定义归宿见 `split-direct-grid-snapshots/placement.json`），覆盖 NWM 目录：`workers/canonical_converter/`、`workers/forcing_producer/`、`workers/data_adapters/`、`workers/shud_runtime/`、`packages/common/`、`tests/`。
+清单共 **49** 行（原29行，加 #114 的15份结构拆分目标及 #82 的5份 safe-fs 拆分目标；各拆分目标与原路径共享同一 NWM 来源，#114 的定义归宿见 `split-direct-grid-snapshots/placement.json`，#82 的搬运边界见上表），覆盖 NWM 目录：`workers/canonical_converter/`、`workers/forcing_producer/`、`workers/data_adapters/`、`workers/shud_runtime/`、`packages/common/`、`tests/`。
 
 ## 2. 七项能力 ↔ 清单行反向核对
 
