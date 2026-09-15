@@ -2215,20 +2215,20 @@ def test_replace_non_absolute_yd_root_raises_config_error():
 
 def test_direct_constructor_accepts_path_and_string_absolute_roots():
     """程序面同时接受 str 与 Path；两者归一到同一 canonical Path。"""
-    kwargs = dict(
-        scratch_root="/fixture/scratch",
-        shud_binary="/fixture/bin/shud",
-        nwm=NwmLocal(
+    kwargs = {
+        "scratch_root": "/fixture/scratch",
+        "shud_binary": "/fixture/bin/shud",
+        "nwm": NwmLocal(
             raw_root="/fixture/nwm/raw",
             checkout_root="/fixture/nwm/checkout",
             python="/fixture/nwm/.venv/bin/python",
         ),
-        slurm={"partition": "cpu"},
-        cron=CronLocal(
+        "slurm": {"partition": "cpu"},
+        "cron": CronLocal(
             lock_path="/fixture/run/yd-producer.lock",
             log_dir="/fixture/log/yd-producer",
         ),
-    )
+    }
 
     as_str = LocalConfig(yd_root="/fixture/yd", **kwargs)
     as_path = LocalConfig(yd_root=Path("/fixture/yd"), **kwargs)
@@ -2259,15 +2259,24 @@ def test_symlink_loop_yd_root_raises_config_error(tmp_path):
     config = _loaded_config(tmp_path)
     data = _with(VALID_LOCAL, "yd_root", str(loop_a))
 
-    try:
-        local = load_local(_write_toml(tmp_path / "local.toml", data), config)
-    except ConfigError as exc:
-        assert exc.path == "yd_root"
-        assert "`yd_root`" in str(exc)
-        return
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", data), config)
 
-    # 部分运行时 resolve(strict=False) 对循环不再抛错；不得发明第二套解析方案。
-    pytest.skip(
-        f"runtime Path.resolve(strict=False) accepted loop as {local.yd_root}; "
-        "notify parent rather than invent another resolution scheme"
-    )
+    _assert_locates(excinfo, "yd_root")
+
+
+def test_symlink_loop_ancestor_with_missing_descendant_raises_config_error(tmp_path):
+    """循环在祖先、叶子不存在时仍以 ConfigError(path='yd_root') 分类。"""
+    loop_a = tmp_path / "loop-a"
+    loop_b = tmp_path / "loop-b"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+    missing = loop_a / "never-created"
+    config = _loaded_config(tmp_path)
+    data = _with(VALID_LOCAL, "yd_root", str(missing))
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    _assert_locates(excinfo, "yd_root")
+    assert not missing.exists()

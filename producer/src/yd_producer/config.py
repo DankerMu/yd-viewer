@@ -18,6 +18,7 @@ gfs)` 字段名相同而顺序相反，`RawSourceConfig` 的 `variables`/`bundle
 均不受影响；`__match_args__` 变为空元组，位置式 `match` 解构不再可用。
 """
 
+import errno
 import os
 import tomllib
 from collections.abc import Mapping
@@ -179,7 +180,8 @@ class LocalConfig:
 
     `yd_root` 在每次构造时把绝对输入以 `Path.resolve(strict=False)` 解析一次，仅保存
     canonical `Path`。相对路径与 `~` 拼写在 resolve 之前拒绝；解析的 `OSError`/
-    `RuntimeError` 同样分类为 `ConfigError(path="yd_root")`。根不必在装载期存在。
+    `RuntimeError`，以及解析成功后对 canonical 路径 `stat` 仍得到的 `ELOOP`，同样分类
+    为 `ConfigError(path="yd_root")`。根不必在装载期存在；缺失与非目录不在此拒绝。
     """
 
     yd_root: Path
@@ -213,6 +215,14 @@ class LocalConfig:
                 f"配置项 `yd_root` 无法解析：{exc}",
                 "yd_root",
             ) from exc
+        try:
+            os.stat(canonical)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ConfigError(
+                    f"配置项 `yd_root` 无法解析：{exc}",
+                    "yd_root",
+                ) from exc
         object.__setattr__(self, "yd_root", canonical)
 
 

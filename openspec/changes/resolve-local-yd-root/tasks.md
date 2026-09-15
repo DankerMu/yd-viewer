@@ -1,10 +1,10 @@
 ## 1. Implementation
-- [ ] 1.1 Normalize LocalConfig.yd_root once, validate absolute spelling and classify resolution failures.
-- [ ] 1.2 Migrate every root consumer and remove stale alias-rejection comments; keep safe_fs unchanged.
-- [ ] 1.3 Add discriminating alias/retarget/descendant/error regressions and migrate changed Path/error contracts.
+- [x] 1.1 Normalize LocalConfig.yd_root once, validate absolute spelling and classify resolution failures.
+- [x] 1.2 Migrate every root consumer and remove stale alias-rejection comments; keep safe_fs unchanged.
+- [x] 1.3 Add discriminating alias/retarget/descendant/error regressions and migrate changed Path/error contracts.
 
 ## 2. Verification
-- [ ] 2.1 Demonstrate red baseline and green alias bootstrap, retarget safety, invalid roots, and internal symlink refusal.
+- [x] 2.1 Demonstrate red baseline and green alias bootstrap, retarget safety, invalid roots, and internal symlink refusal.
 - [ ] 2.2 Run producer pytest, ruff, OpenSpec and actual CLI smoke; complete cross-review and CI.
 
 ## Risk packs
