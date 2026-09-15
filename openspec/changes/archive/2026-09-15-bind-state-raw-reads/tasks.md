@@ -5,7 +5,7 @@
 
 ## 2. Verification
 - [x] 2.1 Run red/green isolated FIFO and descriptor replacement proofs plus normal-reader smoke.
-- [ ] 2.2 Run producer suite, Ruff, size guard, OpenSpec and CI; close cross-review findings.
+- [x] 2.2 Run producer suite, Ruff, size guard, OpenSpec and CI; close cross-review findings.
 
 ## Risk packs
 - Public API / CLI / script entry: selected - parse/frontier/judge refusals and indirect init caller; tasks1.2,1.3,2.1.
