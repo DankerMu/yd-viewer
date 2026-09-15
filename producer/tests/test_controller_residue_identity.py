@@ -360,9 +360,14 @@ def test_hand_built_sorted_deduplicated_plan_deletes_named_targets_only(
     assert (sibling_half / "yd.rivqdown.dat").is_file()
 
 
-def test_hand_built_plan_resolves_root_alias_and_deletes_named_targets(
+def test_hand_built_plan_uses_canonical_root_and_deletes_named_targets(
     tmp_path: pathlib.Path,
 ) -> None:
+    """手构 ResiduePlan 消费配置构造解析过的根，不再在绑定期 resolve 别名。"""
+    from dataclasses import replace
+
+    from init_bootstrap_fixtures import make_local
+
     real = tmp_path.resolve() / "real"
     real.mkdir()
     link = tmp_path.resolve() / "link"
@@ -370,14 +375,17 @@ def test_hand_built_plan_resolves_root_alias_and_deletes_named_targets(
     root = real / "yd"
     root.mkdir()
     builder = _crash_residue_tree(root)
-    unresolved = link / "yd"
     later = builder.state_path(T_PLUS_12, SOURCE)
     half = builder.source_output_dir(T, SOURCE)
     retained = builder.state_path(T, SOURCE)
     done_dir = builder.source_output_dir(D, SOURCE)
+    local = replace(
+        make_local(root, raw_root=tmp_path.resolve() / "raw"),
+        yd_root=str(link / "yd"),
+    )
 
     plan = residue.ResiduePlan(
-        yd_root=unresolved,
+        yd_root=local.yd_root,
         source=SOURCE,
         retained_cycle=parse_cycle(T),
         state_files=(later,),

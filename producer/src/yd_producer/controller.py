@@ -732,7 +732,6 @@ def _preflight(*, config: Config, local: LocalConfig, source: str) -> None:
             source=source,
         )
     for label, value in (
-        ("yd_root", local.yd_root),
         ("scratch_root", local.scratch_root),
         ("nwm.raw_root", local.nwm.raw_root),
         ("shud_binary", local.shud_binary),

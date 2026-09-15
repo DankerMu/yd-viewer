@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import stat
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -873,3 +874,99 @@ def test_calibration_symlink_into_an_unreadable_vault_refuses(tmp_path: Path) ->
     assert report.written == ()
     assert str(calibration) in report.detail
     assert_zero_write(tree, before_states, before_output)
+
+
+def test_root_alias_bootstrap_writes_canonical_states(tmp_path: Path) -> None:
+    """根自身是合法 symlink 时，init 在 realpath 根建链。"""
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    alias = tree.root / "yd_alias"
+    alias.symlink_to(tree.yd_root, target_is_directory=True)
+    tree.local = replace(tree.local, yd_root=str(alias))
+
+    report = tree.run()
+
+    assert report.refusal is None
+    assert tree.local.yd_root == tree.yd_root.resolve()
+    for source in WRITE_ORDER:
+        path = tree.state_path(source, cycle)
+        assert path.is_file()
+        assert path.read_bytes() == expected_bytes(
+            tree.payloads[source], EPOCH_MINUTES_25_00Z
+        )
+
+
+def test_ancestor_alias_bootstrap_writes_canonical_states(tmp_path: Path) -> None:
+    """祖先含合法 symlink 时，init 仍写到 realpath 根。"""
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    alias_parent = tmp_path / "alias_parent"
+    alias_parent.symlink_to(tree.root, target_is_directory=True)
+    tree.local = replace(tree.local, yd_root=str(alias_parent / "yd"))
+
+    report = tree.run()
+
+    assert report.refusal is None
+    assert tree.local.yd_root == tree.yd_root.resolve()
+    for source in WRITE_ORDER:
+        path = tree.state_path(source, cycle)
+        assert path.is_file()
+        assert path.read_bytes() == expected_bytes(
+            tree.payloads[source], EPOCH_MINUTES_25_00Z
+        )
+
+
+def test_loaded_alias_retarget_before_bootstrap_writes_original_tree(
+    tmp_path: Path,
+) -> None:
+    """yd_alias 指向 real_a，装载后再改指向 real_b，init 只在 real_a 建链。"""
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    real_b = tree.root / "real_b"
+    real_b.mkdir()
+    alias = tree.root / "yd_alias"
+    alias.symlink_to(tree.yd_root, target_is_directory=True)
+    tree.local = replace(tree.local, yd_root=str(alias))
+    alias.unlink()
+    alias.symlink_to(real_b, target_is_directory=True)
+
+    report = tree.run()
+
+    assert report.refusal is None
+    for source in WRITE_ORDER:
+        original = tree.state_path(source, cycle)
+        assert original.is_file()
+        assert original.read_bytes() == expected_bytes(
+            tree.payloads[source], EPOCH_MINUTES_25_00Z
+        )
+        assert not (real_b / "states" / source / original.name).exists()
+    assert snapshot(real_b) == {}
+
+
+def test_internal_states_symlink_still_refuses_after_canonical_load(
+    tmp_path: Path,
+) -> None:
+    """根内 states 链仍被既有 no-follow 闸门拒绝，链接目标不变。"""
+    tree = Tree(tmp_path)
+    cycle = datetime(2026, 8, 25, tzinfo=UTC)
+    for source in WRITE_ORDER:
+        tree.write_cycle(source, cycle)
+    outside = tree.root / "outside-states"
+    outside.mkdir()
+    target = outside / "keep.cfg.ic"
+    target.write_bytes(b"outside-state")
+    link = tree.states / "ifs"
+    link.symlink_to(outside)
+
+    report = tree.run()
+
+    assert report.refusal is InitRefusal.STATES_NOT_EMPTY
+    assert report.written == ()
+    assert link.is_symlink()
+    assert target.read_bytes() == b"outside-state"

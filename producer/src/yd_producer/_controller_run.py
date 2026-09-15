@@ -508,7 +508,7 @@ def _run_once(
     controller._preflight(config=config, local=local, source=source)
     ctx.phase = "frontier"
     try:
-        gathered = controller._target_and_state(Path(local.yd_root), source)
+        gathered = controller._target_and_state(local.yd_root, source)
     except controller.DiscoveryUnreadableError as exc:
         return _discovery_unreadable_stop(source, exc)
     except Exception as exc:
@@ -549,7 +549,7 @@ def _run_once(
     )
     try:
         plan = residue_module.plan_residue(
-            yd_root=Path(local.yd_root), source=source, decision=decision
+            yd_root=local.yd_root, source=source, decision=decision
         )
         if plan is not None:
             residue_module.execute_residue_plan(plan)

@@ -176,15 +176,44 @@ class LocalConfig:
 
     `slurm` 以映射暴露而非固定字段，键集由 `Config.slurm.required_fields` 决定；客户端
     命令时限是独立 policy，默认值仅维持既有程序内直接构造兼容。
+
+    `yd_root` 在每次构造时把绝对输入以 `Path.resolve(strict=False)` 解析一次，仅保存
+    canonical `Path`。相对路径与 `~` 拼写在 resolve 之前拒绝；解析的 `OSError`/
+    `RuntimeError` 同样分类为 `ConfigError(path="yd_root")`。根不必在装载期存在。
     """
 
-    yd_root: str
+    yd_root: Path
     scratch_root: str
     shud_binary: str
     nwm: NwmLocal
     slurm: Mapping[str, str | int]
     cron: CronLocal
     slurm_command_timeout_seconds: int = _DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
+
+    def __post_init__(self) -> None:
+        raw = self.yd_root
+        if isinstance(raw, Path):
+            candidate = raw
+        elif isinstance(raw, str):
+            candidate = Path(raw)
+        else:
+            raise ConfigError(
+                f"配置项 `yd_root` 类型错误：期望 str 或 Path，实际 {_type_name(raw)}",
+                "yd_root",
+            )
+        if not candidate.is_absolute():
+            raise ConfigError(
+                f"配置项 `yd_root` 必须是绝对路径（`~` 与相对路径一律拒绝）：{raw}",
+                "yd_root",
+            )
+        try:
+            canonical = candidate.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise ConfigError(
+                f"配置项 `yd_root` 无法解析：{exc}",
+                "yd_root",
+            ) from exc
+        object.__setattr__(self, "yd_root", canonical)
 
 
 # --- `variants.<source>` 的相对性闸门（`prepare` 与 `init` 共用一份判据）--------

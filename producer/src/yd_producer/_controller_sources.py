@@ -162,9 +162,9 @@ def _run_startup_hygiene(
         _stopped_report,
     )
 
-    yd_root = Path(local.yd_root).resolve()
+    yd_root = local.yd_root
     work_root = Path(local.scratch_root).resolve() / "work"
-    output_root = Path(local.yd_root) / "output"
+    output_root = yd_root / "output"
     try:
         controller._iter_entry_names(output_root, missing_is_empty=False)
     except controller.DiscoveryUnreadableError as orig:
@@ -335,7 +335,7 @@ def finalize_failed_attempt(
     try:
         result = cleanup_module.finalize_failed_job(
             cleanup_module.FailureInputs(
-                yd_root=Path(local.yd_root),
+                yd_root=local.yd_root,
                 work_root=work_root,
                 source=source,
                 cycle=cycle,

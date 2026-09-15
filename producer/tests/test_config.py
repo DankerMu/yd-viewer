@@ -608,6 +608,9 @@ def _scalar_leaves(cls: type, prefix: str = "") -> list[tuple[str, type]]:
         field_type = hints[field.name]
         if isinstance(field_type, type) and dataclasses.is_dataclass(field_type):
             leaves.extend(_scalar_leaves(field_type, path))
+        elif field_type is Path:
+            # TOML 输入仍是 str；构造后存 Path。类型错误轴钉的是装载输入。
+            leaves.append((path, str))
         elif field_type in _SCALAR_TYPES:
             leaves.append((path, field_type))
     return leaves
@@ -2135,3 +2138,136 @@ def test_config_defines_the_only_numeric_timeout_default_in_ast():
         and type(node.value) is int
         and node.value == DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
     ]
+
+
+# --- Issue #110：yd_root 只解析一次 --------------------------------------------
+
+
+def test_load_local_stores_resolved_path_for_root_alias(tmp_path):
+    """根自身是合法 symlink 时，装载保存 realpath，不再保留别名拼写。"""
+    real = tmp_path / "real_a"
+    real.mkdir()
+    alias = tmp_path / "yd_alias"
+    alias.symlink_to(real, target_is_directory=True)
+    config = _loaded_config(tmp_path)
+    data = _with(VALID_LOCAL, "yd_root", str(alias))
+
+    local = load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    assert local.yd_root == real.resolve()
+    assert isinstance(local.yd_root, Path)
+
+
+def test_load_local_stores_resolved_path_for_ancestor_alias(tmp_path):
+    """祖先含合法 symlink 时，装载结果与 realpath 根等价。"""
+    real_parent = tmp_path / "real_parent"
+    real_parent.mkdir()
+    real = real_parent / "yd"
+    real.mkdir()
+    alias_parent = tmp_path / "alias_parent"
+    alias_parent.symlink_to(real_parent, target_is_directory=True)
+    config = _loaded_config(tmp_path)
+    data = _with(VALID_LOCAL, "yd_root", str(alias_parent / "yd"))
+
+    local = load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    assert local.yd_root == real.resolve()
+
+
+@pytest.mark.parametrize("spelling", ["relative/yd", "./yd", "~/yd"])
+def test_non_absolute_yd_root_raises_config_error_before_io(tmp_path, spelling):
+    """相对路径与 ~ 拼写在 resolve 之前以 ConfigError(path='yd_root') 拒绝。"""
+    config = _loaded_config(tmp_path)
+    data = _with(VALID_LOCAL, "yd_root", spelling)
+    local_path = _write_toml(tmp_path / "local.toml", data)
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_local(local_path, config)
+
+    _assert_locates(excinfo, "yd_root")
+    assert "绝对路径" in str(excinfo.value)
+
+
+def test_replace_non_absolute_yd_root_raises_config_error():
+    """dataclasses.replace 走新构造，相对拼写同样在构造期拒绝。"""
+    local = LocalConfig(
+        yd_root="/fixture/yd",
+        scratch_root="/fixture/scratch",
+        shud_binary="/fixture/bin/shud",
+        nwm=NwmLocal(
+            raw_root="/fixture/nwm/raw",
+            checkout_root="/fixture/nwm/checkout",
+            python="/fixture/nwm/.venv/bin/python",
+        ),
+        slurm={"partition": "cpu"},
+        cron=CronLocal(
+            lock_path="/fixture/run/yd-producer.lock",
+            log_dir="/fixture/log/yd-producer",
+        ),
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        dataclasses.replace(local, yd_root="relative/root")
+
+    assert excinfo.value.path == "yd_root"
+    assert "绝对路径" in str(excinfo.value)
+
+
+def test_direct_constructor_accepts_path_and_string_absolute_roots():
+    """程序面同时接受 str 与 Path；两者归一到同一 canonical Path。"""
+    kwargs = dict(
+        scratch_root="/fixture/scratch",
+        shud_binary="/fixture/bin/shud",
+        nwm=NwmLocal(
+            raw_root="/fixture/nwm/raw",
+            checkout_root="/fixture/nwm/checkout",
+            python="/fixture/nwm/.venv/bin/python",
+        ),
+        slurm={"partition": "cpu"},
+        cron=CronLocal(
+            lock_path="/fixture/run/yd-producer.lock",
+            log_dir="/fixture/log/yd-producer",
+        ),
+    )
+
+    as_str = LocalConfig(yd_root="/fixture/yd", **kwargs)
+    as_path = LocalConfig(yd_root=Path("/fixture/yd"), **kwargs)
+
+    assert as_str.yd_root == Path("/fixture/yd")
+    assert as_path.yd_root == Path("/fixture/yd")
+
+
+def test_missing_absolute_root_loads_without_creation(tmp_path):
+    """不存在的绝对根装载成功、零目录创建；存在性仍由入口策略决定。"""
+    absent = tmp_path / "never-created" / "yd"
+    config = _loaded_config(tmp_path)
+    data = _with(VALID_LOCAL, "yd_root", str(absent))
+
+    local = load_local(_write_toml(tmp_path / "local.toml", data), config)
+
+    assert local.yd_root == absent.resolve()
+    assert not absent.exists()
+    assert not absent.parent.exists()
+
+
+def test_symlink_loop_yd_root_raises_config_error(tmp_path):
+    """无法解析的根（含循环）以 ConfigError(path='yd_root') 分类，不写入。"""
+    loop_a = tmp_path / "loop-a"
+    loop_b = tmp_path / "loop-b"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+    config = _loaded_config(tmp_path)
+    data = _with(VALID_LOCAL, "yd_root", str(loop_a))
+
+    try:
+        local = load_local(_write_toml(tmp_path / "local.toml", data), config)
+    except ConfigError as exc:
+        assert exc.path == "yd_root"
+        assert "`yd_root`" in str(exc)
+        return
+
+    # 部分运行时 resolve(strict=False) 对循环不再抛错；不得发明第二套解析方案。
+    pytest.skip(
+        f"runtime Path.resolve(strict=False) accepted loop as {local.yd_root}; "
+        "notify parent rather than invent another resolution scheme"
+    )

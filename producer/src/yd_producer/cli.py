@@ -185,7 +185,7 @@ def run(local: LocalConfig, config: Config) -> int:
     """
 
     def action() -> RunSourcesReport:
-        guard = _check_states_dir(Path(local.yd_root) / "states")
+        guard = _check_states_dir(local.yd_root / "states")
         if guard is not None:
             raise _StatesGuardFailed(guard)
         runner = partial(

@@ -67,15 +67,12 @@
      确认位于 yd 自己根目录下的对象；不得跟随路径进入 NWM raw 根」。`safe_fs` 全程
      `O_NOFOLLOW` 逐段锚定，消除了「先 `realpath` 再比前缀」在解析与使用之间的 TOCTOU
      窗口。MUST NOT 用 `shutil.rmtree` / 裸 `Path.unlink`。
-   - **前置条件：传给 `safe_fs` 的 `containment_root` MUST 是 `Path(yd_root).resolve()`**
-     （裁决 6 增补，round 1 B1）。两者不是包含关系，原措辞「严于 `realpath`」不成立：
-     `safe_fs._open_directory_no_follow` 在 `containment_root` 自身上**从 `/` 重新锚定**
-     并把它的每一个分量过一遍 `O_NOFOLLOW`（`safe_fs.py:824-843`），而 `realpath` 语义
-     恰恰允许 root 经 symlink 到达。`YD_ROOT` 里任一分量是 symlink（现场极常见：NFS 挂
-     载点、`/var` 在 macOS 上就是）时，判定侧（跟随 symlink 的 `os.stat`/`iterdir`）会说
-     该源可跑并算出非空清单，执行侧却每次都抛 `SafeFilesystemError`——每 tick 重演，成为
-     带误导消息的永久停源。故本模块在 `plan_residue` 里一次性 `resolve()`，
-     `ResiduePlan.yd_root` 因此**恒为已解析的绝对路径**。
+   - **前置条件：传给 `safe_fs` 的 `containment_root` MUST 是配置构造时解析过的
+     canonical 根**（`LocalConfig.yd_root`）。本模块不再 `resolve()` 该根：重复解析会
+     把构造后被替换成 symlink 的 canonical 路径重新授权。`safe_fs._open_directory_no_follow`
+     在 `containment_root` 自身上**从 `/` 重新锚定**并把它的每一个分量过一遍
+     `O_NOFOLLOW`（`safe_fs.py:824-843`）；调用方交来未解析别名时，执行侧仍会拒绝。
+     `ResiduePlan.yd_root` 因此**恒为调用方交来的 Path**，调用方 MUST 交 canonical 根。
    - **判定期的类型判据同样不对称**：半成品目录要求 `os.lstat` 下是**真目录**（该位置
      是 symlink 时不能被正面识别为半成品，不删）；状态文件在判定期**只过文件名可见
      集，不做 symlink 过滤**——若判定期就把 symlink 状态滤掉，裁决 6 要的「遇 symlink
@@ -233,24 +230,21 @@ def _normalized_unique(paths: tuple[Path, ...]) -> tuple[Path, ...]:
 def _bind_residue_plan(plan: ResiduePlan) -> None:
     """把公开 ResiduePlan 的每一个字段绑定到 (root, source, retained) 身份。
 
-    构造与执行共用：先验证全部字段和全部路径，再写回 resolve 后的根、可往返
-    的 retained cycle，以及按路径排序去重后的不可变 tuple。不得对删除目标
-    做 ``resolve``——词法越界必须保持为越界。
+    构造与执行共用：先验证全部字段和全部路径，再写回可往返的 retained cycle，以及按
+    路径排序去重后的不可变 tuple。不得对根或删除目标做 ``resolve``——词法越界必须保持
+    为越界；根的解析权威只在配置构造。
     """
 
     try:
         _require_source_component(plan.source)
-        try:
-            resolved = Path(plan.yd_root).resolve()
-        except (OSError, ValueError) as error:
-            raise SafeFilesystemError(f"yd_root 无法 resolve：{error}") from error
-        object.__setattr__(plan, "yd_root", resolved)
+        root = Path(plan.yd_root)
+        object.__setattr__(plan, "yd_root", root)
         retained = _require_representable_cycle(plan.retained_cycle)
         object.__setattr__(plan, "retained_cycle", retained)
         for path in plan.state_files:
-            _require_state_identity(path, resolved, plan.source, retained)
+            _require_state_identity(path, root, plan.source, retained)
         for path in plan.half_product_dirs:
-            _require_half_product_identity(path, resolved, plan.source, retained)
+            _require_half_product_identity(path, root, plan.source, retained)
         object.__setattr__(plan, "state_files", _normalized_unique(plan.state_files))
         object.__setattr__(
             plan, "half_product_dirs", _normalized_unique(plan.half_product_dirs)
@@ -270,11 +264,10 @@ class ResiduePlan:
     本清单，不触发删除）。
     """
 
-    #: 传给 `safe_fs` 的 `containment_root`（compute-loop §12）。**契约：MUST 是
-    #: `Path(yd_root).resolve()` 的产物**——`safe_fs` 把容纳根**自身**的每个分量重新过
-    #: `O_NOFOLLOW`（`safe_fs.py:824-843`），未解析的根上任一 symlink 分量会让所有删除
-    #: 永久失败而判定侧照常说「可跑」（裁决 6 增补）。`plan_residue` 负责解析；手工构造
-    #: 本清单的调用方同样受这条约束。
+    #: 传给 `safe_fs` 的 `containment_root`（compute-loop §12）。**契约：MUST 是配置
+    #: 构造时解析过的 canonical 根**——本模块不再 `resolve()`。`safe_fs` 把容纳根**自身**
+    #: 的每个分量重新过 `O_NOFOLLOW`（`safe_fs.py:824-843`）。调用方（含手工构造）交来
+    #: 未解析别名时，删除面会拒绝。
     yd_root: Path
     source: str
     #: 保留的 T：`FrontierDecision.cycle`。`states/<source>/<T>.cfg.ic` 永不进清单。
@@ -310,9 +303,8 @@ def plan_residue(
     `"."` 同样塌回该 cycle 目录，`".."` 更把清单放大成整棵 `output/`——两个点名都被
     **显式**拒绝，不靠 `Path(source).name` 顺带挡）。
 
-    `yd_root` 在此**一次性 `resolve()`**，清单里的 `yd_root` 因此恒为已解析的绝对路径
-    （裁决 6 增补：`safe_fs` 对容纳根自身逐段 `O_NOFOLLOW`）。判定与执行的相对路径拼接
-    全部基于该已解析根。
+    `yd_root` MUST 已是配置构造时解析过的 canonical 根；本函数不再 `resolve()`。判定与
+    执行的相对路径拼接全部基于该根。
 
     交来的 T 上已有 `DONE` 时清单**整体**为空（两类删除共用同一道闸，裁决 4 增补）：
     该 cycle 已提交，`states/<T+12>` 是刚写下的下一环而不是残留。
@@ -340,7 +332,7 @@ def plan_residue(
     if decision.cycle is None:
         return None
 
-    root = Path(yd_root).resolve()
+    root = Path(yd_root)
     retained = decision.cycle
     try:
         if retained in done_cycles(root / "output", source):

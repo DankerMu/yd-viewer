@@ -1232,8 +1232,8 @@ def test_probe_loop_refuses_to_rebuild_a_vanished_run_root(env):
 def _replace_local(env: Env, **overrides) -> Env:
     """替换已装载 `LocalConfig` 的运行根字段。
 
-    装载器对 `yd_root`/`scratch_root` 只做存在性与类型检查（`specs/cli-config/spec.md`
-    钉死），故它原样透传字符串——`replace` 忠实复现装载器会给出的对象。
+    `replace` 对 `yd_root` 走新构造：相对/`~` 拼写在配置构造期即以 `ConfigError`
+    拒绝；绝对别名在构造时解析一次。`scratch_root` 仍原样透传给 prepare 入口闸门。
     """
     from dataclasses import replace
 
@@ -1246,26 +1246,32 @@ def _replace_local(env: Env, **overrides) -> Env:
     )
 
 
-@pytest.mark.parametrize("field_name", ["yd_root", "scratch_root"])
 @pytest.mark.parametrize("spelling", ["~/yd", "relative/yd", "./yd"])
-def test_non_absolute_run_roots_are_refused_before_any_builder_call(
-    env, field_name, spelling
-):
-    """非绝对的运行根一律拒绝（I3 / cand-12）。
-
-    `safe_fs` 的每个原语都先 `expanduser()` 并用 `Path.cwd()` 锚定相对路径，而拒绝覆盖
-    守卫的 `os.path.lexists` 与 `geometry.write_viewer_geojson` 都不展开。同一个配置值
-    在三个消费者眼里成了两个文件系统对象，回滚就会去删真实 `$HOME` 里的既有内容。
-    """
+def test_non_absolute_yd_root_is_refused_at_configuration(env, spelling):
+    """相对/`~` 的 yd_root 在 replace/构造期拒绝，零 builder、零写入。"""
     before = tree_snapshot(env.yd_root)
-    scoped = _replace_local(env, **{field_name: spelling})
+    builder = make_builder(env)
+
+    with pytest.raises(ConfigError) as excinfo:
+        _replace_local(env, yd_root=spelling)
+
+    assert excinfo.value.path == "yd_root"
+    assert "绝对路径" in str(excinfo.value)
+    assert_untouched(env, before, builder)
+
+
+@pytest.mark.parametrize("spelling", ["~/scratch", "relative/scratch", "./scratch"])
+def test_non_absolute_scratch_root_is_refused_before_any_builder_call(env, spelling):
+    """scratch_root 仍由 prepare 入口拒绝相对/`~` 拼写。"""
+    before = tree_snapshot(env.yd_root)
+    scoped = _replace_local(env, scratch_root=spelling)
     builder = make_builder(env)
 
     with pytest.raises(PrepareError) as excinfo:
         run(scoped, builder)
 
     message = str(excinfo.value)
-    assert field_name in message
+    assert "scratch_root" in message
     assert "绝对路径" in message
     assert_untouched(env, before, builder)
 
@@ -1282,7 +1288,7 @@ def test_tilde_run_root_never_touches_the_real_home(env, tmp_path, monkeypatch):
     home_before = tree_snapshot(home)
     builder = make_builder(env)
 
-    with pytest.raises(PrepareError):
+    with pytest.raises(ConfigError):
         run(_replace_local(env, yd_root="~/yd"), builder)
 
     assert victim.read_bytes() == b"OPERATOR BYTES\n"
@@ -1303,26 +1309,62 @@ def test_missing_run_roots_are_refused_before_any_builder_call(env, field_name):
     absent = Path(env.local.yd_root).parent / "typo-root" / "deep"
     builder = make_builder(env)
 
-    with pytest.raises(PrepareError) as excinfo:
+    with pytest.raises(PrepareError) as cop:
         run(_replace_local(env, **{field_name: str(absent)}), builder)
 
-    assert field_name in str(excinfo.value)
-    assert str(absent) in str(excinfo.value)
+    assert field_name in str(cop.value)
+    assert str(absent) in str(cop.value)
     assert not os.path.lexists(absent)
     assert not os.path.lexists(absent.parent)
     assert builder.count == 0
 
 
-def test_symlinked_run_root_is_refused(env, tmp_path):
-    """运行根含 symlink 组件 -> 拒绝（`verify_directory_no_follow` 逐层 no-follow）。"""
-    link = tmp_path / "yd-link"
-    link.symlink_to(env.yd_root)
+def test_root_alias_prepare_uses_canonical_tree(env, tmp_path):
+    """合法根别名装载后，prepare 消费 canonical 根而非别名拼写。"""
+    alias = tmp_path / "yd-alias"
+    alias.symlink_to(env.yd_root, target_is_directory=True)
+    scoped = _replace_local(env, yd_root=str(alias))
     builder = make_builder(env)
 
-    with pytest.raises(PrepareError) as excinfo:
-        run(_replace_local(env, yd_root=str(link)), builder)
+    report = run(scoped, builder)
 
-    assert "yd_root" in str(excinfo.value)
+    assert scoped.local.yd_root == env.yd_root.resolve()
+    for path in report.variants.values():
+        assert path.is_relative_to(env.yd_root)
+    assert report.rivers_geojson.is_relative_to(env.yd_root)
+
+
+def test_internal_symlink_at_canonical_root_is_still_refused(env, tmp_path):
+    """构造后把 canonical 根换成 symlink：prepare 的 no-follow 闸门仍拒绝，目标不变。"""
+    outside = tmp_path / "outside-yd"
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_bytes(b"outside\n")
+    canonical = env.local.yd_root
+    backup = tmp_path / "yd-backup"
+    canonical.rename(backup)
+    canonical.symlink_to(outside, target_is_directory=True)
+    builder = make_builder(env)
+
+    with pytest.raises(PrepareError) as cop:
+        run(env, builder)
+
+    assert "yd_root" in str(cop.value)
+    assert builder.count == 0
+    assert marker.read_bytes() == b"outside\n"
+    assert canonical.is_symlink()
+
+
+def test_symlinked_scratch_root_is_refused(env, tmp_path):
+    """scratch 运行根含 symlink 组件 -> 拒绝（`verify_directory_no_follow`）。"""
+    link = tmp_path / "scratch-link"
+    link.symlink_to(env.scratch_root)
+    builder = make_builder(env)
+
+    with pytest.raises(PrepareError) as cop:
+        run(_replace_local(env, scratch_root=str(link)), builder)
+
+    assert "scratch_root" in str(cop.value)
     assert builder.count == 0
 
 
