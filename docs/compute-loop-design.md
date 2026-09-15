@@ -305,6 +305,8 @@ cycle T 的规则：
 
 `cfg.ic` 是原生分段格式，不得按“单一 6 列表”处理：至少包含 mesh 状态段与 river `Stage` 段，可能还有 lake 段。重戳和检查复用精简后的 NWM `state_qc` 解析语义。
 
+状态首行、`cfg.ic` 路径输入与 raw 可读性验证必须复用 safe_fs 既有的 no-follow、`O_NONBLOCK` open 与打开后 `fstat` 普通文件/身份校验，实际读取绑定同一 fd；预检后被换成无写端 FIFO 不得让控制器持锁挂死。读端不再接受叶子或祖先 symlink，也不得自行 `resolve()` 绕过拒绝：`YD_ROOT` 别名只按 §5 在配置构造时解析，独立 raw/scratch/parse 调用方使用物理路径。状态读失败归 `STATE_UNREADABLE`，`cfg.ic` 读失败归 `ValueError`（率定态链接因此在 init 读阶段拒绝、两源零写入）；raw 预检已发现的缺失/目录/FIFO/目录目标链接/断链仍为 missing，读阶段的 no-follow、身份或 IO 拒绝为 unreadable，空普通文件仍可读。首行流式预算、IC `max_bytes+1`、格式保真与 bytes-like 输入不变；这不是任意 NFS IO 的总超时或 watchdog。
+
 负残差处理沿用 NWM 已验证的纯函数：负残差归零，并保留对应的域均修正阈值检查；不引入状态 registry 或血缘 JSON。
 
 ## 9. 单轮 SHUD 与 T+12 状态
