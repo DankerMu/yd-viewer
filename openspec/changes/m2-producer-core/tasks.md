@@ -2,6 +2,8 @@
 
 任务组按依赖排序（每组的"依赖"行给出真实前置，未列即可与前面各组并行）；全部落 `producer/`，本地测试是唯一门禁。每组尾部标注 compute-loop §13.1 归属行。
 
+当前生产合同增量：#202 的 [native-yd-model-input](../archive/2026-09-15-native-yd-model-input/tasks.md) 已按用户确认的单流域精简方案定义完整 native 文件与真实 prepare driver。它取代下文历史 fixture 的 five-only/v1、平铺 native 输入、`yd.para`、builder-unavailable/M4-driver 与 obsolete module 开关细节；这些旧 fixture 保留为各自历史提交的验收记录，不要求新实现继续复现已替代的表示或未实现状态。状态数值、work owner、cleanup/publish 和独立 legacy external-root assembly 行为不变；原 #132 review ledger 不重置。新 native 实现与对应回归以该 change 的两条具体路径为准，不增加通用资产/registry/审批框架。
+
 ## 1. cli-config：配置装载与 CLI 骨架
 
 - [x] 1.1 实现 `config.toml` 类型化装载与 fail-closed 校验（业务规则字段全集含 `reach_count`，spec cli-config）
@@ -1453,7 +1455,7 @@ def stage_raw(
 
 pin 在 raw cycle 目录内落盘 `manifest.json`（GFS `_persist_manifest_metadata` L1599-1609 调用点 L774；IFS 于 `ifs_adapter.py:667` 构建期一次性写入）。yd MUST **读取** `<raw_root>/<存储身份>/<YYYYMMDDHH>/manifest.json` 并从中承接 entry 级语义，MUST NOT 在 yd 侧发明：
 
-- `grib_short_name`、`cfgrib_filter_by_keys`、`logical_remote_url`、`cycle_time`、`valid_time`、`bundle` —— pin 构建期写的 6 键，逐条承接
+- `grib_short_name`、`cfgrib_filter_by_keys`、`logical_remote_url`、`cycle_time`、`valid_time`、`bundle` —— pin 构建期写的 6 键，逐条承接。**#99 内部一致性**：`cfgrib_filter_by_keys` MUST 是含 `shortName` 的 Mapping，且该值 MUST 等于同 entry 的 `grib_short_name`；形态、缺键或不相等均在复制前以 `RawStagingError(kind="source-manifest")` 拒绝，不得用任一方覆写另一方或自行推导别名。相等时仍逐字承接；不相等的错误须包含 lead、variable 与两个实际值。
 - **累积语义**：pin 下载期把 `IdxSelection.as_metadata()`（键 `step_range`/`accumulation_type`/`idx_record_number`/`selector_warning`）按变量收进**复数** `idx_selectors`（`gfs_adapter.py:1070`），**只有单变量 bundle 才另写单数 `idx_selector`**（L1071-1072）。消费端 `_apcp_selector_metadata`(converter L677) **只读单数键**。yd 的扇出是逐变量的，故每条 entry 的单数键有唯一定义：`idx_selector = 源 manifest 的 idx_selectors[variable]`。两个键都落盘（复数保持与 pin 同形），MUST NOT 只落复数键。
 
 源 manifest 缺失/不可解析/其 entry 集合无法覆盖本轮 (lead, variable) 全集 —— 一律 fail closed，不得以空值或推导补齐。
@@ -1580,11 +1582,11 @@ Regression rows:
 - 多 bundle 配置（`len(bundles) != 1`）在 staging 侧不受支持，需 config 长出 variable→bundle 映射后才能放开（上方单 bundle 约束）
 - 源侧 symlink 一律拒绝，与 3.1 的 `is_file()` 跟随语义有意不对称（上方复制语义）
 - **源 `manifest.json` 叶子段自身不查 symlink，本 issue 有意排除**：symlink MUST 的作用域由上方复制语义逐字限定为「每个源 **bundle 路径**」，Regression rows 有链 bundle 行与链 cycle 目录行、无叶子行。该叶子的**全部祖先段**已被 bundle 走查覆盖，故缺口仅限「叶子自身是链」这一形态。round 1 verifier REFUTED、round 2 复现机制为真后仍维持 REFUTED（无绑定文本归属，verifier 不以翻转判决来裁定范围）。若后续要收口，属 fixture 修订而非实现缺陷
-- **地板兜底 kind 无法与真实源侧失败区分**：`ADMISSION_FALLBACK_KIND = "source-manifest"` 让准入段的任何非词表异常都以该 kind 外抛，而准入段多数注入点（路径归一、containment、`target-exists` 预检）与源 manifest 无因果关系。后果是组 12 控制器按 kind 分流时，无法区分「上游 NWM 清单坏了、该 cycle 不可用」与「yd 准入段自身出了未预期的错」——两者运维处置不同。不扩第十项是因为九项词表由本 fixture 钉死、其判别力问题已归 **#76**；本条随该 issue 一并裁决。
+- **地板兜底 kind 无法与真实源侧失败区分**：`ADMISSION_FALLBACK_KIND = "source-manifest"` 让准入段的任何非词表异常都以该 kind 外抛，而准入段多数注入点（路径归一、containment、`target-exists` 预检）与源 manifest 无因果关系。后果是组 12 控制器按 kind 分流时，无法区分「上游 NWM 清单坏了、该 cycle 不可用」与「yd 准入段自身出了未预期的错」——两者运维处置不同。不扩第十项是因为九项词表由本 fixture 钉死、其判别力问题归 **#76**。用户本次将 #76 明确限定为精确集合断言，不调整此既有 fallback 政策；本条保留作为已知诊断限制，不另开政策 issue 的理由是该裁决不在本次授权范围。
 - **目标侧 symlink containment 的 inode 判据在 CI 上无判别器**：唯一支撑用例在大小写敏感卷（CI 的 ubuntu-latest/ext4）上必然自跳过，而无特权的无条件 seam 级判别器不可构造。补救属 CI 作业面或 fixture 作用域，不是「补一个用例」。follow-up：**issue #89**
-- **九项闭合 kind 词表本身无判别器**：九个 kind 各有具名用例与杀手变异体，但测试从不 import `ERROR_KINDS`，加入第十项的变异体在 747 passed 全绿下存活（round 2 实测，同环境控制变异体 13 failed，harness 已校准）。今日无运行期影响故判 DEFER，但本模块最强的 oracle 锚（逐字钉死的闭合集）目前不设防。follow-up：**issue #76**
-- **产出 manifest 不拒 `NaN`/`Infinity`**：`json.dumps` 默认 `allow_nan=True`，源侧若带非标准 JSON 字面量会原样穿过序列化闸门，严格解析器读不了（round 2 实测）。判 DEFER 的依据是唯一具名契约边界未断——pin 侧 converter 用 `json.load`，默认同样接受。加固成本为一个实参 `allow_nan=False`（抛的 `ValueError` 直接落进现有 except、kind 仍为 `source-manifest`）。follow-up：**issue #75**
-- **六键逐字承接后无内部一致性核对**：`grib_short_name` 与 `cfgrib_filter_by_keys["shortName"]` 在 pin 上同源同值（`nwm-snapshot-inventory.md:109`），yd 两者都逐字承接却从不核对二者相等，故源侧改动其一即产出一份自相矛盾的 `raw-manifest.json` 而 staging 照常成功（round 5 实测复现）。消费端 `_cfgrib_backend_kwargs` 优先取 `cfgrib_filter_by_keys`（`:110`），converter 会静默读错 GRIB 变量——该后果由 §3.1 转录**推理**得出、未实跑（converter 属任务 7.1，不在本 PR）。判 DEFER 的依据：两个操作数均逐字承接，治理不变式的「承接」合取项**未破**，矛盾是继承而非 yd 制造，弱于 round 5 修掉的 entry 时间闸门（那一处矛盾的是 yd **自算**的字段）；且该承接循环先于本轮存在，`d6a8733` 未改动它。follow-up：**issue #99**
+- **#76 九项闭合词表证据**：测试 MUST 导入 `ERROR_KINDS` 并与本 fixture 的九个字面量组成的 `frozenset` 精确相等；不得用长度或子集代替。新增第十项与修改任一拼写的变异体都必须使该用例失败；生产词表、构造期校验及九种错误分支保持不变。
+- **#75 严格 JSON 输出裁决**：`_render_manifest` MUST 使用 `json.dumps(..., allow_nan=False)`；承接值含 `NaN`/`Infinity`/`-Infinity` 时沿既有序列化错误分支抛 `RawStagingError(kind="source-manifest")`，且复制前零写入。有限值产物须可由拒绝非标准常量的严格解析器读取。源 JSON 读取策略及 `idx_selectors` 畸形值策略不在本次实参修复范围。
+- **#99 承接身份一致性裁决**：六键逐字承接之外，必须核对 `cfgrib_filter_by_keys.shortName == grib_short_name`，先判 Mapping 与子键存在；不符沿既有 `source-manifest` 分支零写入拒绝。不新增 GRIB 别名表，不规范化、不互相覆写；其它承接键及 converter 防御仍在原边界。
 - **entry 时间闸门依赖「pin 侧 `valid_time` = cycle + forecast_hour」这一算法**：§3.1 只记录了六键的存在与注入时机，未记录该算法；支撑证据是本仓逐字副本 `raw/manifest.py:51-52` 的 `valid_time_for`（§3.1:45 将该文件登记为转录）。若 pin 对**区间累积**变量另按区间端点写 `valid_time`，本闸门会对每一个 cycle 硬拒；而按上方「地板兜底 kind」一条，组 12 无法凭 kind 把它与「yd 自身出错」区分开。不落 issue 的理由：该形态在 pin 当前源码上不成立，属 pin 演进时才需重估的假设，本条即其登记点。
 
 #### Review focus
@@ -2739,11 +2741,11 @@ Known limits（须走 Phase 8 的 deferral routing：每条配 follow-up issue �
 - **继承的死代码**：裁决 5 登记的 3 处不可达分支 + 2 处 no-op（`_get_existing_product` 后半、`_existing_product_is_current`、`already_done` 状态支、`_upsert_product`、`_update_cycle_status`）与 6 处 ERA5 残面，按裁决 1 保留
 - **继承的矛盾**：`REQUIRED_STANDARD_VARIABLES_BY_SOURCE` 的 `"ERA5"` 键不可达（`normalize_source_id("ERA5")` 抛 `ValueError` 而非 `CanonicalConversionError`）
 - **无产物级回滚**：转换中途失败时已写的 canonical 产物对象留在 object-store（pin 行为，无回滚）
-- **【round-2 补登记】被丢弃的 pin oracle**：`8ae9b8f2:tests/test_ifs_canonical.py`（15 用例）覆盖 `convert_ifs_precipitation_with_metadata` / `convert_ifs_radiation_values` / `convert_ifs_shortwave_down_values` 并带值 oracle，本 PR 未快照它（清单第 35 行那句「均不快照」是构造点枚举的附带说明，不构成覆盖后果登记）。裁决 15 的三条值断言只结清三处单位换算；**残量**——负降水小/显著/连续三分支(`:940-965`)、shortwave 量化与告警(`:1053-1075`)、Magnus RH、lineage 结构——在 yd 侧零覆盖。配 follow-up issue。
+- **【round-2 历史覆盖损失，#105 本次移植结清】被丢弃的 pin oracle**：`NWM@8ae9b8f29c8b72c574e8cbd95f2994160bd42832 tests/test_ifs_canonical.py` 全部15场景已按路线A移植到 `producer/tests/test_ifs_canonical.py`；负降水small/significant/consecutive独立参数化后收集17例。DB观察面改用实际catalog/products，missing-ssr的DB fail行改为typed拒绝与零产物/catalog，原输入/值/QC/lineage oracle保留；Magnus RH仍为产物回读approx0.525(abs1e-3)与top-level method的间接覆盖，不声称直接单测。8个IFS局部单行变异体均在旧完整producer套件（排除新模块）3344passed/3skipped时存活，并被新oracle杀死；正控制也成功判红。runtime源码和裁决15既有三处单位值断言均未改；逐场景对应、精确变异点与原始执行记录归 `port-ifs-canonical-oracles` fixture及PR工作说明。
 - **【round-1 补登记】读侧 symlink 不走 no-follow**：`converter.py` 由 `object_store.resolve_path()` 取裸 `Path` 交给 `xr.open_dataset`，而 `resolve_path`(object_store.py:314-326) 只做键归一 + `validate_object_path` + 字符串级容纳，**无 `O_NOFOLLOW`**；`LocalObjectStore` 的其它每一个消费者都走 `*_no_follow(..., containment_root=self.root)`。store 根内 `raw/<source>/<cycle>/<file>` 任一段的 symlink 会被 eccodes/netCDF4 跟随，读到容纳根之外的字节并据以产出 canonical 产物与 catalog。该缺陷在 #13 当时因 pin 等价规则未修；M2 收尾分叉裁决现已解锁，后续 #103 实现前须先在清单 converter 行「剥离点」登记问题与修法。
   **两点必须写进 follow-up，否则会传播一条陈旧论据**：(a) 「object-store 树只由 `write_bytes_atomic`（no-follow）写入、symlink 须带外植入」对 `raw/` 子树**不成立**——`rawcopy.py:736-737` 把 object-store 根取作 `work_dir`，而 `raw/` 由 `rawcopy.py:893` 自己的 `mkdir` 建立，不经 store；(b) **issue #71 把自身严重性上限建立在「最终消费者经 `object_store.py:190,206,263` 的 `*_no_follow` 读取、故转换器 fail-closed」这一前提上，而本 PR 落地的转换器正是那个消费者且不走那三行**——#71 的 fail-closed 上限自本 PR 起不再成立。
-- **【round-1 补登记】对半可信输入无规模上界**：`load_manifest`(:1213-1216) 与 `grid_definition_uri` 读(:1922) 用无上限的 `read_bytes`，而 store 自带 `MAX_OBJECT_MANIFEST_BYTES = 16MiB`(object_store.py:24) 与 `read_bytes_limited`(:212)，本模块**从不使用**；raw 文件交给 cfgrib/netCDF4 前无 size/stat 检查（模块内 `grep MAX_` 零命中）；`:1502` 把整张格点物化成 Python float 元组，IFS 路径(:2082-2094) 一次持有一小时的全部八个原生变量。
-  **量级按实测写，不用全球网格的数字**：真实 raw 由 NWM 下载器按 `download_bbox = {east:145, north:64, south:8, west:63}` 裁剪，约 329x225 ≈ 74k 点 ≈ **2.4MB/变量、8 变量的 IFS 小时约 19MB**（不是全球 0.25° 的约 265MB）。输入域为**半可信**：自家 NWM 下载器写在共享 NFS 上，非对抗，但跨节点、在 yd 写控制之外、且从不做尺寸校验。该缺陷在 #13 当时因 pin 等价规则未修；M2 收尾分叉裁决现已解锁，后续 #102 实现前须先在清单 converter 行「剥离点」登记问题与修法。
+- **【round-1 历史缺陷，#102 本次实现关闭】对半可信输入无规模上界**：`load_manifest` 与既有 `grid_definition_uri` JSON 读取现统一使用 store 的 `read_bytes_limited` + 唯一 `MAX_OBJECT_MANIFEST_BYTES = 16MiB`；raw 在 staging/decoder 前经 no-follow `store.size` 检查 512MiB 上限，staging 实读计数拒绝 stat 后增长并清理本次临时文件；超限以 `CanonicalConversionError` 明示 input size。解码后的 `RawRecord.values` 保持 NumPy float64 一维数组，数值函数的 tuple 返回接口、坐标与序列化不改。全部分叉已先在 inventory 登记；#103 的 no-follow 读取保证保留。
+  **历史量级与剩余非目标**：NWM bbox `{east:145, north:64, south:8, west:63}` 对应 329x225 ≈ 74k 点，原 Python float 元组约 2.4MB/变量、8变量IFS小时约19MB，而非全球网格265MB。输入为跨节点半可信数据；512MiB 是原始文件上限，不声称约束压缩解码后的峰值。数值函数内部临时 tuple 与压缩膨胀属于本 fixture 明确非目标，不另立 issue。父级验证：5个新回归在旧源码失败、67个canonical定向通过，44个产物及3份catalog JSON逐字节不变。
 
 Non-goals:
 - direct-grid forcing 生产、work 内临时 registry、SHUD 输入组装（组 8）
@@ -2778,9 +2780,9 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 
 **PR 边界与落点裁决**：
 - 本 issue **只做 8.1**。公开验收 seam 是 `yd_producer.forcing.ForcingProducer.produce(...) -> ForcingProductionResult`；design.md D10 覆盖旧草图 `forcing.build(...)`。不新增 build facade，不生成临时 registry，不组装 SHUD 运行目录。
-- 快照目标按 `nwm-snapshot-inventory.md` §1 第 36/37/38/42/43/53 行落地：`forcing/{producer,file_store,canonical_json,direct_grid_contract,shud_forcing_contract}.py` 与抽取式 `tests/test_forcing_producer.py`；`forcing/__init__.py`、grid-identity/no-follow 适配 helper 与 yd 验收测试为本仓自撰，不带 NWM 溯源头。
+- 快照目标按 `nwm-snapshot-inventory.md` §1 的目标路径定位：`forcing/{producer,file_store,canonical_json,direct_grid_contract,shud_forcing_contract}.py` 与抽取式 `tests/test_forcing_producer.py`；#114 的同源拆分归宿由已登记的新目标和 placement 对照承接。`forcing/__init__.py`、grid-identity/no-follow 适配 helper 与 yd 验收测试为本仓自撰，不带 NWM 溯源头。
 - 上述六条清单行的 `落地状态` 必须与对应文件在**同一实现提交**翻为 `本 issue 落地`；fixture-first 文档提交仍保持 `待落地`。
-- `producer.py`、`file_store.py`、抽取式 `test_forcing_producer.py` 保持 pin 文件边界。实际超过 1000 行时只允许把这三份逐文件加入 `.large-file-guard.json`；yd 自撰测试/helper 必须拆分在 1000 行内。若发生豁免，Phase 8 路由一条规模 follow-up；不扩大既有 glob/目录豁免。
+- #14 原允许三份 pin 文件边界的临时逐文件规模豁免；该授权已由 **#114 / PR #218** 的结构拆分撤销。`producer.py`、`file_store.py`、`test_forcing_producer.py` 现在保留兼容 façade/收集入口，定义归宿见归档 `split-direct-grid-snapshots/placement.json`；原路径与全部拆分产物均严格 `<1000` 行，不得重加这三项或扩大 glob/目录豁免。
 - 不改 `config.py`/`cli.py`/`controller.py`/`assemble`、viewer、依赖版本或 lockfile。构造参数由测试/后继编排显式提供；config 接线归 #15/#26。
 
 **Must preserve**：
@@ -2801,7 +2803,7 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 - `FileForcingRepository` 只接受显式、无默认、object-store 相对 key 的 work-local manifest，例如 `models/<model_id>/registry.json`；拒绝绝对路径、S3 manifest URI、`..` 与未知 prefix。删除 `from_env`、宿主 `Path.read_*` 和 object-store 失败后的裸路径 fallback。
 - registry/model manifest 与 canonical catalog 经一个 bounded/no-follow JSON helper 读取：最多 16 MiB、最大深度 64、最多 250000 个 JSON container/scalar node；invalid UTF-8、malformed JSON、`RecursionError`、超深/超宽/超限均映射成稳定 `ForcingStoreError`，不得产生 ready 输出。
 - binding 与 `.sp.att` 读取/校验和受 `ForcingProducerConfig.max_manifest_bytes` 限制；非 UTF-8 `.sp.att`、checksum mismatch、unsafe member、missing FORC index 均在 ready 输出前失败。
-- canonical NetCDF 读必须 descriptor-bound：先经 `safe_fs.open_file_no_follow(..., containment_root=object_store.root)` 打开普通文件，再在 fd 生命周期内用 Linux `/proc/self/fd/<fd>` 或 Darwin `/dev/fd/<fd>` 交给 xarray；symlink leaf/ancestor、FIFO/目录/设备与别名不可用都稳定失败，绝不回退裸 Path。单对象版本化上限固定为 `MAX_CANONICAL_NETCDF_BYTES = 536870912`（512 MiB）：同一 fd 先以 `fstat` 拒绝已知超限文件，checksum 流式读取再按累计字节作第二道 fail-closed guard；不新增环境变量或第二份配置来源。
+- canonical NetCDF 读必须 descriptor-bound：先经 `safe_fs.open_file_no_follow(..., containment_root=object_store.root)` 打开普通文件；Linux 成功路径仍在 fd 生命周期内用 `/proc/self/fd/<fd>` 交给 xarray，别名不可用稳定失败。**#127**：Darwin 不再使用 `/dev/fd` 的 lstat/pathname 交接，而从同一 fd 有界取得不可变内存 bytes，经 `netCDF4.Dataset(memory=...)` / `NetCDF4DataStore` 交给 xarray；可选 checksum 校验实际 decoder payload。symlink leaf/ancestor、FIFO/目录/设备继续稳定失败，绝不回退裸 Path。单对象版本化上限仍为 `MAX_CANONICAL_NETCDF_BYTES = 536870912`（512 MiB）：同一 fd 先以 `fstat` 拒绝已知超限，Darwin 内存读累计字节 guard 独立于是否请求 checksum，Linux checksum 流式 guard 不变；成功、setup/body/dataset.close 异常均清理所持 native/dataset/FD，不折入 #122 因果重构；不新增环境变量、配置来源或 controller/forcing 全局锁。
 - identity owner 分两层且不得循环作证：(1) catalog constructor 独立要求 `valid_time - cycle_time` 是非负整小时并等于整型 `lead_time_hours`，且 `canonical_product_id` 逐字等于 `<normalized-source>_<YYYYMMDDHH>_<variable>_f<lead:03d>`；(2) 精确 canonical object key 再由已验证 row 的 normalized source、compact cycle、variable、product id 唯一导出，dataset 只接受逐字匹配的 data variable、不保留 singleton fallback，并逐项核对 `cycle_time`、`valid_time`、`lead_time_hours`、`unit`、`grid_id`。任何 row 自相矛盾、foreign source/cycle/variable/object 或 attrs mismatch 在 `CanonicalProduct` construction/value extraction/ready 前失败。
 - public `produce` 在任何 repository lookup/write/cleanup 前验证 cycle 为 UTC 整点且 hour 恰为 00/12；06Z、非零 minute/second/microsecond 稳定映射为 `ForcingProductionError`，不得碰撞或清理同小时的合法 ready evidence。`ForcingProducer._resolve_forcing_mapping_contract` 在每个 repository 返回值上独立要求 normalized `contract.applicable_source_ids == (requested_source,)`；file parser 的同名检查只是早失败，不得成为 production source isolation 的唯一 owner。
 - Round 2 boundary corrective action：public request preflight 在零 repository call 前额外拒绝 forcing path component 的 literal `.`/`..`，并只接受 `max_lead_hours is None` 或 `type(max_lead_hours) is int and max_lead_hours >= 0`；bool/string/float/negative 全部稳定失败，`0` 与合法大整数无额外上限。随后只读解析 model identity/contract，在 `get_forcing_version`、failure-status write 与 cleanup 前验证 repository `basin_version_id` 路径和完整 returned-contract structure。前两段失败必须保持任一已 ready sibling 的 record/package/domain/sidecar/handoff/cycle-ready bytes 不变；catalog/binding/NetCDF authority drift 仍在 existing lookup 后校验并撤销已失效 ready，不能用“preservation”掩盖 stale output。
@@ -2887,7 +2889,7 @@ Minimal mergeable slice: direct-grid forcing 生产（8.1）——对合成 cano
 - canonical converter 自身的 unbounded read 与 path-follow 分别由 #102/#103 跟踪；本 PR 只保证 forcing 新读面不复制缺陷，不修改 canonical 源码。
 - #104 已关闭 IFS grid-definition URI 大小写裂口；本 PR 按 catalog 中唯一小写 URI 消费，不保留旧大写别名。
 - file-backend handoff package 的完整 parser/receipt 覆盖按 inventory 风险 12 归 #15；本 PR 只钉 forcing package 本身与直接 JSON identity，不恢复 2777 行校验器。
-- 若三份 snapshot 文件触发 large-file exclude，Phase 8 由 issue-scribe 建立/去重规模债 follow-up；#100/#107 仅覆盖既有 rawcopy/canonical 文件，不能假称已覆盖本 PR 新文件。
+- 规模债 **#114 已由 PR #218 关闭**：三项 forcing snapshot large-file exclude 已移除，18份原/拆分模块均严格 `<1000` 行，原13种子/17node-id及53腿变异判别保留。#100/#107 的 rawcopy/canonical 边界仍各自独立，不与本 forcing 拆分混记。
 - 真实 IFS/GFS 数值与 node-22 运行属 M4；本 PR 只声明合成 fixture 下的结构、映射、时间和 IO 安全。
 
 **Non-goals**：
@@ -5782,7 +5784,7 @@ Minimal mergeable slice: 只交付任务 14.4（原 14.3）；14.1 与 14.3 已�
 **已关闭裁决 / routed deferrals**：
 
 - 已关闭裁决 #108：post-DONE 硬杀/cleanup-pending 留下的历史 scratch work 由本任务每源 startup hygiene 处理；它不是已知限制或后续 owner。
-- Routed deferral #127：Darwin `/dev/fd/FD_NUMBER` descriptor alias 瞬时不可用；测试只串行 synthetic heavy terminal hook，不为生产 controller 增加 forcing/collect 全局锁。
+- 已关闭 deferral #127（PR #217）：Darwin canonical reader 已改为同一 no-follow FD 的有界不可变内存交接，不再依赖 `/dev/fd`；Linux `/proc/self/fd` 成功路径不变。synthetic heavy terminal hook 的测试串行模型保留，生产 controller 未增加 forcing/collect 全局锁。
 - M4：真实 worker/receipt、`sacct ExitCode` 输出的现场复核、跨进程活作业查询与人工操作 receipt、cron、node-22/NFS 真运行；Slurm 退出码 provider 本身及 CLI 注入由 M2 收尾任务实现。
 
 **Non-goals**：

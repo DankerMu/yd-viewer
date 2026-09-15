@@ -92,7 +92,7 @@ NWM 当前物理角色必须牢记：
 - node-22 登录节点和 Slurm 计算节点共同可见 `/scratch`；
 - Slurm 计算节点看不到 `/ghdc` yd NFS；
 - 作业只能在 yd 自己的 `/scratch/.../yd-loop/work/...` 内运行；
-- 控制器负责在取得 exact-work ownership token 后、提交作业前，把 #171 已验证的 source prepared variant exact five 与精确 cycle state 从 NFS 搬入同一 work 的固定 `input/`，并以 canonical、checksum/identity 绑定的 `yd.staged-inputs.json` 重验；
+- 控制器取得 exact-work ownership 后，提交作业前将完整固定 yd native v2 变体与精确 cycle state 搬入同一 work 的 `input/`；沿用既有 staged copy/loader、checksum 和 owner，不添加通用包框架或重复整包验证；
 - `AttemptRequest.variant_dir`/`state_path` 的 NFS source 路径只供登录节点 `driver.prepare` 对账；worker argv/环境、attempt handoff、receipt 与计算节点 assemble 输入只能引用已验证的 work-local capability，不得携带 `YD_ROOT` 路径；
 - 计算节点不能直接写 `YD_ROOT/output` 或 `YD_ROOT/states`。
 
@@ -171,8 +171,9 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 - 活动解释器为 `/scratch/frd_muziyao/NWM/.venv/bin/python`；
 - NWM #1831 维护窗口完成前，禁止在 node-22 NWM checkout 执行 `uv sync`、裸 `uv run` 或任何会隐式重建 `.venv` 的命令；
 - `--active` 不是安全替代；解释器缺失时 fail closed；
-- `prepare` 薄外壳只能用上述精确解释器调用已确认的 mapping-builder module；
+- `prepare` 用上述精确解释器执行随 yd 分发的薄 driver 脚本，直接复用已确认的 NWM mapping 库；不执行 resolution-only CLI 假装 build，不修改 NWM checkout；
 - yd 不安装、不升级、不修复 NWM `.venv`。
+- 子进程 PYTHONPATH 只指向明确 NWM checkout，去掉 DATABASE_URL/PYTHONHOME，不继承其它 Python 路径；保留 venv 解释器的原始绝对路径，不 resolve 到系统解释器；
 
 此约束不意味着 yd 日常依赖 NWM 环境；它只约束一次性 builder 调用。
 
@@ -182,7 +183,7 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 
 实现完成后，所有操作只走本仓 CLI：
 
-- `prepare --baseline <基线模型包路径>`：一次性从外部基线包生成 `yd_gfs`、`yd_ifs` 与两个 GeoJSON；基线包路径只在本次调用传入，不入 `config.toml`/`local.toml`（compute-loop §6.1）；
+- `prepare --baseline <模型目录>`：目录直接含 `yd.*` 与 `gis/river.shp`/`domain.shp`，一次性生成两个完整 source 变体及 GeoJSON。真实 driver/native 适配代码归 M2，M4 只做现场验证；baseline 路径不入 config/local。旧 five-only 变体需在空目标重新 prepare，不自动覆盖现有数据；
 - `init`：只在全新根建立首态；已有任一普通状态文件、`states/<source>` 自身或其树内有任一 symlink、或已有 `DONE` 时必须拒绝；symlink 不跟随且不区分目标类型；
 - `run`：日常循环，不自动 bootstrap；`output/` 根缺失或不是目录时必须停源，不能当作全新链，也不能触发状态/产物残留清理；M2 必须先把它接到 `controller.run_sources`，逐源注入生产 Slurm executor、attempt driver、10 秒 poll wait 与独立失败退出码 provider，M4 只做真实 node-22 验证和 cron 安装。
 

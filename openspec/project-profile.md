@@ -27,6 +27,7 @@ Risk axes:
 
 Typical evidence:
 - 合成目录树 fixture + 注入式 fake（executor / builder / SHUD 调用）
+- prepare-only driver 必须在明确 NWM pin 环境对小型合法 native 几何/网格实际调用库并走 CLI；fake builder/进程边界只证明对应 seam，不计为真实 prepare 完成。原 NWM checkout/venv 不修改，本地证明不替代 M4。
 - 记录型文件操作断言（顺序、终名、uid/gid/mode 不继承 scratch）
 - 字节级 roundtrip（cfg.ic 分段解析回写）
 
@@ -42,6 +43,7 @@ Verification matrix:
 - `producer/src/yd_producer/**` -> `cd producer && uv run pytest` -> pytest 全绿，新行为有对应用例
 - `producer/**` 任意改动 -> `cd producer && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
 - `producer/pyproject.toml` / `uv.lock` -> `cd producer && uv sync --frozen` -> 无 lock drift；CI producer job 绿
+- prepare driver / `nwm.invoke_mapping_builder` / default builder -> 受控 pin 环境中的真实 `yd-producer prepare` CLI smoke -> 双源 loader 接受、稳定身份/bytes、真实失败不提交四终名；普通 pytest/CI 不能替代该库执行证据
 - `viewer/src/yd_viewer/**` -> `cd viewer && uv run pytest && uv run ruff check . && uv run ruff format --check .` -> 退出码 0
 - `openspec/**` -> `openspec validate --all` -> 退出码 0
 - `openspec/changes/<name>/**` -> `bash scripts/check-stage-pipeline-log.sh origin/master` -> 该 change 在 `docs/stage-pipeline-log.jsonl` 有条目

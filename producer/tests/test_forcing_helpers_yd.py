@@ -1,12 +1,15 @@
 """Issue #14 yd-authored helper tests: canonical JSON, grid identity,
-descriptor alias, bounded JSON, and direct-grid contract parser."""
+descriptor-bound NetCDF, bounded JSON, and direct-grid contract parser."""
 
 from __future__ import annotations
 
+import errno
 import inspect
 import json
-from datetime import datetime, timedelta, timezone
+import os
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,8 +31,16 @@ from yd_producer.forcing.direct_grid_contract import (
 )
 from yd_producer.forcing.file_store import FileForcingRepository, ForcingStoreError
 from yd_producer.forcing.grid_identity import grid_identity_hash, grid_identity_tuples
-from yd_producer.forcing.netcdf_open import descriptor_alias_path
-from yd_producer.store.object_store import sha256_bytes
+from yd_producer.forcing.netcdf_open import open_canonical_netcdf
+from yd_producer.forcing.producer import (
+    ForcingTimeseriesRow,
+    _met_stations_from_direct_grid_contract,
+    format_shud_forcing_package,
+)
+from yd_producer.forcing.shud_forcing_contract import (
+    CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+)
+from yd_producer.store.object_store import LocalObjectStore, sha256_bytes
 
 # --- canonical_json ---------------------------------------------------------
 
@@ -147,37 +158,205 @@ def test_load_bounded_json_accepts_wellformed() -> None:
     assert load_bounded_json(b'{"a": 1}') == {"a": 1}
 
 
-# --- descriptor alias -------------------------------------------------------
+# --- Darwin descriptor-memory handoff ---------------------------------------
 
 
-def test_descriptor_alias_path_prefers_linux_then_darwin(tmp_path: Path) -> None:
-    import os
+def _canonical_netcdf_bytes(
+    values: tuple[float, float, float] = (1.25, 2.5, 3.75),
+    source: str = "gfs",
+) -> bytes:
+    import tempfile
 
-    fd = os.open(tmp_path / "x", os.O_CREAT | os.O_RDWR)
-    try:
-        alias = descriptor_alias_path(fd)
-        assert str(alias).startswith("/proc/self/fd/") or str(alias).startswith(
-            "/dev/fd/"
-        )
-    finally:
-        os.close(fd)
+    import netCDF4
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp).resolve() / "canonical.nc"
+        with netCDF4.Dataset(path, "w", format="NETCDF4") as native:
+            native.createDimension("cell", 3)
+            variable = native.createVariable("value", "f8", ("cell",))
+            variable[:] = list(values)
+            native.source = source
+        return path.read_bytes()
 
 
-def test_descriptor_alias_path_raises_when_no_alias(
+def _force_platform(monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
+    from yd_producer.forcing import netcdf_open
+
+    monkeypatch.setattr(netcdf_open, "sys", SimpleNamespace(platform=platform))
+
+
+def _capture_admitted_fd(
+    monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]
+) -> None:
+    from yd_producer.forcing import netcdf_open
+
+    original_open = netcdf_open.open_file_no_follow
+
+    def capturing_open(path: Path, *, containment_root: Path | None = None) -> int:
+        file_fd = original_open(path, containment_root=containment_root)
+        captured["fd"] = file_fd
+        captured["path"] = path
+        return file_fd
+
+    monkeypatch.setattr(netcdf_open, "open_file_no_follow", capturing_open)
+
+
+def _capture_native(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> None:
+    import xarray as xr
+
+    real_store = xr.backends.NetCDF4DataStore
+
+    def capturing_store(native: Any, *args: Any, **kwargs: Any) -> Any:
+        captured["native"] = native
+        return real_store(native, *args, **kwargs)
+
+    monkeypatch.setattr(xr.backends, "NetCDF4DataStore", capturing_store)
+
+
+def _assert_native_and_fd_closed(captured: dict[str, Any]) -> None:
+    assert not captured["native"].isopen()
+    with pytest.raises(OSError) as closed:
+        os.fstat(captured["fd"])
+    assert closed.value.errno == errno.EBADF
+
+
+def _write_canonical(tmp_path: Path, payload: bytes | None = None) -> tuple[Any, str]:
+    store = LocalObjectStore(tmp_path)
+    key = "canonical/gfs/2026050700/air_temperature_2m/value.nc"
+    content = payload if payload is not None else _canonical_netcdf_bytes()
+    store.write_bytes_atomic(key, content)
+    return store, key
+
+
+def test_darwin_alias_ebadf_reads_admitted_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import os
+    captured: dict[str, Any] = {}
+    _force_platform(monkeypatch, "darwin")
+    _capture_admitted_fd(monkeypatch, captured)
+    _capture_native(monkeypatch, captured)
+    real_lstat = os.lstat
 
-    monkeypatch.setattr(
-        "yd_producer.forcing.netcdf_open.os.lstat",
-        lambda p: (_ for _ in ()).throw(OSError()),
-    )
-    fd = os.open(tmp_path / "x", os.O_CREAT | os.O_RDWR)
-    try:
-        with pytest.raises(OSError, match="descriptor alias is unavailable"):
-            descriptor_alias_path(fd)
-    finally:
-        os.close(fd)
+    def fault_alias_lstat(
+        path: str | os.PathLike[str], *args: Any, **kwargs: Any
+    ) -> os.stat_result:
+        text = os.fspath(path)
+        if text.startswith(("/dev/fd/", "/proc/self/fd/")):
+            captured["alias_lstat_called"] = True
+            os.fstat(captured["fd"])
+            raise OSError(errno.EBADF, "injected alias EBADF")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr("yd_producer.forcing.netcdf_open.os.lstat", fault_alias_lstat)
+    store, key = _write_canonical(tmp_path)
+    with open_canonical_netcdf(store, key) as dataset:
+        assert dataset.value.values.tolist() == [1.25, 2.5, 3.75]
+        assert dataset.attrs["source"] == "gfs"
+    assert "alias_lstat_called" not in captured
+    _assert_native_and_fd_closed(captured)
+
+
+def test_darwin_post_admission_replacement_keeps_original_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    original = _canonical_netcdf_bytes()
+    replacement = _canonical_netcdf_bytes(values=(9.0, 8.0, 7.0), source="ifs")
+    _force_platform(monkeypatch, "darwin")
+    _capture_native(monkeypatch, captured)
+    from yd_producer.forcing import netcdf_open
+
+    original_open = netcdf_open.open_file_no_follow
+
+    def replacing_open(path: Path, *, containment_root: Path | None = None) -> int:
+        file_fd = original_open(path, containment_root=containment_root)
+        captured["fd"] = file_fd
+        path.unlink()
+        path.write_bytes(replacement)
+        return file_fd
+
+    monkeypatch.setattr(netcdf_open, "open_file_no_follow", replacing_open)
+    store, key = _write_canonical(tmp_path, original)
+    with open_canonical_netcdf(
+        store, key, expected_checksum=sha256_bytes(original)
+    ) as dataset:
+        assert dataset.value.values.tolist() == [1.25, 2.5, 3.75]
+        assert dataset.attrs["source"] == "gfs"
+    _assert_native_and_fd_closed(captured)
+
+
+def test_darwin_observed_growth_without_checksum_rejects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    payload = _canonical_netcdf_bytes()
+    _force_platform(monkeypatch, "darwin")
+    _capture_admitted_fd(monkeypatch, captured)
+    from yd_producer.forcing import netcdf_open
+
+    real_fstat = os.fstat
+
+    def growing_fstat(fd: int) -> os.stat_result:
+        result = real_fstat(fd)
+        if captured.get("fd") == fd and not captured.get("grown"):
+            captured["initial_size"] = result.st_size
+            captured["grown"] = True
+            with captured["path"].open("ab") as handle:
+                handle.write(b"x")
+        return result
+
+    monkeypatch.setattr(netcdf_open.os, "fstat", growing_fstat)
+    store, key = _write_canonical(tmp_path, payload)
+    with (
+        pytest.raises(ValueError, match=f"observed more than {len(payload)}") as caught,
+        open_canonical_netcdf(store, key, max_bytes=len(payload)),
+    ):
+        pass
+    assert f"size {len(payload)} exceeds" not in str(caught.value)
+    assert captured["initial_size"] == len(payload)
+    with pytest.raises(OSError) as closed:
+        os.fstat(captured["fd"])
+    assert closed.value.errno == errno.EBADF
+
+
+def test_darwin_native_created_setup_failure_closes_owners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    _force_platform(monkeypatch, "darwin")
+    _capture_admitted_fd(monkeypatch, captured)
+    import xarray as xr
+
+    def exploding_store(native: Any, *args: Any, **kwargs: Any) -> Any:
+        captured["native"] = native
+        raise RuntimeError("setup injection")
+
+    monkeypatch.setattr(xr.backends, "NetCDF4DataStore", exploding_store)
+    store, key = _write_canonical(tmp_path)
+    with (
+        pytest.raises(RuntimeError, match="setup injection"),
+        open_canonical_netcdf(store, key),
+    ):
+        pass
+    _assert_native_and_fd_closed(captured)
+
+
+def test_darwin_context_body_failure_closes_owners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    _force_platform(monkeypatch, "darwin")
+    _capture_admitted_fd(monkeypatch, captured)
+    _capture_native(monkeypatch, captured)
+    store, key = _write_canonical(tmp_path)
+    with (
+        pytest.raises(RuntimeError, match="body injection"),
+        open_canonical_netcdf(store, key) as dataset,
+    ):
+        assert dataset.value.values.tolist() == [1.25, 2.5, 3.75]
+        assert dataset.attrs["source"] == "gfs"
+        raise RuntimeError("body injection")
+    _assert_native_and_fd_closed(captured)
 
 
 # --- contract parser --------------------------------------------------------
@@ -363,3 +542,79 @@ def test_file_repository_has_no_independent_asset_byte_limit() -> None:
             FileForcingRepository.load_direct_grid_validation_assets
         ).parameters
     )
+
+
+# --- station-index geometry precision ---------------------------------------
+
+
+def test_format_shud_forcing_package_preserves_full_precision_station_geometry() -> (
+    None
+):
+    manifest = _base_manifest()
+    first = dict(manifest["station_bindings"][0])
+    first.update(
+        longitude=116.1234567890123,
+        latitude=39.87654321098765,
+        x=1540123.4567890123,
+        y=4123456.789012345,
+        z=3375.123456789012,
+    )
+    second = {
+        "station_id": "forc_002",
+        "shud_forcing_index": 2,
+        "forcing_filename": "X2.csv",
+        "longitude": 100.0,
+        "latitude": 30.0,
+        "x": 1.0,
+        "y": 2.0,
+        "z": -12.345678901234,
+        "grid_id": first["grid_id"],
+        "grid_cell_id": "1",
+    }
+    manifest["station_bindings"] = [first, second]
+    contract = parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+    stations = _met_stations_from_direct_grid_contract(
+        contract, basin_version_id="basin_v1"
+    )
+    cycle_time = datetime(2026, 5, 7, tzinfo=UTC)
+    rows = tuple(
+        ForcingTimeseriesRow(
+            forcing_version_id="forcing_v1",
+            basin_version_id="basin_v1",
+            station_id=station.station_id,
+            valid_time=cycle_time,
+            source_id="gfs",
+            variable="PRCP",
+            value=116.1234567890123,
+            unit="mm/day",
+            native_resolution=None,
+        )
+        for station in stations
+    )
+    files = format_shud_forcing_package(rows, stations=stations, cycle_time=cycle_time)
+    expected_index = (
+        b"2 20260507\n"
+        b"shud\n"
+        b"ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        b"1\t116.1234567890123\t39.87654321098765\t1540123.4567890123"
+        b"\t4123456.789012345\t3375.123456789012\tX1.csv\n"
+        b"2\t100.0\t30.0\t1.0\t2.0\t-12.345678901234\tX2.csv\n"
+    )
+    expected_csv = (
+        b"1\t6\t20260507\t20260507\n"
+        b"Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        b"0\t116.1234568\t0\t0\t0\t0\n"
+    )
+    index_text = files[CANONICAL_SHUD_FORCING_INDEX_MEMBER]
+    assert index_text.encode("utf-8") == expected_index
+    for line, binding in zip(
+        index_text.splitlines()[3:], contract.stations, strict=True
+    ):
+        _index, lon, lat, x, y, z, _filename = line.split("\t")
+        assert float(lon) == binding.longitude
+        assert float(lat) == binding.latitude
+        assert float(x) == binding.x
+        assert float(y) == binding.y
+        assert float(z) == binding.z
+    assert files["shud/X1.csv"].encode("utf-8") == expected_csv
+    assert files["shud/X2.csv"].encode("utf-8") == expected_csv

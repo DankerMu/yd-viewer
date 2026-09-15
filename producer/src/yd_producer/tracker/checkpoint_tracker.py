@@ -103,6 +103,7 @@ from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from yd_producer import state
+from yd_producer._native_input import is_native_run_directory, native_run_paths
 from yd_producer.assemble import (
     AssemblyError,
     RunDirectory,
@@ -497,9 +498,20 @@ def ensure_twelve_hour_checkpoint(
     # 静态输入快照（C.1）：初态可解析、全部字节有界；forcing index/CSV 流式摘要。
     snapshot = _snapshot_inputs(run_directory, work_root)
 
-    # 临时参数（C.2）：唯一 writer、只改 END。写失败是整轮失败，runner 零调用。
     try:
-        recovery_parameter = render_shud_parameters(snapshot.parameter, end="0.5")
+        recovery_mode = (
+            "native"
+            if is_native_run_directory(
+                path=run_directory.path,
+                state_path=run_directory.state_path,
+                parameter_path=run_directory.parameter_path,
+                forcing_index_path=run_directory.forcing_index_path,
+            )
+            else "legacy"
+        )
+        recovery_parameter = render_shud_parameters(
+            snapshot.parameter, end="0.5", mode=recovery_mode
+        )
         safe_fs.atomic_write_bytes_no_follow(
             run_directory.parameter_path,
             recovery_parameter,
@@ -633,9 +645,6 @@ def _validate_run_directory(
     path = run_directory.path
     if not isinstance(path, Path) or not path.is_absolute():
         raise TrackerError("run_directory.path must be an absolute path")
-    # `assemble()` 的 run 目录名是它自己写死的字面量（`registry.work_dir / "model"`），
-    # work 根即其父目录。只验「绝对 + 等于 tracker.run_dir」时，伪造另一个绝对目录并把
-    # tracker 与全部字段同步改过去就能过关，而 recovery root 会被安到那棵树的父目录上。
     if path.name != RUN_DIRECTORY_NAME:
         raise TrackerError(
             f"run_directory.path must be the exact `<work>/{RUN_DIRECTORY_NAME}` directory"
@@ -651,16 +660,24 @@ def _validate_run_directory(
         ) from error
     work_root = path.parent
     project = tracker.project_name
-    expected = {
+    native_expected = native_run_paths(path)
+    legacy_expected = {
         "state_path": path / f"{project}.cfg.ic",
         "parameter_path": path / f"{project}.para",
         "forcing_index_path": path / f"{project}.tsd.forc",
     }
-    for label, value in expected.items():
-        actual = getattr(run_directory, label)
-        if actual != value:
-            raise TrackerError(f"{label} must be the exact top-level path {value}")
-        _require_regular(actual, path, label)
+    actual = {
+        "state_path": run_directory.state_path,
+        "parameter_path": run_directory.parameter_path,
+        "forcing_index_path": run_directory.forcing_index_path,
+    }
+    if actual != native_expected and actual != legacy_expected:
+        raise TrackerError(
+            "state_path, parameter_path, and forcing_index_path must be the exact "
+            "native nested combination or the exact legacy flat combination"
+        )
+    for label, value in actual.items():
+        _require_regular(value, path, label)
     csvs = run_directory.forcing_csv_paths
     if not isinstance(csvs, tuple) or not csvs:
         raise TrackerError("forcing_csv_paths must be a non-empty tuple")

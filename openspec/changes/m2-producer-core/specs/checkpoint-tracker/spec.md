@@ -25,6 +25,8 @@ tracker MUST 在 SHUD 运行期间轮询 `<project>.cfg.ic.update` 的 header �
 ### Requirement: 确定性补跑
 7 天运行成功但 T+12 未捕获时，补跑 MUST 使用同一 cycle T 初态与同一份 forcing，将 `END` 缩短为 0.5 天、`Update_IC_STEP=720`，在全新的专用输出目录执行一次同步 job-local 调用。只有精确 `<project>.cfg.ic.update` 经 relative-720 header、原生分段结构与 checksum 校验后才可成为 T+12 checkpoint；补跑参数文件随后 MUST 恢复主跑原 bytes，初态与 forcing 前后 MUST 不变。任一调用、校验、输入对账或恢复失败 MUST 判整轮失败，不写状态与 `DONE`。
 
+#202 native runtime 切片 MUST 同时迁移本 consumer 的私有布局检查与恢复参数模式：接受 `RunDirectory.path=model/` 且 state/parameter/index 位于 `model/input/yd/` 的完整 native 组合，保留独立 legacy assemble 的原有平铺组合及 containment/身份检查，不接受任意拼接路径。native 恢复必须在实际 nested parameter_path 上写 stock `KEY<whitespace>number` 语法的 END=0.5，并恢复该文件原 bytes；已捕获 checkpoint 的 native 输入同样须能通过布局检查而不调用 runner。该迁移归 #202 的 runtime 前置，不归禁止修改 tracker 文件的 #132 六文件 PR。
+
 #### Scenario: 补跑成功
 - **WHEN** 主跑漏采后以注入的假 SHUD 调用完成 0.5 天补跑
 - **THEN** 调用时参数为 END=0.5、Update_IC_STEP=720，runner 只见同一初态/forcing 与全新专用输出目录，校验后的末态被采纳为 T+12 checkpoint，主跑参数原 bytes 已恢复

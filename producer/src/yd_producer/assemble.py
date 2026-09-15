@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
 import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -20,6 +19,13 @@ from yd_producer._assemble_io import (
     bind_store,
     discover_variant_tree,
 )
+from yd_producer._assemble_stage import csv_path as _csv_path
+from yd_producer._assemble_stage import run_paths, write_stage
+from yd_producer._native_input import (
+    NATIVE_INPUT_DIR,
+    PREPARED_VARIANT_PARAMETER_FILENAME,
+)
+from yd_producer._native_input import render_shud_parameters as _render_shud_parameters
 from yd_producer.forcing import DirectGridForcingContract, ForcingProductionResult
 from yd_producer.forcing.bounded_json import BoundedJSONError, load_bounded_json
 from yd_producer.forcing.direct_grid_contract import (
@@ -52,19 +58,6 @@ AssemblyPhase = Literal[
 ]
 _FIELDS = "model_id basin_id basin_version_id river_network_version_id project_name"
 _IDENTITY_KEYS = "model_id basin_id basin_version_id river_network_version_id"
-_CSV = re.compile(r"^[A-Za-z0-9_.-]+\.csv$")
-_ASSIGNMENT = re.compile(
-    r"^(?P<prefix>[ \t]*)(?P<key>[A-Za-z_][A-Za-z0-9_]*)"
-    r"(?P<equals>[ \t]*=[ \t]*)(?P<value>[^\r\n]*)(?P<ending>\r?\n)?$"
-)
-_PARAMETERS = {
-    "START": "0",
-    "END": "7",
-    "DT_QR_DOWN": "60",
-    "Update_IC_STEP": "720",
-    "BINARY_OUTPUT": "1",
-    "ASCII_OUTPUT": "0",
-}
 
 
 class AssemblyError(RuntimeError):
@@ -285,15 +278,21 @@ def _assemble_kernel(
             raise ValueError("registry contract differs from prepared variant handoff.")
         identity, work = registry.identity, registry.work_dir
         project = identity.project_name
+        native = inputs.expected_contract is not None
         root = inputs.containment_root or inputs.variant_root
+        parameter_name = (
+            PREPARED_VARIANT_PARAMETER_FILENAME if native else f"{project}.para"
+        )
         parameter = fs.read_limited(
-            inputs.variant_root / f"{project}.para",
+            inputs.variant_root / parameter_name,
             inputs.parameter_check[0],
             root,
         )
         if checksum := inputs.parameter_check[1]:
             _fs.checksum(checksum, parameter, "parameter")
-        parameter = render_shud_parameters(parameter)
+        parameter = render_shud_parameters(
+            parameter, mode="native" if native else "legacy"
+        )
         warm_state = _state(
             inputs.state_path,
             inputs.states_root,
@@ -305,6 +304,8 @@ def _assemble_kernel(
         index, csvs = _forcing(registry, forcing, fs)
         outputs = {_csv_path(entry["relative_path"]) for entry in csvs}
         outputs.add(f"{project}.tsd.forc")
+        if native:
+            outputs.update({"input", str(NATIVE_INPUT_DIR)})
         roots = {path.parts[0] for path in inputs.variant_dirs if path != Path(".")}
         roots.update(path.parts[0] for path, *_ in inputs.variant_files)
         if collision := sorted(roots & outputs):
@@ -338,32 +339,20 @@ def _assemble_kernel(
         ) from error
     try:
         fs.directory(stage, work, create=True)
-        skipped = {Path(f"{project}.{suffix}") for suffix in ("cfg.ic", "para")}
-        for relative in inputs.variant_dirs:
-            if relative != Path("."):
-                fs.directory(stage / relative, work, create=True)
-        for relative, source, checksum in inputs.variant_files:
-            if relative not in skipped:
-                fs.copy_regular(
-                    source,
-                    stage / relative,
-                    root,
-                    work,
-                    expected_checksum=checksum,
-                )
-        for suffix, content in (("para", parameter), ("cfg.ic", warm_state)):
-            fs.write_new(stage / f"{project}.{suffix}", content, work)
-        store = LocalObjectStore(registry.object_store_root)
-        members = [(index, f"{project}.tsd.forc")]
-        members += [(entry, _csv_path(entry["relative_path"])) for entry in csvs]
-        for entry, name in members:
-            fs.copy_regular(
-                store.resolve_path(str(entry["uri"])),
-                stage / name,
-                store.root,
-                work,
-                expected_checksum=str(entry["checksum"]),
-            )
+        write_stage(
+            fs,
+            stage=stage,
+            work=work,
+            root=root,
+            inputs=inputs,
+            project=project,
+            parameter=parameter,
+            warm_state=warm_state,
+            index=index,
+            csvs=csvs,
+            object_store_root=registry.object_store_root,
+            native=native,
+        )
     except Exception as error:  # noqa: BLE001
         _abort(
             "Failed to stage SHUD run directory",
@@ -396,13 +385,14 @@ def _assemble_kernel(
             fs,
         )
     fs.require_named_root(work)
+    paths = run_paths(final, project, native)
     return RunDirectory(
         identity=identity,
         path=final,
         project_name=project,
-        state_path=final / f"{project}.cfg.ic",
-        parameter_path=final / f"{project}.para",
-        forcing_index_path=final / f"{project}.tsd.forc",
+        state_path=paths["state_path"],
+        parameter_path=paths["parameter_path"],
+        forcing_index_path=paths["forcing_index_path"],
         forcing_csv_paths=tuple(
             final / _csv_path(entry["relative_path"]) for entry in csvs
         ),
@@ -410,71 +400,18 @@ def _assemble_kernel(
     )
 
 
-def render_shud_parameters(content: bytes, *, end: Literal["7", "0.5"] = "7") -> bytes:
-    # 类型判据 MUST 先于成员判据：`not in {…}` 对 unhashable 实参（`[]`/`{}`/`["7"]`）抛裸 `TypeError`，把契约错误漏成第三种异常种类。
-    if not isinstance(end, str) or end not in {"7", "0.5"}:
-        raise AssemblyError("SHUD END must be '7' or '0.5'.", phase="validate")
-    if not isinstance(content, bytes):
-        raise AssemblyError("Parameter content must be bytes.", phase="validate")
-    if len(content) > MAX_OBJECT_MANIFEST_BYTES:
-        raise AssemblyError(
-            f"Parameter content exceeds {MAX_OBJECT_MANIFEST_BYTES} bytes.",
-            phase="validate",
-        )
+def render_shud_parameters(
+    content: bytes,
+    *,
+    end: Literal["7", "0.5"] = "7",
+    mode: Literal["legacy", "native"] = "legacy",
+) -> bytes:
     try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise AssemblyError(
-            "Parameter content must be strict UTF-8.", phase="validate"
-        ) from error
-    lines = text.splitlines(keepends=True)
-    result = list(lines)
-    ending = next(
-        (
-            "\r\n" if line.endswith("\r\n") else "\n"
-            for line in lines
-            if line.endswith(("\n", "\r"))
-        ),
-        "\n",
-    )
-    for key, value in (_PARAMETERS | {"END": end}).items():
-        matches: list[tuple[int, str, re.Match[str]]] = []
-        token = re.compile(rf"(?<![A-Za-z0-9_])\{{\{{{key}\}}\}}(?![A-Za-z0-9_])")
-        shell = re.compile(rf"(?<![A-Za-z0-9_])\$\{{{key}\}}(?![A-Za-z0-9_])")
-        for number, line in enumerate(result):
-            visible = line.split("#", 1)[0]
-            if not visible.strip():
-                continue
-            assignment = _ASSIGNMENT.fullmatch(line)
-            if assignment is not None and assignment.group("key") == key:
-                matches.append((number, "assignment", assignment))
-                continue
-            matches.extend((number, "token", item) for item in token.finditer(visible))
-            matches.extend((number, "shell", item) for item in shell.finditer(visible))
-        if len(matches) > 1:
-            raise AssemblyError(
-                f"SHUD parameter {key!r} has multiple authoritative occurrences.",
-                phase="validate",
-            )
-        if not matches:
-            if result and not result[-1].endswith(("\n", "\r")):
-                result[-1] += ending
-            result.append(f"{key} = {value}{ending}")
-            continue
-        number, kind, match = matches[0]
-        line = result[number]
-        if kind == "assignment":
-            old = match.group("value")
-            comment = ""
-            if "#" in old:
-                before, after = old.split("#", 1)
-                comment = before[len(before.rstrip(" \t")) :] + "#" + after
-            result[number] = (
-                f"{match.group('prefix')}{key}{match.group('equals')}{value}{comment}{match.group('ending') or ''}"
-            )
-        else:
-            result[number] = line[: match.start()] + value + line[match.end() :]
-    return "".join(result).encode("utf-8")
+        return _render_shud_parameters(
+            content, end=end, mode=mode, max_bytes=MAX_OBJECT_MANIFEST_BYTES
+        )
+    except (TypeError, ValueError) as error:
+        raise AssemblyError(str(error), phase="validate") from error
 
 
 def _identity(identity: WorkIdentity) -> None:
@@ -919,15 +856,6 @@ def _forcing(
             "SHUD CSV",
         )
     return indexes[0], tuple(csvs)
-
-
-def _csv_path(value: Any) -> str:
-    if not isinstance(value, str) or not value.startswith("shud/"):
-        raise ValueError("SHUD CSV path must be shud/<basename>.csv.")
-    name = value.removeprefix("shud/")
-    if "/" in name or not _CSV.fullmatch(name):
-        raise ValueError("SHUD CSV basename is unsafe.")
-    return name
 
 
 def _commit_probe(parent: Path, name: str, root: Path, _label: str) -> None:

@@ -7,6 +7,7 @@ import shutil
 from datetime import timedelta
 
 import pytest
+from assembly_fixtures import NATIVE_PARAMETER_EXPECTED
 from run_once_fixtures import (
     CYCLE,
     IFS_JOB_NAME,
@@ -21,6 +22,7 @@ from run_once_fixtures import (
     InProcessDriver,
     checkpoint_payload,
     make_terminal_hook,
+    step_clock,
     work_dir_for,
     write_config_local,
     write_raw_cycle,
@@ -37,14 +39,8 @@ from yd_producer import residue as residue_module
 from yd_producer import staged_inputs as staged_module
 from yd_producer import tracker as tracker_module
 from yd_producer.controller import RunError, RunOutcome, run_once
-from yd_producer.executor import FakeJobExecutor, FakeOutcome, JobState, StepClock
+from yd_producer.executor import FakeJobExecutor, FakeOutcome, JobState
 from yd_producer.staged_inputs import StagedWorkInputsError
-
-T0 = CYCLE.replace(hour=0, minute=0, second=0)
-
-
-def _clock():
-    return StepClock(start=T0, step=timedelta(seconds=10))
 
 
 def _success_outcome() -> dict[str, FakeOutcome]:
@@ -111,7 +107,7 @@ def _run(
                 final_state=JobState.SUCCEEDED, polls_until_terminal=2, started=True
             )
         }
-    clock = _clock()
+    clock = step_clock()
     fake = executor or FakeJobExecutor(outcomes=outcome, clock=clock)
     request_slot = {}
 
@@ -252,7 +248,7 @@ def test_full_public_seam_order_with_waits_in_place(
                 final_state=JobState.SUCCEEDED, polls_until_terminal=2, started=True
             )
         },
-        clock=_clock(),
+        clock=step_clock(),
     )
     request_slot = {}
     original_prepare = driver.prepare
@@ -359,7 +355,7 @@ def test_staging_precedes_driver_prepare_and_submit_with_exact_inputs(
         return original_prepare(request=request)
 
     driver.prepare = recording_prepare  # type: ignore[method-assign]
-    fake = FakeJobExecutor(outcomes=_success_outcome(), clock=_clock())
+    fake = FakeJobExecutor(outcomes=_success_outcome(), clock=step_clock())
     executor = _LedgerExecutor(fake, events)
     hook = HookedExecutor(
         executor,
@@ -437,7 +433,7 @@ def test_nfs_disconnect_after_prepare_uses_only_staged_capability(
         shutil.rmtree(source_variant)
         shutil.rmtree(source_state.parent.parent)
 
-    fake = FakeJobExecutor(outcomes=_success_outcome(), clock=_clock())
+    fake = FakeJobExecutor(outcomes=_success_outcome(), clock=step_clock())
     executor = HookedExecutor(
         fake,
         lambda *, job_id: make_terminal_hook(
@@ -462,10 +458,8 @@ def test_nfs_disconnect_after_prepare_uses_only_staged_capability(
     assert published_state.read_bytes() == expected_state
     assert expected_state != worker_assets["input/states/gfs/2026082612.cfg.ic"]
     assembled = dict(state.assembled_assets)
-    assert assembled["yd.binding"] == worker_assets["input/variant/yd.binding"]
-    assert (
-        assembled["gfs.sp.att"] == worker_assets["input/variant/gfs.sp.att"] == SP_ATT
-    )
+    assert assembled["yd.cfg.para"] == NATIVE_PARAMETER_EXPECTED
+    assert assembled["yd.sp.att"] == worker_assets["input/variant/yd.sp.att"] == SP_ATT
     forbidden = (source_variant.as_posix(), source_state.as_posix())
     evidence = "\n".join(path.as_posix() for path in state.worker_paths)
     assert all(item not in evidence for item in forbidden)
@@ -630,7 +624,7 @@ def test_failed_terminal_returns_job_failed_without_collect_or_publish(
                 final_state=JobState.FAILED, polls_until_terminal=1, started=True
             )
         },
-        clock=_clock(),
+        clock=step_clock(),
     )
     request_slot = {}
 
@@ -675,7 +669,7 @@ def test_stopped_for_missing_state_with_zero_submission(tmp_path: pathlib.Path) 
     write_variant(local)
     write_raw_cycle(local)
     # 不写 states：NO_INITIAL_STATE。
-    fake = FakeJobExecutor(outcomes={}, clock=_clock())
+    fake = FakeJobExecutor(outcomes={}, clock=step_clock())
     report = run_once(
         config=config,
         local=local,
@@ -709,7 +703,7 @@ def test_flock_encloses_the_whole_tick_and_skips_concurrent_entry(
         write_raw_cycle(local)
         state = HookState()
         driver = InProcessDriver(state)
-        fake = FakeJobExecutor(outcomes=_success_outcome(), clock=_clock())
+        fake = FakeJobExecutor(outcomes=_success_outcome(), clock=step_clock())
         request_slot = {}
 
         original_prepare = driver.prepare

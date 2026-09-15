@@ -1,6 +1,7 @@
 """`yd_producer.cli` entry tests. All cases call `cli.main(argv, env=...)`."""
 
 import argparse
+import json
 import os
 import subprocess
 from datetime import UTC, datetime
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from cli_fixtures import write_config, write_fake_interpreter, write_local
+from prepare_fixtures import write_baseline_package
 
 from yd_producer import cli, nwm
 from yd_producer import prepare as prepare_module
@@ -369,50 +371,44 @@ def _prepare_argv(tmp_path, **kwargs):
     return _argv("prepare", tmp_path, python=script, **kwargs)
 
 
-def test_prepare_with_executable_interpreter_reaches_production_builder_binding(
-    monkeypatch, capsys, tmp_path
-):
-    runner = Recorder(result=None)
-    monkeypatch.setattr(nwm, "invoke_mapping_builder", runner)
-    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
+def test_prepare_with_executable_interpreter_reaches_real_builder(capsys, tmp_path):
+    from yd_producer.nwm import PREPARE_DRIVER_SCRIPT
+
+    checkout = tmp_path.resolve() / "nwm" / "checkout"
+    checkout.mkdir(parents=True)
+    write_baseline_package(tmp_path / "baseline")
+    argv = _prepare_argv(tmp_path, checkout_root=checkout)
+    record = tmp_path.resolve() / "record.json"
+    yd_root = tmp_path.resolve() / "yd"
+
+    assert _exit_code(argv, env={}) == 1
+
     err = capsys.readouterr().err
-    assert prepare_module.BUILDER_OWNER in err
-    assert "归属 M4" in err
     assert "Traceback" not in err
-    assert runner.count == 0
-
-
-def _refuse_cleanup(*args, **kwargs):
-    raise prepare_module.safe_fs.SafeFilesystemError(
-        "injected cleanup failure", kind="io"
-    )
-
-
-def _patch_cleanup_refuse(monkeypatch):
-    monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
-    monkeypatch.setattr(
-        prepare_module.safe_fs, "remove_tree_allow_symlinks", _refuse_cleanup
-    )
-    monkeypatch.setattr(prepare_module.safe_fs, "rmtree_no_follow", _refuse_cleanup)
-
-
-def test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code(
-    monkeypatch, capsys, tmp_path
-):
-    _patch_cleanup_refuse(monkeypatch)
-    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
-    err = capsys.readouterr().err
-    assert "归属 M4" in err
-    assert "Traceback" not in err
+    assert "尚未落地" not in err
+    recorded = json.loads(record.read_text(encoding="utf-8"))
+    assert str(PREPARE_DRIVER_SCRIPT) in recorded["argv"]
+    assert not (yd_root / "input" / "models" / "yd_gfs").exists()
+    assert not (yd_root / "input" / "models" / "yd_ifs").exists()
+    assert not (yd_root / "input" / "viewer" / "rivers.geojson").exists()
+    assert not (yd_root / "input" / "viewer" / "boundary.geojson").exists()
 
 
 def test_cleanup_failure_text_reaches_stderr_on_the_failure_path(
     monkeypatch, capsys, tmp_path
 ):
-    _patch_cleanup_refuse(monkeypatch)
-    assert _exit_code(_prepare_argv(tmp_path), env={}) == 3
+
+    def raising(**kwargs):
+        cop = prepare_module.PrepareError("injected mapping failure")
+        cop.add_note("回滚/清理未完成：injected cleanup failure")
+        raise cop
+
+    monkeypatch.setattr(cli, "run_prepare", raising)
+
+    assert _exit_code(_prepare_argv(tmp_path), env={}) == 1
+
     err = capsys.readouterr().err
-    assert "归属 M4" in err
+    assert "injected mapping failure" in err
     assert "injected cleanup failure" in err
     assert "Traceback" not in err
 
@@ -436,25 +432,23 @@ def test_success_path_cleanup_warnings_reach_stderr_without_changing_the_exit_co
         assert warning in err
 
 
-def test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes(
+def test_existing_variant_target_exits_one_without_unimplemented_branch(
     monkeypatch, capsys, tmp_path
 ):
     monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
     argv = _prepare_argv(tmp_path)
     yd_root = tmp_path.resolve() / "yd"
-    assert _exit_code(argv, env={}) == 3
-    capsys.readouterr()
     (yd_root / "input" / "models" / "yd_gfs").mkdir(parents=True)
     assert _exit_code(argv, env={}) == 1
     err = capsys.readouterr().err
     assert str(yd_root / "input" / "models" / "yd_gfs") in err
     assert "Traceback" not in err
+    assert "归属 M4" not in err
 
 
 def test_top_level_staging_residue_exits_one_with_sorted_paths(
     monkeypatch, capsys, tmp_path
 ):
-    """CLI：顶层混合残留必须 exit 1（不是 3），stderr 含排序绝对路径与 docs/agent-ops.md。"""
     monkeypatch.setattr(nwm, "invoke_mapping_builder", Recorder(result=None))
     argv = _prepare_argv(tmp_path)
     yd_root = tmp_path.resolve() / "yd"

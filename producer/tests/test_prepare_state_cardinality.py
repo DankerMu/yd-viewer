@@ -115,7 +115,6 @@ def test_run_prepare_refuses_zero_or_two_top_level_cfg_ic(
     assert str(variant) in message
     assert f"命中 {hits} 个" in message
     assert "必须恰好 1 个" in message
-    assert "exactly five" not in message
     if hits == 0:
         assert "（无）" in message
         assert str(variant / VARIANT_CALIBRATED_STATE_NAME) not in message
@@ -142,11 +141,8 @@ def test_arbitrary_single_alias_is_still_refused(env, monkeypatch):
     probe = _probe(monkeypatch)
     created = _watch_yd_ensure(env, monkeypatch)
     builder = make_builder(env, {"gfs": VariantScript(mutate=_alias)})
-    with pytest.raises(PrepareError) as excinfo:
+    with pytest.raises(PrepareError):
         run(env, builder)
-    message = str(excinfo.value)
-    assert "命中" not in message
-    assert "exact five-entry" in message
     _no_publish(env, before, probe, created)
 
 

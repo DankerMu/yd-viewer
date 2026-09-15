@@ -8,12 +8,9 @@ test_database_url_guard_wins_before_parsing、test_run_rejects_missing_states_di
 
 退出码约定：
 
-- `2`：argparse 用法错误（未知子命令、缺子命令、缺必需参数），由 argparse 自身产生；
-  `run` 的 `ConfigError` / 配置装配错误同样返回 `2`；
-- `1`：守卫失败（`DATABASE_URL`、`states/` 缺失或为空、NWM 解释器 fail-closed、
-  `prepare` 编排的 `PrepareError`）；装载失败在 `prepare`/`init` 仍为 `1`；
-- `3`：`prepare` 的 `BuilderUnavailableError`；`run` 任一 `STOPPED` / `JOB_FAILED` /
-  `SUCCEEDED_CLEANUP_PENDING` 或运行期 controller/executor/driver/provider 错误。
+- `2`：argparse 用法错误，以及 `run` 的 `ConfigError` / 配置装配错误；
+- `1`：`prepare` / `init` 的守卫、配置与 `PrepareError`；
+- `3`：任一非全成功 run 报告或运行期 controller/executor/driver/provider 错误。
 
 **守卫位置**：`DATABASE_URL` 检查是 `main()` 的第一件事，先于 `parse_args` 与任何配置
 装载（agent-ops §2.2）。路径形态：`--config` / `--local` / `prepare` 的 `--baseline`
@@ -41,7 +38,7 @@ from yd_producer.controller import (
 from yd_producer.executor import ExecutorError
 from yd_producer.init import bootstrap
 from yd_producer.nwm import ProductionAttemptDriver
-from yd_producer.prepare import BuilderUnavailableError, PrepareError, run_prepare
+from yd_producer.prepare import PrepareError, run_prepare
 from yd_producer.runlock import RunLockError, run_with_lock
 from yd_producer.slurm import (
     SlurmJobExecutor,
@@ -54,7 +51,6 @@ __all__ = ["build_parser", "main"]
 EXIT_GUARD = 1
 EXIT_USAGE = 2
 EXIT_RUNTIME = 3
-EXIT_UNIMPLEMENTED = EXIT_RUNTIME
 POLL_INTERVAL_SECONDS = 10
 _SOURCE_ORDER = ("ifs", "gfs")
 
@@ -112,19 +108,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# --- 三入口委托目标 ----------------------------------------------------------
-#
-# 三个函数以**模块级名字**被 `main` 在调用时解析（不是导入时冻结进 dict），既是 spec
-# 的薄委托形态，也让测试能注入记录型 fake 断言"未被调用"这类负面证据。
-#
-# pinned: test_dispatch_resolves_delegates_at_call_time（把派发改成导入时冻结的 dict 后
-# 三个参数化用例全红）。注意其余注入用例对这三个名字只有 `count == 0` 的负面断言，对该
-# 变异体恒绿——判别性只来自这条"打了桩的那一支确实被调用一次"的正面证据。
-# `prepare` 内的 `run_prepare` 那一层另由 test_prepare_delegates_resolved_baseline_path
-# （`fake.count == 1`）钉住。
-#
-# 业务体归后续 issue（issue #3 fixture 的 Non-goals 明确划出）：本 issue 交付的是守卫、
-# 参数解析、退出码与薄外壳，全部为真实实现；走到这里说明全部守卫都已通过。
+# Delegates resolve through module globals at call time so each command remains
+# independently injectable while the real prepare, init, and run bodies own their
+# respective work.
 
 
 def prepare(local: LocalConfig, config: Config, baseline_root: Path) -> int:
@@ -137,10 +123,8 @@ def prepare(local: LocalConfig, config: Config, baseline_root: Path) -> int:
 
     `run_prepare` 以**模块级名字**解析（不在导入时冻结），与三个委托目标同纪律，使入口
     层测试能注入 fake 断言"未被调用"这类负面证据（pinned:
-    test_prepare_delegates_resolved_baseline_path，`fake.count == 1` 是正面证据）。编排的
-    两级失败由 `main` 分码：`BuilderUnavailableError` -> `3`，其余 `PrepareError` -> `1`
-    （pinned: test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes、
-    test_prepare_error_becomes_exit_one）。
+    test_prepare_delegates_resolved_baseline_path，`fake.count == 1` 是正面证据）。
+    编排失败由 `main` 转成退出码 `1`（pinned: test_prepare_error_becomes_exit_one）。
 
     成功路径上报告里的 `cleanup_warnings` MUST 打到 stderr（spec cli-config「prepare 的
     清理告警与残留证据 MUST 到达运维」）：它记的是 scratch 或 `YD_ROOT` 内 staging 的
@@ -303,31 +287,22 @@ def _print_notes(exc: BaseException) -> None:
     就等于把"`YD_ROOT` 里还有残留"这条证据丢掉。
     （"不打 traceback"pinned: test_config_error_becomes_exit_one_without_traceback、
     test_run_rejects_states_path_that_is_a_regular_file、
-    test_prepare_with_executable_interpreter_reaches_production_builder_binding、
-    test_cleanup_failure_does_not_downgrade_the_unimplemented_exit_code、
-    test_cleanup_failure_text_reaches_stderr_on_the_failure_path、
-    test_prepare_rejection_and_unimplemented_binding_use_different_exit_codes、
     test_prepare_error_becomes_exit_one、
-    test_cleanup_note_reaches_stderr_on_the_exit_one_path——八条各断言
+    test_cleanup_note_reaches_stderr_on_the_exit_one_path——各断言
     `"Traceback" not in err`。）
 
-    三个分派 handler 各调一次，而不是塞进 `_fail`：`BuilderUnavailableError` 那支退出码
-    是 `3`、根本不经 `_fail`，只改 `_fail` 覆不全。`run_prepare` 的 `except BaseException`
-    按类型无差别地给在途异常挂 note，故三支都可能拿到证据——但 `ConfigError` 那支今天按
-    构造不可达，见下面第 3 条。
+    `prepare` 与 `run` 的 handler 都直接调用本函数，确保失败清理证据不依赖 traceback。
 
-    三个调用点逐个交代（spec cli-config「prepare 的清理告警与残留证据 MUST 到达运维」的
-    失败路径子句没有退出码限定，故三支都要有交代）：
+    两个调用点逐个交代（spec cli-config「prepare 的清理告警与残留证据 MUST 到达运维」的
+    失败路径子句没有退出码限定）：
 
-    1. `BuilderUnavailableError`（退出码 `3`）pinned:
-       test_cleanup_failure_text_reaches_stderr_on_the_failure_path；
-    2. `PrepareError`（退出码 `1`）pinned:
+    1. `PrepareError`（退出码 `1`）pinned:
        test_cleanup_note_reaches_stderr_on_the_exit_one_path（cand-r3-1；用例里的 note 文本
        与 `str(exc)` 无公共子串，否则 `_fail` 单独即可满足断言、不具判别性）；
-    3. `ConfigError`（退出码 `1`）是**防御性声明**，今天按构造挂不上 note：
-       `nwm.check_interpreter` 跑在 `run_prepare` 之前、builder 抛出的 `ConfigError` 在
-       `prepare.py` 里被包装成 `PrepareError`、装载期的 `ConfigError` 由更早一个 handler
-       接走。（等价变异，不可判别：无可达输入能让它渲染出任何东西。）
+    2. `ConfigError`（退出码 `1`）：`nwm.check_interpreter` 跑在 `run_prepare` 之前；
+       builder 预检抛出的 `ConfigError`（缺失/非目录 checkout）经 `run_prepare` 原样
+       上抛后由本 handler 接住；装载期的 `ConfigError` 由更早一个 handler 接走。
+       回滚/清理失败仍以 `add_note` 附在该 `ConfigError` 上。
     """
     for note in getattr(exc, "__notes__", ()):
         print(note, file=sys.stderr)
@@ -375,10 +350,7 @@ def main(
         if args.command == "init":
             return init(local, config)
         return run(local, config)
-    except BuilderUnavailableError as exc:
-        print(f"错误：{exc}", file=sys.stderr)
-        _print_notes(exc)
-        return EXIT_UNIMPLEMENTED
+
     except PrepareError as exc:
         code = _fail(str(exc))
         _print_notes(exc)

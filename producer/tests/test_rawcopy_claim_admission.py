@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from test_rawcopy import CYCLE, build_tree, make_config
+from rawcopy_fixtures import CYCLE, build_tree, make_config
 
 from yd_producer import rawcopy as rawcopy_module
 from yd_producer._work_claim import claim_exact_work

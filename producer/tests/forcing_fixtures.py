@@ -94,7 +94,7 @@ def canonical_products_for_cycle(
     }[cycle_text]
     if grid_definition_uri is None:
         grid_definition_uri = (
-            "canonical/IFS/grid/ifs_0p25/grid.json"
+            "canonical/ifs/grid/ifs_0p25/grid.json"
             if source_id.lower() == "ifs"
             else f"canonical/{source_id}/grid/{grid_id}/grid.json"
         )

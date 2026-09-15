@@ -109,7 +109,6 @@ def make_config(
         output_interval_minutes=60,
         checkpoint_hours=(12,),
         reach_count=3988,
-        nwm_mapping_builder_module="workers.mapping_builder.cli",
         # issue #20 新增的必需字段；init 不读它，但 `Config` 零默认值，缺它即构造失败。
         nwm_canonical_grid_id=CanonicalGridConfig(
             gfs="fixture-grid-gfs", ifs="fixture-grid-ifs"

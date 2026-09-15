@@ -19,9 +19,10 @@ from run_once_fixtures import (
     CYCLE,
     T_PLUS_12,
     T_PLUS_24,
+    HookedExecutor,
     HookState,
     InProcessDriver,
-    bind_terminal_hook,
+    make_terminal_hook,
     success_outcome,
     write_config_local,
     write_raw_cycle,
@@ -333,6 +334,31 @@ def _lock_path(local) -> pathlib.Path:
     return path
 
 
+def _bind_terminal_hook(
+    driver: InProcessDriver,
+    state: HookState,
+    fake: FakeJobExecutor,
+    *,
+    on_terminal=None,
+) -> HookedExecutor:
+    request_slot: dict[str, object] = {}
+    original_prepare = driver.prepare
+
+    def capturing_prepare(*, request):
+        request_slot["request"] = request
+        return original_prepare(request=request)
+
+    driver.prepare = capturing_prepare
+
+    def make_hook(*, job_id):
+        request = request_slot["request"]
+        make_terminal_hook(request, state)()
+        if on_terminal is not None:
+            on_terminal(request, job_id)
+
+    return HookedExecutor(fake, make_hook)
+
+
 def _prepare(
     tmp_path: pathlib.Path,
     *,
@@ -352,7 +378,7 @@ def _prepare(
         outcomes=outcomes or {},
         clock=__import__("run_once_fixtures", fromlist=["step_clock"]).step_clock(),
     )
-    executor = bind_terminal_hook(driver, state, fake, on_terminal=on_terminal)
+    executor = _bind_terminal_hook(driver, state, fake, on_terminal=on_terminal)
     return config, local, fake, driver, executor
 
 

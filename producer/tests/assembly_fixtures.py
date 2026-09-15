@@ -6,11 +6,15 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
+import sys
+from collections import namedtuple
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from yd_producer._work_claim import WorkClaim, claim_exact_work
 from yd_producer.assemble import (
     WorkIdentity,
     WorkRegistry,
@@ -24,6 +28,7 @@ from yd_producer.forcing import (
 )
 from yd_producer.forcing.grid_identity import grid_identity_hash
 from yd_producer.forcing.producer import GridPoint
+from yd_producer.staged_inputs import StagedWorkInputs, stage_work_inputs
 from yd_producer.store.object_store import LocalObjectStore
 
 CYCLE_00 = datetime(2026, 5, 7, 0, tzinfo=UTC)
@@ -59,6 +64,27 @@ PARAMETER_EXPECTED = (
     b"# BINARY_OUTPUT = comment only\n"
     b"BINARY_OUTPUT = 1\n"
     b"ASCII_OUTPUT = 0\n"
+)
+NATIVE_PARAMETER_TEMPLATE = (
+    b"KEEP unchanged\n"
+    b"START\told\n"
+    b"end 9132\n"
+    b"DT_QR_DOWN 1\n"
+    b"Update_IC_STEP old\n"
+    b"# BINARY_OUTPUT comment only\n"
+)
+NATIVE_PARAMETER_EXPECTED = (
+    b"KEEP unchanged\n"
+    b"START\t0\n"
+    b"END\t7\n"
+    b"DT_QR_DOWN\t60\n"
+    b"Update_IC_STEP\t720\n"
+    b"# BINARY_OUTPUT comment only\n"
+    b"BINARY_OUTPUT\t1\n"
+    b"ASCII_OUTPUT\t0\n"
+)
+NATIVE_PARAMETER_RECOVERY = NATIVE_PARAMETER_EXPECTED.replace(
+    b"END\t7\n", b"END\t0.5\n"
 )
 PARAMETER_SAME_LINE = b"keep {{START}} ${END} {{DT_QR_DOWN}} trailing\n"
 PARAMETER_SAME_LINE_EXPECTED = (
@@ -118,6 +144,34 @@ IDENTITY_FIELDS = {
 
 def digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def stock_runtime_values(content: bytes) -> dict[str, float]:
+    """Parse native runtime keys with the stock whitespace-and-number grammar."""
+    aliases = {
+        "start": "START",
+        "end": "END",
+        "dt_qr_down": "DT_QR_DOWN",
+        "update_ic_step": "Update_IC_STEP",
+        "binary_output": "BINARY_OUTPUT",
+        "ascii_output": "ASCII_OUTPUT",
+    }
+    values: dict[str, float] = {}
+    for raw in content.decode("utf-8").splitlines():
+        visible = raw.split("#", 1)[0].strip()
+        if not visible or "=" in visible:
+            continue
+        tokens = visible.split()
+        if len(tokens) < 2:
+            continue
+        canonical = aliases.get(tokens[0].casefold())
+        if canonical is None:
+            continue
+        try:
+            values[canonical] = float(tokens[1])
+        except ValueError:
+            continue
+    return values
 
 
 def identity(cycle: datetime = CYCLE_00, *, source: str = "gfs") -> WorkIdentity:
@@ -486,3 +540,278 @@ def run_assemble(prepared_inputs):
         states_root=states,
         state_path=state,
     )
+
+
+CONSUMER_SCRIPT = r"""
+import json
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+import xarray as xr
+
+from yd_producer._work_claim import claim_exact_work
+from yd_producer.assemble import WorkIdentity, stage_work_registry
+from yd_producer.forcing import ForcingProducer, ForcingProducerConfig
+from yd_producer.forcing.file_store import FileForcingRepository
+from yd_producer.prepare_handoff import load_prepared_variant_handoff
+from yd_producer.staged_inputs import assemble_staged, stage_work_inputs
+from yd_producer.store.object_store import LocalObjectStore
+
+from assembly_fixtures import write_file_repository_canonical_catalog, write_state
+
+variant, root, source, grid = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+h = load_prepared_variant_handoff(variant_root=variant, source_id=source,
+    project_name="yd", grid_id=grid, max_manifest_bytes=65536, max_asset_bytes=65536)
+i = WorkIdentity(source_id=source, cycle_time=datetime(2026,5,7,tzinfo=UTC),
+    project_name=h.project_name, model_id=h.model_id, basin_id=h.basin_id,
+    basin_version_id=h.basin_version_id, river_network_version_id=h.river_network_version_id)
+state = write_state(root/"states", i)
+claim = claim_exact_work(work_root=root/"work", source=source, cycle=i.cycle_time,
+    cycle_name="2026050700")
+staged = stage_work_inputs(claim=claim, source_variant_dir=variant,
+    source_state_path=state, source=source, cycle=i.cycle_time,
+    project_name=h.project_name, grid_id=grid, max_manifest_bytes=65536,
+    max_asset_bytes=65536, max_state_bytes=65536)
+assert staged.prepared == h
+r = stage_work_registry(work_root=claim.work_root, identity=i, contract=h.contract,
+    binding_content=staged.prepared.binding_content,
+    sp_att_content=staged.prepared.sp_att_content, max_asset_bytes=65536)
+store = LocalObjectStore(r.object_store_root)
+write_file_repository_canonical_catalog(store, i)
+catalog_path = store.resolve_path(f"canonical/{source}/2026050700/_catalog/catalog.json")
+catalog = json.loads(catalog_path.read_bytes())
+for row in catalog["products"]:
+    row["grid_id"] = grid
+    path = store.resolve_path(row["object_uri"])
+    with xr.open_dataset(path) as original:
+        ds = original.load()
+    if source == "ifs":
+        if row["variable"] == "pressure_surface":
+            ds = ds.rename({"pressure_surface": "surface_pressure"})
+            row["variable"] = "surface_pressure"
+        row["lead_time_hours"] = 0
+        row["valid_time"] = row["cycle_time"]
+        ds.attrs["lead_time_hours"] = 0
+        ds.attrs["valid_time"] = i.cycle_time.isoformat()
+        identifier = f"ifs_2026050700_{row['variable']}_f000"
+        row["canonical_product_id"] = identifier
+        row["object_uri"] = f"canonical/ifs/2026050700/{row['variable']}/{identifier}.nc"
+        path = store.resolve_path(row["object_uri"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+    ds.attrs["grid_id"] = grid
+    ds.to_netcdf(path, engine="netcdf4")
+    import hashlib
+    row["checksum"] = hashlib.sha256(path.read_bytes()).hexdigest()
+catalog_path.write_text(json.dumps(catalog))
+repo = FileForcingRepository(store, r.registry_manifest)
+f = ForcingProducer(config=ForcingProducerConfig(workspace_root=r.work_dir,
+    object_store_root=r.object_store_root, object_store_prefix=""),
+    repository=repo, object_store=store).produce(source_id=source, cycle_time=i.cycle_time,
+    model_id=i.model_id, basin_id=i.basin_id, basin_version_id=i.basin_version_id,
+    river_network_version_id=i.river_network_version_id)
+assert f.status == "forcing_ready"
+result = assemble_staged(registry=r, staged_inputs=staged, forcing=f)
+assert result.identity == i
+assert len(result.forcing_csv_paths) == 2
+assert (r.object_store_root/h.contract.binding_uri).read_bytes() == staged.prepared.binding_content
+print("prepared-handoff-to-real-forcing-assemble", source, h.model_id)
+"""
+
+
+def consumer_builder(env):
+    from prepare_fixtures import (
+        VARIANT_HANDOFF_NAME,
+        canonical_json_bytes,
+        make_builder,
+        sha256_literal,
+    )
+
+    points = [["cell-one", 1.0, 2.0], ["cell-two", 6.0, 7.0]]
+    signature = hashlib.sha256(
+        canonical_json_bytes({"grid_points": points})
+    ).hexdigest()
+    recording = make_builder(env)
+
+    def builder(request):
+        recording(request)
+        path = request.variant_root / VARIANT_HANDOFF_NAME
+        payload = json.loads(path.read_bytes())
+        contract = payload["direct_grid_forcing_contract"]
+        contract["grid_signature"] = signature
+        contract["station_bindings"] = [
+            {
+                "station_id": name,
+                "shud_forcing_index": index,
+                "forcing_filename": f"X{index}.csv",
+                "longitude": lon,
+                "latitude": lat,
+                "x": lon + 2,
+                "y": lat + 2,
+                "z": 5.0,
+                "grid_id": request.grid_id,
+                "grid_cell_id": name,
+            }
+            for index, (name, lon, lat) in enumerate(points, 1)
+        ]
+        sp = b"2 1\nTRI\tA\tB\tC\tFORC\n1\t0\t0\t0\t1\n2\t0\t0\t0\t2\n"
+        (request.variant_root / payload["sp_att_asset_name"]).write_bytes(sp)
+        checksum = sha256_literal(sp)
+        contract["sp_att_checksum"] = checksum
+        payload["file_checksums"]["yd.sp.att"] = checksum
+        path.write_bytes(canonical_json_bytes(payload))
+
+    return builder
+
+
+def consume_in_process(env, report, source):
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            CONSUMER_SCRIPT,
+            str(report.variants[source]),
+            str(env.scratch_root / "consumer"),
+            source,
+            getattr(env.config.nwm_canonical_grid_id, source),
+        ],
+        cwd=Path(__file__).parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+STAGED_CYCLE = datetime(2026, 8, 26, 12, tzinfo=UTC)
+STAGED_CYCLE_ID = "2026082612"
+STAGED_SOURCE = "gfs"
+STAGED_PROJECT = "yd"
+STAGED_GRID_ID = "fixture-grid-gfs"
+STAGED_MODEL_ID = "model-177"
+STAGED_LIMITS = {
+    "max_manifest_bytes": 65_536,
+    "max_asset_bytes": 65_536,
+    "max_state_bytes": 65_536,
+}
+STAGED_VARIANT_IDS = {
+    "model_id": STAGED_MODEL_ID,
+    "basin_id": "b",
+    "basin_version_id": "v",
+    "river_network_version_id": "r",
+}
+STAGED_CALIBRATED_STATE = b"CALIBRATED-VARIANT-STATE\n"
+STAGED_DEFAULT_PARAMETER = b"# hydrologic parameters\nKsatH 1.0e-4\n"
+StagedSource = namedtuple("StagedSource", "root variant_dir state_path files")
+
+
+def native_segmented_cfg_ic() -> bytes:
+    minute = round(STAGED_CYCLE.timestamp() / 60)
+    return (
+        f"2\t6\t{minute}\nIndex\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+        "1\t0.100000\t1e-3\t-0.0\t2.5E+01\t0.000000\n"
+        "2\t0.100000\t1e-3\t-0.0\t2.5E+01\t0.000000\n"
+        "Index\tRiver_Stage\n1\t0.100000\n"
+    ).encode()
+
+
+def staged_ids(**overrides: object) -> dict[str, object]:
+    values = dict(
+        STAGED_LIMITS,
+        source=STAGED_SOURCE,
+        cycle=STAGED_CYCLE,
+        project_name=STAGED_PROJECT,
+        grid_id=STAGED_GRID_ID,
+    )
+    values.update(overrides)
+    return values
+
+
+def write_staged_source(root: Path, **kwargs: object):
+    from prepare_fixtures import (
+        NATIVE_VARIANT_FILES,
+        VARIANT_HANDOFF_NAME,
+        binding_bytes,
+        contract_payload,
+        handoff_payload,
+        sp_att_bytes,
+        station_payload,
+        write_prepared_variant,
+    )
+
+    source_root, variant_dir = root.resolve(), root.resolve() / "variant"
+    state_path = source_root / "states" / STAGED_SOURCE / f"{STAGED_CYCLE_ID}.cfg.ic"
+    binding = kwargs.get("binding") or binding_bytes(
+        grid_id=STAGED_GRID_ID, source_id=STAGED_SOURCE
+    )
+    sp_att = kwargs.get("sp_att") or sp_att_bytes(source_id=STAGED_SOURCE)
+    stations = [station_payload(grid_id=STAGED_GRID_ID, index=1)]
+    if kwargs.get("two_stations"):
+        extra = station_payload(grid_id=STAGED_GRID_ID, index=2)
+        extra.update(latitude=7.0, longitude=6.0, x=8.0, y=9.0, z=10.0)
+        stations.append(extra)
+    shared = {
+        "source_id": STAGED_SOURCE,
+        "project_name": STAGED_PROJECT,
+        "grid_id": STAGED_GRID_ID,
+        "binding": binding,
+        "sp_att": sp_att,
+    }
+    contract = contract_payload(
+        model_id=STAGED_MODEL_ID, stations=stations, **shared
+    ) | {"grid_signature": "s", "model_input_package_id": "p"}
+    calibrated_state = kwargs.get("calibrated_state", b"calibrated-state\n")
+    parameter = kwargs.get("parameter", STAGED_DEFAULT_PARAMETER)
+    write_prepared_variant(
+        variant_dir,
+        state=calibrated_state,
+        parameter=parameter,
+        payload=handoff_payload(
+            ids=STAGED_VARIANT_IDS,
+            contract=contract,
+            checksums={
+                "yd.cfg.ic": calibrated_state,
+                "yd.cfg.para": parameter,
+            },
+            **shared,
+        ),
+        **shared,
+    )
+    state_bytes = native_segmented_cfg_ic()
+    state_path.parent.mkdir(parents=True)
+    state_path.write_bytes(state_bytes)
+    names = (*NATIVE_VARIANT_FILES, "yd.binding", VARIANT_HANDOFF_NAME)
+    files = {name: (variant_dir / name).read_bytes() for name in names}
+    staged = {f"input/variant/{name}": content for name, content in files.items()}
+    staged[f"input/states/{STAGED_SOURCE}/{STAGED_CYCLE_ID}.cfg.ic"] = state_bytes
+    return StagedSource(source_root, variant_dir, state_path, staged)
+
+
+def staged_claim(tmp_path: Path) -> WorkClaim:
+    return claim_exact_work(
+        work_root=(tmp_path / "scratch/work").resolve(),
+        source=STAGED_SOURCE,
+        cycle=STAGED_CYCLE,
+        cycle_name=STAGED_CYCLE_ID,
+    )
+
+
+def staged_pair(tmp_path: Path, leaf: str = "nfs-test-owned"):
+    return write_staged_source(tmp_path / leaf), staged_claim(tmp_path)
+
+
+def stage_inputs(claim: WorkClaim, source, **overrides: object):
+    values: dict[str, object] = {
+        "claim": claim,
+        "source_variant_dir": source.variant_dir,
+        "source_state_path": source.state_path,
+        **staged_ids(),
+    }
+    values.update(overrides)
+    return stage_work_inputs(**values)
+
+
+def staged_fixture(
+    tmp_path: Path,
+) -> tuple[StagedSource, WorkClaim, StagedWorkInputs]:
+    source, claim = staged_pair(tmp_path)
+    return source, claim, stage_inputs(claim, source)

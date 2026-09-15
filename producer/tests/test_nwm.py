@@ -4,19 +4,15 @@ import shutil
 import struct
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
 import pytest
+from assembly_fixtures import NATIVE_PARAMETER_TEMPLATE
 from cfg_ic_fixtures import build_cfg_ic
-from cli_fixtures import (
-    ALT_MAPPING_BUILDER_MODULE,
-    MAPPING_BUILDER_MODULE,
-    write_config,
-    write_fake_interpreter,
-    write_local,
-)
+from cli_fixtures import write_config, write_fake_interpreter, write_local
 from dat_fixtures import (
     DEFAULT_HEADER_TEXT,
     FIXED_HEADER_BYTES,
@@ -25,69 +21,94 @@ from dat_fixtures import (
     build_dat_bytes,
     expected_v2_size,
 )
+from prepare_fixtures import handoff_payload, write_prepared_variant
 
+from yd_producer import config as config_module
 from yd_producer import nwm
 from yd_producer.config import ConfigError, load_config, load_local
 from yd_producer.controller import AttemptRequest, RunError, RunOutcome, run_once
 from yd_producer.executor import JobRecord, JobState
 from yd_producer.nwm import (
+    PREPARE_DRIVER_SCRIPT,
     RECEIPT_FILENAME,
     ProductionAttemptDriver,
     ProductionAttemptError,
     invoke_mapping_builder,
 )
-from yd_producer.prepare import calibrated_state_path
 
 
 class RecordingRunner:
-    def __init__(self):
+    def __init__(self, delegate=None):
         self.calls: list[tuple[list[str], dict]] = []
+        self._delegate = delegate
 
-    def __call__(self, command, **kwargs):
-        self.calls.append((list(command), dict(kwargs)))
-        return subprocess.CompletedProcess(command, 0)
+    def __call__(self, command, *, cwd, env, capture_output, text):
+        self.calls.append(
+            (
+                list(command),
+                {
+                    "cwd": cwd,
+                    "env": env,
+                    "capture_output": capture_output,
+                    "text": text,
+                },
+            )
+        )
+        if self._delegate is not None:
+            return self._delegate(
+                command, cwd=cwd, env=env, capture_output=capture_output, text=text
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
 
-class CountingRunner:
-    def __init__(self):
-        self.calls = 0
-
-    def __call__(self, command, **kwargs):
-        self.calls += 1
-        return subprocess.run(command, check=False, **kwargs)
-
-
-def _load(tmp_path, module=MAPPING_BUILDER_MODULE, **local_kwargs):
-    config = load_config(write_config(tmp_path, module=module))
+def _load(tmp_path, **local_kwargs):
+    config = load_config(write_config(tmp_path))
     local = load_local(write_local(tmp_path, **local_kwargs), config)
     return local, config
 
 
 @pytest.mark.parametrize(
-    ("kind", "message", "args"),
+    ("kind", "field"),
     [
-        ("missing", "不存在", ["--package-path", "x"]),
-        ("directory", "不是普通文件", []),
-        ("non_executable", "不可执行", []),
+        ("missing-interpreter", "nwm.python"),
+        ("directory-interpreter", "nwm.python"),
+        ("non-executable-interpreter", "nwm.python"),
+        ("relative-interpreter", "nwm.python"),
+        ("slashless-interpreter", "nwm.python"),
+        ("missing-checkout", "nwm.checkout_root"),
+        ("file-checkout", "nwm.checkout_root"),
     ],
 )
-def test_invalid_interpreter_raises_and_starts_no_process(
-    tmp_path, kind, message, args
-):
-    candidate = tmp_path.resolve() / "interpreter"
-    if kind == "directory":
-        candidate.mkdir()
-    elif kind == "non_executable":
-        candidate.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        candidate.chmod(0o644)
+def test_invalid_prepare_runtime_starts_no_process(tmp_path, kind, field):
+    interpreter = tmp_path.resolve() / "interpreter"
+    checkout = tmp_path.resolve() / "checkout"
+    if kind == "missing-interpreter":
+        interpreter /= "absent"
+        checkout.mkdir()
+    elif kind == "directory-interpreter":
+        interpreter.mkdir()
+        checkout.mkdir()
+    elif kind == "non-executable-interpreter":
+        interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        interpreter.chmod(0o644)
+        checkout.mkdir()
+    elif kind == "relative-interpreter":
+        interpreter = Path("nwm/.venv/bin/python")
+        checkout.mkdir()
+    elif kind == "slashless-interpreter":
+        interpreter = Path("python")
+        checkout.mkdir()
     else:
-        candidate /= "absent"
-    local, config = _load(tmp_path, python=candidate)
+        interpreter = write_fake_interpreter(
+            tmp_path.resolve() / "fake-python", tmp_path.resolve() / "record.json"
+        )
+        if kind == "file-checkout":
+            checkout.write_text("not a directory\n", encoding="utf-8")
+    local, _config = _load(tmp_path, python=interpreter, checkout_root=checkout)
     runner = RecordingRunner()
-    with pytest.raises(ConfigError) as excinfo:
-        invoke_mapping_builder(local, config, args, runner)
-    assert excinfo.value.path == "nwm.python"
-    assert message in str(excinfo.value)
+    with pytest.raises(ConfigError) as caught:
+        invoke_mapping_builder(local, [], runner)
+    assert caught.value.path == field
     assert runner.calls == []
 
 
@@ -95,8 +116,7 @@ def _run_fake(
     tmp_path,
     checkout_name="checkout",
     exit_code=0,
-    args=("--dry-run",),
-    module=MAPPING_BUILDER_MODULE,
+    args=("--source", "gfs"),
 ):
     checkout = tmp_path.resolve() / checkout_name
     checkout.mkdir()
@@ -106,52 +126,60 @@ def _run_fake(
         record,
         exit_code=exit_code,
     )
-    local, config = _load(
-        tmp_path, module=module, checkout_root=checkout, python=script
+    local, _config = _load(tmp_path, checkout_root=checkout, python=script)
+    runner = RecordingRunner(subprocess.run)
+    completed = invoke_mapping_builder(local, list(args), runner)
+    return (
+        script,
+        checkout,
+        json.loads(record.read_text(encoding="utf-8")),
+        completed,
+        runner,
     )
-    runner = CountingRunner()
-    completed = invoke_mapping_builder(local, config, list(args), runner)
-    recorded = json.loads(record.read_text(encoding="utf-8"))
-    return script, checkout, recorded, completed, runner
 
 
-def test_fake_interpreter_receives_exact_command_and_context(tmp_path, monkeypatch):
+def test_mapping_builder_uses_only_configured_environment(tmp_path, monkeypatch):
     script, checkout, recorded, completed, _ = _run_fake(
-        tmp_path, args=("--package-path", "baseline")
+        tmp_path, args=("--source", "gfs", "--grid-id", "fixture-grid-gfs")
     )
     assert completed.returncode == 0
-    assert recorded["argv"][0].endswith(str(script))
-    assert recorded["argv"][1:3] == ["-m", MAPPING_BUILDER_MODULE]
-    assert recorded["argv"][3:] == ["--package-path", "baseline"]
-    assert recorded["cwd"] == str(checkout)
-    assert recorded["pythonpath"].split(os.pathsep)[0] == str(checkout)
-    assert all("uv" not in part for part in recorded["argv"])
-    assert "--active" not in recorded["argv"]
-    _, _, _, failed, runner = _run_fake(tmp_path, checkout_name="nonzero", exit_code=7)
-    assert failed.returncode == 7
-    assert runner.calls == 1
-    monkeypatch.setenv("PYTHONPATH", "/inherited/path")
-    _, inherited_checkout, inherited, _, _ = _run_fake(
-        tmp_path, checkout_name="inherited"
-    )
-    assert inherited["pythonpath"].split(os.pathsep) == [
-        str(inherited_checkout),
-        "/inherited/path",
+    assert recorded["argv"] == [
+        str(script),
+        str(PREPARE_DRIVER_SCRIPT),
+        "--source",
+        "gfs",
+        "--grid-id",
+        "fixture-grid-gfs",
     ]
+    assert recorded["cwd"] == recorded["pythonpath"] == str(checkout)
+    assert "uv" not in " ".join(recorded["argv"])
+    assert "--active" not in recorded["argv"]
+    assert recorded["argv"][0] != sys.executable
     _, first_checkout, first, _, _ = _run_fake(tmp_path, checkout_name="checkout-a")
     _, second_checkout, second, _, _ = _run_fake(tmp_path, checkout_name="checkout-b")
     assert first_checkout != second_checkout
-    assert first["cwd"] == str(first_checkout)
-    assert second["cwd"] == str(second_checkout)
-    assert first["pythonpath"].split(os.pathsep)[0] == str(first_checkout)
-    assert second["pythonpath"].split(os.pathsep)[0] == str(second_checkout)
-    assert MAPPING_BUILDER_MODULE != ALT_MAPPING_BUILDER_MODULE
-    _, _, first, _, _ = _run_fake(tmp_path, checkout_name="module-a")
-    _, _, second, _, _ = _run_fake(
-        tmp_path, checkout_name="module-b", module=ALT_MAPPING_BUILDER_MODULE
+    assert first["cwd"] == first["pythonpath"] == str(first_checkout)
+    assert second["cwd"] == second["pythonpath"] == str(second_checkout)
+    _, _, _, failed, runner = _run_fake(tmp_path, checkout_name="nonzero", exit_code=7)
+    assert failed.returncode == 7 and len(runner.calls) == 1
+    monkeypatch.setenv("PYTHONPATH", "/inherited/path")
+    monkeypatch.setenv("DATABASE_URL", "postgres://example")
+    monkeypatch.setenv("PYTHONHOME", "/poison/home")
+    isolated = tmp_path.resolve() / "isolated-checkout"
+    isolated.mkdir()
+    local, _config = _load(
+        tmp_path,
+        checkout_root=isolated,
+        python=write_fake_interpreter(
+            tmp_path.resolve() / "isolated-python", tmp_path.resolve() / "isolated.json"
+        ),
     )
-    assert first["argv"][1:3] == ["-m", MAPPING_BUILDER_MODULE]
-    assert second["argv"][1:3] == ["-m", ALT_MAPPING_BUILDER_MODULE]
+    runner = RecordingRunner()
+    invoke_mapping_builder(local, ["--source", "ifs"], runner)
+    kwargs = runner.calls[0][1]
+    assert kwargs["capture_output"] is True and kwargs["text"] is True
+    assert kwargs["env"]["PYTHONPATH"] == str(isolated)
+    assert "DATABASE_URL" not in kwargs["env"] and "PYTHONHOME" not in kwargs["env"]
 
 
 def test_symlinked_interpreter_is_invoked_verbatim_not_resolved(tmp_path):
@@ -163,10 +191,15 @@ def test_symlinked_interpreter_is_invoked_verbatim_not_resolved(tmp_path):
     venv_bin.mkdir(parents=True)
     link = venv_bin / "python"
     link.symlink_to(target)
-    local, config = _load(tmp_path, checkout_root=checkout, python=link)
-    invoke_mapping_builder(local, config, [], CountingRunner())
+    assert link.name != target.name
+    assert link.resolve() == target
+    local, _config = _load(tmp_path, checkout_root=checkout, python=link)
+    completed = invoke_mapping_builder(local, [], RecordingRunner(subprocess.run))
+    assert completed.returncode == 0
     recorded = json.loads(record.read_text(encoding="utf-8"))
     assert recorded["argv"][0] == str(link)
+    assert recorded["argv"][0] != str(target)
+    assert recorded["argv"][1] == str(PREPARE_DRIVER_SCRIPT)
 
 
 SOURCE = "gfs"
@@ -218,54 +251,41 @@ def _write_handoff(
         cell_id, signature = "0", TWO_CELL_GRID_SIGNATURE
     else:
         cell_id, signature = "0", CONVERTER_GRID_SIGNATURE
-    payload = {
-        "basin_id": "m2-synthetic-basin",
-        "basin_version_id": "m2-synthetic-basin-v1",
-        "direct_grid_forcing_contract": {
-            "applicable_source_ids": [source],
-            "binding_checksum": "sha256:" + BINDING_SHA256,
-            "binding_uri": "models/m2-synthetic-model/direct-grid/binding.json",
-            "forcing_mapping_mode": "direct_grid",
-            "grid_id": grid_id,
-            "grid_signature": signature,
-            "model_input_package_id": "m2-synthetic-package",
-            "sp_att_checksum": "sha256:" + SP_ATT_SHA256,
-            "sp_att_path": "input/yd.sp.att",
-            "station_bindings": [
-                {
-                    "forcing_filename": "m2-synthetic-station.csv",
-                    "grid_cell_id": cell_id,
-                    "grid_id": grid_id,
-                    "latitude": 0.0,
-                    "longitude": 0.0,
-                    "shud_forcing_index": 1,
-                    "station_id": "m2-synthetic-station",
-                    "x": 0.0,
-                    "y": 0.0,
-                    "z": 0.0,
-                }
-            ],
+    payload = handoff_payload(
+        source_id=source,
+        project_name="yd",
+        grid_id=grid_id,
+        binding=BINDING,
+        sp_att=SP_ATT,
+        checksums={
+            "yd.cfg.ic": VALID_CFG,
+            "yd.cfg.para": NATIVE_PARAMETER_TEMPLATE,
+            "yd.binding": BINDING,
+            "yd.sp.att": SP_ATT,
         },
-        "model_id": "m2-synthetic-model",
-        "project_name": "yd",
-        "river_network_version_id": "m2-synthetic-rivnet-v1",
-        "schema_version": "yd.prepare.direct-grid-handoff.v1",
-        "source_id": source,
-        "sp_att_asset_name": "explicit-synthetic.sp.att",
-    }
-    (variant / "yd.direct-grid-handoff.json").write_bytes(
-        json.dumps(
-            payload,
-            allow_nan=False,
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
     )
-    calibrated_state_path(variant).write_bytes(VALID_CFG)
-    (variant / "yd.para").write_bytes(b"# m2 synthetic parameters\n")
-    (variant / "yd.binding").write_bytes(BINDING)
-    (variant / "explicit-synthetic.sp.att").write_bytes(SP_ATT)
+    contract = payload["direct_grid_forcing_contract"]
+    contract["grid_signature"] = signature
+    contract["station_bindings"][0].update(
+        forcing_filename="m2-synthetic-station.csv",
+        grid_cell_id=cell_id,
+        latitude=0.0,
+        longitude=0.0,
+        station_id="m2-synthetic-station",
+        x=0.0,
+        y=0.0,
+        z=0.0,
+    )
+    write_prepared_variant(
+        variant,
+        source_id=source,
+        grid_id=grid_id,
+        binding=BINDING,
+        sp_att=SP_ATT,
+        state=VALID_CFG,
+        parameter=NATIVE_PARAMETER_TEMPLATE,
+        payload=payload,
+    )
     minute = round(CYCLE.timestamp() / 60)
     return VALID_CFG.replace(b"1 6 0 0\n", f"1 6 0 {minute}\n".encode(), 1)
 
@@ -288,13 +308,17 @@ def _write_shud(
     stdout_src.write_bytes(stdout)
     path.write_text(
         "#!/bin/sh\n"
-        'if [ "$1" = "-o" ]; then out=$2; project=$3; '
-        "else out=output/$1.out; project=$1; fi\n"
+        '[ "$1" = "-o" ] && [ "$#" -eq 3 ] || exit 64\n'
+        "out=$2; project=$3\n"
+        '[ -f "input/yd/$project.cfg.ic" ] || exit 65\n'
+        '[ -f "input/yd/$project.cfg.para" ] || exit 65\n'
+        '[ -s "input/yd/$project.tsd.forc" ] || exit 65\n'
+        'grep -Eq "^END[[:space:]]+(7|0\\.5)$" "input/yd/$project.cfg.para" || exit 65\n'
         f'if [ "${{out##*/}}" = f012 ]; then update="{recovery_src}"; '
         f'else update="{update_src}"; fi\n'
         'mkdir -p "$out"\n'
-        f'cp "{dat_src}" "$out/yd.rivqdown.dat"\n'
-        'cp "$update" "$out/yd.cfg.ic.update"\n'
+        f'cp "{dat_src}" "$out/$project.rivqdown.dat"\n'
+        'cp "$update" "$out/$project.cfg.ic.update"\n'
         f'cat "{stdout_src}"\n',
         encoding="utf-8",
     )
@@ -306,14 +330,11 @@ def _synthetic_shud(
     path: Path, *, stdout: bytes = b"shud-ok\n", recovery: bool = False
 ) -> Path:
     valid = build_cfg_ic(mesh_count=1, river_count=1, minute="720.000000").payload
+    update = build_cfg_ic(mesh_count=1, river_count=1, minute="0.000000").payload
     return _write_shud(
         path,
         dat=build_dat_bytes(nc=1, rows=168),
-        update=(
-            build_cfg_ic(mesh_count=1, river_count=1, minute="0.000000").payload
-            if recovery
-            else valid
-        ),
+        update=update if recovery else valid,
         recovery_update=valid if recovery else None,
         stdout=stdout,
     )
@@ -441,7 +462,7 @@ def _stage_synthetic(
     state_path = source_root / "states" / source / "2026010200.cfg.ic"
     state_path.parent.mkdir(parents=True)
     state_path.write_bytes(cycle_state)
-    staged = stage_work_inputs(
+    stage_work_inputs(
         claim=claim,
         source_variant_dir=variant_dir,
         source_state_path=state_path,
@@ -453,7 +474,7 @@ def _stage_synthetic(
         max_asset_bytes=4096,
         max_state_bytes=4096,
     )
-    return source_root, claim, variant_dir, state_path, staged, cycle_state
+    return source_root, claim, variant_dir, state_path
 
 
 def _request(
@@ -519,12 +540,11 @@ class _SubprocessJobExecutor:
             raise RuntimeError(f"unknown job {job_id}")
         self._polls += 1
         if self._polls == 1:
-            self._record = _record(
-                job_id,
-                name=self._spec.name,
+            self._record = replace(
+                self._record,
                 state=JobState.RUNNING,
-                ended=None,
-                resources=dict(self._spec.resources),
+                started_at=CYCLE,
+                ended_at=None,
             )
             return self._record
         completed = subprocess.run(
@@ -538,8 +558,8 @@ class _SubprocessJobExecutor:
             raise RuntimeError(completed.stderr or completed.stdout or "worker failed")
         if self._after_worker is not None:
             self._after_worker(self._spec.work_dir)
-        self._record = _record(
-            job_id, name=self._spec.name, resources=dict(self._spec.resources)
+        self._record = replace(
+            self._record, state=JobState.SUCCEEDED, started_at=CYCLE, ended_at=CYCLE
         )
         return self._record
 
@@ -558,26 +578,23 @@ def _prepared_attempt(tmp_path, **kwargs):
     shud_recovery = kwargs.pop("shud_recovery", False)
     source = kwargs.get("source", SOURCE)
     grid_id = kwargs.get("grid_id", GRID_ID)
-    source_root, claim, variant_dir, state_path, _staged, _cycle_state = (
-        _stage_synthetic(tmp_path, **kwargs)
-    )
+    source_root, claim, variant_dir, state_path = _stage_synthetic(tmp_path, **kwargs)
     shud = _synthetic_shud(
         tmp_path / (shud_name or f"shud-{source}"),
         stdout=shud_stdout,
         recovery=shud_recovery,
     )
-    request = _request(claim, variant_dir, state_path, shud, source=source)
-    attempt = ProductionAttemptDriver(grid_id=grid_id).prepare(request=request)
-    return source_root, claim, variant_dir, state_path, attempt
+    attempt = ProductionAttemptDriver(grid_id=grid_id).prepare(
+        request=_request(claim, variant_dir, state_path, shud, source=source)
+    )
+    return source_root, claim, attempt
 
 
 def _run_worker(tmp_path, monkeypatch, *, native=GFS_NATIVE, **kwargs):
     kwargs.setdefault("fixture", "converter")
     extra_cell = kwargs.get("extra_cell", False)
     source = kwargs.get("source", SOURCE)
-    source_root, claim, _variant_dir, _state_path, attempt = _prepared_attempt(
-        tmp_path, **kwargs
-    )
+    source_root, claim, attempt = _prepared_attempt(tmp_path, **kwargs)
     encoded = (claim.work_dir / "yd.attempt-handoff.json").read_text(encoding="utf-8")
     assert str(source_root) not in encoded
     assert "work_identity" not in encoded
@@ -594,74 +611,57 @@ def _run_worker(tmp_path, monkeypatch, *, native=GFS_NATIVE, **kwargs):
     return claim, attempt, completed
 
 
-def _production_tree(tmp_path: Path, *, source: str = SOURCE):
-    from yd_producer.config import (
-        CanonicalGridConfig,
-        Config,
-        CronLocal,
-        CycleConfig,
-        LocalConfig,
-        NwmLocal,
-        RawConfig,
-        RawSourceConfig,
-        SlurmSchema,
-        VariantsConfig,
-    )
-
+def _production_tree(tmp_path: Path):
     root = tmp_path.resolve()
-    yd_root = root / "yd"
-    scratch = root / "scratch"
-    raw_root = root / "nwm" / "raw"
-    variant = yd_root / "input" / "models" / ("yd_gfs" if source == "gfs" else "yd_ifs")
-    states = yd_root / "states" / source
+    yd_root, scratch, raw_root = root / "yd", root / "scratch", root / "nwm" / "raw"
+    variant = yd_root / "input" / "models" / "yd_gfs"
+    states = yd_root / "states" / SOURCE
     variant.mkdir(parents=True)
     states.mkdir(parents=True)
     (yd_root / "output").mkdir()
     scratch.mkdir()
-    (root / "run").mkdir()
-    cycle_state = _write_handoff(variant, source, GRID_ID, fixture="converter")
+    cycle_state = _write_handoff(variant, SOURCE, GRID_ID, fixture="converter")
     (states / "2026010200.cfg.ic").write_bytes(cycle_state)
-    native = GFS_NATIVE if source == "gfs" else IFS_NATIVE
-    _plant_nwm_raw_root(raw_root, source=source, native=native)
-    shud = _synthetic_shud(root / f"shud-{source}-prod")
-    config = Config(
+    _plant_nwm_raw_root(raw_root, source=SOURCE, native=GFS_NATIVE)
+    config = config_module.Config(
         forecast_days=7,
         output_interval_minutes=60,
         checkpoint_hours=(12,),
         reach_count=1,
-        nwm_mapping_builder_module="workers.mapping_builder.cli",
-        nwm_canonical_grid_id=CanonicalGridConfig(
+        nwm_canonical_grid_id=config_module.CanonicalGridConfig(
             gfs=GRID_ID, ifs="m2-synthetic-ifs-grid"
         ),
-        cycle=CycleConfig(hours=(0, 12)),
-        variants=VariantsConfig(gfs="input/models/yd_gfs", ifs="input/models/yd_ifs"),
-        raw=RawConfig(
-            ifs=RawSourceConfig(
+        cycle=config_module.CycleConfig(hours=(0, 12)),
+        variants=config_module.VariantsConfig(
+            gfs="input/models/yd_gfs", ifs="input/models/yd_ifs"
+        ),
+        raw=config_module.RawConfig(
+            ifs=config_module.RawSourceConfig(
                 lead_hours=FORECAST_HOURS,
                 variables=tuple(IFS_NATIVE),
                 bundles=("ifs.t{cycle_hour}z.f{lead}.bundle.grib2",),
                 f000_special=False,
             ),
-            gfs=RawSourceConfig(
+            gfs=config_module.RawSourceConfig(
                 lead_hours=FORECAST_HOURS,
                 variables=tuple(GFS_NATIVE),
                 bundles=("gfs.t{cycle_hour}z.pgrb2.0p25.f{lead}.bundle.grib2",),
                 f000_special=False,
             ),
         ),
-        slurm=SlurmSchema(required_fields=("partition", "account")),
+        slurm=config_module.SlurmSchema(required_fields=("partition", "account")),
     )
-    local = LocalConfig(
+    local = config_module.LocalConfig(
         yd_root=str(yd_root),
         scratch_root=str(scratch),
-        shud_binary=str(shud),
-        nwm=NwmLocal(
+        shud_binary=str(_synthetic_shud(root / "shud-gfs-prod")),
+        nwm=config_module.NwmLocal(
             raw_root=str(raw_root),
             checkout_root=str(root / "nwm" / "checkout"),
             python=str(sys.executable),
         ),
         slurm={"partition": "cpu", "account": "a"},
-        cron=CronLocal(
+        cron=config_module.CronLocal(
             lock_path=str(root / "run" / "yd-producer.lock"), log_dir=str(root / "log")
         ),
     )
@@ -717,6 +717,19 @@ def test_independent_worker_converts_source_raw_and_writes_receipt(
     assert receipt["source"] == source
     assert Path(receipt["scratch_dat"]) == attempt.scratch_dat
     assert attempt.scratch_dat == claim.work_dir / "model" / "yd.rivqdown.dat"
+    native_dir = claim.work_dir / "model" / "input" / "yd"
+    assert tuple(
+        Path(receipt["run_directory"][name])
+        for name in ("state_path", "parameter_path", "forcing_index_path")
+    ) == (
+        native_dir / "yd.cfg.ic",
+        native_dir / "yd.cfg.para",
+        native_dir / "yd.tsd.forc",
+    )
+    assert all(
+        Path(path).parent == claim.work_dir / "model"
+        for path in receipt["run_directory"]["forcing_csv_paths"]
+    )
     assert (claim.work_dir / "job.log").read_bytes() == expected_log
     assert receipt["merged_log_checksum"] == (
         f"sha256:{sha256(expected_log).hexdigest()}"
@@ -735,7 +748,7 @@ def test_independent_worker_converts_source_raw_and_writes_receipt(
 def test_worker_fails_closed_without_raw_or_database_url(
     tmp_path, monkeypatch, failure
 ):
-    source_root, claim, _variant_dir, _state_path, attempt = _prepared_attempt(
+    source_root, claim, attempt = _prepared_attempt(
         tmp_path, fixture="converter", shud_name=f"shud-{failure}"
     )
     shutil.rmtree(source_root)
@@ -753,7 +766,7 @@ def test_worker_fails_closed_without_raw_or_database_url(
 
 @pytest.mark.parametrize(
     "mutation",
-    [
+    (
         "job",
         "source",
         "cycle",
@@ -766,7 +779,7 @@ def test_worker_fails_closed_without_raw_or_database_url(
         "checksum",
         "oversize",
         "partial",
-    ],
+    ),
 )
 def test_collect_rejects_tampered_receipt_from_success(tmp_path, monkeypatch, mutation):
     claim, attempt, completed = _run_worker(tmp_path, monkeypatch)
@@ -801,19 +814,10 @@ def test_collect_rejects_tampered_receipt_from_success(tmp_path, monkeypatch, mu
 
 
 def test_prepare_rejects_nfs_path_in_handoff(tmp_path):
-    _source_root, claim, variant_dir, state_path, _staged, _cycle_state = (
-        _stage_synthetic(tmp_path, fixture="converter")
-    )
-    shud = tmp_path / "shud"
-    shud.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    shud.chmod(0o755)
-    request = _request(claim, variant_dir, state_path, shud)
-    attempt = ProductionAttemptDriver(grid_id=GRID_ID).prepare(request=request)
+    source_root, claim, attempt = _prepared_attempt(tmp_path, fixture="converter")
     text = (claim.work_dir / "yd.attempt-handoff.json").read_text(encoding="utf-8")
-    assert str(variant_dir) not in text
-    assert str(state_path) not in text
-    assert attempt.command[1:3] == ("-m", "yd_producer.nwm")
-    assert attempt.command[0] == sys.executable
+    assert str(source_root) not in text and "work_identity" not in text
+    assert attempt.command[:3] == (sys.executable, "-m", "yd_producer.nwm")
 
 
 def _plant_nwm_raw_root(raw_root: Path, *, source: str, native) -> None:
@@ -829,23 +833,22 @@ def _plant_nwm_raw_root(raw_root: Path, *, source: str, native) -> None:
     )
     base = raw_root / segment / cycle_id
     base.mkdir(parents=True)
-    variables = tuple(native)
     entries = []
     for lead in FORECAST_HOURS:
         name = pattern.replace("{cycle_hour}", cycle_hour).replace(
             "{lead}", f"{lead:03d}"
         )
         (base / name).write_bytes(
-            _encode_raw_bytes(native, lead, source=source, variables=variables)
+            _encode_raw_bytes(native, lead, source=source, variables=native)
         )
         cycle_iso = CYCLE.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
         valid_iso = (CYCLE + timedelta(hours=lead)).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
         remote = f"https://mirror.invalid/{segment}/{cycle_id}/{name}"
-        for variable in variables:
+        for variable in native:
             metadata = {
                 "cycle_time": cycle_iso,
                 "valid_time": valid_iso,
-                "bundle": {"layout": "per_forecast_hour", "variables": list(variables)},
+                "bundle": {"layout": "per_forecast_hour", "variables": list(native)},
                 "grib_short_name": variable,
                 "cfgrib_filter_by_keys": {"shortName": variable},
                 "logical_remote_url": remote,

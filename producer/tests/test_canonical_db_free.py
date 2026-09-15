@@ -381,7 +381,7 @@ def _write_ifs_netcdf_raw(store: LocalObjectStore) -> dict[str, Any]:
     }
 
 
-def test_ifs_convert_manifest_is_ready_and_uses_lowercase_identity_except_grid_uri(
+def test_ifs_convert_manifest_is_ready_and_uses_lowercase_identity(
     tmp_path: Path, no_outbound_sockets: None
 ) -> None:
     """IFS 端到端：完整产物集 MUST 判 `canonical_ready`，并钉住 f003 的三处单位换算。
@@ -391,9 +391,9 @@ def test_ifs_convert_manifest_is_ready_and_uses_lowercase_identity_except_grid_u
     `evaluate_canonical_readiness` 以 `normalize_source_id` 后的 `"ifs"` 过滤，
     每一行都被丢弃，本用例在 `canonical_ready` 断言上变红。
 
-    小写身份只到对象键、catalog 键与行 `source_id`、`canonical_product_id` 为止：
-    `grid_definition_uri` 这一段**故意不是**小写（pin 常量 `converter.py:206`，裁决 1/16
-    裁定不改），本用例按已登记的 Known limit 原样钉住大写值，不宣称「全链一个小写身份」。
+    对象键、catalog 键、catalog 行 `source_id`、`canonical_product_id` 与
+    `grid_definition_uri` 同用一个小写身份。网格 URI 钉
+    `canonical/ifs/grid/ifs_0p25/grid.json`（字符串级，不依赖文件系统大小写）。
 
     本用例把 NetCDF 字节写在 `.grib2` 键下，故按设计走 netcdf4 回退，**不**构成 GRIB 覆盖；
     真实 cfgrib 解码由 `test_convert_manifest_decodes_real_grib2_through_cfgrib_backend` 承担。
@@ -413,7 +413,7 @@ def test_ifs_convert_manifest_is_ready_and_uses_lowercase_identity_except_grid_u
 
     # tasks.md 裁决 12（含 round-2 勘误）：canonical 命名空间归 yd 所有，且过滤用归一值、
     # 打戳用原始值是一处真实缺陷。故对象键、catalog 键、catalog 行 `source_id` 与
-    # `canonical_product_id` MUST 同用一个小写身份；`grid_definition_uri` 是例外，见下。
+    # `canonical_product_id` MUST 同用一个小写身份。
     for product in result.products:
         assert product.object_uri.startswith(f"canonical/ifs/{IFS_COMPACT_CYCLE}/")
         assert product.canonical_product_id.startswith(f"ifs_{IFS_COMPACT_CYCLE}_")
@@ -426,10 +426,8 @@ def test_ifs_convert_manifest_is_ready_and_uses_lowercase_identity_except_grid_u
     assert len(catalog["products"]) == 8 * len(FORECAST_HOURS)
     assert {row["source_id"] for row in catalog["products"]} == {"ifs"}
     for row in catalog["products"]:
-        # 裁决 16：`grid_definition_uri` 是 pin 常量（converter.py:206），入口归一够不着它，
-        # 故整棵 canonical 树里只有网格键仍是大写。这里**故意**钉住大写值——它钉的是一条
-        # 已登记的 Known limit；日后 follow-up 把该常量改小写时，本行会自动变红。
-        assert row["grid_definition_uri"] == "canonical/IFS/grid/ifs_0p25/grid.json"
+        # 裁决 16 / #104：唯一小写网格 URI；字符串级断言，以免 APFS 掩蔽旧大写键。
+        assert row["grid_definition_uri"] == "canonical/ifs/grid/ifs_0p25/grid.json"
 
     # 裁决 15：f003 的三处单位换算 MUST 带值级 oracle，数值取本文件 IFS_NATIVE_VALUES
     # 上方 `#:` 注释里已算好的三个（tp 3mm/3h → 24 mm/day；ssr 1.08e6 J/m2 / 10800s →

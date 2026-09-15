@@ -1,10 +1,3 @@
-"""NWM mapping-builder 薄外壳与生产 AttemptDriver / 私有 worker。
-
-`prepare` 是全仓唯一主动进入 NWM 活动环境的代码路径。`check_interpreter` 与
-`invoke_mapping_builder` 保持既有指定解释器 / cwd / PYTHONPATH 规则。日常 worker
-只以 yd 自己的解释器和精确 argv 启动本模块，不借用 NWM 环境。
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -19,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from yd_producer._native_input import native_run_paths
 from yd_producer.assemble import RunDirectory, WorkIdentity, stage_work_registry
 from yd_producer.canonical.converter import (
     CanonicalConversionError,
@@ -27,7 +21,7 @@ from yd_producer.canonical.converter import (
     IFSCanonicalConverter,
     IFSCanonicalConverterConfig,
 )
-from yd_producer.config import Config, ConfigError, LocalConfig
+from yd_producer.config import ConfigError, LocalConfig
 from yd_producer.controller import AttemptProducts, AttemptRequest, PreparedAttempt
 from yd_producer.executor import JobRecord, JobState
 from yd_producer.forcing.bounded_json import BoundedJSONError, load_bounded_json
@@ -69,6 +63,7 @@ __all__ = [
     "ATTEMPT_HANDOFF_FILENAME",
     "ATTEMPT_HANDOFF_SCHEMA",
     "POLL_INTERVAL_SECONDS",
+    "PREPARE_DRIVER_SCRIPT",
     "RECEIPT_FILENAME",
     "RECEIPT_SCHEMA",
     "WORKER_ENTRY",
@@ -79,8 +74,12 @@ __all__ = [
 ]
 
 _INTERPRETER_FIELD = "nwm.python"
+_CHECKOUT_FIELD = "nwm.checkout_root"
+_DRIVER_ENV_DROPS = ("DATABASE_URL", "PYTHONHOME")
 
+PREPARE_DRIVER_SCRIPT = Path(__file__).with_name("_nwm_prepare_driver.py")
 POLL_INTERVAL_SECONDS = 10
+
 WORKER_ENTRY = "yd_producer.nwm"
 ATTEMPT_HANDOFF_FILENAME = "yd.attempt-handoff.json"
 ATTEMPT_HANDOFF_SCHEMA = "yd.run.attempt-handoff.v1"
@@ -183,54 +182,67 @@ _CAPTURE_WAIT = 0.05
 
 
 class ProductionAttemptError(RuntimeError):
-    """Login-side prepare/collect or worker receipt failure."""
+    pass
 
 
 def check_interpreter(local: LocalConfig) -> str:
-    """校验 NWM 解释器路径可用，返回 `local.toml` 里配置的**原样路径**。"""
     configured = local.nwm.python
     candidate = Path(configured)
-    if not candidate.exists():
+    if not configured or "/" not in configured:
         raise ConfigError(
-            f"NWM 解释器路径不存在：{configured}；"
-            "yd 不安装、不升级、不修复 NWM .venv（agent-ops §7.2），"
-            "不回退到任何其它解释器",
+            f"NWM 解释器路径必须是含斜杠的绝对路径：{configured}",
             _INTERPRETER_FIELD,
         )
+    if not candidate.is_absolute():
+        raise ConfigError(
+            f"NWM 解释器路径必须是绝对路径：{configured}", _INTERPRETER_FIELD
+        )
+    if not candidate.exists():
+        raise ConfigError(f"NWM 解释器路径不存在：{configured}", _INTERPRETER_FIELD)
     if not candidate.is_file():
         raise ConfigError(
-            f"NWM 解释器路径不是普通文件：{configured}",
-            _INTERPRETER_FIELD,
+            f"NWM 解释器路径不是普通文件：{configured}", _INTERPRETER_FIELD
         )
     if not os.access(candidate, os.X_OK):
-        raise ConfigError(
-            f"NWM 解释器不可执行：{configured}",
-            _INTERPRETER_FIELD,
-        )
+        raise ConfigError(f"NWM 解释器不可执行：{configured}", _INTERPRETER_FIELD)
     return configured
 
 
 def invoke_mapping_builder(
     local: LocalConfig,
-    config: Config,
     args: Sequence[str] = (),
     runner: Callable[..., Any] = subprocess.run,
 ) -> subprocess.CompletedProcess[Any]:
-    """以 NWM 解释器调用 `config.nwm_mapping_builder_module`。"""
     interpreter = check_interpreter(local)
     checkout_root = local.nwm.checkout_root
+    checkout = Path(checkout_root)
+    if not checkout_root or not checkout.is_absolute():
+        raise ConfigError(
+            f"NWM checkout 必须是绝对目录：{checkout_root}", _CHECKOUT_FIELD
+        )
+    if not checkout.exists():
+        raise ConfigError(f"NWM checkout 不存在：{checkout_root}", _CHECKOUT_FIELD)
+    if not checkout.is_dir():
+        raise ConfigError(f"NWM checkout 不是目录：{checkout_root}", _CHECKOUT_FIELD)
+    if not PREPARE_DRIVER_SCRIPT.is_file():
+        raise ConfigError(
+            f"prepare driver 脚本不存在：{PREPARE_DRIVER_SCRIPT}",
+            _INTERPRETER_FIELD,
+        )
     env = dict(os.environ)
-    inherited = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = (
-        checkout_root if not inherited else checkout_root + os.pathsep + inherited
+    for name in _DRIVER_ENV_DROPS:
+        env.pop(name, None)
+    env["PYTHONPATH"] = checkout_root
+    return runner(
+        [interpreter, str(PREPARE_DRIVER_SCRIPT), *args],
+        cwd=checkout_root,
+        env=env,
+        capture_output=True,
+        text=True,
     )
-    command = [interpreter, "-m", config.nwm_mapping_builder_module, *args]
-    return runner(command, cwd=checkout_root, env=env)
 
 
 class ProductionAttemptDriver:
-    """Production AttemptDriver: login prepare + receipt collect, no login SHUD."""
-
     def __init__(self, *, grid_id: str | None = None) -> None:
         self._grid_id = grid_id
 
@@ -320,10 +332,35 @@ class ProductionAttemptDriver:
         _pin_work_root(work_dir)
         if terminal_record.state is not JobState.SUCCEEDED:
             raise ProductionAttemptError("collect requires a SUCCEEDED terminal record")
-        receipt = _load_receipt(work_dir)
+        receipt = _load_json_object(
+            work_dir / RECEIPT_FILENAME,
+            work_dir,
+            max_bytes=_RECEIPT_MAX_BYTES,
+            label="receipt",
+            keys=_RECEIPT_KEYS,
+            schema=RECEIPT_SCHEMA,
+        )
         _verify_receipt_envelope(receipt, attempt, terminal_record, work_dir)
-        run_directory = _run_directory_from_receipt(receipt, attempt.identity)
-        record = _checkpoint_from_receipt(receipt["checkpoint"])
+        run_payload = receipt["run_directory"]
+        run_directory = RunDirectory(
+            identity=attempt.identity,
+            path=Path(run_payload["path"]),
+            project_name=run_payload["project_name"],
+            state_path=Path(run_payload["state_path"]),
+            parameter_path=Path(run_payload["parameter_path"]),
+            forcing_index_path=Path(run_payload["forcing_index_path"]),
+            forcing_csv_paths=tuple(
+                Path(item) for item in run_payload["forcing_csv_paths"]
+            ),
+        )
+        checkpoint = receipt["checkpoint"]
+        record = CapturedCheckpoint(
+            lead_hours=int(checkpoint["lead_hours"]),
+            relative_minute=float(checkpoint["relative_minute"]),
+            path=Path(checkpoint["path"]),
+            source_name=str(checkpoint["source_name"]),
+            checksum=str(checkpoint["checksum"]).removeprefix(_SHA256_PREFIX),
+        )
         tracker = CheckpointTracker(
             run_dir=run_directory.path,
             project_name=run_directory.project_name,
@@ -434,17 +471,6 @@ def _load_json_object(
     return payload
 
 
-def _load_receipt(work_dir: Path) -> dict[str, Any]:
-    return _load_json_object(
-        work_dir / RECEIPT_FILENAME,
-        work_dir,
-        max_bytes=_RECEIPT_MAX_BYTES,
-        label="receipt",
-        keys=_RECEIPT_KEYS,
-        schema=RECEIPT_SCHEMA,
-    )
-
-
 def _verify_receipt_envelope(
     receipt: Mapping[str, Any],
     attempt: PreparedAttempt,
@@ -494,7 +520,7 @@ def _verify_asset_checksums(receipt: Mapping[str, Any], work_dir: Path) -> None:
         source=str(receipt["source"]),
         cycle=datetime.fromisoformat(str(receipt["cycle"])),
         project_name=str(receipt["identity"]["project_name"]),
-        grid_id=_grid_id_from_work(work_dir),
+        grid_id=str(_load_handoff(work_dir, _pin_work_root(work_dir))["grid_id"]),
         max_manifest_bytes=MAX_PREPARED_VARIANT_MANIFEST_BYTES,
         max_asset_bytes=MAX_PREPARED_VARIANT_ASSET_BYTES,
         max_state_bytes=MAX_STATE_IC_BYTES,
@@ -506,10 +532,6 @@ def _verify_asset_checksums(receipt: Mapping[str, Any], work_dir: Path) -> None:
         raise ProductionAttemptError("receipt binding checksum does not match staged")
     if receipt["sp_att_checksum"] != sp_att:
         raise ProductionAttemptError("receipt sp.att checksum does not match staged")
-
-
-def _grid_id_from_work(work_dir: Path) -> str:
-    return str(_load_handoff(work_dir, _pin_work_root(work_dir))["grid_id"])
 
 
 def _require_regular(path: Path, work_dir: Path) -> os.stat_result:
@@ -545,11 +567,7 @@ def _verify_run_directory_member(
         raise ProductionAttemptError("receipt RunDirectory.path is not work/model")
     if payload["project_name"] != identity.project_name:
         raise ProductionAttemptError("receipt RunDirectory.project_name mismatches")
-    expected = {
-        "state_path": path / f"{identity.project_name}.cfg.ic",
-        "parameter_path": path / f"{identity.project_name}.para",
-        "forcing_index_path": path / f"{identity.project_name}.tsd.forc",
-    }
+    expected = native_run_paths(path)
     for name, expected_path in expected.items():
         actual = Path(payload[name])
         if actual != expected_path:
@@ -593,31 +611,6 @@ def _verify_checkpoint_member(
     declared = str(payload["checksum"])
     if declared.removeprefix(_SHA256_PREFIX) != actual.removeprefix(_SHA256_PREFIX):
         raise ProductionAttemptError("checkpoint checksum does not match current bytes")
-
-
-def _run_directory_from_receipt(
-    receipt: Mapping[str, Any], identity: WorkIdentity
-) -> RunDirectory:
-    payload = receipt["run_directory"]
-    return RunDirectory(
-        identity=identity,
-        path=Path(payload["path"]),
-        project_name=payload["project_name"],
-        state_path=Path(payload["state_path"]),
-        parameter_path=Path(payload["parameter_path"]),
-        forcing_index_path=Path(payload["forcing_index_path"]),
-        forcing_csv_paths=tuple(Path(item) for item in payload["forcing_csv_paths"]),
-    )
-
-
-def _checkpoint_from_receipt(payload: Mapping[str, Any]) -> CapturedCheckpoint:
-    return CapturedCheckpoint(
-        lead_hours=int(payload["lead_hours"]),
-        relative_minute=float(payload["relative_minute"]),
-        path=Path(payload["path"]),
-        source_name=str(payload["source_name"]),
-        checksum=str(payload["checksum"]).removeprefix(_SHA256_PREFIX),
-    )
 
 
 def _load_handoff(work_dir: Path, root_id: tuple[int, int]) -> dict[str, Any]:
@@ -867,7 +860,6 @@ def _write_receipt(
 
 
 def run_private_worker(*, work_dir: Path) -> None:
-    """Independent Slurm-job worker: staged reload → compute → atomic receipt last."""
     env = _worker_env()
     work = Path(work_dir)
     if not work.is_absolute():

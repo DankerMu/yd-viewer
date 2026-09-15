@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import os
 import stat
 from pathlib import Path
@@ -18,6 +20,7 @@ from assembly_fixtures import (
     prepared,
     run_assemble,
     sources,
+    staged_fixture,
     work_dir,
     write_forcing_package,
     write_state,
@@ -27,6 +30,12 @@ from assembly_fixtures import (
 from yd_producer._work_claim import claim_exact_work
 from yd_producer.assemble import AssemblyError, assemble, stage_work_registry
 from yd_producer.staged_inputs import (
+    STAGED_INPUT_DIRNAME,
+    STAGED_INPUTS_MANIFEST_FILENAME,
+    STAGED_INPUTS_SCHEMA,
+    STAGED_STATES_DIRNAME,
+    STAGED_VARIANT_DIRNAME,
+    StagedWorkInputs,
     StagedWorkInputsError,
     load_staged_work_inputs,
     stage_work_inputs,
@@ -38,6 +47,95 @@ from yd_producer.store.object_store import MAX_OBJECT_MANIFEST_BYTES
 
 def _inputs(tmp_path: Path):
     return prepared(tmp_path)
+
+
+STAGED_FIELDS = [
+    "source",
+    "cycle",
+    "work_dir",
+    "variant_dir",
+    "state_path",
+    "manifest_path",
+    "work_identity",
+    "manifest_checksum",
+    "file_checksums",
+    "prepared",
+    "project_name",
+    "grid_id",
+    "max_manifest_bytes",
+    "max_asset_bytes",
+    "max_state_bytes",
+]
+STAGE_PARAMETERS = [
+    "claim",
+    "source_variant_dir",
+    "source_state_path",
+    "source",
+    "cycle",
+    "project_name",
+    "grid_id",
+    "max_manifest_bytes",
+    "max_asset_bytes",
+    "max_state_bytes",
+]
+LOAD_PARAMETERS = [
+    "work_dir",
+    "source",
+    "cycle",
+    "project_name",
+    "grid_id",
+    "max_manifest_bytes",
+    "max_asset_bytes",
+    "max_state_bytes",
+]
+
+
+def _assert_required_signature(callable_: object, names: list[str]) -> None:
+    parameters = inspect.signature(callable_).parameters
+    assert list(parameters) == names
+    for parameter in parameters.values():
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is inspect.Parameter.empty
+
+
+def test_staged_inputs_public_api_shape_and_freeze(tmp_path: Path) -> None:
+    assert STAGED_INPUTS_SCHEMA == "yd.run.staged-inputs.v2"
+    assert STAGED_INPUT_DIRNAME == "input"
+    assert STAGED_VARIANT_DIRNAME == "variant"
+    assert STAGED_STATES_DIRNAME == "states"
+    assert STAGED_INPUTS_MANIFEST_FILENAME == "yd.staged-inputs.json"
+    _assert_required_signature(StagedWorkInputs, STAGED_FIELDS)
+    _assert_required_signature(stage_work_inputs, STAGE_PARAMETERS)
+    _assert_required_signature(load_staged_work_inputs, LOAD_PARAMETERS)
+    names = [field.name for field in dataclasses.fields(StagedWorkInputs)]
+    assert names == STAGED_FIELDS
+    assert StagedWorkInputs.__dataclass_params__.frozen
+    _, _, staged = staged_fixture(tmp_path)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        staged.source = "ifs"
+    values = {field: getattr(staged, field) for field in STAGED_FIELDS}
+    invalid_values = {
+        "source": 1,
+        "project_name": None,
+        "grid_id": False,
+        "manifest_checksum": b"sha256",
+        "work_dir": str(staged.work_dir),
+        "prepared": object(),
+        "work_identity": [*staged.work_identity],
+        "work_identity-bool": (True, staged.work_identity[1]),
+        "work_identity-member": ("1", staged.work_identity[1]),
+        "file_checksums": [*staged.file_checksums],
+        "file_checksums-member": (("key", 1),),
+        **{
+            f"{field}-{kind}": value
+            for field in ("max_manifest_bytes", "max_asset_bytes", "max_state_bytes")
+            for kind, value in (("nonpositive", 0), ("bool", True))
+        },
+    }
+    for case, value in invalid_values.items():
+        field = case.rsplit("-", 1)[0] if "-" in case else case
+        with pytest.raises((TypeError, ValueError)):
+            StagedWorkInputs(**(values | {field: value}))
 
 
 def _refuse(prepared_inputs, *, phase: str, **kwargs):
@@ -548,7 +646,7 @@ def test_variant_has_no_invented_entry_or_depth_cap(tmp_path: Path) -> None:
     ).read_bytes() == b"deep"
 
 
-def test_staged_input_listing_stops_at_exact_five_budget(
+def test_staged_input_listing_stops_at_exact_fifteen_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _config, local = fixtures.write_config_local(tmp_path)
@@ -630,7 +728,7 @@ def test_staged_input_listing_stops_at_exact_five_budget(
             max_asset_bytes=65_536,
             max_state_bytes=65_536,
         )
-    assert consumed[0] <= 6
+    assert consumed[0] <= 15
     assert not (claim.work_dir / "model").exists()
 
 
@@ -688,9 +786,9 @@ def test_public_stage_and_load_refuse_hostile_ancestors_directories_unreadable_a
         return
     if case.endswith("directory"):
         victim = (
-            source_variant / "yd.para"
+            source_variant / "yd.cfg.para"
             if case.startswith("source")
-            else claim.work_dir / "input" / "variant" / "yd.para"
+            else claim.work_dir / "input" / "variant" / "yd.cfg.para"
         )
         if victim.is_file():
             victim.unlink()
@@ -724,7 +822,7 @@ def test_public_stage_and_load_refuse_hostile_ancestors_directories_unreadable_a
             assert not (claim.work_dir / "model").exists()
         return
     else:
-        victim_name = "yd.para"
+        victim_name = "yd.cfg.para"
         real_open = os.open
         fired: list[str] = []
 

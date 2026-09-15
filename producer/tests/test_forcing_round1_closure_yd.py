@@ -364,7 +364,7 @@ def test_missing_canonical_writer_attribute_has_no_ready_output(tmp_path: Path) 
     _assert_no_gfs_ready(repository, store)
 
 
-def test_ifs_fixture_uses_literal_12z_and_exact_uppercase_grid_uri(
+def test_ifs_fixture_uses_literal_12z_and_exact_lowercase_grid_uri(
     tmp_path: Path,
 ) -> None:
     store = LocalObjectStore(tmp_path)
@@ -396,7 +396,7 @@ def test_ifs_fixture_uses_literal_12z_and_exact_uppercase_grid_uri(
     assert result.forcing_package_uri == f"{_IFS_PACKAGE_KEY}/"
     assert manifest["cycle_time"] == "2026-05-07T12:00:00Z"
     assert {row["grid_definition_uri"] for row in catalog["products"]} == {
-        "canonical/IFS/grid/ifs_0p25/grid.json"
+        "canonical/ifs/grid/ifs_0p25/grid.json"
     }
 
 
@@ -651,7 +651,7 @@ def test_public_timeseries_caps_reject_before_mapping_write(
     _assert_no_gfs_ready(repository, store)
 
 
-def test_ifs_uses_literal_catalog_grid_uri_without_lowercase_fallback(
+def test_ifs_uses_literal_catalog_grid_uri_without_case_fallback(
     tmp_path: Path,
 ) -> None:
     store = LocalObjectStore(tmp_path)
@@ -675,7 +675,7 @@ def test_ifs_uses_literal_catalog_grid_uri_without_lowercase_fallback(
         )
     )
     assert {row["grid_definition_uri"] for row in catalog["products"]} == {
-        "canonical/IFS/grid/ifs_0p25/grid.json"
+        "canonical/ifs/grid/ifs_0p25/grid.json"
     }
     assert (
         producer.produce(
@@ -685,7 +685,7 @@ def test_ifs_uses_literal_catalog_grid_uri_without_lowercase_fallback(
     )
 
 
-def test_ifs_grid_read_receives_exact_uppercase_catalog_uri(
+def test_ifs_grid_read_receives_exact_lowercase_catalog_uri(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from yd_producer.store import object_store as object_store_module
@@ -724,7 +724,7 @@ def test_ifs_grid_read_receives_exact_uppercase_catalog_uri(
         == "forcing_ready"
     )
     assert observed_uris
-    assert set(observed_uris) == {"canonical/IFS/grid/ifs_0p25/grid.json"}
+    assert set(observed_uris) == {"canonical/ifs/grid/ifs_0p25/grid.json"}
 
 
 _F003_IDENTITIES: dict[str, tuple[str, str]] = {

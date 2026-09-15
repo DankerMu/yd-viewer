@@ -1,0 +1,17 @@
+## Context
+Project profile yd-viewer; bugfix; upstream suggested level absent. Fixture expanded (persisted path/field contract), repair intensity medium: literal identity cutover, no new file access/security/resource algorithm. Scope no longer needs decision A/B; user and m2 fixture already chose A.
+## Goals / Non-Goals
+Use exactly canonical/ifs/grid/ifs_0p25/grid.json for produced/default IFS grid references and preserve all other values/behavior. No uppercase migration alias or case fallback. GFS unchanged; raw/IFS and historical NWM pin references unchanged. Do not cite published products-contract §3.2 for scratch naming.
+## Decisions
+Change IFSCanonicalConverterConfig.grid_definition_uri and forcing.file_store._grid_definition_uri_for_source IFS value (a now-existing sibling absent when issue was filed). The latter is required clean caller migration, not a broader helper refactor. All write/check/catalog points keep consuming their existing field/URI, no new constant or normalization layer.
+Update test_canonical_db_free IFS e2e name/docstring and exact string; test_canonical_raw_containment grid helper; forcing_fixtures and test_forcing_round1_closure_yd producer/consumer string expectations. Preserve consumers' use of catalog exact URI instead of rewriting it.
+Already-approved m2 decision16 explicitly removes old dual-prefix enumeration and phantom-source obligations: object_path.py stays generic and case-preserving; newly emitted lowercase key naturally parses source=ifs. Old uppercase user-supplied keys are not reclassified or aliased. A parent string/parser smoke proves distinction without relying on APFS existence.
+Risk packs selected: Public API (catalog/default identity), Schema/field names (exact URI), Legacy compatibility (all callers/fixtures cutover, other fields unchanged), Documentation (inventory/old comments), NWM provenance+DB-free (registered literal fork). Integration review traces canonical->forcing.
+Risk packs not selected: Config/setup (no env), File IO safety/overwrite (no primitives/ordering altered), Auth (no permission), Concurrency (no shared-state change), Resource limits (unchanged), Error/rollback (unchanged), Release/dependencies (unchanged), Geospatial/CRS (no coordinates), Time-series (no values/times), State-chain (none).
+## Required evidence
+Changed real IFS e2e string assertion must fail on prior source and pass after; explicit lowercase catalog and forcing references on both casesensitive/insensitive hosts. Existing downstream forcing string tests pass. Parent smoke compares old/new all product bytes (unchanged) and catalog JSON after replacing only the authorized URI, checks actual emitted key parsed as source=ifs and contrasts old key source=IFS without altering parser.
+## Risks / Trade-offs
+Old disposable work trees are not migrated and no alias remains. Source helper literals and all current producers/tests found by URI search migrate together. Historical pin documentation strings remain uppercase intentionally; they are not runtime references.
+
+## Fixture review clarification
+Inventory converter row36 (IFSCanonicalConverterConfig.grid_definition_uri) and forcing row38 (_grid_definition_uri_for_source) both already contain #104 problem+fix registrations; identify by target path, never stale historical row35. Source cutover includes stale convert_manifest decision1/16 uppercase comments and current header claims, as well as test names/docstrings. Historical NWM pin references are not current URI exceptions and stay untouched.

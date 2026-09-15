@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import pytest
 from assembly_fixtures import (
+    NATIVE_PARAMETER_EXPECTED,
+    NATIVE_PARAMETER_RECOVERY,
+    NATIVE_PARAMETER_TEMPLATE,
     PARAMETER_EXPECTED,
     PARAMETER_SAME_LINE,
     PARAMETER_SAME_LINE_EXPECTED,
     PARAMETER_TEMPLATE,
+    stock_runtime_values,
 )
 
 from yd_producer.assemble import AssemblyError, render_shud_parameters
@@ -119,12 +123,36 @@ def test_end_override_rewrites_only_the_end_assignment() -> None:
     )
 
 
-# fmt: off
-@pytest.mark.parametrize("end", ["0.5 ", "8", "0.500000", "07", "", 0.5, True, None,
-                                 [], {}, ["7"]])  # 后三支 unhashable：成员判据会先抛裸 TypeError
+@pytest.mark.parametrize(
+    "end",
+    ["0.5 ", "8", "0.500000", "07", "", 0.5, True, None, [], {}, ["7"]],
+)
 def test_illegal_end_values_are_refused(end) -> None:
-    """两个 literal 之外没有接受域：数值型/带空白/等价写法/**unhashable 容器**一律 validate 期拒绝。"""
-# fmt: on
+    """Only the two literal END values are valid, including for containers."""
     with pytest.raises(AssemblyError) as captured:
-        render_shud_parameters(PARAMETER_TEMPLATE, end=end)  # type: ignore[arg-type]
+        render_shud_parameters(PARAMETER_TEMPLATE, end=end)
     assert captured.value.phase == "validate"
+
+
+def test_native_mode_emits_unique_stock_readable_runtime_values() -> None:
+    result = render_shud_parameters(NATIVE_PARAMETER_TEMPLATE, mode="native")
+    assert result == NATIVE_PARAMETER_EXPECTED
+    values = stock_runtime_values(result)
+    assert values == {
+        "START": 0.0,
+        "END": 7.0,
+        "DT_QR_DOWN": 60.0,
+        "Update_IC_STEP": 720.0,
+        "BINARY_OUTPUT": 1.0,
+        "ASCII_OUTPUT": 0.0,
+    }
+    assert result.count(b"END") == 1
+    recovery = render_shud_parameters(
+        NATIVE_PARAMETER_TEMPLATE, end="0.5", mode="native"
+    )
+    assert recovery == NATIVE_PARAMETER_RECOVERY
+    recovered = stock_runtime_values(recovery)
+    assert recovered["END"] == 0.5
+    assert recovered["START"] == 0.0
+    assert recovered["Update_IC_STEP"] == 720.0
+    assert render_shud_parameters(PARAMETER_TEMPLATE) == PARAMETER_EXPECTED

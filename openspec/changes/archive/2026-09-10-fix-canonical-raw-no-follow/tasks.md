@@ -1,0 +1,24 @@
+## 1. Risk packs and implementation
+- Public API / CLI / script entry: selected — same convert_manifest result/errors; existing GFS/IFS suite.
+- Config / project setup: not selected — no config change.
+- File IO / path safety / overwrite: selected — symlink matrix, descriptor lifetime, no raw reopen/output.
+- Schema / columns / units / field names: not selected — no contract change; valid-byte comparison guards preservation.
+- Auth / permissions / secrets: not selected — no identity/auth surface.
+- Concurrency / shared state / ordering: selected — descriptor binding prevents original-path replacement from redirecting decode; lifecycle check.
+- Resource limits / large input / discovery: not selected — #102 owns byte limits; no new discovery or whole-file memory copy.
+- Legacy compatibility / examples: selected — existing canonical tests, real GRIB + NetCDF, byte-identical products.
+- Error handling / rollback / partial outputs: selected — conversion error, no products/catalog, owned resources released.
+- Release / packaging / dependency compatibility: not selected — no new dependencies.
+- Documentation / migration notes: selected — inventory, module provenance, issue #71 correction.
+- Geospatial / CRS / shapefile sidecars: not selected — no coordinate changes.
+- Time series / forcing / temporal boundaries: not selected — conversion algorithms unchanged.
+- 状态链 / warm-start 定戳一致性: not selected — no state files.
+- NWM 快照溯源与 DB-free 隔离: selected — registered fork and existing provenance/socket guard.
+- [x] 1.1 Register converter fork in inventory before code and update module header with problem/fix.
+- [x] 1.2 Replace bare raw-path decoder access with existing no-follow access; preserve backend behavior and lifecycle.
+- [x] 1.3 Add leaf/raw/source/cycle pre-existing external-link regressions for BOTH GFS and IFS convert_manifest, including a late entry after valid entries, asserting zero writes under canonical/ (products, catalog and grid definition); add resource/identity checks. Use a new yd-owned test_canonical_raw_containment.py without NWM provenance; leave pin test_canonical_converter.py and unrelated product-read helpers unchanged.
+## 2. Evidence and delivery
+- [x] 2.1 Batched pre-change red proof for new rejection tests; same valid fixture before/after compares produced bytes, no leftover stash.
+- [x] 2.2 Parent runs focused canonical tests including real cfgrib and NetCDF, then project-profile deduplicated producer/viewer pytest, ruff and OpenSpec pipeline; all pass.
+- [x] 2.3 Correct issue #71 historical fail-closed rationale, accounting for its current state; no claim that read fix repairs rawcopy writes.
+- [x] 2.4 Fixture review and strict validation, cross-review/verifier, final frozen-head review/CI/evidence and preauthorized merge; archive/log afterwards.
