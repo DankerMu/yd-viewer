@@ -1631,7 +1631,7 @@ Change surface:
 - 新增 `producer/src/yd_producer/state/__init__.py` 与 `producer/src/yd_producer/state/cfg_ic.py`：格式保真的解析/回写层
 - 从 NWM pin 移植的分段识别辅助（逐函数带 `NWM@8ae9b8f2 packages/common/state_qc.py` 溯源注释）：`_looks_like_column_header`（`:741`）、`_section_from_column_header`（`:751`）、`_native_lake_section_preamble`（`:762`）、`_header_counts`（`:574`）、`_numeric_row`（`:730`，仅作内部分类器）、`_read_bytes_limited`（含其说明「为何刻意不走 no-follow 安全读」的 docstring，原样保留）、`_as_float`（`:878-882`，`_header_counts` 的被调用方，随之强制移植）与 `MAX_STATE_IC_BYTES`（`:43`）
 - 新增 `producer/tests/test_cfg_ic.py` 与合成 fixture 构造器
-- 快照清单 `nwm-snapshot-inventory.md:44` 的目标路径 `state/state_qc.py` 由 **#9** 补齐：本 issue 只落格式层子集到 `state/cfg_ic.py`，不建空的 `state_qc.py` 占位（避免死代码），该行的落地状态在本 PR 内标注为「部分（格式层）」
+- 快照清单 `nwm-snapshot-inventory.md#1. 快照清单` 中 `packages/common/state_qc.py` 的目标路径 `state/state_qc.py` 由 **#9** 补齐：本 issue 只落格式层子集到 `state/cfg_ic.py`，不建空的 `state_qc.py` 占位（避免死代码），该行的落地状态在本 PR 内标注为「部分（格式层）」
 
 Must preserve:
 - `cfg_ic.py` 以 NWM pin 的分段识别语义为兼容基线，但不再要求逐字等价；yd MAY 修复确认缺陷。每一处偏离 MUST 在快照清单对应行「剥离点」登记“问题 + 修法”，并在模块头注明，二者缺一不可
@@ -1713,7 +1713,7 @@ Required evidence（每条 input -> expected output）:
 Non-goals:
 - 结构检查 `state_ic_structure_complete` / `run_state_variable_qc`（任务 4.2，issue #9）、重戳与 `cfg_ic_header_minute_index/_time/_shape`（任务 4.3，issue #9）、负残差与域均修正（任务 4.4，issue #9）
 - **不移植 NWM 的 `tests/test_state_qc.py` 测试代码**：该文件的解析失败用例（`test_empty_file_is_parse_failure`、`test_oversized_ic_fails_without_crash`、`test_binary_non_utf8_ic_fails_without_crash` 等）全部经 `run_state_variable_qc` 行使，而该函数归 #9。本 issue 在新 seam 上**新写**测试，以 NWM 的**场景**为独立真值来源，测试代码本身随 #9 到位。清单 `nwm-snapshot-inventory.md` 中该测试文件的落地归 #9
-- **不落 `producer/tests/test_cfg_ic_header.py`**：`nwm-snapshot-inventory.md:56` 记录了配对约束——该测试引用的三个符号全部出自 `runtime.py` 抽取集（capability 6），缺任一即不可导入；归 #9 与 capability 6 之后
+- **不落 `producer/tests/test_cfg_ic_header.py`**：`nwm-snapshot-inventory.md#1. 快照清单` 中 `tests/test_runtime_ic_header.py` 记录了配对约束——该测试引用的三个符号全部出自 `runtime.py` 抽取集（capability 6），缺任一即不可导入；归 #9 与 capability 6 之后
 - **不支持兼容的计数式布局**（NWM `_parse_ic_file` 在原生分段解析失败时的回退分支）：issue #8 的 In Scope 逐字写作「原生分段」。取舍依据与**未决点**：唯一可能是非原生格式的输入是率定末态基线包，而 compute-loop §6 明写「基线模型包的现场路径和归档方式由实施方管理，不进入 Git」，其实际格式在本阶段**不可核**。故本 issue 按原生分段 fail-closed（非原生输入抛 `ValueError` 而非静默走回退），并记录该假设；「率定末态是否为原生分段格式」的核实与兼容布局的归属裁决路由至 **#32**，触发点是 #11（init 首态）真正读入基线包时。MUST NOT 静默支持两种布局
 - **本模块是共享格式根，#9 MUST 复用而非重新移植**：`_looks_like_column_header` / `_section_from_column_header` / `_native_lake_section_preamble` / `_header_counts` 落在 `state/cfg_ic.py` 后，#9 的 `state/state_qc.py` MUST 从 `cfg_ic` 导入这四个符号；再移植一份即为 pin 分段逻辑的双权威副本，本 fixture 显式禁止
 - 不接入 CLI、不写入任何文件、不做发布顺序相关工作
@@ -1786,7 +1786,7 @@ pin 的重戳经 `atomic_write_bytes_no_follow` 落 `.{name}.normalized` 点前�
 - 新增 `producer/tests/test_state_tools_qc.py`、`producer/tests/test_state_tools_restamp.py`（**刻意避开** `producer/tests/test_state_qc.py` / `producer/tests/test_state_restamp.py` 这两个清单 §1 为 pin 用例**移植**保留的目标路径：本 issue 的用例是按 NWM 场景新写的，占用那两个路径就要贴上 `# NWM@8ae9b8f2 tests/...` 溯源头，等于在清单里申报一次没发生过的移植）；扩充 `producer/tests/cfg_ic_fixtures.py` 的合成构造器（非有限值、BOM、段重入、U+0085 内嵌、负残差矩阵）
 - 改 `producer/tests/test_cfg_ic.py`：#54 第 3/4/5 条在格式层的负例；**并按 #54 评论 2 的方向改造 `:718-733` 的偏离穷尽性测试**（现行写法自指——只断 docstring 写着「六条」、从代码零导出，故对「偏离清单漏登记」恒绿）：改为用 `ast` 数 `parse` 体内的 `ast.Raise` 节点并与模块头登记的偏离条数闭合。**计数域 MUST 覆盖所有承载登记偏离的函数**：`__post_init__` / `with_replaced_lines` 的拒绝路径若入册，其 `ast.Raise` 一并计入，否则漏登记不被该测试覆盖——那正是本测试要终结的那类恒绿
 - 改 `openspec/changes/m2-producer-core/specs/state-tools/spec.md`：结构检查 Requirement 补两条 Scenario（非有限值、river 行数与权威计数），负残差 Requirement 补一条 Scenario（非有限值在归零前被拒）并把「沿用 NWM 语义」收窄为「除模块头登记的偏离外沿用」——裁决 4 的 spec 授权
-- 改 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md`：`:44` 落地状态由「部分（格式层）」改为完成状态并点名本 issue 落的符号；`:45` 标注「部分（重戳面）」并写明 rekey 面路由 #16/#24、`_read_limited_*_no_follow` 的闭包切点；`:55` 标注只落重戳用例
+- 改 `nwm-snapshot-inventory.md#1. 快照清单`：`packages/common/state_qc.py` 行 落地状态由「部分（格式层）」改为完成状态并点名本 issue 落的符号；`packages/common/state_cli.py` 行 标注「部分（重戳面）」并写明 rekey 面路由 #16/#24、`_read_limited_*_no_follow` 的闭包切点；`tests/test_state_manager.py` 行 标注只落重戳用例
 - 不改 `config.py` / `cli.py` / `geometry.py` / `nwm.py` / `executor.py` / `pyproject.toml` / `uv.lock`
 
 #### Must preserve
@@ -4285,7 +4285,7 @@ Upstream suggested level: compact（override：正面命中 `openspec/project-pr
 Repair intensity: high（首次写 NFS 发布根、部分产物即把系统**永久砖化**——「已有任一状态即拒绝」使一次半写死锁住所有后续 init；同时命中 profile 首位风险轴「断链即整链失效」的**链起点**。适用 `Invariant Matrix`）
 Project profile: yd-viewer
 
-**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #21 落地时，其验收标准依赖「从两个变体内各自同源率定末态复制首态」（`specs/init-bootstrap/spec.md`、compute-loop §6.2 第 4 步），但**当时**率定末态在变体目录内的落点尚无文档、spec 或配置钉死：compute-loop §6.1 只说变体「水文参数和率定状态来自同一基线」，`config.toml` 的 `variants.*` 只到变体目录一级，`nwm-snapshot-inventory.md:132` 的 `_project_name` 只决定 tracker 轮询的 `<project>.cfg.ic.update` 文件名、且该 manifest 在 init 期不存在。该 seam 由本 issue 裁决 2 先在 init 侧补齐；#97 M2 收尾现已把同一顶层 `*.cfg.ic` 基数谓词回填到 #20 / 任务 10.3 的 prepare 文档、spec、提交前校验与证据面，关闭写侧缺口。
+**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #21 落地时，其验收标准依赖「从两个变体内各自同源率定末态复制首态」（`specs/init-bootstrap/spec.md`、compute-loop §6.2 第 4 步），但**当时**率定末态在变体目录内的落点尚无文档、spec 或配置钉死：compute-loop §6.1 只说变体「水文参数和率定状态来自同一基线」，`config.toml` 的 `variants.*` 只到变体目录一级，`nwm-snapshot-inventory.md#4. 风险与不确定项` 的 `_project_name` 只决定 tracker 轮询的 `<project>.cfg.ic.update` 文件名、且该 manifest 在 init 期不存在。该 seam 由本 issue 裁决 2 先在 init 侧补齐；#97 M2 收尾现已把同一顶层 `*.cfg.ic` 基数谓词回填到 #20 / 任务 10.3 的 prepare 文档、spec、提交前校验与证据面，关闭写侧缺口。
 
 **#96 收尾裁决（修订本 fixture 的 symlink 例外）**：`states/<source>` 条目自身及其树内的任何 symlink 都视为已有状态条目，阶段 A MUST 以 `STATES_NOT_EMPTY` fail closed；不跟随目标，不按目标为普通文件、目录、断链或其它类型分流。该修订只给 symlink 单列：普通（非 symlink）空目录仍不触发守卫，`output/` 的 `DONE` 可见性也不在 #96 内扩大。由此撤销本 fixture 中“state symlink 可穿过阶段 A、到阶段 B 再作为外来阻塞物”的旧构造；阶段 B 同类证据改用普通空目录、FIFO 等非 symlink 载体。
 
@@ -4519,13 +4519,13 @@ Upstream suggested level: compact（override：正面命中 `openspec/project-pr
 Repair intensity: high（本函数是 profile 首位风险轴「断链即整链失效」的**唯一执行点**：它决定每源用哪一份状态起跑；且本 issue 落 `state/header_time.py` 这一共享 helper 根，由 #9 的重戳与结构检查复用。适用 `Invariant Matrix`）
 Project profile: yd-viewer
 
-**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #22 的依赖只列 #2/#8，但验收标准里的「时间头不对应绝对 T 即停」需要 header 时间语义符号（`cfg_ic_header_minute_index` / `cfg_ic_header_shape`），而 `nwm-snapshot-inventory.md:44` 把它们归在 #9（任务 4.3）。缺失的 seam 本 issue 自行补齐（见下方裁决 1），并按核心规则「needed-but-missing seam is a reported deviation」记录在此。
+**上游契约偏离（consumed not renegotiated，须回流 stage-change-pipeline sizing-retro）**：issue #22 的依赖只列 #2/#8，但验收标准里的「时间头不对应绝对 T 即停」需要 header 时间语义符号（`cfg_ic_header_minute_index` / `cfg_ic_header_shape`），而 `nwm-snapshot-inventory.md#1. 快照清单` 中 `packages/common/state_qc.py` 把它们归在 #9（任务 4.3）。缺失的 seam 本 issue 自行补齐（见下方裁决 1），并按核心规则「needed-but-missing seam is a reported deviation」记录在此。
 
 **#86 收尾裁决（修订根级缺席语义）**：共享 `output/` 根自身的 `ENOENT` / `ENOTDIR` 不再等价于空集合，而是根异常；每个受检 source 都 MUST 以既有 `DISCOVERY_UNREADABLE` 停止，不判全新链、不调用 raw 判定、不进入残留规划。只有 `output/` 根已确认为可枚举目录后，下层 cycle/source/`DONE` 路径的 `ENOENT` / `ENOTDIR` 才继续表示「该处不存在」。不得用 `exists()` 预检制造 check-to-enumerate 窗口；严格语义必须由枚举 `output/` 根的同一次调用施加。
 
 **核心设计裁决（本 fixture 钉死，实现不得自行改写）**：
 
-1. **读侧 header 时间原语落地在本 issue，不注入 fake**。把 pin 的 `cfg_ic_header_minute_index`(`state_qc.py:609`)、`cfg_ic_header_minute_time`(`:629`)、`cfg_ic_header_shape`(`:664`)、`CfgIcHeaderShape`(`:650`) 与其闭包常量 `_VALID_CFG_IC_HEADER_TOKEN_COUNTS`(`:646`) 移植到**新文件** `producer/src/yd_producer/state/header_time.py`，`_as_float` **MUST 从 `state.cfg_ic` 导入**（pin 的 docstring 逐字声明这三个符号与 `_header_counts` 共享「最后一个数值 token 即 minute-time」规则，两份定义即双权威）。这是 `nwm-snapshot-inventory.md:44` 行的**第二次部分落地**（第一次是 #8 的格式层），该行的落地状态注记随本 PR 更新。#9 MUST 从 `header_time` 导入这五个符号，MUST NOT 再移植一份。
+1. **读侧 header 时间原语落地在本 issue，不注入 fake**。把 pin 的 `cfg_ic_header_minute_index`(`state_qc.py:609`)、`cfg_ic_header_minute_time`(`:629`)、`cfg_ic_header_shape`(`:664`)、`CfgIcHeaderShape`(`:650`) 与其闭包常量 `_VALID_CFG_IC_HEADER_TOKEN_COUNTS`(`:646`) 移植到**新文件** `producer/src/yd_producer/state/header_time.py`，`_as_float` **MUST 从 `state.cfg_ic` 导入**（pin 的 docstring 逐字声明这三个符号与 `_header_counts` 共享「最后一个数值 token 即 minute-time」规则，两份定义即双权威）。这是 `nwm-snapshot-inventory.md#1. 快照清单` 中 `packages/common/state_qc.py` 行的**第二次部分落地**（第一次是 #8 的格式层），该行的落地状态注记随本 PR 更新。#9 MUST 从 `header_time` 导入这五个符号，MUST NOT 再移植一份。
    - **不选注入式 seam** 的理由：若把「header 时间是否对应 T」做成调用方传入的 callable，验收 Scenario「时间头不对应 T 即停」退化为「fake 说停就停」的永真式，spec 的 MUST 没有任何用例把守。
    - 不落 `state/state_qc.py`、不动 `state/cfg_ic.py`：后者的 fixture 带逐函数溯源窗口断言与已审的变异套件，改它等于重开 #8 的审核面。
 2. **MUST NOT 移植 `_valid_time_from_header_minute`**（`state_cli.py:359`，归 #9）。该函数**刻意接受相对分钟**（`0 <= m <= horizon` 时按 `cycle_time + m` 解释）——对 checkpoint 重戳是对的，对前沿闸门是**错的**：compute-loop §8 与 `specs/run-controller/spec.md` 的判据逐字是「以绝对时间判定」，宽容读法会让一份未重戳的残留 header（如 `720.000000`）在 T=cycle+12h 时被判为「对应 T」而放行，正是断链的入口。本 issue 的判据是自有的绝对时间比较（裁决 3），并把该**刻意不移植**写进模块头。
@@ -4547,7 +4547,7 @@ Change surface:
 - 新增 `producer/src/yd_producer/state/header_time.py`：移植的 header 时间原语（逐函数带 `NWM@8ae9b8f2 packages/common/state_qc.py:<行>` 溯源头）
 - 新增 `producer/src/yd_producer/controller.py`：严格前沿纯函数与停止原因词表
 - 新增 `producer/tests/test_header_time.py`、`producer/tests/test_controller_frontier.py` 与 tmp 目录树 fixture 构造器
-- 更新 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md:44` 的落地状态注记（第二次部分落地：读侧 header 时间原语）
+- 更新 `nwm-snapshot-inventory.md#1. 快照清单` 中 `packages/common/state_qc.py` 的落地状态注记（第二次部分落地：读侧 header 时间原语）
 
 Must preserve:
 - 移植的五个符号与 pin 逐字一致（含「最后一个数值 token 即 minute-time」与 3/4 token shape 门）；任何偏离 MUST 在模块头注明
