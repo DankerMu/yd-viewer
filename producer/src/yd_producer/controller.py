@@ -1,7 +1,7 @@
 """严格前沿：由 `DONE` 与状态文件集合判定每源的待跑 cycle 或停止原因（任务 12.1）。
 
 契约来源：`docs/compute-loop-design.md` §8/§10、`docs/products-contract.md` §2–§4、
-`openspec/changes/m2-producer-core/specs/run-controller/spec.md` 的「严格前沿确定待跑
+`openspec/specs/run-controller/spec.md` 的「严格前沿确定待跑
 cycle」与「raw 缺口阻塞不跳轮」两条 Requirement。
 
 **本模块零写入**：只 `stat` / 列目录 / 有界读状态文件首行，MUST NOT 创建、修改或删除

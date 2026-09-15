@@ -5,7 +5,7 @@ tasks.md 任务 3.2）。
 manifest」「manifest 语义键承接与 fail-closed」、`docs/compute-loop-design.md` §4.1
 （只读 NWM 原件的硬约束）与 §7.1–7.2。落盘形态、`local_key` 布局、entry 逐变量扇出、
 `metadata` 六键与累积语义的承接方式转录自 NWM pin `8ae9b8f2`（见下方逐条溯源注释），
-唯一桥是 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md` §3.1。
+唯一桥是 `openspec/changes/archive/2026-09-15-m2-producer-core/nwm-snapshot-inventory.md` §3.1。
 
 设计约束：
 - **只读源、只写 work**：本模块 MUST NOT 写、删、改、重命名 `raw_root` 之下的任何

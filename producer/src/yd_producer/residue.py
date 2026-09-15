@@ -2,7 +2,7 @@
 
 契约来源：`docs/compute-loop-design.md` §10 步骤 4、§11.2、§11.3、§12，
 `docs/products-contract.md` §2/§4，
-`openspec/changes/m2-producer-core/specs/run-controller/spec.md` 的
+`openspec/specs/run-controller/spec.md` 的
 「未提交残留清理重跑」Requirement。
 
 本模块实现 issue #23 fixture 的下列裁决（编号即裁决号，故不连续：裁决 8/11 是

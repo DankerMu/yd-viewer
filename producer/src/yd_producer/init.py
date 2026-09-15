@@ -1,7 +1,7 @@
 """`yd-producer init`：只在全新根建立首态（任务 11.1）。
 
 契约来源：`docs/compute-loop-design.md` §6.2 与
-`openspec/changes/m2-producer-core/specs/init-bootstrap/spec.md`。**这里只给路径、不复述
+`openspec/specs/init-bootstrap/spec.md`。**这里只给路径、不复述
 条数、也不复述 Requirement 名字清单**：复述会随规范增删而静默过期（实测该清单曾写「三条」
 却列了四个名字，两者又都与 spec 的实际条目对不上），规范文件本身是唯一真源。
 

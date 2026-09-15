@@ -2,7 +2,7 @@
 
 契约来源：`docs/compute-loop-design.md` §10（cron 每小时调用的非阻塞 `flock` 包装，锁
 覆盖发现、提交、等待、发布、清理全生命周期），
-`openspec/changes/m2-producer-core/specs/run-controller/spec.md` 的「并发与锁」
+`openspec/specs/run-controller/spec.md` 的「并发与锁」
 Requirement。
 
 本模块实现 issue #23 fixture 的下列裁决：

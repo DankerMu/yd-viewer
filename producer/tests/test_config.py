@@ -423,7 +423,7 @@ SPEC_PINNED_TOP_LEVEL_KEYS = (
 
 # --- 第二本账：从 fixture 手工转录的必需 key 全集 ----------------------------
 #
-# 来源：`openspec/changes/m2-producer-core/tasks.md` →「### Issue #2 fixture（任务
+# 来源：`openspec/changes/archive/2026-09-15-m2-producer-core/tasks.md` →「### Issue #2 fixture（任务
 # 1.1–1.2）」→「TOML key schema」代码块。**权威锚点是该块标题**，不是行号：下面各处的
 # tasks.md 行号（config 侧 42-70、local 侧 91-112）只是撰写时的位置提示，文件上游插入
 # 内容导致行号漂移不使本转录失效，按块标题重新定位即可。下面两份清单按该代码块的

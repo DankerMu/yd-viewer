@@ -1,6 +1,6 @@
 """任务 2.3：快照溯源头部检查（双向）与快照面的 DB-free 隔离检查。
 
-数据源是 `openspec/changes/m2-producer-core/nwm-snapshot-inventory.md` 的 §1 快照清单
+数据源是 `openspec/changes/archive/2026-09-15-m2-producer-core/nwm-snapshot-inventory.md` 的 §1 快照清单
 表本身（`| 能力项 | NWM 原路径 | 目标路径 | 剥离点 | 落地状态 | 备注 |`），在测试时解析，**不**在
 本文件里转录一份 Python 副本——转录副本会与清单漂移，且会要求后续任务组手工维护第二份
 名单。正向断言对表内每个已落地的目标路径生效，反向守卫强制后续组落地的快照文件必须先
@@ -315,7 +315,7 @@ def test_files_carrying_a_provenance_header_are_marked_landed() -> None:
 
     **残留（不得声称已完全关闭）**：一次提交里同时降级并删除某一行的文件，仍能全绿——
     本条只看在场文件，文件没了就没有反向义务。彻底关闭需要一份冻结路径名单，而那是已裁定
-    的非目标——`openspec/changes/m2-producer-core/tasks.md` 的 Non-goals「已知限度：完全
+    的非目标——`openspec/changes/archive/2026-09-15-m2-producer-core/tasks.md` 的 Non-goals「已知限度：完全
     失去竖线的表体行不可达」一条写明「不冻结名单是刻意取舍——名单正是本守卫要消灭的
     东西」（PR 偏离 F8/F10）：名单会与清单表构成第二份名录并要求后续任务组手工同步。本条的执行集 = 「在场且带头部的已登记
     文件」，不多不少。
