@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # stage-change-pipeline 锚定检查：PR 若改动 openspec/changes/<name>/**，
 # docs/stage-pipeline-log.jsonl 必须已有该 change 的运行条目，否则阻塞。
+# 已归档 change 在 openspec/changes/archive/ 下，不是活跃流水线条目。
 # 用法: check-stage-pipeline-log.sh <base-ref>
 set -euo pipefail
 
@@ -8,7 +9,7 @@ base_ref="${1:?usage: check-stage-pipeline-log.sh <base-ref>}"
 log_file="docs/stage-pipeline-log.jsonl"
 
 changes=$(git diff --name-only "$base_ref"...HEAD -- 'openspec/changes/**' |
-  awk -F/ 'NF >= 3 { print $3 }' | sort -u)
+  awk -F/ 'NF >= 3 && $3 != "archive" { print $3 }' | sort -u)
 
 if [[ -z "$changes" ]]; then
   echo "No OpenSpec change touched; nothing to check."
