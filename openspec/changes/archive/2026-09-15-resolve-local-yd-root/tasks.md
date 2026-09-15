@@ -5,7 +5,7 @@
 
 ## 2. Verification
 - [x] 2.1 Demonstrate red baseline and green alias bootstrap, retarget safety, invalid roots, and internal symlink refusal.
-- [ ] 2.2 Run producer pytest, ruff, OpenSpec and actual CLI smoke; complete cross-review and CI.
+- [x] 2.2 Run producer pytest, ruff, OpenSpec and actual CLI smoke; complete cross-review and CI.
 
 ## Risk packs
 - Public API / CLI / script entry: selected - Path representation and early errors; tasks 1.2, 1.3, 2.2.
