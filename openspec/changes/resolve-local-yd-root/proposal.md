@@ -17,6 +17,7 @@ Evidence floor: alias-retarget regression, root-internal symlink refusal, produc
 ## Capabilities
 ### Modified Capabilities
 - cli-config: canonical configured root and classified construction errors.
+- run-controller: ResiduePlan consumes the config-owned canonical root; all identity/zero-delete rules remain unchanged.
 
 ## Impact
 config, cli, init, prepare, controller run/startup/cleanup/publish callers, related regression tests. No safe_fs weakening, dependency or persisted format change.

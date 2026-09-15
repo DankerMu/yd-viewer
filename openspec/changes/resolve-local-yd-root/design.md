@@ -12,6 +12,7 @@ Non-goals: no safe_fs change, root fd lifetime capability, protection against ar
 ## Decisions
 Validate absolute spelling before Path.resolve(strict=False), without expanduser; otherwise relative/~ inputs would become valid accidentally.
 Invalid spelling and OSError/RuntimeError from resolution raise ConfigError(path="yd_root"); load_local adds the existing local.toml context.
+Non-strict resolve suppresses loop errors on newer supported Python; construction must still classify ELOOP, without requiring an existing directory or introducing a second resolver. The loop regression must never skip this contract.
 Constructor normalization covers direct LocalConfig callers as well as load_local; dataclasses.replace creates a new configuration and thus resolves once for that new object.
 This moves yd_root absolute-path rejection into configuration construction; #32 other domain ownership is unchanged.
 Remove Path(local.yd_root) wrappers and consumer root resolve calls, including prepare and _controller_sources, not only the three originally named files.
@@ -23,6 +24,7 @@ Seams under test: load_local to init/bootstrap and CLI run; direct LocalConfig c
 Required evidence: root alias and ancestor alias reach the same canonical root; retarget alias after load then init writes only original root.
 Required evidence: root-internal symlink still refused without outside mutation; relative/~ root gives ConfigError; missing absolute root loads without creation; symlink loop gives ConfigError.
 Required evidence: existing realpath and producer tests; actual yd-producer --help and config-error CLI smoke; red baseline for new bug regressions.
+Publication additionally proves that retargeting the input alias after configuration cannot redirect DAT/DONE/state, and replacement of the canonical directory by a symlink cannot authorize outside writes.
 Review focus: all root consumers migrated; no repeated alias resolution; no weakened descendant protection; error ownership and existing non-root behavior preserved.
 
 ## Risks / Trade-offs
