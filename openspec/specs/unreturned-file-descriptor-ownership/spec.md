@@ -1,7 +1,7 @@
 # unreturned-file-descriptor-ownership Specification
 
 ## Purpose
-TBD - created by archiving change close-unreturned-file-descriptor. Update Purpose after archive.
+Define file-descriptor ownership from acquisition through successful return, preserving primary failures and one-attempt cleanup in the no-follow opener.
 ## Requirements
 ### Requirement: Own acquired file descriptors until successful return
 open_file_no_follow SHALL retain ownership of acquired file descriptors through post-open validation and parent cleanup. On any BaseException exit before return it SHALL attempt file close exactly once, preserve the primary exception object, and record cleanup failures only secondarily without retrying or inferring descriptor state.
