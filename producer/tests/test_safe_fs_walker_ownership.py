@@ -82,8 +82,8 @@ def _cleanup_leftovers(captured: dict[str, object]) -> None:
     real_close = captured["real_close"]
     assert callable(real_close)
     for role in ("previous", "successor", "root"):
-        fd = captured[role]
-        if fd is None or captured[f"{role}_really_closed"]:
+        fd = captured.get(role)
+        if fd is None or captured.get(f"{role}_really_closed"):
             continue
         try:
             real_close(fd)
@@ -351,3 +351,119 @@ def test_directory_walkers_preserve_return_and_listing_contracts(
     )
     assert len(limited) == 3
     assert set(limited) <= set(names)
+
+
+def _install_list_success_root_fault(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    root: Path,
+    root_error: OSError | None = None,
+    dup_error: OSError | None = None,
+) -> dict[str, object]:
+    real_open = safe_fs._open_directory_no_follow
+    real_close = os.close
+    real_dup = os.dup
+    real_fstat = os.fstat
+    real_scandir = os.scandir
+    captured: dict[str, object] = {
+        "armed": True,
+        "root": None,
+        "scan_fd": None,
+        "root_live_during_scan": False,
+        "dup_count": 0,
+        "root_close_count": 0,
+        "root_really_closed": False,
+        "real_close": real_close,
+        "real_fstat": real_fstat,
+    }
+
+    def opening(path: Path) -> int:
+        fd = real_open(path)
+        if Path(path) == root:
+            assert captured["root"] is None
+            captured["root"] = fd
+        return fd
+
+    def duping(fd: int) -> int:
+        if captured["root"] is not None and fd == captured["root"]:
+            captured["dup_count"] = int(captured["dup_count"]) + 1
+            if dup_error is not None:
+                raise dup_error
+        return real_dup(fd)
+
+    def scanning(fd: int):
+        captured["scan_fd"] = fd
+        if captured["root"] is not None:
+            real_fstat(captured["root"])
+            captured["root_live_during_scan"] = True
+        return real_scandir(fd)
+
+    def closing(fd: int) -> None:
+        if not captured["armed"]:
+            real_close(fd)
+            return
+        if captured["root"] == fd:
+            captured["root_close_count"] = int(captured["root_close_count"]) + 1
+            real_close(fd)
+            captured["root_really_closed"] = True
+            if root_error is not None:
+                raise root_error
+            return
+        real_close(fd)
+
+    monkeypatch.setattr(safe_fs, "_open_directory_no_follow", opening)
+    monkeypatch.setattr(os, "dup", duping)
+    monkeypatch.setattr(os, "scandir", scanning)
+    monkeypatch.setattr(os, "close", closing)
+    return captured
+
+
+@pytest.mark.parametrize("shape", ["root-only", "deep"])
+def test_list_success_root_close_keeps_bare_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    root = tmp_path.resolve()
+    target = root if shape == "root-only" else _tree(root)
+    (target / "entry.txt").write_text("listed", encoding="utf-8")
+    injected = OSError(errno.EIO, f"list {shape} success root close")
+    captured = _install_list_success_root_fault(
+        monkeypatch, root=root, root_error=injected
+    )
+    try:
+        with pytest.raises(OSError) as info:
+            list_directory_no_follow(target, containment_root=root)
+        assert info.value is injected
+        assert not isinstance(info.value, SafeFilesystemError)
+        assert captured["root"] is not None
+        assert captured["scan_fd"] is not None
+        assert captured["root_live_during_scan"] is True
+        if shape == "root-only":
+            assert captured["scan_fd"] == captured["root"]
+            assert captured["dup_count"] == 0
+        else:
+            assert captured["scan_fd"] != captured["root"]
+        assert captured["root_close_count"] == 1
+    finally:
+        _cleanup_leftovers(captured)
+
+
+def test_list_root_only_succeeds_without_dupping_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    (root / "entry.txt").write_text("listed", encoding="utf-8")
+    dup_error = OSError(errno.EMFILE, "injected list dup EMFILE")
+    captured = _install_list_success_root_fault(
+        monkeypatch, root=root, dup_error=dup_error
+    )
+    try:
+        names = list_directory_no_follow(root, containment_root=root)
+        assert "entry.txt" in names
+        assert captured["root"] is not None
+        assert captured["scan_fd"] == captured["root"]
+        assert captured["dup_count"] == 0
+        assert captured["root_live_during_scan"] is True
+        assert captured["root_close_count"] == 1
+        _assert_closed(captured, "root")
+    finally:
+        _cleanup_leftovers(captured)

@@ -578,9 +578,19 @@ def _list_directory_no_follow(
     target = _expand_path(path)
     root, parts = _anchor_for(target, containment_root=containment_root)
     root_fd = _open_directory_no_follow(root)
-    fd = -1
+    fd = root_fd
+    handoff_primary: OSError | None = None
     try:
-        fd = _walk_directory_fds(root_fd, parts, target)
+        for part in parts:
+            previous_fd = fd
+            fd = _open_child_dir(previous_fd, part, target)
+            if previous_fd == root_fd:
+                continue
+            try:
+                os.close(previous_fd)
+            except OSError as error:
+                handoff_primary = error
+                raise
         names: list[str] = []
         with os.scandir(fd) as entries:
             for entry in entries:
@@ -595,8 +605,12 @@ def _list_directory_no_follow(
             f"Failed to list directory {target}: {error}", kind="io"
         ) from error
     finally:
-        if fd != -1:
-            os.close(fd)
+        if handoff_primary is not None:
+            _close_directory_fds(fd, root_fd, handoff_primary)
+        else:
+            if fd != root_fd:
+                os.close(fd)
+            os.close(root_fd)
 
 
 def unlink_no_follow(
