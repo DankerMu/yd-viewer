@@ -10,10 +10,10 @@
 - Not selected Config / project setup; Schema / columns / units / field names; Release / packaging / dependency compatibility: unchanged.
 
 ## 1. Implementation
-- [ ] 1.1 Route recovery through existing chunk reader, remove communicate, preserve primary tracker and recovery ownership.
-- [ ] 1.2 Add real-process bounded recovery/output-order/receipt/collect regressions and nonzero recovery preservation.
+- [x] 1.1 Route recovery through existing chunk reader, remove communicate, preserve primary tracker and recovery ownership.
+- [x] 1.2 Add real-process bounded recovery/output-order/receipt/collect regressions and nonzero recovery preservation.
 
 ## 2. Evidence
-- [ ] 2.1 Record baseline bounded-read failure and fixed success; actual worker 520000/1040000-byte/checksum/collect smoke.
-- [ ] 2.2 Run producer uv pytest, ruff check/format-check, large-file guard and OpenSpec strict/all.
+- [x] 2.1 Record baseline bounded-read failure and fixed success; actual worker 520000/1040000-byte/checksum/collect smoke.
+- [x] 2.2 Run producer uv pytest, ruff check/format-check, large-file guard and OpenSpec strict/all.
 - [ ] 2.3 Complete code reviews and archive/sync this independent change inside its issue PR; final CI/merge tracked in PR evidence afterward.
