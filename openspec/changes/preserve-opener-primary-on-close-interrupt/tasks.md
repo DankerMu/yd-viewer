@@ -1,8 +1,8 @@
 ## 1. Implementation and evidence
 - [x] 1.0 Register #232 problem and repair in inventory row 42 before source changes (published in da3b1f1); preserve NWM header within HEADER_LINE_BUDGET and do not edit pinned tests/test_safe_fs.py.
-- [ ] 1.1 Add real-fd secondary-interrupt regressions and record pre-fix red evidence.
-- [ ] 1.2 Isolate opener close interruptions while preserving primary and pending-parent ownership.
-- [ ] 1.3 Prove regressions green, including file-then-parent order; keep #225 OSError secondary-note/primary-identity controls in test_safe_fs_open_ownership.py and #122 controls in test_safe_fs_reads.py green. Run #183/#185 regressions only as unchanged sibling controls.
+- [x] 1.1 Add real-fd secondary-interrupt regressions and record pre-fix red evidence.
+- [x] 1.2 Isolate opener close interruptions while preserving primary and pending-parent ownership.
+- [x] 1.3 Prove regressions green, including file-then-parent order; keep #225 OSError secondary-note/primary-identity controls in test_safe_fs_open_ownership.py and #122 controls in test_safe_fs_reads.py green. Run #183/#185 regressions only as unchanged sibling controls.
 - [ ] 1.4 Run producer verification, strict OpenSpec validation, review and CI; archive in PR before final SHA.
 
 ## Risk packs
