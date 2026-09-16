@@ -16,4 +16,4 @@
 ## 2. Evidence and delivery
 - [x] 2.1 Record new behavior red against original source and green against implementation; CLI smoke through main.
 - [x] 2.2 Run producer uv run pytest, uv run ruff check ., uv run ruff format --check .; strict and all OpenSpec validation.
-- [ ] 2.3 Complete fixture/code reviews, CI and merge gate; archive this independent change and synchronize cli-config main spec, never restore M2 tasks.
+- [x] 2.3 Complete fixture/code reviews, CI and merge gate; archive this independent change and synchronize cli-config main spec, never restore M2 tasks. PR #229 merged at reviewed head ffcf93b6d6bec8bc7b5f3e82514f1425422040ab; archive and spec sync recorded in the follow-up commit.
