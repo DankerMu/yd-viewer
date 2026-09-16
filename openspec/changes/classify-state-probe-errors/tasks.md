@@ -10,10 +10,10 @@
 - Not selected Config / project setup; Schema / columns / units / field names; Release / packaging / dependency compatibility: unchanged.
 
 ## 1. Implementation
-- [ ] 1.1 Classify root metadata and nested probe OSError in the state guard, preserving #95 admission and existing absence/type lanes.
-- [ ] 1.2 Add CLI-seam EACCES/EIO probe regressions and mode-000 refusal with read-only/no-init evidence.
+- [x] 1.1 Classify root metadata and nested probe OSError in the state guard, preserving #95 admission and existing absence/type lanes.
+- [x] 1.2 Add CLI-seam EACCES/EIO probe regressions and mode-000 refusal with read-only/no-init evidence.
 
 ## 2. Verification
-- [ ] 2.1 Record baseline-red/fixed-green refusal lanes and actual CLI permission smoke; keep #95 regressions green.
-- [ ] 2.2 Run producer uv pytest, ruff check/format check, large-file gate and OpenSpec strict/all validation.
+- [x] 2.1 Record baseline-red/fixed-green refusal lanes and actual CLI permission smoke; keep #95 regressions green.
+- [x] 2.2 Run producer uv pytest, ruff check/format check, large-file gate and OpenSpec strict/all validation.
 - [ ] 2.3 Complete fixture/code review and synchronize/archive this independent change in the same PR; final CI and merge are subsequent PR gates, not a claim implied by this checkbox.

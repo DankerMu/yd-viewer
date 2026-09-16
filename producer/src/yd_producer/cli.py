@@ -19,6 +19,7 @@ test_database_url_guard_wins_before_parsing、test_run_rejects_missing_states_di
 
 import argparse
 import os
+import stat
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -253,30 +254,72 @@ def _runtime_fail(message: str) -> int:
 def _check_states_dir(states: Path) -> str | None:
     """返回拒绝理由；`None` 表示守卫通过。只读探测：不创建、不写入、不删除。
 
-    存在性分类先于目录遍历：`states` 是普通文件时直接 `os.scandir()` 会抛
-    `NotADirectoryError` 逃逸成 traceback（pinned:
-    test_run_rejects_states_path_that_is_a_regular_file——断言 `"不是目录"` 且
-    `"Traceback" not in err`；三条 lane 各断言本 lane 独有的措辞，见各用例注释）。
+    根元数据用会抛出的 `os.stat`，不用会吞掉部分 `OSError` 的 `Path.exists()` /
+    `Path.is_dir()`。真正的缺失与非目录只在这次根探测上分类；其后遍历（含中途
+    消失）的故障一律视为探测失败，不得伪装成空目录或提示 init。
     「空」按 `states/<source>/` 的直接子文件判定：任一源目录下存在以既有
     `STATE_SUFFIX` 结尾的文件即通过，不要求两源齐备，不解析内容或 cycle。
     顶层文件、空源目录、杂项、以该后缀命名的目录及更深层文件都不算状态文件。
     命中第一个状态文件即可返回（any-source）；未命中则沿用既有空目录拒绝措辞。
+    `PermissionError` 与其它 `OSError` 在本边界分成权限不足与读取失败，不得逃逸。
     """
-    if not states.exists():
-        return (
-            f"状态目录不存在：{states}；"
-            "run 永不自动 bootstrap，请先经授权执行 `yd-producer init`"
-        )
-    if not states.is_dir():
-        return f"状态目录不是目录：{states}"
-    with os.scandir(states) as sources:
-        for source in sources:
-            if not source.is_dir():
-                continue
-            with os.scandir(source.path) as entries:
-                for entry in entries:
-                    if entry.name.endswith(STATE_SUFFIX) and entry.is_file():
-                        return None
+    probe_path: Path | str = states
+
+    def refusal(exc: OSError) -> str:
+        filename = getattr(exc, "filename", None)
+        if isinstance(filename, bytes):
+            failing = Path(os.fsdecode(filename))
+        elif isinstance(filename, (str, os.PathLike)):
+            failing = Path(filename)
+        else:
+            failing = Path(probe_path)
+        if isinstance(exc, PermissionError):
+            head = f"状态目录权限不足：{states}"
+        else:
+            head = f"状态目录读取失败：{states}"
+        if failing != states:
+            head += f"（{failing}）"
+        return f"{head}：{exc}"
+
+    try:
+        try:
+            info = os.stat(states)
+        except FileNotFoundError:
+            return (
+                f"状态目录不存在：{states}；"
+                "run 永不自动 bootstrap，请先经授权执行 `yd-producer init`"
+            )
+        except NotADirectoryError:
+            return f"状态目录不是目录：{states}"
+        if not stat.S_ISDIR(info.st_mode):
+            return f"状态目录不是目录：{states}"
+        with os.scandir(states) as sources:
+            while True:
+                probe_path = states
+                try:
+                    source = next(sources)
+                except StopIteration:
+                    break
+                probe_path = Path(source.path)
+                if not source.is_dir():
+                    continue
+                with os.scandir(source.path) as entries:
+                    while True:
+                        probe_path = Path(source.path)
+                        try:
+                            entry = next(entries)
+                        except StopIteration:
+                            break
+                        probe_path = Path(entry.path)
+                        if entry.name.endswith(STATE_SUFFIX) and entry.is_file():
+                            probe_path = Path(source.path)
+                            return None
+                    probe_path = Path(source.path)
+            probe_path = states
+    except PermissionError as exc:
+        return refusal(exc)
+    except OSError as exc:
+        return refusal(exc)
     return (
         f"状态目录为空：{states}；"
         "run 永不自动 bootstrap，请先经授权执行 `yd-producer init`"
