@@ -525,11 +525,11 @@ def test_window_upper_bound_is_closed(tmp_path: Path) -> None:
         )
 
 
-# --- `cycle.hours` 取值域自查（round 1 cand-01）------------------------------
+# --- 手构 `Config` 的 `cycle.hours` 可构造性自查（round 1 cand-01）-----------
 #
-# `_candidate_cycles` 是本路径上 `config.cycle.hours` 的第一个消费者、跑在任何
-# `rawscan.judge` 之前，故全仓唯一的域校验 `rawscan._validate_config_domain`（在 `judge`
-# 体内）对下面两个输入**结构性不可达**。
+# 文件装载的 Config 域权威在 `config._validate_config_domain`；rawscan/init 只对手构
+# `Config` 保留防御。下面两个手构输入在枚举阶段就让 `rawscan.judge` 体内的防御
+# **结构性不可达**，故 init 枚举前只查 hours 非空、且为 `0..23` 内的整数以保证可构造。
 
 
 def test_empty_cycle_hours_is_a_config_error_not_a_missing_raw_refusal(
@@ -582,11 +582,11 @@ def test_out_of_range_cycle_hours_raise_config_error_not_bare_value_error(
 def test_in_range_but_off_domain_cycle_hour_still_comes_from_rawscan(
     tmp_path: Path,
 ) -> None:
-    """控制行：`hours = (13,)` 网格可构造 -> 域校验仍由 `rawscan.judge` 施加。
+    """控制行：手构 `Config` 的 `hours = (13,)` 网格可构造 -> 由 `rawscan.judge` 防御。
 
-    本模块 MUST NOT 重新声明 `{0, 12}` 这个域；新增的自查只补「网格不可构造」的两个洞，
-    `rawscan` 仍是取值域的唯一权威。把 `{0, 12}` 抄进 `init` 的实现在本行看不出区别，
-    但会在 `rawscan` 改域时静默分叉——故断言异常文本来自 `rawscan` 的措辞。
+    文件装载的 Config 域权威在 `config._validate_config_domain`；rawscan/init 只对手构
+    配置保留防御。init 枚举前只查 hours 非空与 `0..23` 可构造，MUST NOT 重新声明
+    `{0, 12}` 这个域；本行确认手构配置仍被拒绝，并且不写状态文件。
     """
     tree = Tree(tmp_path, config=make_config(cycle_hours=(13,)))
     for source in WRITE_ORDER:
