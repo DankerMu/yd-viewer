@@ -340,6 +340,8 @@ def open_file_no_follow(path: Path, *, containment_root: Path | None = None) -> 
     parent_fd, parent_path = _open_parent_dir(
         target, containment_root=containment_root, create=False
     )
+    file_fd: int | None = None
+    parent_pending = True
     try:
         _verify_fd_matches_path(parent_fd, parent_path)
         try:
@@ -362,24 +364,27 @@ def open_file_no_follow(path: Path, *, containment_root: Path | None = None) -> 
                     f"Target file must not be a symlink: {target}"
                 ) from error
             raise
-        try:
-            opened = os.fstat(file_fd)
-            if not stat.S_ISREG(opened.st_mode):
-                raise SafeFilesystemError(
-                    f"Target file must be a regular file: {target}"
-                )
-            if expected.st_dev != opened.st_dev or expected.st_ino != opened.st_ino:
-                raise SafeFilesystemError(
-                    f"Target file changed while being opened: {target}",
-                    kind="identity_changed",
-                )
-            _verify_fd_matches_path(parent_fd, parent_path)
-            return file_fd
-        except Exception:
-            os.close(file_fd)
-            raise
-    finally:
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise SafeFilesystemError(f"Target file must be a regular file: {target}")
+        if expected.st_dev != opened.st_dev or expected.st_ino != opened.st_ino:
+            raise SafeFilesystemError(
+                f"Target file changed while being opened: {target}",
+                kind="identity_changed",
+            )
+        _verify_fd_matches_path(parent_fd, parent_path)
+        parent_pending = False
         os.close(parent_fd)
+        return file_fd
+    except BaseException as primary:
+        pending = ((file_fd, "file"), (parent_fd if parent_pending else None, "parent"))
+        for fd, role in pending:
+            if fd is None:
+                continue
+            close_error = _close_acquired_file_fd(fd)
+            if close_error is not None:
+                primary.add_note(_descriptor_close_note(role, close_error))
+        raise
 
 
 def stat_no_follow(
@@ -419,7 +424,11 @@ def _close_acquired_file_fd(file_fd: int) -> OSError | None:
 
 
 def _file_close_note(error: OSError) -> str:
-    return f"file descriptor close also failed: {type(error).__name__}: {error}"
+    return _descriptor_close_note("file", error)
+
+
+def _descriptor_close_note(role: str, error: OSError) -> str:
+    return f"{role} descriptor close also failed: {type(error).__name__}: {error}"
 
 
 def _conclude_bounded_read(
