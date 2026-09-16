@@ -29,6 +29,7 @@ from pathlib import Path
 from yd_producer import nwm
 from yd_producer.config import Config, ConfigError, LocalConfig, load_config, load_local
 from yd_producer.controller import (
+    STATE_SUFFIX,
     RunError,
     RunOutcome,
     RunSourcesError,
@@ -256,9 +257,10 @@ def _check_states_dir(states: Path) -> str | None:
     `NotADirectoryError` 逃逸成 traceback（pinned:
     test_run_rejects_states_path_that_is_a_regular_file——断言 `"不是目录"` 且
     `"Traceback" not in err`；三条 lane 各断言本 lane 独有的措辞，见各用例注释）。
-    「空判定用 `next(...)` 早停」是性能选择，不是行为选择（等价变异，不可判别：改成
-    `list(entries)` 只是把整个目录读完再判空，空/非空的判定结果、返回的拒绝理由与是否
-    写入都不变，没有可观测差别可断言）。
+    「空」按 `states/<source>/` 的直接子文件判定：任一源目录下存在以既有
+    `STATE_SUFFIX` 结尾的文件即通过，不要求两源齐备，不解析内容或 cycle。
+    顶层文件、空源目录、杂项、以该后缀命名的目录及更深层文件都不算状态文件。
+    命中第一个状态文件即可返回（any-source）；未命中则沿用既有空目录拒绝措辞。
     """
     if not states.exists():
         return (
@@ -267,13 +269,18 @@ def _check_states_dir(states: Path) -> str | None:
         )
     if not states.is_dir():
         return f"状态目录不是目录：{states}"
-    with os.scandir(states) as entries:
-        if next(entries, None) is None:
-            return (
-                f"状态目录为空：{states}；"
-                "run 永不自动 bootstrap，请先经授权执行 `yd-producer init`"
-            )
-    return None
+    with os.scandir(states) as sources:
+        for source in sources:
+            if not source.is_dir():
+                continue
+            with os.scandir(source.path) as entries:
+                for entry in entries:
+                    if entry.name.endswith(STATE_SUFFIX) and entry.is_file():
+                        return None
+    return (
+        f"状态目录为空：{states}；"
+        "run 永不自动 bootstrap，请先经授权执行 `yd-producer init`"
+    )
 
 
 def _print_notes(exc: BaseException) -> None:

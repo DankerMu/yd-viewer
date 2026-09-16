@@ -295,6 +295,12 @@ def test_run_rejects_states_path_that_is_a_regular_file(monkeypatch, capsys, tmp
 def test_run_with_non_empty_states_enters_locked_production_assembly(
     monkeypatch, capsys, tmp_path
 ):
+    """Issue #95 刻意改写：空的 `states/gfs/` 不再视为已 bootstrap。
+
+    旧 fixture 只 `mkdir` 源目录、目录内无文件，把「有目录条目」钉成放行条件。
+    空源目录是 init 半途残留，不是建链；补上真实 `.cfg.ic` 后守卫按状态文件
+    存在性放行，生产装配仍可达。不得把这次改写读成顺手对齐。
+    """
     captured: dict[str, object] = {}
 
     def fake_lock(*, lock_path, action):
@@ -315,6 +321,7 @@ def test_run_with_non_empty_states_enters_locked_production_assembly(
     states = yd_root / "states"
     states.mkdir(parents=True)
     (states / "gfs").mkdir()
+    (states / "gfs" / "2026010200.cfg.ic").write_bytes(b"presence")
     argv = _argv("run", tmp_path, yd_root=yd_root)
     assert _exit_code(argv, env={}) == 0
     kwargs = captured["kwargs"]
@@ -607,6 +614,7 @@ def _ready_run_argv(tmp_path, *, timeout: int | None = 37):
     states = Path(local.yd_root) / "states"
     states.mkdir(parents=True, exist_ok=True)
     (states / "gfs").mkdir(exist_ok=True)
+    (states / "gfs" / "2026010200.cfg.ic").write_bytes(b"presence")
     return ["run", "--config", str(config_path), "--local", str(local_path)], local
 
 
