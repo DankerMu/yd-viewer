@@ -5,7 +5,7 @@
 - [x] 2.2 Implement finally close-once with read/close/cancellation precedence; prove stream and checksum consumer behavior green.
 - [x] 2.3 Run producer uv pytest, ruff check/format and line guard; OpenSpec strict/all validation.
 ## 3. Delivery artifacts
-- [ ] 3.1 Complete cross-review and same-PR archive/spec sync; merge remains external final SHA gate.
+- [x] 3.1 Complete cross-review and same-PR archive/spec sync; merge remains external final SHA gate.
 ## Risk pack mapping
 - Selected Public API / CLI / script entry: ObjectStoreError cause/cancellation identity, chunks and checksum consumer (2.1–2.2).
 - Selected File IO / path safety / overwrite: same safe_fs admission, real acquired fd, no-follow/containment regression controls (2.1–2.3).

@@ -750,7 +750,7 @@ def _run_shud_live(
     work_dir: Path,
     root_id: tuple[int, int],
     log_path: Path,
-    tracker: CheckpointTracker,
+    tracker: CheckpointTracker | None,
     env: Mapping[str, str],
 ) -> int:
     process = subprocess.Popen(
@@ -763,7 +763,8 @@ def _run_shud_live(
     stream = process.stdout
     try:
         while True:
-            tracker.capture_available()
+            if tracker is not None:
+                tracker.capture_available()
             if stream is None:
                 break
             ready, _, _ = select.select([stream], (), (), _CAPTURE_WAIT)
@@ -778,7 +779,8 @@ def _run_shud_live(
                     _append_job_log(log_path, work_dir, root_id, chunk)
                 break
         process.wait()
-        tracker.capture_available()
+        if tracker is not None:
+            tracker.capture_available()
         return int(process.returncode or 0)
     finally:
         if process.poll() is None:
@@ -936,16 +938,15 @@ def run_private_worker(*, work_dir: Path) -> None:
         raise ProductionAttemptError(f"SHUD exited {code} in {run_directory.path}")
 
     def recovery_runner(*, run_directory: RunDirectory, output_dir: Path) -> int:
-        recovered = subprocess.Popen(
-            list(_shud_argv(binary, identity.project_name, output_dir)),
+        return _run_shud_live(
+            argv=_shud_argv(binary, identity.project_name, output_dir),
             cwd=run_directory.path,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=dict(env),
+            work_dir=staged.work_dir,
+            root_id=root_id,
+            log_path=job_log,
+            tracker=None,
+            env=env,
         )
-        stdout, _stderr = recovered.communicate()
-        _append_job_log(job_log, staged.work_dir, root_id, stdout)
-        return int(recovered.returncode or 0)
 
     try:
         captured = ensure_twelve_hour_checkpoint(
