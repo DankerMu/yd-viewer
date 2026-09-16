@@ -8,7 +8,8 @@
 - [x] 2.3 Run producer `uv run python -m pytest`, `uv run ruff check .`, `uv run ruff format --check .`, plus `openspec validate --all` and strict change validation.
 
 ## 3. Delivery
-- [ ] 3.1 Complete cross-review, green CI, merge gate and archive.
+- [x] 3.1 Complete cross-review and CI evidence; prepare same-PR archival. Merge remains the external, SHA-bound final gate after archived artifacts pass CI.
+Delivery sequencing: protected master requires CI and the user requires one issue per PR, so this change is archived in its implementation PR rather than a second post-merge PR. This checkbox does not claim the PR is already merged.
 
 ## Risk pack mapping
 - Selected Public API / CLI / script entry: unchanged signature and exception families; success/refusal regressions (2.1).
