@@ -26,3 +26,8 @@ open_file_no_follow SHALL retain ownership of acquired file descriptors through 
 - **WHEN** all checks and parent cleanup succeed
 - **THEN** the caller receives an open readable fd and is responsible for closing it
 
+#### Scenario: Secondary close interruption during primary cleanup
+- **WHEN** post-open validation has failed and closing file or parent raises a non-OSError BaseException such as KeyboardInterrupt
+- **THEN** the identical validation primary SHALL escape with secondary role/type/message diagnostics, and each remaining owned descriptor SHALL receive its own close attempt in file-then-parent order, at most once per descriptor
+- **AND** neither retry nor inference about failed-close descriptor liveness is permitted
+

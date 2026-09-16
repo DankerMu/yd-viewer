@@ -3,7 +3,7 @@
 - [x] 1.1 Add real-fd secondary-interrupt regressions and record pre-fix red evidence.
 - [x] 1.2 Isolate opener close interruptions while preserving primary and pending-parent ownership.
 - [x] 1.3 Prove regressions green, including file-then-parent order; keep #225 OSError secondary-note/primary-identity controls in test_safe_fs_open_ownership.py and #122 controls in test_safe_fs_reads.py green. Run #183/#185 regressions only as unchanged sibling controls.
-- [ ] 1.4 Run producer verification, strict OpenSpec validation, review and CI; archive in PR before final SHA.
+- [x] 1.4 Run producer verification, strict OpenSpec validation, review and CI; archive in PR before final SHA.
 
 ## Risk packs
 - Selected: File IO / path safety / overwrite — real-fd one-shot/order tests; existing safety and transfer tests.
