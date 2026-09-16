@@ -256,29 +256,13 @@ def open_directory_no_follow(
 
     target = _expand_path(path)
     root, parts = _anchor_for(target, containment_root=containment_root)
-    root_fd = _open_directory_no_follow(root)
-    fd = root_fd
+    directory_fd = _walk_directory_fds(_open_directory_no_follow(root), parts, target)
     try:
-        for part in parts:
-            next_fd = _open_child_dir(fd, part, target)
-            if fd != root_fd:
-                os.close(fd)
-            fd = next_fd
-        directory_fd = os.dup(root_fd) if fd == root_fd else fd
-        if fd != root_fd:
-            fd = -1
-        try:
-            _verify_fd_matches_path(directory_fd, target)
-            return directory_fd
-        except Exception:
-            os.close(directory_fd)
-            raise
+        _verify_fd_matches_path(directory_fd, target)
+        return directory_fd
     except Exception:
-        if fd != -1 and fd != root_fd:
-            os.close(fd)
+        os.close(directory_fd)
         raise
-    finally:
-        os.close(root_fd)
 
 
 def write_bytes_no_follow_exclusive(
@@ -431,6 +415,34 @@ def _descriptor_close_note(role: str, error: OSError) -> str:
     return f"{role} descriptor close also failed: {type(error).__name__}: {error}"
 
 
+def _walk_directory_fds(root_fd: int, parts: tuple[str, ...], path_label: Path) -> int:
+    current_fd = root_fd
+    try:
+        for part in parts:
+            previous_fd = current_fd
+            current_fd = _open_child_dir(previous_fd, part, path_label)
+            if previous_fd != root_fd:
+                os.close(previous_fd)
+        if current_fd == root_fd:
+            current_fd = os.dup(root_fd)
+        directory_fd = current_fd
+        root_fd, pending_root_fd = -1, root_fd
+        os.close(pending_root_fd)
+        current_fd = -1
+        return directory_fd
+    except BaseException as primary:
+        _close_directory_fds(current_fd, root_fd, primary)
+        raise
+
+
+def _close_directory_fds(current_fd: int, root_fd: int, primary: BaseException) -> None:
+    for fd, role in ((current_fd, "successor"), (root_fd, "root")):
+        if fd == -1 or (fd == root_fd and role == "successor"):
+            continue
+        if (error := _close_acquired_file_fd(fd)) is not None:
+            primary.add_note(_descriptor_close_note(role, error))
+
+
 def _conclude_bounded_read(
     path: Path,
     *,
@@ -566,13 +578,9 @@ def _list_directory_no_follow(
     target = _expand_path(path)
     root, parts = _anchor_for(target, containment_root=containment_root)
     root_fd = _open_directory_no_follow(root)
-    fd = root_fd
+    fd = -1
     try:
-        for part in parts:
-            next_fd = _open_child_dir(fd, part, target)
-            if fd != root_fd:
-                os.close(fd)
-            fd = next_fd
+        fd = _walk_directory_fds(root_fd, parts, target)
         names: list[str] = []
         with os.scandir(fd) as entries:
             for entry in entries:
@@ -587,9 +595,8 @@ def _list_directory_no_follow(
             f"Failed to list directory {target}: {error}", kind="io"
         ) from error
     finally:
-        if fd != root_fd:
+        if fd != -1:
             os.close(fd)
-        os.close(root_fd)
 
 
 def unlink_no_follow(
@@ -784,23 +791,7 @@ def _open_parent_dir(
     if create:
         ensure_directory_no_follow(parent, containment_root=containment_root)
     root, parts = _anchor_for(parent, containment_root=containment_root)
-    root_fd = _open_directory_no_follow(root)
-    fd = root_fd
-    try:
-        for part in parts:
-            next_fd = _open_child_dir(fd, part, parent)
-            if fd != root_fd:
-                os.close(fd)
-            fd = next_fd
-        if fd == root_fd:
-            return os.dup(root_fd), parent
-        parent_fd = fd
-        fd = -1
-        return parent_fd, parent
-    finally:
-        if fd != -1 and fd != root_fd:
-            os.close(fd)
-        os.close(root_fd)
+    return _walk_directory_fds(_open_directory_no_follow(root), parts, parent), parent
 
 
 def _open_child_dir(parent_fd: int, name: str, path_label: Path) -> int:
@@ -847,23 +838,7 @@ def _open_verified_dir(path: Path) -> int:
 def _open_directory_no_follow(path: Path) -> int:
     target = _expand_path(path)
     root, parts = _anchor_for(target, containment_root=None)
-    root_fd = _open_verified_dir(root)
-    fd = root_fd
-    try:
-        for part in parts:
-            next_fd = _open_child_dir(fd, part, target)
-            if fd != root_fd:
-                os.close(fd)
-            fd = next_fd
-        if fd == root_fd:
-            return os.dup(root_fd)
-        directory_fd = fd
-        fd = -1
-        return directory_fd
-    finally:
-        if fd != -1 and fd != root_fd:
-            os.close(fd)
-        os.close(root_fd)
+    return _walk_directory_fds(_open_verified_dir(root), parts, target)
 
 
 def _lstat_dir(path: Path) -> os.stat_result:

@@ -1,9 +1,9 @@
 ## 1. Fixture
-- [ ] 1.1 Register inventory deviation before implementation and obtain fixture-review pass / strict validation.
+- [x] 1.1 Register inventory deviation before implementation and obtain fixture-review pass / strict validation.
 ## 2. Repair and verification
-- [ ] 2.1 Prove four-walker defect red with real-fd injection including consumed/unconsumed previous and bounded repetition.
-- [ ] 2.2 Apply uniform ownership handoff and primary-preserving cleanup; show regressions green and successful root/deep/list behavior.
-- [ ] 2.3 Run producer uv pytest, ruff check/format and line guard; OpenSpec all/strict validation.
+- [x] 2.1 Prove four-walker defect red with real-fd injection including consumed/unconsumed previous and bounded repetition.
+- [x] 2.2 Apply uniform ownership handoff and primary-preserving cleanup; show regressions green and successful root/deep/list behavior.
+- [x] 2.3 Run producer uv pytest, ruff check/format and line guard; OpenSpec all/strict validation.
 ## 3. Delivery artifacts
 - [ ] 3.1 Complete cross-review and same-PR archive/spec synchronization; merge remains external SHA-bound gate after final CI.
 ## Risk pack mapping
