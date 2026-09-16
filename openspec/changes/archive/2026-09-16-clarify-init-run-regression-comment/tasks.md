@@ -1,6 +1,6 @@
 ## 1. Comment maintenance
-- [ ] 1.1 Replace only the stale two-line explanation; preserve both existing assertions and all executable code.
-- [ ] 1.2 Run the existing init→run regression, producer lint/format and OpenSpec/log checks; inspect scope before archive/PR.
+- [x] 1.1 Replace only the stale two-line explanation; preserve both existing assertions and all executable code.
+- [x] 1.2 Run the existing init→run regression, producer lint/format and OpenSpec/log checks; inspect scope before archive/PR.
 
 ## Risk packs
 - Selected: Documentation / migration notes — task 1.1 diff inspection and task 1.2 existing test; no deployment migration.

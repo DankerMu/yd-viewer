@@ -832,8 +832,8 @@ def test_cli_init_success_prints_written_paths_and_unblocks_run(
         assert target.is_file()
         assert str(target) in out
 
-    # `run` 的 `_check_states_dir`（#3，未改动）在 init 之后不再拒绝：退出码不再是
-    # `EXIT_GUARD`，而是 `run` 自己的分阶段未实现。
+    # init 后 states 守卫不再拒绝，`run` 继续进入生产路径；本用例只验证该守卫放行。
+    # 此合成 fixture 下后续运行非成功，使用运行期出口 `EXIT_RUNTIME=3`，并非未实现分支。
     run_argv = ["run"] + argv[1:]
     assert cli.main(run_argv, env={}) == 3
     assert "状态目录" not in capsys.readouterr().err
