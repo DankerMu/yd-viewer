@@ -12,6 +12,8 @@ from urllib.parse import unquote, urlparse
 from yd_producer.store.object_path import validate_object_path
 from yd_producer.store.safe_fs import (
     SafeFilesystemError,
+    _close_acquired_file_fd,
+    _file_close_note,
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
     open_file_no_follow,
@@ -265,15 +267,27 @@ class LocalObjectStore:
             raise ObjectStoreError(
                 f"Failed to stream object {key_or_uri}: {error}"
             ) from error
+        primary: BaseException | None = None
         try:
             while chunk := os.read(file_fd, chunk_size):
                 yield chunk
-        except OSError as error:
-            raise ObjectStoreError(
-                f"Failed to stream object {key_or_uri}: {error}"
-            ) from error
+        except BaseException as error:  # noqa: BLE001 - retain/rethrow, not wrap
+            primary = error
         finally:
-            os.close(file_fd)
+            close_error = _close_acquired_file_fd(file_fd)
+        if isinstance(primary, OSError):
+            error = ObjectStoreError(f"Failed to stream object {key_or_uri}: {primary}")
+            if close_error is not None:
+                error.add_note(_file_close_note(close_error))
+            raise error from primary
+        if primary is not None:
+            if close_error is not None:
+                primary.add_note(_file_close_note(close_error))
+            raise primary
+        if close_error is not None:
+            raise ObjectStoreError(
+                f"Failed to stream object {key_or_uri}: {close_error}"
+            ) from close_error
 
     def checksum(self, key_or_uri: str) -> str:
         return self.size_and_checksum(key_or_uri)[1]

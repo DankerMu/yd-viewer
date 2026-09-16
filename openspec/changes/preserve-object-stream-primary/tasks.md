@@ -1,9 +1,9 @@
 ## 1. Fixture
-- [ ] 1.1 Register object_store inventory deviation, obtain fixture review pass and strict validate before source edits.
+- [x] 1.1 Register object_store inventory deviation, obtain fixture review pass and strict validate before source edits.
 ## 2. Repair and verification
-- [ ] 2.1 Add real-fd stream fault regressions and prove new defect lanes red before fix.
-- [ ] 2.2 Implement finally close-once with read/close/cancellation precedence; prove stream and checksum consumer behavior green.
-- [ ] 2.3 Run producer uv pytest, ruff check/format and line guard; OpenSpec strict/all validation.
+- [x] 2.1 Add real-fd stream fault regressions and prove new defect lanes red before fix.
+- [x] 2.2 Implement finally close-once with read/close/cancellation precedence; prove stream and checksum consumer behavior green.
+- [x] 2.3 Run producer uv pytest, ruff check/format and line guard; OpenSpec strict/all validation.
 ## 3. Delivery artifacts
 - [ ] 3.1 Complete cross-review and same-PR archive/spec sync; merge remains external final SHA gate.
 ## Risk pack mapping

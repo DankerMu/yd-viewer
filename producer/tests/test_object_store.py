@@ -220,7 +220,7 @@ def test_validate_object_path_alone_accepts_parent_traversal() -> None:
     捕获，不校验段内容），所以 `..` 会被当成合法的 `{cycle_time}` 值。真正闭合
     containment 的是复合入口 `LocalObjectStore.resolve_path` =
     `normalize_object_key`（拒 `..` 与空键）→ `validate_object_path`（前缀白名单，拒
-    绝对路径 strip 后的非法前缀）→ `relative_to(root)`。清单 §1 该行 `剥离点` 为 `无`，
+    绝对路径 strip 后的非法前缀）→ `relative_to(root)`。清单 §1 `object_path` 行 `剥离点` 仍为 `无`（#185 登记的是 `object_store` 的 iterator close 因果，不改本函数），
     组 3/7/13 若把本函数读成穿越闸门即为误用。
     """
     result = validate_object_path("raw/gfs/../../../etc/passwd")
