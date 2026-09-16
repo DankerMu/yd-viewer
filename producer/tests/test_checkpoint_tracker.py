@@ -767,12 +767,10 @@ def test_captured_record_is_frozen(tmp_path: pathlib.Path) -> None:
         tracker.captured[12].lead_hours = 24  # type: ignore[misc]
 
 
-def test_captured_record_rejects_positional_construction(
-    tmp_path: pathlib.Path,
-) -> None:
-    """`kw_only=True`：五个字段里有三个是字符串/路径，位置构造错序不会有任何提示。"""
-    with pytest.raises(TypeError):
-        CapturedCheckpoint(12, 720.0, tmp_path / "x", "s", "c")  # type: ignore[misc]
+def test_captured_record_rejects_positional_construction() -> None:
+    """直接检查 `kw_only=True` 与 `frozen=True`，避免字段数变化导致位置构造误报。"""
+    assert CapturedCheckpoint.__dataclass_params__.kw_only is True
+    assert CapturedCheckpoint.__dataclass_params__.frozen is True
 
 
 def test_missing_hours_is_ascending_regardless_of_argument_order(
