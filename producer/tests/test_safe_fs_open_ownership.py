@@ -1,14 +1,16 @@
-"""Pre-return file-descriptor ownership for `open_file_no_follow` (#225).
+"""Pre-return file-descriptor ownership for `open_file_no_follow` (#225, #232).
 
 `open_file_no_follow` used to close the acquired file fd only in
 `except Exception`, then close the parent in `finally`. KeyboardInterrupt
 and SystemExit skipped file cleanup; a close OSError replaced the original
 failure; a parent-close failure after successful validation discarded the
-unreturned file fd. Discriminators are the captured file/parent fds, one
-close attempt each, primary object identity, secondary close notes, and
-`fstat` -> EBADF after a successful close. Injected close errors never
-assert liveness of that fd. Leftover closes are disarmed and separate
-from the assertions.
+unreturned file fd. A later file-then-parent loop still let a non-OSError
+close interrupt replace the primary and skip the remaining descriptor.
+Discriminators are the captured file/parent fds, one close attempt each
+in file-then-parent order, primary object identity, secondary close notes
+with role/type/message in the same note, and `fstat` -> EBADF after a
+successful close. Injected close errors never assert liveness of that fd.
+Leftover closes are disarmed and separate from the assertions.
 """
 
 from __future__ import annotations
@@ -61,6 +63,19 @@ def _assert_close_note(error: BaseException, injected: OSError, *, role: str) ->
     assert injected.strerror in joined
 
 
+def _assert_interrupt_note(
+    error: BaseException, injected: BaseException, *, role: str
+) -> None:
+    matches = [
+        note
+        for note in _notes_of(error)
+        if note.startswith(f"{role} descriptor close also failed:")
+        and type(injected).__name__ in note
+        and str(injected) in note
+    ]
+    assert matches
+
+
 def _cleanup_leftovers(captured: dict[str, object]) -> None:
     captured["armed"] = False
     real_close = captured["real_close"]
@@ -85,12 +100,13 @@ def _install_open_faults(
     file_mode: int | None = None,
     file_ino: int | None = None,
     parent_identity_mismatch: bool = False,
-    file_close_error: OSError | None = None,
-    parent_close_error: OSError | None = None,
+    file_close_error: BaseException | None = None,
+    parent_close_error: BaseException | None = None,
 ) -> dict[str, object]:
     real_open = os.open
     real_close = os.close
     real_fstat = os.fstat
+    close_order: list[int] = []
     captured: dict[str, object] = {
         "fd": None,
         "parent_fd": None,
@@ -102,6 +118,7 @@ def _install_open_faults(
         "fstat_injected": False,
         "real_close": real_close,
         "real_fstat": real_fstat,
+        "close_order": close_order,
     }
 
     def opening(path, flags, mode=0o777, *, dir_fd=None):
@@ -117,6 +134,7 @@ def _install_open_faults(
             return
         if captured["fd"] is not None and fd == captured["fd"]:
             captured["file_close_count"] = int(captured["file_close_count"]) + 1
+            close_order.append(fd)
             real_close(fd)
             captured["file_really_closed"] = True
             if file_close_error is not None:
@@ -124,6 +142,7 @@ def _install_open_faults(
             return
         if captured["parent_fd"] is not None and fd == captured["parent_fd"]:
             captured["parent_close_count"] = int(captured["parent_close_count"]) + 1
+            close_order.append(fd)
             real_close(fd)
             captured["parent_really_closed"] = True
             if parent_close_error is not None:
@@ -343,6 +362,56 @@ def test_open_file_validation_and_cleanup_failures_keep_primary(
             _assert_close_note(info.value, file_error, role="file")
         if parent_error is not None:
             _assert_close_note(info.value, parent_error, role="parent")
+        _assert_one_cleanup(
+            captured,
+            file_close_failed=file_close,
+            parent_close_failed=parent_close,
+        )
+    finally:
+        _cleanup_leftovers(captured)
+
+
+@pytest.mark.parametrize(
+    ("file_close", "parent_close"),
+    [
+        (True, False),
+        (False, True),
+        (True, True),
+    ],
+    ids=["file-close", "parent-close", "both-closes"],
+)
+def test_open_file_keeps_primary_when_cleanup_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_close: bool,
+    parent_close: bool,
+) -> None:
+    root = tmp_path.resolve()
+    target = _plant(root)
+    injected = KeyboardInterrupt("primary interrupt")
+    file_error = (
+        KeyboardInterrupt("secondary close interrupt A") if file_close else None
+    )
+    parent_error = (
+        KeyboardInterrupt("secondary close interrupt B") if parent_close else None
+    )
+    captured = _install_open_faults(
+        monkeypatch,
+        fstat_error=injected,
+        file_close_error=file_error,
+        parent_close_error=parent_error,
+    )
+    try:
+        with pytest.raises(BaseException) as info:
+            _open(target, root)
+        assert info.value is injected
+        assert info.value is not file_error
+        assert info.value is not parent_error
+        if file_error is not None:
+            _assert_interrupt_note(info.value, file_error, role="file")
+        if parent_error is not None:
+            _assert_interrupt_note(info.value, parent_error, role="parent")
+        assert captured["close_order"] == [captured["fd"], captured["parent_fd"]]
         _assert_one_cleanup(
             captured,
             file_close_failed=file_close,

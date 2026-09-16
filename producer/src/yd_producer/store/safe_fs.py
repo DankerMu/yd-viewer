@@ -365,7 +365,14 @@ def open_file_no_follow(path: Path, *, containment_root: Path | None = None) -> 
         for fd, role in pending:
             if fd is None:
                 continue
-            close_error = _close_acquired_file_fd(fd)
+            try:
+                close_error = _close_acquired_file_fd(fd)
+            except BaseException as interrupt:  # noqa: BLE001 - retain primary, isolate close interrupt
+                primary.add_note(
+                    f"{role} descriptor close also failed: "
+                    f"{type(interrupt).__name__}: {interrupt}"
+                )
+                continue
             if close_error is not None:
                 primary.add_note(_descriptor_close_note(role, close_error))
         raise
