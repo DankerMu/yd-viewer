@@ -6,7 +6,7 @@ Issue type: bugfix
 Fixture level: expanded
 Upstream suggested level: absent (expanded: file IO and ownership)
 Blast radius: pre-return descriptor cleanup and exception causality in open_file_no_follow
-Selected risk packs: File IO / path safety / overwrite; Error handling / rollback / partial outputs
+Selected risk packs: File IO / path safety / overwrite; Error handling / rollback / partial outputs; Documentation / migration notes
 Evidence floor: real-fd regression red before / green after; producer suite, lint, format, line guard; strict OpenSpec validation; CI
 
 ## What Changes
