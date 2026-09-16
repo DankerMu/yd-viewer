@@ -343,8 +343,9 @@ def _normalize_now(now: datetime) -> datetime:
 def _require_constructible_hours(hours: tuple[int, ...]) -> None:
     """候选网格可构造性自查：`hours` 非空、且每个值都在 `0..23` 内。
 
-    只管「网格能不能建」，不管业务取值域（`{0, 12}` 由 `rawscan.judge` 施加，见
-    :func:`_candidate_cycles` 的 docstring）。
+    只管手构 `Config` 的「网格能不能建」，不管业务取值域；文件装载的 Config 域权威在
+    `config._validate_config_domain`，rawscan/init 只保留手构配置的防御，见
+    :func:`_candidate_cycles` 的 docstring。
     """
     if not hours:
         raise ConfigError(
@@ -369,17 +370,18 @@ def _candidate_cycles(
     `cycle <= now`，未来 cycle 不进候选集。`hours` 在 `config.toml` 内的书写顺序不作数，
     故最后统一排序——按日期网格 × 声明序枚举出的序列未必升序。
 
-    **取值域自查跑在枚举之前**：全仓唯一的域校验 `rawscan._validate_config_domain` 在
-    `judge` **体内**，而本函数是这条路径上 `config.cycle.hours` 的第一个消费者、跑在任何
-    `judge` 调用之前，于是有两个输入结构性地到不了那道校验——`hours = ()` 让候选集为空、
-    `judge` 一次都不调，退化成「窗内无完整 cycle、等 raw 补齐」这个**伪装**；`hours` 含
-    `0..23` 之外的值让 `datetime(...)` 抛**裸 `ValueError`**，`cli.main` 的
-    `except ConfigError` 接不住，traceback 逃逸出 CLI。故此处只补这两个洞：非空 + 每个值
-    是合法小时，不满足即 `ConfigError` 点名 `cycle.hours`。
+    **可构造性自查跑在枚举之前**：文件装载的 Config 域权威在
+    `config._validate_config_domain`；rawscan/init 只对手构 `Config` 保留防御。
+    手构配置绕过装载校验，而 `rawscan._validate_config_domain` 在 `judge` **体内**：
+    `hours = ()` 让候选集为空、`judge` 一次都不调，退化成「窗内无完整 cycle、等 raw
+    补齐」这个**伪装**；`hours` 含 `0..23` 之外的值让 `datetime(...)` 抛**裸
+    `ValueError`**，`cli.main` 的 `except ConfigError` 接不住。故 init 枚举前只查
+    `hours` 非空、且每个值是 `0..23` 内的整数以保证可构造，否则以 `ConfigError` 点名
+    `cycle.hours`。
     **MUST NOT 在此重新声明 `{0, 12}` 这个域**，也 MUST NOT 导入私有的
-    `rawscan._validate_config_domain`（`rawscan` 属 Must-preserve 面）：候选网格一旦非空
-    且可构造，第一次 `judge` 调用就会施加 `{0, 12}` 并原样上抛 `ConfigError`——`rawscan`
-    仍是取值域的唯一权威。
+    `rawscan._validate_config_domain`（`rawscan` 属 Must-preserve 面）：若手构配置产生了
+    待判定候选，`judge` 调用仍会防御性检查 `{0, 12}` 并原样上抛 `ConfigError`；
+    这不替代文件装载时 `config._validate_config_domain` 的域权威。
     """
     _require_constructible_hours(hours)
     candidates: list[datetime] = []
