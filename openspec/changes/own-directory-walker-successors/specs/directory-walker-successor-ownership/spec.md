@@ -4,12 +4,12 @@
 The four safe_fs walkers _open_parent_dir, _open_directory_no_follow, open_directory_no_follow and _list_directory_no_follow SHALL track a successfully opened successor as current before closing previous. If previous close fails they SHALL clean successor exactly once, never retry previous, and preserve the previous failure as the primary error or existing list-domain error cause; cleanup OSError SHALL be secondary. Existing no-follow, containment and successful return contracts SHALL remain unchanged.
 
 #### Scenario: Previous close reports failure
-- **WHEN** a multi-component walk opens successor and then previous close raises OSError, whether previous was consumed or not
+- **WHEN** each named walker's own non-root handoff over at least two components opens successor and then captured previous close raises OSError, whether previous was consumed or not
 - **THEN** successor and root receive cleanup, successor is attempted once, previous is not retried and its error remains primary or the listing error cause
 
 #### Scenario: Secondary cleanup also fails
 - **WHEN** previous close fails and successor or root cleanup also reports OSError
-- **THEN** the original previous failure remains primary or cause, secondary errors are recorded and no failed close is retried
+- **THEN** the same previous exception object remains primary for open/parent/private-open or the SafeFilesystemError(kind=io) cause for listing, secondary errors are attached via add_note using the existing descriptor-note convention, and no failed close is retried
 
 #### Scenario: Repeated bounded handoff faults
 - **WHEN** each walker repeatedly encounters injected previous-close failure over a bounded deep tree

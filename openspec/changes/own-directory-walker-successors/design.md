@@ -27,8 +27,9 @@ Bounded repeated faults detect accumulated successor ownership using captured re
 
 ## Required Evidence
 Each of four walkers: multi-component real directory tree, child open returns successor, previous close OSError -> successor closed once, previous attempted once, root cleanup, preserved exception/cause.
+Injection must target each named walker's own non-root handoff, not its nested absolute-root opener: containment-relative tree has at least two components (for _open_parent_dir, the parent has at least two). Record that specific _open_child_dir returned successor, then inject on its captured previous fd. A fix only to the nested _open_directory_no_follow must not make the other three regressions pass.
 Cover consumed and unconsumed previous injection for each walker; verify successor EBADF only after successful cleanup.
-Secondary successor/root cleanup OSError -> original previous failure/cause remains primary, no retry, no fd-liveness assertion for failed cleanup.
+Secondary successor/root cleanup OSError -> original previous object (or list-domain error cause) remains primary, with add_note diagnostics using existing _descriptor_close_note; tests inspect error details in __notes__ on the primary/cause, not exact sentence wording. No retry or fd-liveness assertion for failed cleanup.
 Repeat a bounded number of deep faults in each walker -> no accumulated successfully closable successors.
 Success: root-only and multi-level open/parent return readable directory fds; listing names/limited sentinel unchanged; symlink/containment refusal via existing suite.
 Run defect regressions red before fix then green; existing compatibility controls may already pass baseline.
