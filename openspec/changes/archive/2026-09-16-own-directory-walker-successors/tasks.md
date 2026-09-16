@@ -5,7 +5,7 @@
 - [x] 2.2 Apply uniform ownership handoff and primary-preserving cleanup; show regressions green and successful root/deep/list behavior.
 - [x] 2.3 Run producer uv pytest, ruff check/format and line guard; OpenSpec all/strict validation.
 ## 3. Delivery artifacts
-- [ ] 3.1 Complete cross-review and same-PR archive/spec synchronization; merge remains external SHA-bound gate after final CI.
+- [x] 3.1 Complete cross-review and same-PR archive/spec synchronization; merge remains external SHA-bound gate after final CI.
 ## Risk pack mapping
 - Selected Public API / CLI / script entry: unchanged callers and returned-fd/list semantics (2.2–2.3).
 - Selected File IO / path safety / overwrite: four handoffs, no-follow/containment/refusals retained (2.1–2.3).
