@@ -1,11 +1,11 @@
 ## 1. Fixture and provenance
-- [ ] 1.1 Register #225 problem and repair in the safe_fs inventory row before source changes.
-- [ ] 1.2 Obtain fixture pass and strict OpenSpec validation.
+- [x] 1.1 Register #225 problem and repair in the safe_fs inventory row before source changes.
+- [x] 1.2 Obtain fixture pass and strict OpenSpec validation.
 
 ## 2. Implementation and evidence
-- [ ] 2.1 Add real-descriptor local regressions for interruptions, rejection, close precedence and success; show failure regressions red before fix.
-- [ ] 2.2 Repair only open_file_no_follow ownership through return and demonstrate targeted green tests.
-- [ ] 2.3 Run producer `uv run python -m pytest`, `uv run ruff check .`, `uv run ruff format --check .`, plus `openspec validate --all` and strict change validation.
+- [x] 2.1 Add real-descriptor local regressions for interruptions, rejection, close precedence and success; show failure regressions red before fix.
+- [x] 2.2 Repair only open_file_no_follow ownership through return and demonstrate targeted green tests.
+- [x] 2.3 Run producer `uv run python -m pytest`, `uv run ruff check .`, `uv run ruff format --check .`, plus `openspec validate --all` and strict change validation.
 
 ## 3. Delivery
 - [ ] 3.1 Complete cross-review, green CI, merge gate and archive.
