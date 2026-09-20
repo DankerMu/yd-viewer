@@ -37,12 +37,12 @@ export function createM11Map(
 }
 
 export function setM11MapStyle(map: MapLibreMap, style: MapStyle): void {
-  map.setStyle(style as StyleSpecification)
+  map.setStyle(style as StyleSpecification, { diff: false })
 }
 
 export function onStyleReady(map: MapLibreMap, callback: () => void): () => void {
-  if (map.isStyleLoaded()) callback()
   map.on('style.load', callback)
+  if (map.getStyle() != null) callback()
   return () => {
     map.off('style.load', callback)
   }

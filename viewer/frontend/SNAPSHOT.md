@@ -67,7 +67,7 @@ Removed unused Bar/Pie/DataZoom/MarkLine/Title registrations.
 
 ### `m11MapRuntime.tsx`
 
-Kept: native MapLibre 4.7 map create (`createM11Map` / `useM11Map`); NavigationControl + ScaleControl; **fixed initial fit only** from `lib/bbox` bounds via `M11MapCameraFit`; `setM11MapStyle` from `lib/basemaps` without refitting camera; `onStyleReady` so consumers can re-register overlays after style rebuild.
+Kept: native MapLibre 4.7 map create (`createM11Map` / `useM11Map`); NavigationControl + ScaleControl; **fixed initial fit only** from `lib/bbox` bounds via `M11MapCameraFit`; `setM11MapStyle` from `lib/basemaps` without refitting camera (full rebuild `map.setStyle(style, {diff:false})` so promised `style.load` always fires); `onStyleReady` so consumers can re-register overlays after style rebuild (initialized-style via public `getStyle()`, not tile completion: subscribe `style.load` and invoke immediately if `getStyle()` is defined).
 
 - store: removed
 - routing: absent
@@ -95,7 +95,7 @@ Removed unused wrappers: `M11RegisteredOverlay`, `buildRiverOverlay`, `m11Regist
 
 ### `m11MapInteractions.ts`
 
-Kept: native MapLibre hover/click on the river hit layer; integer `reach_id` extraction; cursor reset; listener disposal; `queryReachFeature` returns null if the hit layer is missing during style replacement (presence check only; no catch around `queryRenderedFeatures`).
+Kept: native MapLibre hover/click on the river hit layer; integer `reach_id` extraction; cursor reset; listener disposal (listeners are always removed even after owner.remove; canvas cursor reset is safe because the canvas object remains). `queryReachFeature` returns null if public `getStyle()` is undefined after owner.remove / before style initialization, or if the hit layer is missing during style replacement (presence check only; no catch around `queryRenderedFeatures`).
 
 - store: absent
 - routing: absent
@@ -106,7 +106,7 @@ Kept: native MapLibre hover/click on the river hit layer; integer `reach_id` ext
 
 ### `m11MapPrimitives.tsx`
 
-Kept: native `addSource`/`addLayer` (no react-map-gl); river overlay with casing, main, transparent hit, hover, selected; boundary fill/outline; feature-state colors via `lib/color`. Overlay source lifetime is `[map, data]` (`style.load` re-registers and reapplies current hover/selected via refs). Highlight-only effects call `setRiverHover`/`setRiverSelected` and do not recreate the source. Presence checks skip `setFeatureState`/`setFilter` when the source/layer is unloaded; no catch around those mutations. Style replacement clears feature-state colors; the primitive restores highlights, not colors. #259 must re-call `applyReachColors` after the river source is recreated.
+Kept: native `addSource`/`addLayer` (no react-map-gl); river overlay with casing, main, transparent hit, hover, selected; boundary fill/outline; feature-state colors via `lib/color`. Overlay source lifetime is `[map, data]` (`onStyleReady` re-registers and reapplies current hover/selected via refs). Highlight-only effects call `setRiverHover`/`setRiverSelected` and do not recreate the source. Presence checks skip `setFeatureState`/`setFilter` when the source/layer is unloaded; unregister helpers no-op when public `getStyle()` is undefined so layout-effect `map.remove()` can precede primitive cleanup; no catch around those mutations. Style replacement clears feature-state colors; the primitive restores highlights, not colors. #259 must re-call `applyReachColors` after the river source is recreated.
 
 - store: absent
 - routing: absent

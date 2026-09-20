@@ -3,6 +3,7 @@ import type { FeatureCollection } from 'geojson'
 import type { GeoJSONSource, LayerSpecification, Map as MapLibreMap } from 'maplibre-gl'
 
 import { dischargeColor } from '../../lib/color'
+import { onStyleReady } from './m11MapRuntime'
 import {
   M11_BOUNDARY_LAYER_IDS,
   M11_BOUNDARY_SOURCE_ID,
@@ -20,6 +21,7 @@ import {
 } from './m11MapBuilders'
 
 export function registerRiverOverlay(map: MapLibreMap, data: FeatureCollection): void {
+  if (map.getStyle() == null) return
   const existing = map.getSource(M11_RIVER_SOURCE_ID)
   if (existing && existing.type === 'geojson') {
     ;(existing as GeoJSONSource).setData(data)
@@ -32,11 +34,13 @@ export function registerRiverOverlay(map: MapLibreMap, data: FeatureCollection):
 }
 
 export function unregisterRiverOverlay(map: MapLibreMap): void {
+  if (map.getStyle() == null) return
   removeLayers(map, M11_RIVER_LAYER_IDS)
   if (map.getSource(M11_RIVER_SOURCE_ID)) map.removeSource(M11_RIVER_SOURCE_ID)
 }
 
 export function registerBoundaryOverlay(map: MapLibreMap, data: FeatureCollection): void {
+  if (map.getStyle() == null) return
   const existing = map.getSource(M11_BOUNDARY_SOURCE_ID)
   if (existing && existing.type === 'geojson') {
     ;(existing as GeoJSONSource).setData(data)
@@ -49,16 +53,19 @@ export function registerBoundaryOverlay(map: MapLibreMap, data: FeatureCollectio
 }
 
 export function unregisterBoundaryOverlay(map: MapLibreMap): void {
+  if (map.getStyle() == null) return
   removeLayers(map, M11_BOUNDARY_LAYER_IDS)
   if (map.getSource(M11_BOUNDARY_SOURCE_ID)) map.removeSource(M11_BOUNDARY_SOURCE_ID)
 }
 
 export function setRiverHover(map: MapLibreMap, reachId: number | null): void {
+  if (map.getStyle() == null) return
   setReachFilter(map, M11_RIVER_HOVER_HALO_LAYER_ID, reachId)
   setReachFilter(map, M11_RIVER_HOVER_LINE_LAYER_ID, reachId)
 }
 
 export function setRiverSelected(map: MapLibreMap, reachId: number | null): void {
+  if (map.getStyle() == null) return
   setReachFilter(map, M11_RIVER_SELECTED_HALO_LAYER_ID, reachId)
   setReachFilter(map, M11_RIVER_SELECTED_LINE_LAYER_ID, reachId)
 }
@@ -68,6 +75,7 @@ export function applyReachColors(
   entries: Iterable<{ reachId: number; value: number | null }>,
   sourceId: string = M11_RIVER_SOURCE_ID,
 ): void {
+  if (map.getStyle() == null) return
   if (!map.getSource(sourceId)) return
   for (const entry of entries) {
     map.setFeatureState(
@@ -104,10 +112,9 @@ export function M11OverlayPrimitive({
         unregisterRiverOverlay(map)
       }
     }
-    if (map.isStyleLoaded()) apply()
-    map.on('style.load', apply)
+    const stop = onStyleReady(map, apply)
     return () => {
-      map.off('style.load', apply)
+      stop()
       unregisterRiverOverlay(map)
     }
   }, [map, data])
@@ -138,10 +145,9 @@ export function M11BoundaryPrimitive({
       if (data) registerBoundaryOverlay(map, data)
       else unregisterBoundaryOverlay(map)
     }
-    if (map.isStyleLoaded()) apply()
-    map.on('style.load', apply)
+    const stop = onStyleReady(map, apply)
     return () => {
-      map.off('style.load', apply)
+      stop()
       unregisterBoundaryOverlay(map)
     }
   }, [map, data])

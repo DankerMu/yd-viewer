@@ -20,6 +20,7 @@ export function queryReachFeature(
   point: PointLike,
   layerId: string = M11_RIVER_HIT_LAYER_ID,
 ): MapGeoJSONFeature | null {
+  if (map.getStyle() == null) return null
   if (!map.getLayer(layerId)) return null
   const features = map.queryRenderedFeatures(point, { layers: [layerId] })
   return features[0] ?? null
