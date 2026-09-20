@@ -36,3 +36,14 @@
 - 依赖：后端只加 `fastapi`、`uvicorn[standard]`（dev 加 `httpx`）；不加 numpy、pydantic-settings、缓存或 ORM。前端依赖对齐 NWM 版本；不装 zustand、react-router、react-query。
 - 文档：products-contract §5.2/§6、design §6.1/§7/§11 先改后码（契约 §9 变更规则：viewer 侧判据属新增条款，不改变 producer 义务与目录布局）。
 - 外部系统：不连接 NWM DB/display API/scheduler；不复制 NWM 天地图 key；部署（镜像装载、端口、Nginx）归 M5。
+
+## Issue-workflow fixture
+
+Issue type: feature
+Fixture level: expanded
+Upstream suggested level: compact (override: project setup, public UI entrypoints, runtime config and shared state trigger expanded review).
+Blast radius: frontend build, relative-path assets, runtime basemap configuration and viewer packaging.
+Selected risk packs: Config / project setup; Public API / CLI / script entry; Schema / columns / units / field names; Release / packaging / dependency compatibility; Auth / permissions / secrets; Documentation / migration notes.
+Evidence floor: issue-scoped acceptance plus frozen install, typecheck, vitest and build; runtime smoke for the changed surface.
+Issue scope: each issue implements only its named task(s); #256 is task 5.1, not the complete frontend capability.
+Lifecycle: this shared M3 fixture remains active until all M3 tasks are complete; individual issue merges must not archive unfinished sibling capabilities.
