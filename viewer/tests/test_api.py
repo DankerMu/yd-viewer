@@ -1,4 +1,4 @@
-"""create_app() validates geometry at factory time and serves GET /api/health."""
+"""create_app() validates geometry at factory time and serves GET /api/health and GET /api/cycles."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from yd_viewer.geometry import GeometryError
 from yd_viewer.settings import Settings, SettingsError
 
 CYCLE_00 = "2026082700"
+CYCLE_2612 = "2026082612"
 CYCLE_12 = "2026082712"
 CYCLE_NEWER = "2026082800"
 IDS_1_TO_5 = (1, 2, 3, 4, 5)
@@ -24,6 +25,11 @@ INPUT = "YD_VIEWER_INPUT_DIR"
 OUTPUT = "YD_VIEWER_OUTPUT_DIR"
 STATIC = "YD_VIEWER_STATIC_DIR"
 HEALTH = "/api/health"
+CYCLES = "/api/cycles"
+MIXED_CYCLES = [
+    {"cycle": "2026082700", "sources": ["gfs", "ifs"]},
+    {"cycle": "2026082612", "sources": ["gfs"]},
+]
 OK_EMPTY = {"status": "ok", "latest_cycle": None}
 OK_12Z = {"status": "ok", "latest_cycle": CYCLE_12}
 OK_00Z = {"status": "ok", "latest_cycle": CYCLE_00}
@@ -62,6 +68,10 @@ def _write_eligible(
 
 def _health(settings: Settings):
     return TestClient(create_app(settings)).get(HEALTH)
+
+
+def _cycles(settings: Settings):
+    return TestClient(create_app(settings)).get(CYCLES)
 
 
 def test_empty_output_returns_ok_with_null_latest_cycle(tmp_path: Path) -> None:
@@ -227,3 +237,73 @@ def test_importing_app_does_not_require_environment(
     reloaded = importlib.reload(app_module)
 
     assert callable(reloaded.create_app)
+
+
+def test_cycles_returns_mixed_dual_and_single_source_array(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _write_eligible(settings.output_dir, CYCLE_2612, "gfs")
+    _write_eligible(settings.output_dir, CYCLE_00, "ifs")
+    _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+
+    response = _cycles(settings)
+
+    assert response.status_code == 200
+    assert response.json() == MIXED_CYCLES
+
+
+def test_cycles_empty_output_returns_empty_array(tmp_path: Path) -> None:
+    response = _cycles(_settings(tmp_path))
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_cycles_does_not_reread_geometry_files(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _write_eligible(settings.output_dir, CYCLE_2612, "gfs")
+    _write_eligible(settings.output_dir, CYCLE_00, "ifs")
+    _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    client = TestClient(create_app(settings))
+    (settings.input_dir / "rivers.geojson").unlink()
+
+    response = client.get(CYCLES)
+
+    assert response.status_code == 200
+    assert response.json() == MIXED_CYCLES
+
+
+def test_next_cycles_reflects_newly_published_cycle(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _write_eligible(settings.output_dir, CYCLE_2612, "gfs")
+    client = TestClient(create_app(settings))
+
+    first = client.get(CYCLES)
+    _write_eligible(settings.output_dir, CYCLE_00, "ifs")
+    _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    second = client.get(CYCLES)
+
+    assert first.status_code == 200
+    assert first.json() == [{"cycle": "2026082612", "sources": ["gfs"]}]
+    assert second.status_code == 200
+    assert second.json() == MIXED_CYCLES
+
+
+def test_removed_output_returns_cycles_503_with_generic_detail(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    first = client.get(CYCLES)
+    shutil.rmtree(settings.output_dir)
+    response = client.get(CYCLES)
+
+    assert first.status_code == 200
+    assert first.json() == []
+    assert response.status_code == 503
+    body = response.json()
+    assert set(body) == {"detail"}
+    detail = body["detail"]
+    assert isinstance(detail, str)
+    assert detail
+    assert str(tmp_path) not in detail
+    assert str(settings.output_dir) not in detail
