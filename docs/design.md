@@ -249,7 +249,7 @@ output/<cycle>/<source>/
 - discharge 色带和图例；
 - 起报下拉的纯 UI 外壳。
 
-不复制 NWM 的 OpenAPI client、store、路由、登录/RBAC、MVT、代站弹窗、降水叠加、多流域、监控和运维链接。来源为 NWM `4f8d98263` 对应快照；在 `viewer/frontend/SNAPSHOT.md` 登记完整来源 commit、复制文件清单和逐文件删减（包括上述禁复内容），之后独立维护。任何源文件 ≤1000 行，不新增 large-file-guard 豁免；色带/图例只取必要片段。
+不复制 NWM 的 OpenAPI client、store、路由、登录/RBAC、MVT、代站弹窗、降水叠加、多流域、监控和运维链接。来源为 NWM `4f8d98263` 对应快照；在 `viewer/frontend/SNAPSHOT.md` 登记完整来源 commit、复制文件清单和逐文件删减（包括上述禁复内容），之后独立维护。任何源文件 ≤1000 行，不新增源文件 large-file-guard 豁免；唯一允许新增的豁免是生成文件 `viewer/frontend/pnpm-lock.yaml`；色带/图例只取必要片段。
 
 前端构建 `base: './'`；API、几何及 `basemaps.json` 请求均为相对路径，构建物无以 `/` 开头的绝对资源引用。`https://h/yd/` 下 cycles 请求为 `https://h/yd/api/cycles`，同一构建物兼容根路径与剥前缀部署。
 

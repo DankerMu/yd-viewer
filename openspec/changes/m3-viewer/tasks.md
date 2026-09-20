@@ -113,3 +113,9 @@ later tasks. Each issue receives its own fixture review and code review.
 prefix stripping → 200 HTML and referenced JS/CSS. Inspect generated resource
 URLs → relative; scan generated text → zero `tianditu`/`tk=` matches.
 No permanent tests are required before pure-function task 5.2.
+
+#256 用户裁决：仅允许在 `.large-file-guard.json` 增加
+`viewer/frontend/pnpm-lock.yaml` 的生成文件豁免；不提高 1000 行阈值，
+不豁免源文件、不改 CI job。先提交并 push docs/spec，再修改 guard 配置。
+验证：干净提交副本运行 guard → exit 0；加入 tracked 1001 行前端源文件
+→ exit 1；frozen install → exit 0。PR 边界扩展仅限本项及必要文档。
