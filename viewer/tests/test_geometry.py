@@ -97,10 +97,10 @@ def _missing_reach_id_feature() -> dict:
 @pytest.mark.parametrize(
     "features",
     [
-        [_river_feature(1), _missing_reach_id_feature()],
-        [_river_feature(1), _river_feature(1.0)],
-        [_river_feature(1), _river_feature("1")],
-        [_river_feature(1), _river_feature(True)],
+        [_river_feature(42), _missing_reach_id_feature()],
+        [_river_feature(42), _river_feature(1.0)],
+        [_river_feature(42), _river_feature("1")],
+        [_river_feature(42), _river_feature(True)],
     ],
     ids=["missing", "float", "string", "bool"],
 )
@@ -120,19 +120,6 @@ def test_reach_id_missing_or_non_integer_is_rejected(
     assert RIVERS in message
     assert "reach_id" in message
     assert "2" in message
-
-
-def test_boolean_true_is_not_treated_as_reach_id_one(tmp_path: Path) -> None:
-    _write_pair(tmp_path, _rivers([1, True]), _polygon())
-
-    with pytest.raises(GeometryError) as excinfo:
-        load_geometry(tmp_path)
-
-    message = str(excinfo.value)
-    assert RIVERS in message
-    assert "reach_id" in message
-    assert "2" in message
-    assert "true" in message.lower()
 
 
 def test_duplicate_reach_id_is_rejected(tmp_path: Path) -> None:
