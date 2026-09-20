@@ -1,0 +1,27 @@
+# From this directory: copy env.example to .env, then chmod 600 .env.
+# Inspect interpolation with:
+#   docker compose --env-file .env -f compose.example.yml config
+# Service env_file injects container env; --env-file is required because
+# env_file does not supply Compose interpolation of ${YD_VIEWER_PORT}.
+# Rendered config can expose populated basemap secrets; keep .env private.
+# Host bind sources below are synthetic placeholders, not node paths.
+
+name: yd-viewer
+
+services:
+  yd-web:
+    image: yd-viewer:local
+    container_name: yd-web
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:${YD_VIEWER_PORT}:8000"
+    volumes:
+      - /example/host/yd-products/input/viewer:/input:ro
+      - /example/host/yd-products/output:/output:ro
+    networks:
+      - yd-network
+
+networks:
+  yd-network:
+    name: yd-network
