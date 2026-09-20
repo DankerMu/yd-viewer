@@ -1,4 +1,4 @@
-"""Application factory and GET /api/health."""
+"""Application factory, GET /api/health, and GET /api/cycles."""
 
 from __future__ import annotations
 
@@ -22,5 +22,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except OSError as exc:
             raise HTTPException(status_code=503) from exc
         return {"status": "ok", "latest_cycle": latest_cycle}
+
+    @app.get("/api/cycles")
+    def cycles() -> list[dict[str, str | list[str]]]:
+        try:
+            return catalog.list_cycles(settings.output_dir, geometry.reach_ids)
+        except OSError as exc:
+            raise HTTPException(status_code=503) from exc
 
     return app
