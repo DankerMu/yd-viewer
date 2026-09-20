@@ -81,7 +81,7 @@ Minimal mergeable slice: 5.1（脚手架 + 空页面可构建）——不含任�
 ## 6. viewer-container：镜像、entrypoint、compose、CI
 
 - [x] 6.1 `viewer/entrypoint.sh` + `viewer/Dockerfile`（同一 PR）：entrypoint 按 6 个 env 生成 `$YD_VIEWER_STATIC_DIR/basemaps.json`（缺键缺席、全缺 `{}`、URL 不进日志）后 `exec uvicorn --host 0.0.0.0 --port 8000`（容器内端口固定 8000，宿主端口由 compose `127.0.0.1:${YD_VIEWER_PORT}:8000` 映射），shell 单测以非 root 用户给定 env 断言 JSON 与日志不含 URL；Dockerfile 多阶段（Node 22 pnpm build → Python 3.12 `uv sync --frozen --no-dev` → `ENV YD_VIEWER_STATIC_DIR=<镜像内固定路径>`，该目录属运行用户 → 非 root 执行 `entrypoint.sh`）；`docker build` 通过；镜像内 `USER` 非 root 且静态目录可写含 `index.html`
-- [ ] 6.2 `viewer/compose.example.yml`：两个 `:ro` 挂载、`127.0.0.1:${YD_VIEWER_PORT}:8000`、`env_file`、project/service/container/network/image 全 `yd-` 前缀；`viewer/env.example` 列出 `YD_VIEWER_{INPUT,OUTPUT}_DIR`、`YD_VIEWER_PORT`、六个 `YD_BASEMAP_*`，不含 `YD_VIEWER_STATIC_DIR`
+- [x] 6.2 `viewer/compose.example.yml`：两个 `:ro` 挂载、`127.0.0.1:${YD_VIEWER_PORT}:8000`、`env_file`、project/service/container/network/image 全 `yd-` 前缀；`viewer/env.example` 列出 `YD_VIEWER_{INPUT,OUTPUT}_DIR`、`YD_VIEWER_PORT`、六个 `YD_BASEMAP_*`，不含 `YD_VIEWER_STATIC_DIR`
 - [x] 6.3 ci.yml 新增 `viewer-frontend` job（install --frozen-lockfile、typecheck、test、build）；现有 job 不变
 
 依赖：6.3 需 5.1；6.1 需 5.1 与 1.1；6.2 需 6.1
@@ -447,3 +447,43 @@ or fake production fallback; local packaging proof is not a deployment receipt.
 Exec proof: test launches entrypoint, captures its PID, and asserts uvicorn
 sentinel PID equals that entrypoint PID and effective UID remains non-root;
 matching argv alone is not sufficient to distinguish exec from child spawning.
+
+## #265 fixture — task 6.2 only
+
+Expanded (upstream compact raised): operational bind mounts, network exposure,
+runtime configuration and release names require integration/security review.
+Deliver only viewer/compose.example.yml and viewer/env.example, plus workflow
+fixture metadata. No deployment, Nginx, image/source changes or new env knobs.
+Preserve #264 fixed internal port and image-owned static directory.
+
+Governing invariant: two read-only bind mounts expose only input/viewer and output;
+one loopback host port maps to 8000; all project/service/container/network/image
+names start yd-. Explicit service network attachment prevents implicit default.
+env_file references ignored .env; usage comment specifies --env-file .env because
+service env_file alone does not supply Compose interpolation.
+Exactly nine env keys: INPUT_DIR/OUTPUT_DIR/PORT with YD_VIEWER_ prefix and six
+YD_BASEMAP_{VECTOR,SATELLITE,TERRAIN}_{URL,ANNOTATION_URL} names.
+Directory values are container destinations, not host source variables. Example
+absolute host paths are synthetic placeholders, never actual node paths; target
+paths match env.example. Basemap values empty, no live URLs/credentials.
+Neither file contains the static-directory env variable, even in comments.
+
+Risk/evidence matrix:
+- Config/public boundary: file oracle asserts exact nine keys, env_file .env,
+  precise ports string 127.0.0.1:${YD_VIEWER_PORT}:8000, two :ro volumes,
+  yd- names, explicit network attachment and container/env path agreement.
+- Permissions/security: parsed Docker Compose config has two read-only bind
+  mounts, no whole-root mount, one 127.0.0.1 published port targeting8000;
+  synthetic .env only, existing .gitignore excludes .env, no secret output.
+- Release/integration: docker compose --env-file synthetic.env -f copied-example
+  config --format json succeeds; inspect output in memory without printing env.
+- Scope/legacy: no compose up, no restart of any process, no M5 claims, no new
+  environment variables, no orchestration beyond optional restart policy.
+
+The named tests/test_compose_example.py does not exist in the base. To satisfy
+the issue's exact verification route without violating its two-file PR boundary,
+implementer creates a throwaway test there, proves missing examples red then
+examples green via uv run pytest tests/test_compose_example.py in viewer, and
+parent reruns before removing it. Preserve oracle/result in local review evidence;
+do not commit source-text assertions or a third deliverable file. This is a
+verification artifact, not a reduced acceptance criterion.
