@@ -12,6 +12,7 @@ local.toml
 
 # Local agent tooling
 .claude/
+.omp/
 
 # subagent-workflow ephemeral state
 .workplans/

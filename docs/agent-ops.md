@@ -397,7 +397,7 @@ viewer 回滚只作用于 yd：
 
 ### 14.1 原则
 
-- 副本代码与 NWM 上游**逐字节一致**，仅允许两个已登记 patch（见 14.4）；其余隔离全部落在部署身份层（checkout、env、unit、端口、路径）。禁止 sed 批量改名 `nwm`/`nhms` 内部符号。
+- 副本代码与 NWM 上游**逐字节一致**，仅允许 14.4 登记的 patch；其余隔离全部落在部署身份层（checkout、env、unit、端口、路径）。禁止 sed 批量改名 `nwm`/`nhms` 内部符号。
 - 副本不能影响 NWM 业务化：不修改 NWM 的 checkout、unit、env、registry、DB、object-store、raw；不占 `:8080`/`:55432`；Nginx 只新增 `/yd/` location，`nginx -t` 后 reload，禁 restart。
 - 所有破坏性服务（retention/compression/governance）的作用域由 env 圈定（已逐脚本核实无硬编码路径）；副本的 `DATABASE_URL`、object-store/pgdata 根、以及全部 `*_LOCK_PATH`/`*_LOG_ROOT`/`*_RECEIPT_PATH`/`*_REPO(_ROOT)` 必须换成 yd 专属值——锁默认在 `/tmp`，照抄会与 NWM timer 互斥/竞态。
 
@@ -427,14 +427,22 @@ node-22（`frd_muziyao@210.77.77.22`）：
 | display 端口 | `127.0.0.1:8080` | `127.0.0.1:8081`（`NHMS_DISPLAY_API_PORT` 本为变量） |
 | PG | `nhms-db` 容器 `:55432` | 第二容器（如 `yd-db`）：新端口、新 pgdata、库名 `yd` |
 | 数据面 | `/{home/ghdc,ghdc/data}/nwm/...` | NFS 同级新根（如 `.../yd-nwm/`）：object-store、published、Basins（NFS 份）；22 本地 `/volume` 下新根放 Basins（scheduler 份） |
-| Slurm | 现有 job 名 | job-name 加 yd 前缀；同集群同分区 |
+| Slurm | 现有 job 名 | job-name `yd_<stage>` 前缀（2026-09-01 用户裁决后交付，fork commit `9bff45df`：14 个 sbatch 模板 + reconcile 双前缀容忍——sacct 名字校验是次级防护，legacy `nhms_*` 行永久可接受以覆盖切换窗）；同集群同分区 |
 | 流域注册 | 33 basin | 副本 Basins 树只放 `yd/` 一个流域 |
 | Nginx | `location / → :8080` | 仅新增 `location /yd/ { proxy_pass http://127.0.0.1:8081/; }`（剥前缀语义，§9.3） |
 
-### 14.4 仅有的两个代码 patch（fork 内登记维护）
+### 14.4 已登记代码 patch（fork 内登记维护）
 
-1. `services/orchestrator/source_cycle_raw_manifest.py:38-39`：`NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT`（现 `/ghdc/data/nwm/object-store`）与 manifest 前缀是代码字面量且 preflight 强制相等，副本改为 yd 数据面根；
-2. `apps/frontend/src/App.tsx`：`BrowserRouter` 增加 `basename={import.meta.env.BASE_URL}`（NWM 自身构建 BASE_URL=`/`，行为不变）。
+1. `services/orchestrator/source_cycle_raw_manifest.py:38-39`：`NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT`（现 `/ghdc/data/nwm/object-store`）与 manifest 前缀是代码字面量且 preflight 强制相等，副本改为 yd 数据面根（22 侧 fork commit `d65303cd`）；
+2. `apps/frontend/src/App.tsx`：`BrowserRouter` 增加 `basename={import.meta.env.BASE_URL.replace(/\/+$/, "")}`（NWM 自身构建 BASE_URL=`/`，行为不变；27 侧 fork commit `537fc4a4`）；
+3. `config/calibration_overrides.yaml` 置空为 `calibration_overrides: []`（上游含 hetianhe 条目，registry publisher 对 yd-only inventory fail-closed 拒发；配置文件而非代码，仍按 patch 登记；22 侧 fork commit `e75d2907`）——部署中发现，待用户追认，可否决回退；
+4. `apps/frontend/src/api/base.ts`：`buildApiUrl` 对相对前缀 base（`/yd`）改走字符串拼接——`new URL(path, "/yd/")` 因 base 非绝对 URL 直接抛 TypeError，React 整树崩溃白屏（2026-09-01 上线后用户报障，headless Chrome 复现定位）；NWM 现行两条路径（空 base、绝对 URL base）行为不变（27 侧 fork commit `4c7b89a5`）；
+5. Slurm job-name `yd_<stage>`（22 侧 fork commit `9bff45df`）：14 个 `infra/sbatch/*.sbatch` 模板 + `services/orchestrator/reconcile.py`（`_expected_job_name_token`→`yd_`、`FALLBACK_JOB_NAME="yd_forecast,nhms_forecast"`、`_GENERIC_ARRAY_JOB_NAMES` 双前缀、`_strip_job_name_prefix` 容忍 legacy 行，规避切换窗 wedge）；
+6. yd 展示定制（27 侧 fork commit `edde7932`，2026-09-01 用户要求）：径流分档取消 1000–10000 档、`>1000` 直接红色 `#CB181D`（`overviewDataContracts.ts` 图例+`m11DischargeColor`、`m11MapBuilders.ts` MVT log 阶插值 stops 同步）；`OverviewPage.tsx` 单流域部署时初始相机 fit 到该流域 bbox（多流域行为不变）；
+7. 流域边界总开关（27 侧 fork commit `c44b7161`）：`m11MapBuilders.ts:58` `m11BasinBoundaryOverlayEnabled` false→true——上游产品口径不展示边界，yd 单流域部署需要；headless 截图验证边界多边形+描边+Yd 标签正常渲染；
+8. 空边界提示防闪（27 侧 fork commit `b991b507`）：翻开边界开关后暴露上游瞬态——basins 先到、versions（含几何）后到的窗口里「当前没有可见流域边界」闪现；`m11MapRuntime.tsx` 给该提示加 1.5s 驻留判定（`useSettledCondition`），真实缺边界仍提示；配套测试改用 fake timers 并固化「瞬态不显示」断言。
+
+代码之外的实例数据变更（非 patch，登记备查）：`core.basin_version` 中 `basins_yd_vbasins.geom` 由注册导入的 7891 个 mesh 三角形（31,564 点，被前端几何预算拒绝 → 无边界/无 bbox）替换为 mesh union+simplify 的 238 点流域边界 MultiPolygon（SRID 4490 保留，`ogr2ogr ST_Union` 自 `/home/ghdc/yd/input/yd/gis/domain.shp`）；原 geom 备份 `/home/nwm/yd-backup-basins_yd_vbasins-geom-20260901.json`（0600）。该表仅注册导入路径写入，autopipe 不覆写。
 
 前端构建：`--base=/yd/` + `VITE_API_BASE_URL=/yd`（API client 与 MVT 瓦片 URL 均取自该变量，已核实无其它根绝对调用）。
 
@@ -443,3 +451,17 @@ node-22（`frd_muziyao@210.77.77.22`）：
 - 注册来源用 NFS `/home/ghdc/yd`（完整，含 `seg.*`），不用本地 fixture 子集；`/home/ghdc/yd` 同时是主线 YD_ROOT 的现场根，副本只读拷出，不在其中新建任何目录；
 - 副本 venv 构建方式照抄 NWM 现场同款（NWM #1831 冻结约束只作用于 NWM 自己的 checkout，不约束副本 checkout，但部署时先确认现场构建方法）；
 - NFS 余量 164G 需在副本 retention 生效前监控。
+
+### 14.6 上线登记（2026-09-01）
+
+2026-09-01 部署完成并上线，逐步 receipt 见 `/home/nwm/yd-deploy-receipt-20260901.md`（27）与 `/scratch/frd_muziyao/yd-nwm-prod/deploy-receipt-20260901.md`（22）。要点：
+
+- checkout：27 `/home/nwm/yd-NWM`（`537fc4a4`，branch yd-instance）；22 `/scratch/frd_muziyao/yd-NWM`（`e75d2907`）；
+- 端口：display `127.0.0.1:8081`，`yd-db` 容器 `127.0.0.1:55434`（pgdata `/home/nwm/yd-pgdata`），slurm-gateway `127.0.0.1:8092`；
+- 数据面：NFS `/{home/ghdc,ghdc/data}/yd-nwm/`；22 本地 `/scratch/frd_muziyao/yd-nwm-prod/`（Basins scheduler 份在 `/scratch/frd_muziyao/yd-nwm/Basins`，未用 /volume）；
+- 公网：`https://nwm.ac.cn/yd/`、`https://test.nwm.ac.cn/yd/`（两 conf 各插一处 `location /yd/`，`nginx -t` 后 reload）；
+- registry：仅 `basins_yd_shud`，direct-grid 2 行 canonical（dg-gfs-8827efa1…/dg-ifs-f2e14f8c…），packaged-IC audit 4/4 qualified；
+- timers（enabled）：`yd-node27-download` 30 min、`yd-node27-autopipe` 10 min、`yd-compute-scheduler` 5 min；2026-09-01 用户裁决后加 `yd-node27-raw-retention`（每日 04:05 UTC，14 天窗，anchor=display watermark）与 `yd-node27-timeseries-retention`（每日 05:45 UTC，14 天窗，enforce，archive gate=disabled 按 ADR 0002 Rev 2026-08-11）——env/锁/日志根全 yd 前缀，首跑均 rc=0 零删除、作用域核实仅 yd 根。**compression/governance/frontier-alert 类 timer 仍有意未装未启**；
+- scheduler 回看窗保持 96h（用户裁决）：更老的已拷 raw 只作存档，不会被计算；
+- 首轮全链（cycle 2026082712 双源）≈10–11 min/cycle，state index 已闭合（entry_count 4）；
+- 已知偏差：`AUTOPIPE_MVT_PREWARM_ENABLED=0`（prewarm 会打 `:8080`，属只读越界，已关）。Slurm job-name 偏差已于当日修复（patch 5）。
