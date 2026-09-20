@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import math
 import os
+import re
 import stat
 import struct
 from pathlib import Path
@@ -188,7 +189,6 @@ def test_wrong_st_is_accepted_and_not_used_as_time(tmp_path: Path) -> None:
     header_a = read_header(path_a, AUTHORITY_1_TO_5)
     header_b = read_header(path_b, AUTHORITY_1_TO_5)
 
-    assert ST_A != ST_B
     assert header_a.nc == header_b.nc == 5
     assert header_a.column_ids == header_b.column_ids == IDS_1_TO_5
     assert header_a.row_count == header_b.row_count == 168
@@ -479,9 +479,6 @@ def test_golden_minute_axis_is_accepted(tmp_path: Path) -> None:
 
     datfile = dat_mod.read_dat(path, AUTHORITY_1_TO_5)
 
-    assert GOLDEN_MINUTES[0] == 0
-    assert GOLDEN_MINUTES[-1] == 10020
-    assert len(GOLDEN_MINUTES) == 168
     assert len(datfile.column(1)) == 168
 
 
@@ -500,8 +497,8 @@ def test_shifted_minutes_fail_at_row_zero_expected_zero(
     message = str(excinfo.value)
     reason = _reason(message, path)
     assert str(path) in message
-    assert "0" in reason
-    assert "期望" in reason
+    assert re.search(r"第\s*0\s*行", reason)
+    assert re.search(r"期望\s*0(?:\.0)?(?![\d.eE])", reason)
 
 
 def test_row_five_nan_minute_is_rejected_without_result(
@@ -519,7 +516,7 @@ def test_row_five_nan_minute_is_rejected_without_result(
     message = str(excinfo.value)
     reason = _reason(message, path)
     assert str(path) in message
-    assert "5" in reason
+    assert re.search(r"第\s*5\s*行", reason)
 
 
 def test_lead_zero_reach_one_86400_is_one_cubic_metre_per_second(
@@ -575,7 +572,6 @@ def test_wrong_st_does_not_change_read_dat_values(tmp_path: Path) -> None:
     file_a = dat_mod.read_dat(path_a, AUTHORITY_1_TO_5)
     file_b = dat_mod.read_dat(path_b, AUTHORITY_1_TO_5)
 
-    assert ST_A != ST_B
     assert file_a.row(0) == file_b.row(0)
     assert file_a.column(1) == file_b.column(1)
     assert file_a.row(0)[0] == 1.0
@@ -595,7 +591,7 @@ def test_invalid_final_minute_rejects_entire_file(tmp_path: Path) -> None:
     message = str(excinfo.value)
     reason = _reason(message, path)
     assert str(path) in message
-    assert "167" in reason
+    assert re.search(r"第\s*167\s*行", reason)
 
 
 def test_read_dat_does_not_full_read_when_structure_fails(
