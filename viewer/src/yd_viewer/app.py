@@ -1,8 +1,9 @@
-"""Application factory, GET /api/health, GET /api/cycles, and GET /api/map/latest."""
+"""Application factory and HTTP API for health, cycles, map, and reach curves."""
 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 
 from fastapi import FastAPI, HTTPException
@@ -14,6 +15,8 @@ from yd_viewer.settings import Settings, load_settings
 
 _DAT_NAME = "yd.rivqdown.dat"
 _LOGGER = logging.getLogger(__name__)
+_CYCLE_NAME = re.compile(r"^\d{8}(?:00|12)$")
+_LEAD_HOURS = list(range(168))
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -61,5 +64,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "values": values,
                 }
         raise HTTPException(status_code=404)
+
+    @app.get("/api/cycles/{cycle}/reaches/{reach_id}")
+    def reach_curve(cycle: str, reach_id: int) -> dict[str, object]:
+        if _CYCLE_NAME.fullmatch(cycle) is None or reach_id not in geometry.reach_ids:
+            raise HTTPException(status_code=400)
+        try:
+            entries = catalog.list_cycles(settings.output_dir, geometry.reach_ids)
+        except OSError as exc:
+            raise HTTPException(status_code=503) from exc
+        selected = next((entry for entry in entries if entry["cycle"] == cycle), None)
+        if selected is None:
+            raise HTTPException(status_code=404)
+        series: dict[str, tuple[float, ...]] = {}
+        for source in selected["sources"]:
+            path = settings.output_dir / selected["cycle"] / source / _DAT_NAME
+            try:
+                series[source] = read_dat(path, geometry.reach_ids).column(reach_id)
+            except DatError as exc:
+                _LOGGER.warning("%s", exc)
+        if not series:
+            raise HTTPException(status_code=404)
+        return {
+            "cycle": selected["cycle"],
+            "reach_id": reach_id,
+            "lead_hours": _LEAD_HOURS,
+            "series": series,
+        }
 
     return app

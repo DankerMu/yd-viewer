@@ -1,4 +1,4 @@
-"""create_app() validates geometry at factory time and serves health, cycles, and map/latest."""
+"""create_app() validates geometry at factory time and serves health, cycles, map, and curves."""
 
 from __future__ import annotations
 
@@ -29,6 +29,13 @@ STATIC = "YD_VIEWER_STATIC_DIR"
 HEALTH = "/api/health"
 CYCLES = "/api/cycles"
 MAP_LATEST = "/api/map/latest"
+LEAD_HOURS = list(range(168))
+GFS_SERIES = [float(n) for n in range(1, 169)]
+IFS_SERIES = [float(n) for n in range(1001, 1169)]
+GFS_COLUMN_RAW = tuple(value * 86400.0 for value in GFS_SERIES)
+IFS_COLUMN_RAW = tuple(value * 86400.0 for value in IFS_SERIES)
+ABSENT_CYCLE = "2026082600"
+OUT_WINDOW_CYCLE = "2026081900"
 APP_LOGGER = "yd_viewer.app"
 GEOMETRY_IDS = (19, 42, 7)
 DAT_COLUMN_IDS = (42, 7, 19)
@@ -102,6 +109,39 @@ def _health(settings: Settings):
 
 def _cycles(settings: Settings):
     return TestClient(create_app(settings)).get(CYCLES)
+
+
+def _curve(cycle: str, reach_id: int | str) -> str:
+    return f"/api/cycles/{cycle}/reaches/{reach_id}"
+
+
+def _set_column_raw(
+    path: Path, *, nc: int, column: int, raw_values: tuple[float, ...]
+) -> None:
+    payload = bytearray(path.read_bytes())
+    header = 1024 + 8 * (2 + nc)
+    stride = nc + 1
+    for row, value in enumerate(raw_values):
+        offset = header + (row * stride + column) * 8
+        payload[offset : offset + 8] = struct.pack("<d", value)
+    path.write_bytes(payload)
+
+
+def _assert_default_detail(
+    response, status: int, tmp_path: Path, output_dir: Path
+) -> None:
+    assert response.status_code == status
+    body = response.json()
+    assert set(body) == {"detail"}
+    detail = body["detail"]
+    if isinstance(detail, str):
+        assert detail
+        text = detail
+    else:
+        assert detail
+        text = json.dumps(detail)
+    assert str(tmp_path) not in text
+    assert str(output_dir) not in text
 
 
 def test_empty_output_returns_ok_with_null_latest_cycle(tmp_path: Path) -> None:
@@ -590,4 +630,224 @@ def test_map_latest_does_not_reread_geometry_files(tmp_path: Path) -> None:
         "source": "gfs",
         "valid_time": VALID_TIME_12Z,
         "values": SORTED_LEAD0_VALUES,
+    }
+
+
+def test_curve_returns_selected_cycle_series_by_reach_not_column_position(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, GEOMETRY_IDS)
+    ifs_dat = _write_eligible(
+        settings.output_dir,
+        CYCLE_00,
+        "ifs",
+        column_ids=DAT_COLUMN_IDS,
+        st=WRONG_ST,
+    )
+    gfs_dat = _write_eligible(
+        settings.output_dir,
+        CYCLE_00,
+        "gfs",
+        column_ids=DAT_COLUMN_IDS,
+        st=WRONG_ST,
+    )
+    _write_eligible(settings.output_dir, CYCLE_12, "gfs", column_ids=DAT_COLUMN_IDS)
+    _set_column_raw(gfs_dat, nc=3, column=3, raw_values=GFS_COLUMN_RAW)
+    _set_column_raw(ifs_dat, nc=3, column=3, raw_values=IFS_COLUMN_RAW)
+    client = TestClient(create_app(settings))
+
+    cycles = client.get(CYCLES)
+    response = client.get(_curve(CYCLE_00, 19))
+
+    assert cycles.status_code == 200
+    assert cycles.json() == [
+        {"cycle": CYCLE_12, "sources": ["gfs"]},
+        {"cycle": CYCLE_00, "sources": ["gfs", "ifs"]},
+    ]
+    assert response.status_code == 200
+    assert response.json() == {
+        "cycle": CYCLE_00,
+        "reach_id": 19,
+        "lead_hours": LEAD_HOURS,
+        "series": {"gfs": GFS_SERIES, "ifs": IFS_SERIES},
+    }
+
+
+def test_curve_returns_only_ifs_when_selected_cycle_has_no_gfs(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    _write_eligible(settings.output_dir, CYCLE_12, "ifs")
+    client = TestClient(create_app(settings))
+
+    cycles = client.get(CYCLES)
+    response = client.get(_curve(CYCLE_12, 1))
+
+    assert cycles.status_code == 200
+    assert cycles.json() == [
+        {"cycle": CYCLE_12, "sources": ["ifs"]},
+        {"cycle": CYCLE_00, "sources": ["gfs"]},
+    ]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cycle"] == CYCLE_12
+    assert body["reach_id"] == 1
+    assert body["lead_hours"] == LEAD_HOURS
+    assert set(body["series"]) == {"ifs"}
+    assert len(body["series"]["ifs"]) == 168
+
+
+def test_curve_omits_shifted_gfs_and_keeps_same_cycle_ifs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _settings(tmp_path)
+    _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    gfs_dat = _write_eligible(
+        settings.output_dir, CYCLE_12, "gfs", minutes=SHIFTED_MINUTES
+    )
+    ifs_dat = _write_eligible(settings.output_dir, CYCLE_12, "ifs")
+    _set_column_raw(ifs_dat, nc=5, column=1, raw_values=IFS_COLUMN_RAW)
+    client = TestClient(create_app(settings))
+
+    with caplog.at_level(logging.WARNING, logger=APP_LOGGER):
+        cycles = client.get(CYCLES)
+        response = client.get(_curve(CYCLE_12, 1))
+
+    assert cycles.status_code == 200
+    assert cycles.json() == [
+        {"cycle": CYCLE_12, "sources": ["gfs", "ifs"]},
+        {"cycle": CYCLE_00, "sources": ["gfs"]},
+    ]
+    assert response.status_code == 200
+    assert response.json() == {
+        "cycle": CYCLE_12,
+        "reach_id": 1,
+        "lead_hours": LEAD_HOURS,
+        "series": {"ifs": IFS_SERIES},
+    }
+    warnings = _warning_messages(caplog)
+    assert len(warnings) == 1
+    assert str(gfs_dat) in warnings[0]
+    assert warnings[0] != str(gfs_dat)
+
+
+def test_curve_does_not_fall_back_to_older_cycle_when_selected_data_fails(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _settings(tmp_path)
+    older_gfs = _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    _set_column_raw(older_gfs, nc=5, column=1, raw_values=GFS_COLUMN_RAW)
+    latest_gfs = _write_eligible(
+        settings.output_dir, CYCLE_12, "gfs", minutes=SHIFTED_MINUTES
+    )
+    latest_ifs = _write_eligible(
+        settings.output_dir, CYCLE_12, "ifs", minutes=SHIFTED_MINUTES
+    )
+    client = TestClient(create_app(settings))
+
+    with caplog.at_level(logging.WARNING, logger=APP_LOGGER):
+        cycles = client.get(CYCLES)
+        response = client.get(_curve(CYCLE_12, 1))
+
+    assert cycles.status_code == 200
+    assert cycles.json() == [
+        {"cycle": CYCLE_12, "sources": ["gfs", "ifs"]},
+        {"cycle": CYCLE_00, "sources": ["gfs"]},
+    ]
+    _assert_default_detail(response, 404, tmp_path, settings.output_dir)
+    warnings = _warning_messages(caplog)
+    assert len(warnings) == 2
+    text = "\n".join(warnings)
+    assert str(latest_gfs) in text
+    assert str(latest_ifs) in text
+    assert str(older_gfs) not in text
+
+
+def test_curve_returns_404_for_legal_absent_and_out_of_window_cycles(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    selected = _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    _set_column_raw(selected, nc=5, column=1, raw_values=GFS_COLUMN_RAW)
+    _write_eligible(settings.output_dir, OUT_WINDOW_CYCLE, "gfs")
+    client = TestClient(create_app(settings))
+
+    ok = client.get(_curve(CYCLE_00, 1))
+    absent = client.get(_curve(ABSENT_CYCLE, 1))
+    out_window = client.get(_curve(OUT_WINDOW_CYCLE, 1))
+
+    assert ok.status_code == 200
+    assert ok.json()["cycle"] == CYCLE_00
+    _assert_default_detail(absent, 404, tmp_path, settings.output_dir)
+    _assert_default_detail(out_window, 404, tmp_path, settings.output_dir)
+
+
+@pytest.mark.parametrize(
+    ("cycle", "reach_id", "status"),
+    [
+        ("202608270", 1, 400),
+        ("2026082701", 1, 400),
+        ("2026ab2700", 1, 400),
+        (CYCLE_00, 99999, 400),
+        (CYCLE_00, "abc", 422),
+    ],
+)
+def test_curve_rejects_malformed_cycle_and_out_of_authority_reach(
+    tmp_path: Path, cycle: str, reach_id: int | str, status: int
+) -> None:
+    settings = _settings(tmp_path)
+    dat = _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    _set_column_raw(dat, nc=5, column=1, raw_values=GFS_COLUMN_RAW)
+    client = TestClient(create_app(settings))
+
+    ok = client.get(_curve(CYCLE_00, 1))
+    response = client.get(_curve(cycle, reach_id))
+
+    assert ok.status_code == 200
+    _assert_default_detail(response, status, tmp_path, settings.output_dir)
+
+
+def test_removed_output_returns_curve_503_after_validating_request(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    dat = _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    _set_column_raw(dat, nc=5, column=1, raw_values=GFS_COLUMN_RAW)
+    client = TestClient(create_app(settings))
+    first = client.get(_curve(CYCLE_00, 1))
+    shutil.rmtree(settings.output_dir)
+
+    valid = client.get(_curve(CYCLE_00, 1))
+    malformed = client.get(_curve("2026082701", 1))
+    unknown_reach = client.get(_curve(CYCLE_00, 99999))
+
+    assert first.status_code == 200
+    _assert_default_detail(valid, 503, tmp_path, settings.output_dir)
+    _assert_default_detail(malformed, 400, tmp_path, settings.output_dir)
+    _assert_default_detail(unknown_reach, 400, tmp_path, settings.output_dir)
+
+
+def test_curve_does_not_reread_geometry_files(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, GEOMETRY_IDS)
+    gfs_dat = _write_eligible(
+        settings.output_dir,
+        CYCLE_00,
+        "gfs",
+        column_ids=DAT_COLUMN_IDS,
+        st=WRONG_ST,
+    )
+    _set_column_raw(gfs_dat, nc=3, column=3, raw_values=GFS_COLUMN_RAW)
+    client = TestClient(create_app(settings))
+    (settings.input_dir / "rivers.geojson").unlink()
+    (settings.input_dir / "boundary.geojson").unlink()
+
+    response = client.get(_curve(CYCLE_00, 19))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "cycle": CYCLE_00,
+        "reach_id": 19,
+        "lead_hours": LEAD_HOURS,
+        "series": {"gfs": GFS_SERIES},
     }
