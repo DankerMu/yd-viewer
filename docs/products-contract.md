@@ -93,6 +93,13 @@ valid_time = UTC(cycle_id) + relative_minutes
 - 第 1 行：`[cycle, cycle+1h)`；
 - 最后一行：`[cycle+167h, cycle+168h)`。
 
+viewer 消费侧采用两层校验，不改变 §4 的 producer 完成语义：
+
+- 结构层（枚举期）：只用标准库 `array`/`struct`，有界读取前 `1024 + 8*(2+nc)` 字节并 `stat`；`nc` 必须为正整数，数据区大小必须能被 `8*(nc+1)` 整除，推算行数必须恰为 168，列编号集合必须等于启动自检得到的几何权威集合。失败抛出带路径与具体原因的 `DatError`；catalog 以 WARNING 记录并排除该 source，不传播为 5xx。枚举不整读数据区、不校分钟列。
+- 数据层（取数期）：先过结构层，再整读文件；第 0 列逐值校验为由本节常量推导的 `i*60`（`i=0..167`），包括拒绝非有限分钟值。生产读取与测试写出不得共用同一算术表达式。失败抛出带路径与原因的 `DatError`，不返回部分结果；API 回落/省略规则见 [design.md](design.md) §6.1。
+- `st` 日期头只解析，不参与任何时间计算；即使与 cycle 日期不符也不据此拒绝文件。取 lead 行时去掉分钟列，按权威 `reach_id` 升序重排；取河段列时按列编号映射定位，不假设编号等于文件列位置；二者均按 §5.3 换算。
+- viewer 候选只认 `lstat` 为普通文件的 `DONE`（symlink 不算），忽略非十位数字、小时非 00/12 的 cycle 名及非小写 `gfs`/`ifs` 的 source。无结构层可用 source 的 cycle 不列出。消费窗口以最新结构层可用 cycle 为锚，包含起报时间 ≥ 锚 − 7 天的 cycle，倒序排列；source 固定按 `gfs`、`ifs` 排列。`latest()` 返回同一枚举的锚或 `None`，不另行扫描。
+
 ### 5.3 单位
 
 DAT 中的 `rivqdown` 单位为 m³/day。viewer API 返回和页面展示统一转换为 m³/s：
@@ -110,6 +117,13 @@ value_m3s = value_m3day / 86400
 - `boundary.geojson` 是 yd 流域边界；
 - 几何由 producer 的一次性 `prepare` 生成，模型变体更新时成套替换；
 - viewer 运行时不读取 shapefile，也不做投影转换。
+
+几何完整性由 viewer 启动自检判定，不设 `input/viewer/DONE`，不增加 producer 的发布标记或义务。应用创建时各读取两份 GeoJSON 一次：
+
+- 两文件必须存在且可解析；失败指明文件与原因。
+- `rivers` 顶层必须为 `FeatureCollection`；每个 Feature 的 `properties.reach_id` 必须存在、为整数（不接受 bool、浮点或字符串），且全体无重复。错误包含 Feature 序号或重复值。
+- `boundary` 顶层必须为单个 `Feature`（不能是 FeatureCollection），`geometry.type` 为 `Polygon` 或 `MultiPolygon`。
+- 任一失败则应用启动失败；成功后 `reach_id` 集合成为进程内唯一河段权威集合，不设河段数 env。业务 API 请求不重读几何；静态几何请求仍直接提供磁盘文件。
 
 ## 7. 窗口与清理
 
