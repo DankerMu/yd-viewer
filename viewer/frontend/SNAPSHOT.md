@@ -106,7 +106,7 @@ Kept: native MapLibre hover/click on the river hit layer; integer `reach_id` ext
 
 ### `m11MapPrimitives.tsx`
 
-Kept: native `addSource`/`addLayer` (no react-map-gl); river overlay with casing, main, transparent hit, hover, selected; boundary fill/outline; feature-state colors via `lib/color`. Overlay source lifetime is `[map, data]` (`onStyleReady` re-registers and reapplies current hover/selected via refs). Highlight-only effects call `setRiverHover`/`setRiverSelected` and do not recreate the source. Presence checks skip `setFeatureState`/`setFilter` when the source/layer is unloaded; unregister helpers no-op when public `getStyle()` is undefined so layout-effect `map.remove()` can precede primitive cleanup; no catch around those mutations. Style replacement clears feature-state colors; the primitive restores highlights, not colors. #259 must re-call `applyReachColors` after the river source is recreated.
+Kept: native `addSource`/`addLayer`; river casing/main/hit/hover/selected layers, boundary fill/outline, feature-state colors via `lib/color`, and safe unregister helpers using public `getStyle()`. Task 5.4's `MapPage` is the single overlay lifecycle owner: shared `onStyleReady` registers boundary then rivers, replays colors, and restores current hover/selection. Highlight-only changes do not recreate sources. The unused `M11OverlayPrimitive`/`M11BoundaryPrimitive` React wrappers were removed when the page chose that ordered registration path; native helper behavior and provenance remain.
 
 - store: absent
 - routing: absent
