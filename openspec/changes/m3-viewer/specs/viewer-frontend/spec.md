@@ -59,11 +59,15 @@ hover 河段 MUST 高亮，点击 MUST 选中并打开可拖拽曲线窗；曲�
 - **THEN** 页头含 `2026-08-27 20:00`
 
 ### Requirement: 复制来源登记与规模
-从 NWM 复制的组件 MUST 在 `viewer/frontend/SNAPSHOT.md` 登记来源 commit、文件清单与逐文件删减；MUST NOT 复制 store、路由、OpenAPI client、代站弹窗、降水叠加、RBAC；任何源文件 MUST ≤ 1000 行且不新增 large-file-guard 豁免。
+从 NWM 复制的组件 MUST 在 `viewer/frontend/SNAPSHOT.md` 登记来源 commit、文件清单与逐文件删减；MUST NOT 复制 store、路由、OpenAPI client、代站弹窗、降水叠加、RBAC；任何源文件 MUST ≤ 1000 行且 MUST NOT 新增源文件 large-file-guard 豁免。唯一允许新增的豁免是生成文件 `viewer/frontend/pnpm-lock.yaml`；MUST 保留该 lockfile 供 frozen install 使用，不改变全局行数阈值。
 
 #### Scenario: 登记存在
 - **WHEN** 读取 `SNAPSHOT.md`
 - **THEN** 含来源 commit SHA、每个复制文件一行说明，以及对上述六类禁复内容的逐文件删减记录
+
+#### Scenario: 生成 lockfile 的单路径豁免
+- **WHEN** `viewer/frontend/pnpm-lock.yaml` 超过 1000 行而前端源文件均未超限
+- **THEN** guard 仅对该生成文件路径豁免，frozen install 仍通过；超过 1000 行的前端源文件仍被拒绝
 
 ### Requirement: 构建门禁
 `corepack pnpm install --frozen-lockfile`、`tsc --noEmit`、`vitest run`、`pnpm build` MUST 全部通过；vitest MUST 覆盖色带映射、相对 URL 拼接、北京时间格式化、`basemaps.json` 解析、cycles → 下拉项、boundary 包围盒六个纯函数模块。
