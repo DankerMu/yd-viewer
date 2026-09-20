@@ -81,7 +81,14 @@ export function ForecastChart({ data }: ForecastChartProps) {
     const axisColor = '#94a3b8'
     return {
       color: packed.series.map((entry) => SOURCE_COLOR[entry.source]),
-      legend: { top: 0, left: 0, itemWidth: 18, itemHeight: 8, textStyle: { color: axisColor } },
+      legend: {
+        top: 0,
+        left: 0,
+        itemWidth: 18,
+        itemHeight: 8,
+        textStyle: { color: axisColor },
+        selectedMode: false,
+      },
       grid: { left: 52, right: 16, top: 28, bottom: 28 },
       tooltip: {
         trigger: 'axis',
@@ -100,6 +107,7 @@ export function ForecastChart({ data }: ForecastChartProps) {
       yAxis: {
         type: 'value',
         name: '流量 (m³/s)',
+        nameLocation: 'middle',
         nameGap: 32,
         scale: true,
         axisLabel: { color: axisColor },
@@ -141,19 +149,21 @@ export function ForecastChart({ data }: ForecastChartProps) {
 
   if (!packed || packed.series.length === 0 || option === null) {
     return (
-      <div className="grid min-h-72 place-items-center rounded-lg border border-dashed border-white/15 p-4 text-center text-sm text-slate-400">
+      <div className="grid h-full min-h-0 place-items-center rounded-lg border border-dashed border-white/15 p-4 text-center text-sm text-slate-400">
         暂无预报数据
       </div>
     )
   }
 
   return (
-    <ReactEChartsCore
-      echarts={echarts}
-      option={option}
-      notMerge
-      lazyUpdate
-      style={{ height: '100%', width: '100%', minHeight: 216 }}
-    />
+    <div className="h-full min-h-0 w-full">
+      <ReactEChartsCore
+        echarts={echarts}
+        option={option}
+        notMerge
+        lazyUpdate
+        style={{ height: '100%', width: '100%', minHeight: 0 }}
+      />
+    </div>
   )
 }
