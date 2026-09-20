@@ -29,8 +29,8 @@ Minimal mergeable slice: 1.1–1.2（依赖与 settings）——纯函数加测�
 ## 2. viewer-dat-reader：v2 DAT 两层读取
 
 - [ ] 2.1 `viewer/tests/synthetic.py`：合成 `YD_ROOT` 生成器——写 v2 DAT（1024 字节头 + `st` + `nc` + 列编号 + 数据区；参数化行数/列编号/第 0 列/`st`/单元格 NaN）、写 `DONE`（可选写成 symlink）、写小 GeoJSON（Polygon 或 MultiPolygon）；不依赖 producer 包
-- [ ] 2.2 `dat.py` 结构层 `read_header(path, reach_ids)`：有界读 `1024+8*(2+nc)` 字节 + `stat` 推算行数；校验整除、168 行、列编号集合；`st` 只解析不用；`DatError` 含路径与差异
-- [ ] 2.3 `dat.py` 数据层 `read_dat(path, reach_ids)`：先结构层，再整读 + `array('d')` 解析数据区；第 0 列逐值校验（期望由契约常量推导，不与 2.1 写出算术同式，含 NaN 拒绝）
+- [ ] 2.2 `dat.py` 结构层 `read_header(path, reach_ids)`：有界读 `1024+8*(2+nc)` 字节 + `stat` 推算行数；校验整除、168 行、列编号无重复且集合相等；`st` 只解析不用；`DatError` 含路径与差异（#245 已实现基础；#246 用户裁决补重复编号拒绝及回归）
+- [ ] 2.3 `dat.py` 数据层 `read_dat(path, reach_ids)`：先结构层，再整读 + `array('d')` 解析数据区；第 0 列逐值校验（期望由契约常量独立推导，含 NaN 拒绝）；独立 golden 轴证明 validator 单独/与 writer 共同偏移 +60 的变异会失败，数学等价改写不要求变红
 - [ ] 2.4 `dat.py` 取值：`row(lead)` 按权威集合升序、`column(reach_id)` 168 值，均已 /86400
 
 依赖：0（2.1–2.2 可与 1 并行；2.2 的权威集合参数为 `set[int]`，不依赖 1.3 的类型）
