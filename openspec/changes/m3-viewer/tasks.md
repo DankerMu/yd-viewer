@@ -67,7 +67,7 @@ Minimal mergeable slice: 4.1（应用工厂 + health）——只依赖 settings/
 
 - [x] 5.1 脚手架：`viewer/frontend/` Vite 6 + React 18.3 + TS 5.9 + Tailwind + vitest，`packageManager: pnpm@10.11.0`，`base: './'`，`build.outDir` 默认 `dist`；`typecheck`/`test`/`build` 脚本，vitest 配 `passWithNoTests: true`（5.2 前无测试文件也保绿）；空页面可构建
 - [x] 5.2 纯函数模块与 vitest：`lib/api.ts`（相对 URL 拼接与三种响应类型）、`lib/time.ts`（cycle/lead → 北京时间文案）、`lib/color.ts`（≥ 阈值 5 档 + 图例标签，含边界值测试）、`lib/basemaps.ts`（解析 `basemaps.json` → MapLibre 样式；404/`{}`/缺键 → 空样式）、`lib/cycles.ts`（cycles → 下拉项）、`lib/bbox.ts`（boundary GeoJSON → 包围盒）
-- [ ] 5.3 M11 快照：从 NWM `4f8d98263` 复制 `M11DraggableCurveWindow`、`ForecastChart` + `echartsCore`、`m11MapRuntime`（去 key，改读 5.2 `lib/basemaps.ts` 的样式）、`m11MapBuilders`、`m11MapInteractions`、`m11MapPrimitives`、`M11FloatingControls`（只留底图切换）、`overviewDataContracts` 的色带/图例子集；逐文件删除 store、路由、OpenAPI client、代站弹窗、降水叠加、RBAC 六类内容并在 `SNAPSHOT.md` 逐文件登记；每文件 ≤1000 行
+- [x] 5.3 M11 快照：从 NWM `4f8d98263` 复制 `M11DraggableCurveWindow`、`ForecastChart` + `echartsCore`、`m11MapRuntime`（去 key，改读 5.2 `lib/basemaps.ts` 的样式）、`m11MapBuilders`、`m11MapInteractions`、`m11MapPrimitives`、`M11FloatingControls`（只留底图切换）、`overviewDataContracts` 的色带/图例子集；逐文件删除 store、路由、OpenAPI client、代站弹窗、降水叠加、RBAC 六类内容并在 `SNAPSHOT.md` 逐文件登记；每文件 ≤1000 行
 - [ ] 5.4 地图页：全屏 MapLibre、加载几何、按 `map/latest` 着色、右下 colorbar、右上底图按钮、缩放控件与比例尺、初始视野 fit 到 5.2 `bbox`、hover/selected 高亮
 - [ ] 5.5 曲线窗：点击河段打开可拖拽窗，起报下拉（默认地图 cycle）、GFS/IFS 同轴 168 点、x 轴北京时间；切换只重取曲线
 - [ ] 5.6 页头：最新起报时间（北京时间，标「起报」）与「流量 (m³/s)」；无数据显示「暂无数据」；`App.tsx` 装配
@@ -194,3 +194,55 @@ lead 5 → `2026-08-28 01:00` (Beijing rollover).
 Recognized basemap keys are exactly vector/satellite/terrain with that priority;
 satellite-only defaults to satellite, terrain-only defaults to terrain.
 `annotation: null` from task 6.1 remains a valid choice with only its base layer.
+
+## #258 fixture — task 5.3 only
+
+Expanded: copied UI entrypoints, event lifecycle, dependency and provenance.
+User-approved scope clarification: package.json/pnpm-lock.yaml may add only
+required dependencies from the documented stack; forbidden-code scan targets
+frontend src, dependency declarations and dist, not explanatory docs/SNAPSHOT.
+No real credentials may enter any committed file. No new guard exemption.
+Pinned source: NWM `4f8d982637f67956acb788b813006e12c1c93174`.
+Parent verified all nine target blobs match that pin; copying uses `git show`.
+
+Deliver all named snapshot files from 5.3, adapted rather than placeholder
+components: river-only draggable window, controlled chart with ECharts core,
+map runtime/builders/interactions/primitives, basemap-only floating controls,
+and discharge legend subset. Native MapLibre replaces wrapper-specific JSX
+where needed; do not import the full NWM app or its dependency manifest.
+Reuse lib/color/time/basemaps/cycles; no duplicate six-band/UTC rules.
+Downstream: #259 consumes map helpers/controls/legend, #260 consumes draggable
+window/chart, #261 assembles page. Do not mount these in App or fetch APIs here.
+
+Governing invariant: copied UI remains useful without NWM runtime state, secrets
+or forbidden subsystems, and cleanup releases listeners/resources it owns.
+Preserve drag pointer identity, interactive-control no-drag, container bounds;
+river identity is integer reach_id; base style changes cannot erase river overlay
+once consumers reapply it. Keep chart's real line rendering, dual-source labels,
+all 168 values and Beijing labels; remove upstream 144h IFS truncation/markers.
+No fly-to, remembered camera, extra themes, station window or external data client.
+Sibling surfaces: NWM imports, local props/types, DOM listeners/unmount, ECharts
+registration, MapLibre layers/sources, package+lock, SNAPSHOT provenance.
+
+Selected risks:
+- Public API/entry + schema: typecheck all new files against useful controlled
+  props and real library types; throwaway bundle imports every snapshot export.
+- Release/dependency + config: frozen install/typecheck/test/build succeed with
+  MapLibre4.7/ECharts6/echarts-for-react3 and only necessary typings; no new
+  state/router/query framework. Existing 21 pure-function tests remain green.
+- Auth/secrets: scan src/manifest/dist for prohibited key/domain/import strings
+  → zero; scan committed additions for actual credential material without
+  printing any upstream key. Credential-bearing upstream lines never copied.
+- Concurrency/shared state + resource: read-only audit of drag listener removal
+  on stop/cancel/unmount and no cross-window state; no network or shared stores.
+- Legacy/provenance + documentation: SNAPSHOT lists full SHA, each of nine
+  source→target mappings, retained behavior and deletion/absent disposition
+  separately for store, routing, generated client, station UI, precipitation,
+  authorization; every target source ≤1000 lines and guard config unchanged.
+- File IO/error rollback not selected: no custom persistence/publish/fetch path.
+
+Required evidence: parent frozen install/typecheck/test/build → exit0; temporary
+consumer bundle imports all nine file exports using actual React/MapLibre/ECharts
+types → build succeeds; source scans and provenance audit above. No permanent
+DOM/visual tests or page visibility required by this issue. Runtime browser
+interaction is verified when mounted in #259–#261, not claimed for this slice.
