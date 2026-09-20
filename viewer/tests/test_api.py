@@ -1,10 +1,12 @@
-"""create_app() validates geometry at factory time and serves GET /api/health and GET /api/cycles."""
+"""create_app() validates geometry at factory time and serves health, cycles, and map/latest."""
 
 from __future__ import annotations
 
 import importlib
 import json
+import logging
 import shutil
+import struct
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,15 @@ OUTPUT = "YD_VIEWER_OUTPUT_DIR"
 STATIC = "YD_VIEWER_STATIC_DIR"
 HEALTH = "/api/health"
 CYCLES = "/api/cycles"
+MAP_LATEST = "/api/map/latest"
+APP_LOGGER = "yd_viewer.app"
+GEOMETRY_IDS = (19, 42, 7)
+DAT_COLUMN_IDS = (42, 7, 19)
+LEAD0_RAW = (172800.0, 259200.0, 86400.0)
+SORTED_LEAD0_VALUES = [3.0, 1.0, 2.0]
+WRONG_ST = 19990101.0
+VALID_TIME_12Z = "2026-08-27T12:00:00Z"
+VALID_TIME_00Z = "2026-08-27T00:00:00Z"
 MIXED_CYCLES = [
     {"cycle": "2026082700", "sources": ["gfs", "ifs"]},
     {"cycle": "2026082612", "sources": ["gfs"]},
@@ -35,18 +46,20 @@ OK_12Z = {"status": "ok", "latest_cycle": CYCLE_12}
 OK_00Z = {"status": "ok", "latest_cycle": CYCLE_00}
 
 
-def _dirs(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _dirs(
+    tmp_path: Path, reach_ids: tuple[int, ...] = IDS_1_TO_5
+) -> tuple[Path, Path, Path]:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     static_dir = tmp_path / "static"
-    write_geometry(input_dir, reach_ids=IDS_1_TO_5)
+    write_geometry(input_dir, reach_ids=reach_ids)
     output_dir.mkdir()
     static_dir.mkdir()
     return input_dir, output_dir, static_dir
 
 
-def _settings(tmp_path: Path) -> Settings:
-    input_dir, output_dir, static_dir = _dirs(tmp_path)
+def _settings(tmp_path: Path, reach_ids: tuple[int, ...] = IDS_1_TO_5) -> Settings:
+    input_dir, output_dir, static_dir = _dirs(tmp_path, reach_ids)
     return Settings(
         input_dir=input_dir,
         output_dir=output_dir,
@@ -64,6 +77,23 @@ def _write_eligible(
     write_done(source_dir / "DONE")
     kwargs = {"column_ids": IDS_1_TO_5, **dat_kwargs}
     return write_dat(source_dir / "yd.rivqdown.dat", **kwargs)
+
+
+def _set_lead0_raw(path: Path, raw_values: tuple[float, ...]) -> None:
+    nc = len(raw_values)
+    payload = bytearray(path.read_bytes())
+    for column, value in enumerate(raw_values, start=1):
+        offset = 1024 + 8 * (2 + nc) + column * 8
+        payload[offset : offset + 8] = struct.pack("<d", value)
+    path.write_bytes(payload)
+
+
+def _warning_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
 
 
 def _health(settings: Settings):
@@ -307,3 +337,257 @@ def test_removed_output_returns_cycles_503_with_generic_detail(
     assert detail
     assert str(tmp_path) not in detail
     assert str(settings.output_dir) not in detail
+
+
+def test_map_latest_prefers_gfs_and_returns_sorted_lead0_values(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, GEOMETRY_IDS)
+    ifs_dat = _write_eligible(
+        settings.output_dir,
+        CYCLE_12,
+        "ifs",
+        column_ids=DAT_COLUMN_IDS,
+        st=WRONG_ST,
+    )
+    gfs_dat = _write_eligible(
+        settings.output_dir,
+        CYCLE_12,
+        "gfs",
+        column_ids=DAT_COLUMN_IDS,
+        st=WRONG_ST,
+    )
+    _set_lead0_raw(ifs_dat, (86400.0, 86400.0, 86400.0))
+    _set_lead0_raw(gfs_dat, LEAD0_RAW)
+    client = TestClient(create_app(settings))
+
+    cycles = client.get(CYCLES)
+    response = client.get(MAP_LATEST)
+
+    assert cycles.status_code == 200
+    assert cycles.json() == [{"cycle": CYCLE_12, "sources": ["gfs", "ifs"]}]
+    assert response.status_code == 200
+    assert response.json() == {
+        "cycle": CYCLE_12,
+        "source": "gfs",
+        "valid_time": VALID_TIME_12Z,
+        "values": SORTED_LEAD0_VALUES,
+    }
+
+
+def test_map_latest_uses_ifs_when_latest_cycle_has_only_ifs(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    _write_eligible(settings.output_dir, CYCLE_12, "ifs")
+    client = TestClient(create_app(settings))
+
+    cycles = client.get(CYCLES)
+    response = client.get(MAP_LATEST)
+
+    assert cycles.status_code == 200
+    assert cycles.json() == [{"cycle": CYCLE_12, "sources": ["ifs"]}]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cycle"] == CYCLE_12
+    assert body["source"] == "ifs"
+    assert body["valid_time"] == VALID_TIME_12Z
+
+
+def test_map_latest_skips_shifted_gfs_for_same_cycle_ifs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _settings(tmp_path)
+    older_gfs = _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    _set_lead0_raw(older_gfs, (172800.0,) * 5)
+    gfs_dat = _write_eligible(
+        settings.output_dir, CYCLE_12, "gfs", minutes=SHIFTED_MINUTES
+    )
+    ifs_dat = _write_eligible(settings.output_dir, CYCLE_12, "ifs")
+    _set_lead0_raw(ifs_dat, (86400.0,) * 5)
+    client = TestClient(create_app(settings))
+
+    with caplog.at_level(logging.WARNING, logger=APP_LOGGER):
+        cycles = client.get(CYCLES)
+        response = client.get(MAP_LATEST)
+
+    assert cycles.status_code == 200
+    assert cycles.json() == [
+        {"cycle": CYCLE_12, "sources": ["gfs", "ifs"]},
+        {"cycle": CYCLE_00, "sources": ["gfs"]},
+    ]
+    assert response.status_code == 200
+    assert response.json() == {
+        "cycle": CYCLE_12,
+        "source": "ifs",
+        "valid_time": VALID_TIME_12Z,
+        "values": [1.0, 1.0, 1.0, 1.0, 1.0],
+    }
+    warnings = _warning_messages(caplog)
+    assert len(warnings) == 1
+    assert str(gfs_dat) in warnings[0]
+    assert warnings[0] != str(gfs_dat)
+
+
+def test_map_latest_falls_back_to_older_cycle_gfs_when_latest_data_fails(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _settings(tmp_path)
+    older_ifs = _write_eligible(settings.output_dir, CYCLE_00, "ifs")
+    _set_lead0_raw(older_ifs, (86400.0,) * 5)
+    older_gfs = _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    _set_lead0_raw(older_gfs, (172800.0,) * 5)
+    latest_gfs = _write_eligible(
+        settings.output_dir, CYCLE_12, "gfs", minutes=SHIFTED_MINUTES
+    )
+    latest_ifs = _write_eligible(
+        settings.output_dir, CYCLE_12, "ifs", minutes=SHIFTED_MINUTES
+    )
+    client = TestClient(create_app(settings))
+
+    with caplog.at_level(logging.WARNING, logger=APP_LOGGER):
+        cycles = client.get(CYCLES)
+        response = client.get(MAP_LATEST)
+
+    assert cycles.status_code == 200
+    assert cycles.json() == [
+        {"cycle": CYCLE_12, "sources": ["gfs", "ifs"]},
+        {"cycle": CYCLE_00, "sources": ["gfs", "ifs"]},
+    ]
+    assert response.status_code == 200
+    assert response.json() == {
+        "cycle": CYCLE_00,
+        "source": "gfs",
+        "valid_time": VALID_TIME_00Z,
+        "values": [2.0, 2.0, 2.0, 2.0, 2.0],
+    }
+    warnings = _warning_messages(caplog)
+    assert len(warnings) == 2
+    text = "\n".join(warnings)
+    assert str(latest_gfs) in text
+    assert str(latest_ifs) in text
+
+
+def test_map_latest_returns_404_when_all_catalog_candidates_fail_data_layer(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _settings(tmp_path)
+    latest_gfs = _write_eligible(
+        settings.output_dir, CYCLE_12, "gfs", minutes=SHIFTED_MINUTES
+    )
+    latest_ifs = _write_eligible(
+        settings.output_dir, CYCLE_12, "ifs", minutes=SHIFTED_MINUTES
+    )
+    older_gfs = _write_eligible(
+        settings.output_dir, CYCLE_00, "gfs", minutes=SHIFTED_MINUTES
+    )
+    older_ifs = _write_eligible(
+        settings.output_dir, CYCLE_00, "ifs", minutes=SHIFTED_MINUTES
+    )
+    client = TestClient(create_app(settings))
+
+    with caplog.at_level(logging.WARNING, logger=APP_LOGGER):
+        cycles = client.get(CYCLES)
+        response = client.get(MAP_LATEST)
+
+    assert cycles.status_code == 200
+    assert cycles.json() == [
+        {"cycle": CYCLE_12, "sources": ["gfs", "ifs"]},
+        {"cycle": CYCLE_00, "sources": ["gfs", "ifs"]},
+    ]
+    assert response.status_code == 404
+    body = response.json()
+    assert set(body) == {"detail"}
+    detail = body["detail"]
+    assert isinstance(detail, str)
+    assert detail
+    assert str(tmp_path) not in detail
+    assert str(settings.output_dir) not in detail
+    warnings = _warning_messages(caplog)
+    assert len(warnings) == 4
+    text = "\n".join(warnings)
+    for path in (latest_gfs, latest_ifs, older_gfs, older_ifs):
+        assert str(path) in text
+        assert sum(str(path) in message for message in warnings) == 1
+
+
+def test_map_latest_returns_404_until_done_is_published(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    source_dir = settings.output_dir / CYCLE_12 / "gfs"
+    dat = write_dat(source_dir / "yd.rivqdown.dat", column_ids=IDS_1_TO_5)
+    _set_lead0_raw(dat, (86400.0,) * 5)
+    client = TestClient(create_app(settings))
+
+    unpublished = client.get(MAP_LATEST)
+    cycles = client.get(CYCLES)
+    write_done(source_dir / "DONE")
+    published = client.get(MAP_LATEST)
+
+    assert unpublished.status_code == 404
+    unpublished_body = unpublished.json()
+    assert set(unpublished_body) == {"detail"}
+    unpublished_detail = unpublished_body["detail"]
+    assert isinstance(unpublished_detail, str)
+    assert unpublished_detail
+    assert cycles.status_code == 200
+    assert cycles.json() == []
+    assert published.status_code == 200
+    assert published.json() == {
+        "cycle": CYCLE_12,
+        "source": "gfs",
+        "valid_time": VALID_TIME_12Z,
+        "values": [1.0, 1.0, 1.0, 1.0, 1.0],
+    }
+
+
+def test_removed_output_returns_map_latest_503_with_generic_detail(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    gfs_dat = _write_eligible(
+        settings.output_dir,
+        CYCLE_12,
+        "gfs",
+        column_ids=IDS_1_TO_5,
+    )
+    _set_lead0_raw(gfs_dat, (86400.0,) * 5)
+    client = TestClient(create_app(settings))
+    first = client.get(MAP_LATEST)
+    shutil.rmtree(settings.output_dir)
+    response = client.get(MAP_LATEST)
+
+    assert first.status_code == 200
+    assert first.json()["source"] == "gfs"
+    assert response.status_code == 503
+    body = response.json()
+    assert set(body) == {"detail"}
+    detail = body["detail"]
+    assert isinstance(detail, str)
+    assert detail
+    assert str(tmp_path) not in detail
+    assert str(settings.output_dir) not in detail
+
+
+def test_map_latest_does_not_reread_geometry_files(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, GEOMETRY_IDS)
+    gfs_dat = _write_eligible(
+        settings.output_dir,
+        CYCLE_12,
+        "gfs",
+        column_ids=DAT_COLUMN_IDS,
+        st=WRONG_ST,
+    )
+    _set_lead0_raw(gfs_dat, LEAD0_RAW)
+    client = TestClient(create_app(settings))
+    (settings.input_dir / "rivers.geojson").unlink()
+    (settings.input_dir / "boundary.geojson").unlink()
+
+    response = client.get(MAP_LATEST)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "cycle": CYCLE_12,
+        "source": "gfs",
+        "valid_time": VALID_TIME_12Z,
+        "values": SORTED_LEAD0_VALUES,
+    }
