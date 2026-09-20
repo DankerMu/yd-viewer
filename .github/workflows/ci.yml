@@ -38,6 +38,22 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run pytest
 
+  viewer-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: viewer/frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - run: corepack enable
+      - run: corepack pnpm install --frozen-lockfile
+      - run: corepack pnpm typecheck
+      - run: corepack pnpm test
+      - run: corepack pnpm build
+
   openspec:
     runs-on: ubuntu-latest
     steps:
