@@ -68,7 +68,7 @@ Minimal mergeable slice: 4.1（应用工厂 + health）——只依赖 settings/
 - [x] 5.1 脚手架：`viewer/frontend/` Vite 6 + React 18.3 + TS 5.9 + Tailwind + vitest，`packageManager: pnpm@10.11.0`，`base: './'`，`build.outDir` 默认 `dist`；`typecheck`/`test`/`build` 脚本，vitest 配 `passWithNoTests: true`（5.2 前无测试文件也保绿）；空页面可构建
 - [x] 5.2 纯函数模块与 vitest：`lib/api.ts`（相对 URL 拼接与三种响应类型）、`lib/time.ts`（cycle/lead → 北京时间文案）、`lib/color.ts`（≥ 阈值 5 档 + 图例标签，含边界值测试）、`lib/basemaps.ts`（解析 `basemaps.json` → MapLibre 样式；404/`{}`/缺键 → 空样式）、`lib/cycles.ts`（cycles → 下拉项）、`lib/bbox.ts`（boundary GeoJSON → 包围盒）
 - [x] 5.3 M11 快照：从 NWM `4f8d98263` 复制 `M11DraggableCurveWindow`、`ForecastChart` + `echartsCore`、`m11MapRuntime`（去 key，改读 5.2 `lib/basemaps.ts` 的样式）、`m11MapBuilders`、`m11MapInteractions`、`m11MapPrimitives`、`M11FloatingControls`（只留底图切换）、`overviewDataContracts` 的色带/图例子集；逐文件删除 store、路由、OpenAPI client、代站弹窗、降水叠加、RBAC 六类内容并在 `SNAPSHOT.md` 逐文件登记；每文件 ≤1000 行
-- [ ] 5.4 地图页：全屏 MapLibre、加载几何、按 `map/latest` 着色、右下 colorbar、右上底图按钮、缩放控件与比例尺、初始视野 fit 到 5.2 `bbox`、hover/selected 高亮
+- [x] 5.4 地图页：全屏 MapLibre、加载几何、按 `map/latest` 着色、右下 colorbar、右上底图按钮、缩放控件与比例尺、初始视野 fit 到 5.2 `bbox`、hover/selected 高亮
 - [ ] 5.5 曲线窗：点击河段打开可拖拽窗，起报下拉（默认地图 cycle）、GFS/IFS 同轴 168 点、x 轴北京时间；切换只重取曲线
 - [ ] 5.6 页头：最新起报时间（北京时间，标「起报」）与「流量 (m³/s)」；无数据显示「暂无数据」；`App.tsx` 装配
 - [ ] 5.7 本地开发：`vite.config` 代理 `/api`、`/geometry`、`/basemaps.json` 到本地后端；README 一条命令用 2.1 生成器起全栈
@@ -246,3 +246,54 @@ consumer bundle imports all nine file exports using actual React/MapLibre/EChart
 types → build succeeds; source scans and provenance audit above. No permanent
 DOM/visual tests or page visibility required by this issue. Runtime browser
 interaction is verified when mounted in #259–#261, not claimed for this slice.
+
+## #259 fixture — task 5.4 only
+
+Expanded: first real map page with async fetch, event/state and rendering.
+Scope pages/ + map components, no App/main mount, curve window or header.
+MapPage owns one latest-map/geometry/basemaps load per mount, a selected reach
+and controlled basemap choice; optional onReachSelect/onLatestChange callbacks
+serve #260/#261 without fetching those data twice. No caches or polling.
+Wait for geometry before creating the map so initial fit has boundary bounds.
+Initial fit is not repeated by hover, selection or basemap changes.
+
+Governing invariant: API values map to sorted integer reach_id, not feature
+order; base-style replacement restores geometry, colors and selected identity
+without refetching or changing latest cycle. Keep #258 shared readiness helper.
+Sibling surfaces: relative API/geometry/config URLs, boundary Feature adapter,
+map source/layer registration, style.load color replay, hover/click filters,
+request abort/unmount, callbacks for future chart/header.
+
+Selected risk packs:
+- Public API/entry + schema: fetch ./geometry/rivers.geojson (FeatureCollection),
+  ./geometry/boundary.geojson (single Feature), ./api/map/latest and
+  ./basemaps.json under root or stripped /yd/; use docs response types. With
+  shuffled reaches [3,1,2] and values [0.5,10,1000], actual colors for 1/2/3
+  are #7FB8DC/#2171B5/#CB181D, and click returns the actual integer id.
+- Config + error/partial outputs: vector/satellite only → exactly2 buttons and
+  vector default; 404 or {} basemaps → no buttons but river drawing/highlight
+  remain. Latest404 → neutral river colors, no fabricated cycle/data.
+- Concurrency/shared state + resource: real Chromium smoke mounts StrictMode,
+  exercises hover/click and two style switches, confirms restored colors and
+  filters, then unmounts with no errors or stale asynchronous state updates.
+  Fetches cancel on unmount; style registration precedes color replay.
+- Release/dependency + auth/secrets: existing frozen install/typecheck/21tests/
+  build pass, no new dependencies or keys; built requests retain prefix.
+- Documentation: record synthetic browser evidence and limits in PR; no M5
+  receipt claim or permanent DOM/visual suite.
+- File IO/legacy/resource-limits not selected beyond normal4000reach rendering:
+  no filesystem, persisted state, migrations, data framework or new budgets.
+
+Required browser evidence: temporary harness mounts exported real page with
+synthetic HTTP JSON, not mock MapLibre; canvas/controls/colorbar render; shuffled
+ids map correctly; pointer hover/click selects; two basemap changes restore
+sources/colors/selection and preserve camera; basemap404 and{} both work.
+Record actual requests under /yd/ and unchanged latest fetch count on selection
+and style switching. Typecheck/build plus inherited tests remain project gate.
+Remove throwaway harness afterward; permanent page entry waits for #261.
+Callback contract: `onLatestChange?: (latest: MapLatestResponse | null) => void`;
+latest404 invokes it with null, so #261 renders 暂无数据 without another fetch.
+Fit oracle: synthetic boundary Feature with bbox `[[100,30],[101,31]]` →
+createM11Map initial `fitTo.bounds` is that bbox after geometry load, using its
+existing36px padding. Capture resultant camera; hover/select/two style rebuilds
+leave it unchanged. No fabricated cycle/source/values on404.
