@@ -82,7 +82,7 @@ Minimal mergeable slice: 5.1（脚手架 + 空页面可构建）——不含任�
 
 - [ ] 6.1 `viewer/entrypoint.sh` + `viewer/Dockerfile`（同一 PR）：entrypoint 按 6 个 env 生成 `$YD_VIEWER_STATIC_DIR/basemaps.json`（缺键缺席、全缺 `{}`、URL 不进日志）后 `exec uvicorn --host 0.0.0.0 --port 8000`（容器内端口固定 8000，宿主端口由 compose `127.0.0.1:${YD_VIEWER_PORT}:8000` 映射），shell 单测以非 root 用户给定 env 断言 JSON 与日志不含 URL；Dockerfile 多阶段（Node 22 pnpm build → Python 3.12 `uv sync --frozen --no-dev` → `ENV YD_VIEWER_STATIC_DIR=<镜像内固定路径>`，该目录属运行用户 → 非 root 执行 `entrypoint.sh`）；`docker build` 通过；镜像内 `USER` 非 root 且静态目录可写含 `index.html`
 - [ ] 6.2 `viewer/compose.example.yml`：两个 `:ro` 挂载、`127.0.0.1:${YD_VIEWER_PORT}:8000`、`env_file`、project/service/container/network/image 全 `yd-` 前缀；`viewer/env.example` 列出 `YD_VIEWER_{INPUT,OUTPUT}_DIR`、`YD_VIEWER_PORT`、六个 `YD_BASEMAP_*`，不含 `YD_VIEWER_STATIC_DIR`
-- [ ] 6.3 ci.yml 新增 `viewer-frontend` job（install --frozen-lockfile、typecheck、test、build）；现有 job 不变
+- [x] 6.3 ci.yml 新增 `viewer-frontend` job（install --frozen-lockfile、typecheck、test、build）；现有 job 不变
 
 依赖：6.3 需 5.1；6.1 需 5.1 与 1.1；6.2 需 6.1
 §9.1 归属：前端构建门禁（6.3）；其余为 M5 镜像前置
@@ -119,3 +119,32 @@ No permanent tests are required before pure-function task 5.2.
 不豁免源文件、不改 CI job。先提交并 push docs/spec，再修改 guard 配置。
 验证：干净提交副本运行 guard → exit 0；加入 tracked 1001 行前端源文件
 → exit 1；frozen install → exit 0。PR 边界扩展仅限本项及必要文档。
+
+## #263 fixture — task 6.3 only
+
+Expanded (CI config and shared verification entrypoint). Selected packs:
+Config / project setup; Public API / CLI / script entry; Release / packaging /
+dependency compatibility. Evidence: Node 22 CI checks out the repository,
+enters `viewer/frontend`, then frozen install → typecheck → test → build, all
+exit 0. A failed command must fail the job, not be ignored. Parse workflow
+to prove original producer/viewer-backend/openspec/stage-pipeline-log jobs
+are unchanged, then run the actual new GitHub Actions job on the PR.
+Secrets/auth not selected: no credentials or secret configuration added.
+File IO/schema/concurrency/resource/legacy/error-rollback/docs-migration
+not selected: only ordinary CI steps; no runtime/API/publish change.
+Must preserve: existing job definitions and their success/failure semantics,
+pnpm 10.11.0 from packageManager, frozen lockfile, empty-suite success.
+Governing invariant: every CI frontend check runs against this checkout in the
+frontend directory using the declared package manager, and failures block CI.
+Sibling surfaces: ci.yml, package scripts, packageManager and pnpm-lock.yaml.
+Non-goals: Docker/compose, caches, deployments, runtime source edits.
+Preserve workflow-level `on:` (`push` to `master`, `pull_request`) and the
+`stage-pipeline-log` job's `if:` verbatim. Downstream consumers: all later
+frontend PRs (5.2+) are gated here; task 6.1's Node stage uses compatible
+frontend commands but remains out of implementation scope.
+Explicit #263 oracle: base/head ci.yml → unchanged original job definitions,
+triggers and conditional; new `viewer-frontend` job → Node 22 with pnpm 10.11.0
+in `viewer/frontend`, `corepack pnpm install --frozen-lockfile` followed by
+`corepack pnpm typecheck`, `corepack pnpm test`, `corepack pnpm build` in order;
+no continue-on-error or shell suppression → failed step fails the job.
+PR CI run → named `viewer-frontend` check succeeds with each command exit 0.
