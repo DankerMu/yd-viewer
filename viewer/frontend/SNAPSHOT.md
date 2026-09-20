@@ -150,7 +150,7 @@ Removed unused exports: `DischargeLegendEntry`, `GLASS_PANEL` (class remains fil
 #259 map page:
 
 - `useM11Map` (`M11MapCameraFit` for initial fit), `setM11MapStyle`, `onStyleReady`
-- `M11OverlayPrimitive`, `M11BoundaryPrimitive`, `applyReachColors` (after river source recreation)
+- `registerRiverOverlay`, `registerBoundaryOverlay` and their unregister helpers; `applyReachColors` after registration, then `setRiverHover` / `setRiverSelected` (owned by `MapPage`)
 - `attachRiverInteractions`
 - `M11FloatingBasemapSwitcher`
 - `M11DischargeLegend`
