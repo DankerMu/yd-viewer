@@ -69,7 +69,7 @@ Minimal mergeable slice: 4.1（应用工厂 + health）——只依赖 settings/
 - [x] 5.2 纯函数模块与 vitest：`lib/api.ts`（相对 URL 拼接与三种响应类型）、`lib/time.ts`（cycle/lead → 北京时间文案）、`lib/color.ts`（≥ 阈值 5 档 + 图例标签，含边界值测试）、`lib/basemaps.ts`（解析 `basemaps.json` → MapLibre 样式；404/`{}`/缺键 → 空样式）、`lib/cycles.ts`（cycles → 下拉项）、`lib/bbox.ts`（boundary GeoJSON → 包围盒）
 - [x] 5.3 M11 快照：从 NWM `4f8d98263` 复制 `M11DraggableCurveWindow`、`ForecastChart` + `echartsCore`、`m11MapRuntime`（去 key，改读 5.2 `lib/basemaps.ts` 的样式）、`m11MapBuilders`、`m11MapInteractions`、`m11MapPrimitives`、`M11FloatingControls`（只留底图切换）、`overviewDataContracts` 的色带/图例子集；逐文件删除 store、路由、OpenAPI client、代站弹窗、降水叠加、RBAC 六类内容并在 `SNAPSHOT.md` 逐文件登记；每文件 ≤1000 行
 - [x] 5.4 地图页：全屏 MapLibre、加载几何、按 `map/latest` 着色、右下 colorbar、右上底图按钮、缩放控件与比例尺、初始视野 fit 到 5.2 `bbox`、hover/selected 高亮
-- [ ] 5.5 曲线窗：点击河段打开可拖拽窗，起报下拉（默认地图 cycle）、GFS/IFS 同轴 168 点、x 轴北京时间；切换只重取曲线
+- [x] 5.5 曲线窗：点击河段打开可拖拽窗，起报下拉（默认地图 cycle）、GFS/IFS 同轴 168 点、x 轴北京时间；切换只重取曲线
 - [ ] 5.6 页头：最新起报时间（北京时间，标「起报」）与「流量 (m³/s)」；无数据显示「暂无数据」；`App.tsx` 装配
 - [ ] 5.7 本地开发：`vite.config` 代理 `/api`、`/geometry`、`/basemaps.json` 到本地后端；README 一条命令用 2.1 生成器起全栈
 
@@ -297,3 +297,51 @@ Fit oracle: synthetic boundary Feature with bbox `[[100,30],[101,31]]` →
 createM11Map initial `fitTo.bounds` is that bbox after geometry load, using its
 existing36px padding. Capture resultant camera; hover/select/two style rebuilds
 leave it unchanged. No fabricated cycle/source/values on404.
+
+## #260 fixture — task 5.5 only
+
+Expanded: async curve selection and real chart/window interaction.
+Scope curve/map-window + chart components only; no MapPage/main/App/header edits.
+Export a controlled RiverCurveWindow accepting selected reach_id, current map
+cycle, and a close callback; null selection/map cycle means no open window.
+#261 wires existing MapPage callbacks; temporary harness wires them here.
+Window fetches ./api/cycles for its sole selector and ./api/cycles/{cycle}/reaches/
+{reach_id} for curves; no map/latest fetch or mutation. Default selected cycle
+is map cycle on a new reach/open; changing cycle affects only window requests.
+Use cycleOptions/formatBeijingTime/curveUrl and existing draggable/ForecastChart.
+No additional export, source/lead controls, comparison, cache, retries or store.
+
+Governing invariant: displayed reach/cycle/curve always share one request identity;
+stale/aborted results cannot replace current selection, and curve history never
+changes map cycle, coloring, selected reach, camera or latest request count.
+Sibling surfaces: selector options, request identity, loading/404/error state,
+chart category labels/series, drag header input guards, unmount/close cleanup.
+Downstream: #261 supplies map cycle and reach from existing callbacks, not a
+second map/data loader. Preserve #259 map and #258 real chart/rendering contracts.
+
+Selected packs:
+- Public API/entry + schema: synthetic cycles [2026082712,2026082700] →
+  dropdown [2026-08-27 20:00,2026-08-27 08:00] in that order, default12Z;
+  curves for reach1 latest → GFS+IFS168points each on same axes; historical
+  source omission → exactly one168point curve, no stale second source.
+  2026082700 lead5 x-label → 2026-08-27 13:00. Values remain m³/s.
+- Concurrency/shared state + resource: switch A→B while A's response is delayed
+  → onlyB renders; new reach resets default to mapcycle and cannot show oldreach
+  result. Close/unmount aborts outstanding fetch and draglisteners; select/button
+  interactions do not drag window; dragging blank header changes windowposition.
+- Error/partial outputs: curve404 → no old series and generic no-data UI;
+  other non2xx → generic failure without producer/internal states; no fabricated
+  sources/cycles. Unavailable responses must not leave previous data under newlabel.
+- Config/dependency + auth/secrets: no new dependency/config; URLs resolve relative
+  to document directory for root and /yd/; no credentials; existing21tests and
+  frozen install/typecheck/build remain green.
+- Documentation: PR records actual synthetic-browser evidence, not M5.
+- FileIO/legacy/largeinput/release not selected beyond fixed2×168 chart:
+  no persistence, migration, deployment or new resource framework.
+
+Required proof: temporary real Chromium+MapLibre+ECharts harness connects
+MapPage onReachSelect/onLatestChange to window. Real river click opens it;
+actual ECharts option/render contains one vs two168point series and Beijing
+labels; history switch leaves captured map state/camera/latestrequest count
+unchanged. Exercise real drag, non-drag selector, close, delayed stale response,
+curve404, StrictMode unmount. No permanent DOM test suite or App mount here.
