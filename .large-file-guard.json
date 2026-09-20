@@ -2,6 +2,7 @@
   "enabled": true,
   "maxLines": 1000,
   "exclude": [
+    "viewer/frontend/pnpm-lock.yaml",
     "openspec/changes/archive/2026-09-15-m2-producer-core/tasks.md",
     "producer/tests/test_canonical_converter.py",
     "producer/tests/test_cfg_ic.py",
