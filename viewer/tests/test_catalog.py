@@ -1,4 +1,4 @@
-"""list_cycles() enumerates structurally valid DONE candidates."""
+"""list_cycles() enumerates structurally valid DONE candidates within a 7-day window."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from synthetic import write_dat, write_done
 
+from yd_viewer import catalog
 from yd_viewer.catalog import list_cycles
 
 CYCLE_00 = "2026082700"
@@ -63,6 +64,10 @@ def _write_eligible(
 
 def _list(output_dir: Path):
     return list_cycles(output_dir, AUTHORITY_1_TO_5)
+
+
+def _latest(output_dir: Path):
+    return catalog.latest(output_dir, AUTHORITY_1_TO_5)
 
 
 @contextmanager
@@ -125,14 +130,15 @@ def _warning_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 def test_regular_done_for_both_sources_groups_under_each_cycle(tmp_path: Path) -> None:
     output_dir = tmp_path / "output"
-    _write_eligible(output_dir, CYCLE_00, "gfs")
     _write_eligible(output_dir, CYCLE_00, "ifs")
+    _write_eligible(output_dir, CYCLE_00, "gfs")
     _write_eligible(output_dir, CYCLE_12, "gfs")
 
-    assert _groups(_list(output_dir)) == [
-        (CYCLE_00, ["gfs", "ifs"]),
-        (CYCLE_12, ["gfs"]),
+    assert _list(output_dir) == [
+        {"cycle": CYCLE_12, "sources": ["gfs"]},
+        {"cycle": CYCLE_00, "sources": ["gfs", "ifs"]},
     ]
+    assert _latest(output_dir) == CYCLE_12
 
 
 def test_done_without_dat_is_excluded_with_warning(
@@ -211,10 +217,12 @@ def test_invalid_cycle_and_source_names_are_ignored(
     _write_dat(output_dir, f"{CYCLE_00}\n", "gfs")
     write_done(output_dir / f"{CYCLE_00}x" / "gfs" / "DONE")
     _write_dat(output_dir, f"{CYCLE_00}x", "gfs")
+    _write_eligible(output_dir, "2026023000", "gfs")
+    _write_eligible(output_dir, "2026130112", "ifs")
     _write_eligible(output_dir, CYCLE_12, "gfs")
 
     with caplog.at_level(logging.WARNING, logger=CATALOG_LOGGER):
-        assert _groups(_list(output_dir)) == [(CYCLE_12, ["gfs"])]
+        assert _list(output_dir) == [{"cycle": CYCLE_12, "sources": ["gfs"]}]
     assert _warning_messages(caplog) == []
 
 
@@ -235,6 +243,7 @@ def test_empty_root_returns_empty_list(tmp_path: Path) -> None:
     output_dir.mkdir()
 
     assert _list(output_dir) == []
+    assert _latest(output_dir) is None
 
 
 def test_missing_root_raises_oserror(tmp_path: Path) -> None:
@@ -242,6 +251,8 @@ def test_missing_root_raises_oserror(tmp_path: Path) -> None:
 
     with pytest.raises(OSError):
         _list(output_dir)
+    with pytest.raises(OSError):
+        _latest(output_dir)
     assert not output_dir.exists()
 
 
@@ -251,6 +262,8 @@ def test_nondirectory_root_raises_oserror(tmp_path: Path) -> None:
 
     with pytest.raises(OSError):
         _list(output_dir)
+    with pytest.raises(OSError):
+        _latest(output_dir)
 
 
 def test_unreadable_root_raises_oserror(tmp_path: Path) -> None:
@@ -259,8 +272,11 @@ def test_unreadable_root_raises_oserror(tmp_path: Path) -> None:
     output_dir.mkdir()
     _write_regular_done(output_dir, CYCLE_00, "gfs")
 
-    with _chmod(output_dir, 0o000), pytest.raises(OSError):
-        _list(output_dir)
+    with _chmod(output_dir, 0o000):
+        with pytest.raises(OSError):
+            _list(output_dir)
+        with pytest.raises(OSError):
+            _latest(output_dir)
 
 
 def test_short_gfs_is_excluded_while_valid_ifs_remains(
@@ -361,11 +377,24 @@ def test_enumeration_reads_only_header_bytes_per_large_candidate(
     )
     assert template.stat().st_size == FILE_SIZE_3988
     authority = set(range(1, NC_3988 + 1))
-    pairs = [
-        (f"202608{day:02d}00", source)
-        for day in range(1, 16)
-        for source in ("gfs", "ifs")
-    ]
+    cycles = (
+        "2026082700",
+        "2026082612",
+        "2026082600",
+        "2026082512",
+        "2026082500",
+        "2026082412",
+        "2026082400",
+        "2026082312",
+        "2026082300",
+        "2026082212",
+        "2026082200",
+        "2026082112",
+        "2026082100",
+        "2026082012",
+        "2026082000",
+    )
+    pairs = [(cycle, source) for cycle in cycles for source in ("gfs", "ifs")]
     assert len(pairs) == N_BUDGET_CANDIDATES
     dat_paths = []
     for cycle, source in pairs:
@@ -384,6 +413,8 @@ def test_enumeration_reads_only_header_bytes_per_large_candidate(
         (entry["cycle"], source) for entry in entries for source in entry["sources"]
     }
     assert listed == set(pairs)
+    assert [entry["cycle"] for entry in entries] == list(cycles)
+    assert all(entry["sources"] == ["gfs", "ifs"] for entry in entries)
     for path in expected:
         spans = calls.get(path, [])
         assert spans, f"no os.read for {path}"
@@ -393,3 +424,57 @@ def test_enumeration_reads_only_header_bytes_per_large_candidate(
             assert position + nbytes <= HEADER_BUDGET_3988
             returned += nbytes
         assert 0 < returned <= HEADER_BUDGET_3988
+
+
+def test_inclusive_seven_day_window_keeps_00z_boundary(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    _write_eligible(output_dir, "2026082700", "gfs")
+    _write_eligible(output_dir, "2026082000", "gfs")
+    _write_eligible(output_dir, "2026081912", "gfs")
+
+    assert _list(output_dir) == [
+        {"cycle": "2026082700", "sources": ["gfs"]},
+        {"cycle": "2026082000", "sources": ["gfs"]},
+    ]
+    assert _latest(output_dir) == "2026082700"
+
+
+def test_inclusive_seven_day_window_keeps_12z_boundary(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    _write_eligible(output_dir, "2026082712", "ifs")
+    _write_eligible(output_dir, "2026082012", "gfs")
+    _write_eligible(output_dir, "2026082000", "gfs")
+
+    assert _list(output_dir) == [
+        {"cycle": "2026082712", "sources": ["ifs"]},
+        {"cycle": "2026082012", "sources": ["gfs"]},
+    ]
+    assert _latest(output_dir) == "2026082712"
+
+
+def test_newest_structurally_invalid_cycle_does_not_anchor_window(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    output_dir = tmp_path / "output"
+    _write_eligible(output_dir, "2026082800", "gfs", rows=167)
+    _write_eligible(output_dir, "2026082700", "gfs")
+    _write_eligible(output_dir, "2026082000", "ifs")
+
+    with caplog.at_level(logging.WARNING, logger=CATALOG_LOGGER):
+        entries = _list(output_dir)
+
+    assert entries == [
+        {"cycle": "2026082700", "sources": ["gfs"]},
+        {"cycle": "2026082000", "sources": ["ifs"]},
+    ]
+    assert _latest(output_dir) == "2026082700"
+
+
+def test_stale_latest_cycle_still_listed_without_wallclock_anchor(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    _write_eligible(output_dir, "2025070100", "gfs")
+
+    assert _list(output_dir) == [{"cycle": "2025070100", "sources": ["gfs"]}]
+    assert _latest(output_dir) == "2025070100"

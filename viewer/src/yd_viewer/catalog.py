@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import stat
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypedDict
 
@@ -13,6 +14,7 @@ from yd_viewer.dat import DatError, read_header
 
 _CYCLE_NAME = re.compile(r"\d{8}(?:00|12)")
 _SOURCES = frozenset({"gfs", "ifs"})
+_WINDOW = timedelta(days=7)
 _DONE_NAME = "DONE"
 _DAT_NAME = "yd.rivqdown.dat"
 _LOGGER = logging.getLogger(__name__)
@@ -25,17 +27,38 @@ class CycleEntry(TypedDict):
 
 def list_cycles(output_dir: str | Path, reach_ids: set[int]) -> list[CycleEntry]:
     root = Path(output_dir)
-    entries: list[CycleEntry] = []
+    dated: list[tuple[datetime, CycleEntry]] = []
     for cycle_path in root.iterdir():
         cycle = cycle_path.name
-        if _CYCLE_NAME.fullmatch(cycle) is None:
+        start = _utc_cycle_start(cycle)
+        if start is None:
             continue
         if not cycle_path.is_dir():
             continue
         sources = _structurally_valid_sources(cycle_path, reach_ids)
         if sources:
-            entries.append({"cycle": cycle, "sources": sources})
-    return entries
+            dated.append((start, {"cycle": cycle, "sources": sources}))
+    if not dated:
+        return []
+    dated.sort(key=lambda item: item[0], reverse=True)
+    anchor = dated[0][0]
+    return [entry for start, entry in dated if anchor - start <= _WINDOW]
+
+
+def latest(output_dir: str | Path, reach_ids: set[int]) -> str | None:
+    entries = list_cycles(output_dir, reach_ids)
+    if not entries:
+        return None
+    return entries[0]["cycle"]
+
+
+def _utc_cycle_start(cycle: str) -> datetime | None:
+    if _CYCLE_NAME.fullmatch(cycle) is None:
+        return None
+    try:
+        return datetime.strptime(cycle, "%Y%m%d%H").replace(tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 def _structurally_valid_sources(cycle_path: Path, reach_ids: set[int]) -> list[str]:
@@ -53,6 +76,7 @@ def _structurally_valid_sources(cycle_path: Path, reach_ids: set[int]) -> list[s
                 sources.append(source)
     except (FileNotFoundError, NotADirectoryError):
         return sources
+    sources.sort()
     return sources
 
 
