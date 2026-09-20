@@ -274,6 +274,16 @@ node-27 是 NWM active production host。yd 只能操作：
 - 天地图 URL/key 只走 env 或部署配置，不打印进 receipt，不复制 NWM 源码中的旧 key；
 - 升级前记录当前镜像 digest和 compose 配置位置，保留上一镜像用于回滚。
 
+M3 容器配置合同（这里只规定打包与配置，不执行 M5 部署）：
+
+- `viewer/Dockerfile` 多阶段构建：Node 22 执行 `corepack pnpm install --frozen-lockfile` 与 `corepack pnpm build`；Python 3.12 用 `uv sync --frozen --no-dev` 安装后端，复制前端 dist；运行镜像不含 Node、pnpm、uv 缓存或 dev 依赖。
+- Dockerfile 以 `ENV YD_VIEWER_STATIC_DIR=<镜像内前端目录>` 固定静态目录，含 `index.html` 且对运行用户可写；运维不得覆盖，`viewer/env.example` 与 `viewer/compose.example.yml` 均不得包含该变量。
+- entrypoint 与 uvicorn 使用同一非 root 用户；`viewer/entrypoint.sh` 在启动前写 `$YD_VIEWER_STATIC_DIR/basemaps.json`，随后 `exec uvicorn` 固定监听 `0.0.0.0:8000`，容器端口不读 env。
+- 运维 env 清单仅为 `YD_VIEWER_INPUT_DIR`、`YD_VIEWER_OUTPUT_DIR`、`YD_VIEWER_PORT`、`YD_BASEMAP_VECTOR_URL`、`YD_BASEMAP_SATELLITE_URL`、`YD_BASEMAP_TERRAIN_URL`、`YD_BASEMAP_VECTOR_ANNOTATION_URL`、`YD_BASEMAP_SATELLITE_ANNOTATION_URL`、`YD_BASEMAP_TERRAIN_ANNOTATION_URL`；env.example 列键但无真实值。
+- 两个目录 env 指向容器内只读挂载；host 端口映射固定形状为 `127.0.0.1:${YD_VIEWER_PORT}:8000`，env_file 指向不入库的私有 env。compose 示例恰有 input/viewer、output 两条 `:ro` 挂载，不挂整个 `YD_ROOT`，不写挂载路径。
+- compose project（`name`）、service、container、network、image 均用 `yd-` 前缀，例如依次为 `yd-viewer`、`yd-web`、`yd-web`、`yd-network`、`yd-viewer:<tag>`，不借用 NWM 对象。
+- basemaps JSON 的键为 `vector`/`satellite`/`terrain`；有底图 URL 才写 `{"tiles":[url],"annotation":[url]或null}`，全缺写 `{}` 并正常进入 uvicorn。URL 必须原样写入，stdout/stderr 与 receipt 不得出现 URL/key；不得开启 shell trace 打印秘密。文件位于镜像文件系统而非 NFS 挂载。前端消费规则见 [design.md](design.md) §7。
+
 部署是对外动作，实际执行前必须有明确授权。构建、加载、启动失败要原样报告，不用重启 NWM 服务“试试”。
 
 ### 9.3 Nginx `/yd/`

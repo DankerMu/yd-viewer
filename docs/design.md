@@ -158,7 +158,7 @@ output/<cycle>/<source>/
 
 1. producer 先完成 DAT 和下一轮状态的提交，最后创建空文件 `DONE`；
 2. viewer 只枚举有 `DONE` 的 source 目录；
-3. cycle 下任一 source 有 `DONE`，该 cycle 即可选择；
+3. cycle 下任一 source 有 `DONE` 即完成发布；viewer 是否列出该 source 另须通过消费侧结构校验（不改变完成语义）；
 4. IFS/GFS 互不阻塞；后完成的来源自然补成第二条曲线；
 5. viewer 的 7 天窗口以最新成功 cycle 为锚，而不是墙钟；计算停更后仍展示最后一批数据；
 6. producer 保留最新成功 cycle 往前 14 天，清理窗口外 source 目录。
@@ -167,7 +167,9 @@ output/<cycle>/<source>/
 
 ## 6. viewer 后端
 
-单容器内的 FastAPI 同时服务业务 API、预转换 GeoJSON 和构建后的前端。容器无数据库、无磁盘缓存、无写路径。
+单容器内的 FastAPI 同时服务业务 API、预转换 GeoJSON 和构建后的前端。无数据库、无磁盘缓存；「无写路径」指无业务写 API、不写 `YD_ROOT` 只读挂载。容器 entrypoint 在镜像内可写静态目录生成 `basemaps.json` 是唯一运行时配置写入，不是业务产物。
+
+后端只从 `YD_VIEWER_INPUT_DIR`、`YD_VIEWER_OUTPUT_DIR`、`YD_VIEWER_STATIC_DIR` 三个 env 取目录，不读配置文件、数据库或整个 `YD_ROOT`；任一缺失、非目录或不可读即启动失败，错误带变量名及路径（缺失时说明未设置）。几何启动自检及 DAT 两层消费校验遵循 [products-contract.md](products-contract.md) §5.2/§6。容器内静态目录由镜像固定，不接受运维覆盖，详见 [agent-ops.md](agent-ops.md) §9.2。
 
 ### 6.1 API
 
@@ -175,12 +177,14 @@ output/<cycle>/<source>/
 
 | 端点 | 说明 |
 |---|---|
-| `GET /api/cycles` | 最新成功 cycle 往前 7 天，倒序返回 cycle 及实际可用 source |
-| `GET /api/map/latest` | 选择最新一个任一来源 `DONE` 的 cycle；该 cycle 内 GFS 优先、否则 IFS；取 lead 0，返回 3988 个 m³/s 值 |
-| `GET /api/cycles/{cycle}/reaches/{reach_id}` | 一次返回该河段该 cycle 的所有可用 GFS/IFS 曲线，各 168 点 |
-| `GET /api/health` | 容器健康检查；确认服务运行且只读数据挂载可访问 |
+| `GET /api/cycles` | 同一 catalog 枚举：最新结构层可用 cycle 往前 7 天（含边界），cycle 倒序、source 按 gfs/ifs；空态 `200 []` |
+| `GET /api/map/latest` | 按 catalog 顺序尝试候选：最新 cycle 内 GFS 优先、其次 IFS，再更早 cycle；数据层失败 WARNING（路径与原因）后继续，首个成功者取 lead 0；无候选或全部失败 404 |
+| `GET /api/cycles/{cycle}/reaches/{reach_id}` | 对指定 cycle 每个 catalog 可用 source 做数据层读取，成功者入 series，各 168 点；失败 WARNING 并省略，series 为空 404 |
+| `GET /api/health` | output 可枚举时 `200 {"status":"ok","latest_cycle":"YYYYMMDDHH"或null}`；latest_cycle 来自同一 catalog 枚举，不另写扫描，不返回内部路径或运行状态 |
 
-几何作为同源静态文件提供，不再包装成 geometry API。
+`output/` 不可枚举（含启动后删除、权限不可读）时以上四端点均返回 503。cycle 不在可用列表内为 404；格式不匹配 `^\d{10}$`、小时不为 00/12 或 reach_id 不在权威集合内为 4xx，不能 5xx。错误沿用 FastAPI 默认 `{"detail": ...}`，不自定义错误模型/异常处理器。
+
+`/geometry/rivers.geojson`、`/geometry/boundary.geojson` 直接提供 `YD_VIEWER_INPUT_DIR` 同名文件（不复制、不改写，字节一致），不包装成 geometry API。`YD_VIEWER_STATIC_DIR` 以 `/` 挂载构建后 SPA，根路径提供 `index.html`；`/api/*` 与 `/geometry/*` 优先于静态挂载，未知 `/api/*` 返回非 HTML 的 404。单页无路由，不做 history fallback。
 
 `/api/cycles` 示例：
 
@@ -202,23 +206,39 @@ output/<cycle>/<source>/
 }
 ```
 
-河段曲线一次返回可用双源，缺源时省略该 source，不让前端发两次请求再合并。
+`values` 为按权威 `reach_id` 升序排列的 m³/s 数组，不按 DAT 文件列位置；`valid_time` 是 `UTC(cycle)` 的带 `Z` ISO 8601 时间，12Z 示例为 `2026-08-27T12:00:00Z`。
+
+河段曲线形状为 `{"cycle":"2026082700","reach_id":1,"lead_hours":[0,…,167],"series":{"gfs":[168个m³/s值],"ifs":[168个m³/s值]}}`（此处省略号仅说明形状）。缺源省略键，不让前端发两次请求再合并。前端按 `UTC(cycle)+lead` 计算横轴，不从日期头推时刻。
 
 ## 7. 前端
 
-技术栈：Vite + React + TypeScript + MapLibre GL + ECharts，使用 `corepack pnpm`。
+技术栈：Vite 6 + React 18.3 + TypeScript 5.9 + MapLibre 4.7 + ECharts 6 + echarts-for-react 3 + Tailwind（版本随 NWM），使用 `corepack pnpm`（pnpm 10.11）。保留 NWM 组件的 Tailwind class 子集，不加插件或主题；不引入全局 store、路由或 react-query，状态使用 `useState`。
 
 交互以 NWM 当前实际挂载的源页面 `OverviewPage` 为准；可复制组件仍沿用源码中的 `M11*` 命名：
 
-- 全屏地图；
-- 河网按 `/api/map/latest` 的流量着色；
-- 右上矢量/卫星/地形底图按钮；
-- 右下 m11 流量 colorbar；
-- 地图缩放和比例尺；
-- 点击河段高亮并打开可拖拽曲线窗；
-- 曲线窗内只有起报时次下拉，GFS/IFS 同轴显示；
-- 曲线窗切换历史 cycle 不改变地图，地图始终保持最新总览；
-- 页面显示最新数据时间，不显示停更原因或内部计算状态。
+- 全屏地图，加载 `./geometry/rivers.geojson` 与 `./geometry/boundary.geojson`；
+- 河网按 `/api/map/latest` 的 `values` 与升序 `reach_id` 对应着色；
+- 右上只显示配置中存在的矢量/卫星/地形底图按钮；
+- 右下流量 colorbar 与单位 `m³/s`；
+- 地图缩放控件和比例尺，初始视野 fit 到 boundary 包围盒；无飞行或记忆视野等额外相机逻辑；
+- hover 河段高亮，点击选中并打开可拖拽曲线窗；
+- 曲线窗只有起报 cycle 下拉（来自 cycles，默认地图当前 cycle），series 的可用源各 168 点同轴显示；
+- 切换历史 cycle 只重取曲线，不改变地图着色或地图 cycle；
+- 页头显示 map/latest 的起报时间（标「起报」「北京时间」）与「流量 (m³/s)」，不显示停更原因、source 失败或内部计算状态；无可用 cycle 显示「暂无数据」。
+
+全部页面时间按 `Asia/Shanghai` 显示：cycle `2026082712` → `2026-08-27 20:00`；`2026082700` lead 5 → `2026-08-27 13:00`；下拉保持 API cycle 顺序。API 绝对时间仍为 UTC `Z`。
+
+固定 5 档色带使用 ≥ 阈值，图例与地图使用同一分档：
+
+| 流量 m³/s | 颜色 | 图例标签 |
+|---|---|---|
+| `<1` | `#7FB8DC` | `<1` |
+| `1 ≤ v < 10` | `#4292C6` | `1–10` |
+| `10 ≤ v < 100` | `#2171B5` | `10–100` |
+| `100 ≤ v < 1000` | `#08519C` | `100–1000` |
+| `≥1000` | `#CB181D` | `≥1000` |
+
+`null` 用 `#94ADC7`，不是第六个数值档；色带不可配置。
 
 从 NWM 复制并精简：
 
@@ -229,9 +249,13 @@ output/<cycle>/<source>/
 - discharge 色带和图例；
 - 起报下拉的纯 UI 外壳。
 
-不复制 NWM 的 OpenAPI client、Zustand store、登录/RBAC、MVT、代站、多流域、监控和运维链接。复制代码记录来源 commit，之后由本仓独立维护。
+不复制 NWM 的 OpenAPI client、store、路由、登录/RBAC、MVT、代站弹窗、降水叠加、多流域、监控和运维链接。来源为 NWM `4f8d98263` 对应快照；在 `viewer/frontend/SNAPSHOT.md` 登记完整来源 commit、复制文件清单和逐文件删减（包括上述禁复内容），之后独立维护。任何源文件 ≤1000 行，不新增 large-file-guard 豁免；色带/图例只取必要片段。
 
-NWM 源码中的旧天地图 key 不得复制。node-27 通过运行时配置注入有效的底图 URL 模板；客户侧未来可替换为内网瓦片或空底图，无需重建前端。
+前端构建 `base: './'`；API、几何及 `basemaps.json` 请求均为相对路径，构建物无以 `/` 开头的绝对资源引用。`https://h/yd/` 下 cycles 请求为 `https://h/yd/api/cycles`，同一构建物兼容根路径与剥前缀部署。
+
+NWM 旧天地图 key 不得复制；构建物不得含 `tianditu.gov.cn` 或 `tk=`。运行时 entrypoint 从六个 env 生成静态 `basemaps.json`：`YD_BASEMAP_VECTOR_URL`、`YD_BASEMAP_SATELLITE_URL`、`YD_BASEMAP_TERRAIN_URL` 与各自 `YD_BASEMAP_*_ANNOTATION_URL`。形状为 `{"vector":{"tiles":[url],"annotation":[url]或null},...}`；缺底图 URL 则键缺席，注记可选，URL 原样写入、不进日志。
+
+页面启动 fetch `./basemaps.json`，只列出存在的 `vector`/`satellite`/`terrain`，按该顺序默认选首项；每种底图由 tiles 栅格层与可选 annotation 栅格层组成。404、`{}` 或三键全缺均用无瓦片空样式、无切换按钮，河网与曲线仍可用；无需重建前端。不增加 `/api/config`。
 
 ## 8. node-27 部署
 
@@ -252,8 +276,12 @@ NWM 源码中的旧天地图 key 不得复制。node-27 通过运行时配置注
 | v2 DAT 解析 | 合成 168 行、3988 列 fixture；校验分钟列、单位换算和按列读取 |
 | 目录契约 | 临时树覆盖无 DONE、单源、双源、7 天窗口和排序 |
 | 几何 | 真实外部 fixture 预转换后落在 yd 合理经纬度范围，reach_id 与河网一致 |
+| viewer 启动自检 | 合成几何覆盖缺失/坏 JSON、顶层类型、reach_id 缺失/类型/重复、boundary Polygon/MultiPolygon；请求期不重读几何 |
 | API | FastAPI 测试覆盖 cycles、latest map、单/双源曲线、health |
-| 前端 | TypeScript、构建和组件测试；base 与 fetch 均为相对路径 |
+| 前端 | `corepack pnpm install --frozen-lockfile`、`corepack pnpm typecheck`（`tsc --noEmit`）、`corepack pnpm test`（`vitest run`）、`corepack pnpm build`；纯函数覆盖色带、相对 URL、北京时间、basemaps 解析、cycles 下拉、boundary 包围盒；不做 DOM/视觉回归 |
+| 容器打包 | 仓库根 `docker build -f viewer/Dockerfile .`；非 root shell 单测覆盖 basemaps 生成与 URL 不进日志；不冒充 M5 现场 health receipt |
+
+CI 新增 `viewer-frontend` job，在 `viewer/frontend` 按上述顺序安装、typecheck、test、build；现有 producer、viewer-backend、openspec job 不变。
 
 ### 9.2 node-22 真产物
 
@@ -345,6 +373,7 @@ oracle：node-27 live receipt（agent-ops §11.3）。
 
 - node-27 viewer 独立端口；
 - node-27 有效天地图配置；
+- `/yd/` 由应急 yd-NWM 副本还是主线 viewer 持有：M5 前另行裁决；当前占用见 agent-ops §14.6，M3 只保证相对路径部署，不做切换；
 - Slurm partition、account、CPU、内存和 walltime；
 - 外部基线模型包在首次 `prepare` 时的现场路径；
 - 客户服务器的计算、下载和调度形态。
