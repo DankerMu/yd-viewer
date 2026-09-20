@@ -70,7 +70,7 @@ Minimal mergeable slice: 4.1（应用工厂 + health）——只依赖 settings/
 - [x] 5.3 M11 快照：从 NWM `4f8d98263` 复制 `M11DraggableCurveWindow`、`ForecastChart` + `echartsCore`、`m11MapRuntime`（去 key，改读 5.2 `lib/basemaps.ts` 的样式）、`m11MapBuilders`、`m11MapInteractions`、`m11MapPrimitives`、`M11FloatingControls`（只留底图切换）、`overviewDataContracts` 的色带/图例子集；逐文件删除 store、路由、OpenAPI client、代站弹窗、降水叠加、RBAC 六类内容并在 `SNAPSHOT.md` 逐文件登记；每文件 ≤1000 行
 - [x] 5.4 地图页：全屏 MapLibre、加载几何、按 `map/latest` 着色、右下 colorbar、右上底图按钮、缩放控件与比例尺、初始视野 fit 到 5.2 `bbox`、hover/selected 高亮
 - [x] 5.5 曲线窗：点击河段打开可拖拽窗，起报下拉（默认地图 cycle）、GFS/IFS 同轴 168 点、x 轴北京时间；切换只重取曲线
-- [ ] 5.6 页头：最新起报时间（北京时间，标「起报」）与「流量 (m³/s)」；无数据显示「暂无数据」；`App.tsx` 装配
+- [x] 5.6 页头：最新起报时间（北京时间，标「起报」）与「流量 (m³/s)」；无数据显示「暂无数据」；`App.tsx` 装配
 - [ ] 5.7 本地开发：`vite.config` 代理 `/api`、`/geometry`、`/basemaps.json` 到本地后端；README 一条命令用 2.1 生成器起全栈
 
 依赖：5.1 需 0；5.2 需 5.1；5.3 需 5.1、5.2（`m11MapRuntime` 读 `lib/basemaps.ts`）；5.4–5.6 需 5.2、5.3（响应形状按 spec，可用 mock JSON 开发，不需后端合并）；5.7 需 2.1 与组 4 实际可运行（不可用 mock 顶替）
@@ -345,3 +345,52 @@ actual ECharts option/render contains one vs two168point series and Beijing
 labels; history switch leaves captured map state/camera/latestrequest count
 unchanged. Exercise real drag, non-drag selector, close, delayed stale response,
 curve404, StrictMode unmount. No permanent DOM test suite or App mount here.
+
+## #261 fixture — task 5.6 only
+
+Expanded: permanent UI entrypoint and assembly state. App plus header are the
+feature scope; main.tsx must replace its empty fragment with App as the minimal
+entry wiring (otherwise the requested assembly is unreachable). No other page,
+chart, helper, proxy, README, dependency or config change.
+App owns only selected reach and latest MapLatestResponse|null, populated by
+existing MapPage callbacks; header and curve share that latest cycle. Close
+sets selected reach null; re-clicking the same river must reopen the window.
+Header renders 流量 (m³/s), 起报 and 北京时间; cycle2026082712 →
+2026-08-27 20:00. Latest404/null → 暂无数据 with no fabricated time/source.
+Header must not render source failure, stopped/degraded or internal status.
+
+Governing invariant: one map owner and one latest fetch path; historical curve
+selection cannot change header's latest cycle, map colors/camera or latest
+request count. One App state flow feeds existing controlled components.
+Sibling surfaces: main StrictMode, App state, MapPage onLatestChange/onReachSelect,
+header formatter, RiverCurveWindow null/close/reopen and mapCycle input.
+
+Selected risks:
+- Public entry/schema/config: actual production index.html mounts App (not a
+  temporary replacement); root and stripped /yd/ requests stay same-origin under
+  prefix; header exact12Z→20:00 and unit/labels, latest404→暂无数据.
+- Concurrency/shared state/resource: actual river click opens real curve; history
+  changes chart only; close and same-reach click reopen. StrictMode dev still
+  owns one live map; no new fetching in App/header.
+- Error/partial output: latest404 gives no-data header and no curve with fakecycle;
+  existing MapPage generic failures preserved, no internal status surfaced.
+- Dependency/release/auth: frozen/typecheck/21tests/build pass; no newdeps/keys;
+  dist relative resources and forbidden-key scans remain clean.
+- Docs: record synthetic production browser evidence/limits in PR, not M5.
+- FileIO/legacy/largeinput not selected: assembly only, no new data algorithms.
+
+Required proof: build real App then Vite preview+Chromium with synthetic HTTP
+responses; header positive/empty cases, real map+curve, history/header isolation,
+close/reopen same reach, root+/yd/ paths and no browser exceptions. No permanent
+DOMsuite. Previous temporary harness becomes unnecessary; verify actual entry.
+Explicit preservation: no edits to MapPage/RiverCurveWindow/lib/vite/README;
+header overlays fullscreen map, adds no document-flow viewport height, reuses
+formatBeijingTime; existing callback/null/close semantics and21tests preserved.
+Browser I/O: latest12Z → 起报/北京时间/2026-08-27 20:00/流量 (m³/s);
+curve00Z selection → header still20:00, map colors/camera identical, latest
+request count1 in production. latest404 → 暂无数据, no time/source/fake curve.
+Close then click same reach → window reopens. Real dist at `/yd/` requests
+`/yd/api/map/latest`, `/yd/geometry/{rivers,boundary}.geojson`, `/yd/basemaps.json`,
+then `/yd/api/cycles` and `/yd/api/cycles/{cycle}/reaches/{id}`; root has no prefix.
+Dist tianditu.gov.cn/tk= scan →0hits; browser exceptions→0; smoke resources removed.
+Downstream5.7 proxy/README and6.1 image copy consume this production entry only.
