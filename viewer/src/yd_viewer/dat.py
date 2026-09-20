@@ -1,17 +1,24 @@
-"""Read SHUD v2 DAT structure without loading the data region."""
+"""Read SHUD v2 DAT structure and converted rivqdown values."""
 
 from __future__ import annotations
 
 import math
 import os
 import struct
+import sys
+from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
 _TEXT_HEADER_BYTES = 1024
 _FLOAT64_BYTES = 8
 _FIXED_PREFIX_BYTES = _TEXT_HEADER_BYTES + 2 * _FLOAT64_BYTES
-_EXPECTED_ROWS = 168
+_START_DAYS = 0
+_END_DAYS = 7
+_DT_QR_DOWN_MINUTES = 60
+_MINUTES_PER_DAY = 24 * 60
+_EXPECTED_ROWS = (_END_DAYS - _START_DAYS) * _MINUTES_PER_DAY // _DT_QR_DOWN_MINUTES
+_M3_PER_DAY = 86400.0
 
 
 class DatError(Exception):
@@ -23,6 +30,29 @@ class DatHeader:
     nc: int
     column_ids: tuple[int, ...]
     row_count: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class DatFile:
+    _values: array
+    _stride: int
+    _ordered_columns: tuple[int, ...]
+    _column_by_reach: dict[int, int]
+
+    def row(self, lead: int) -> tuple[float, ...]:
+        base = lead * self._stride + 1
+        return tuple(
+            self._values[base + index] / _M3_PER_DAY for index in self._ordered_columns
+        )
+
+    def column(self, reach_id: int) -> tuple[float, ...]:
+        index = self._column_by_reach[reach_id]
+        stride = self._stride
+        values = self._values
+        return tuple(
+            values[row * stride + 1 + index] / _M3_PER_DAY
+            for row in range(_EXPECTED_ROWS)
+        )
 
 
 def read_header(path: str | Path, reach_ids: set[int]) -> DatHeader:
@@ -53,6 +83,36 @@ def read_header(path: str | Path, reach_ids: set[int]) -> DatHeader:
             )
     assert header is not None
     return header
+
+
+def read_dat(path: str | Path, reach_ids: set[int]) -> DatFile:
+    dat = Path(path)
+    try:
+        fd = os.open(dat, os.O_RDONLY)
+    except OSError as exc:
+        raise DatError(f"无法读取 {dat}（{exc}）") from exc
+    primary: BaseException | None = None
+    result: DatFile | None = None
+    try:
+        try:
+            result = _read_dat_fd(fd, dat, reach_ids)
+        except OSError as exc:
+            raise DatError(f"无法读取 {dat}（{exc}）") from exc
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            os.close(fd)
+        except OSError as close_error:
+            if primary is None:
+                raise DatError(f"无法读取 {dat}（{close_error}）") from close_error
+            primary.add_note(
+                "DAT descriptor close also failed: "
+                f"{type(close_error).__name__}: {close_error}"
+            )
+    assert result is not None
+    return result
 
 
 def _read_header_fd(fd: int, dat: Path, reach_ids: set[int]) -> DatHeader:
@@ -90,12 +150,16 @@ def _read_header_fd(fd: int, dat: Path, reach_ids: set[int]) -> DatHeader:
         )
 
     column_ids: list[int] = []
+    file_ids: set[int] = set()
     for index, raw in enumerate(struct.unpack(f"<{nc}d", raw_ids)):
         if not math.isfinite(raw) or raw != math.floor(raw):
             raise DatError(f"{dat} 的列编号[{index}] {raw!r} 不是整数")
-        column_ids.append(int(raw))
+        column_id = int(raw)
+        if column_id in file_ids:
+            raise DatError(f"{dat} 的列编号重复 {column_id}")
+        file_ids.add(column_id)
+        column_ids.append(column_id)
 
-    file_ids = set(column_ids)
     missing = sorted(reach_ids - file_ids)
     extra = sorted(file_ids - reach_ids)
     if missing or extra:
@@ -107,3 +171,37 @@ def _read_header_fd(fd: int, dat: Path, reach_ids: set[int]) -> DatHeader:
         raise DatError(f"{dat} 的列编号与权威集合不符（{'；'.join(parts)}）")
 
     return DatHeader(nc=nc, column_ids=tuple(column_ids), row_count=rows)
+
+
+def _read_dat_fd(fd: int, dat: Path, reach_ids: set[int]) -> DatFile:
+    header = _read_header_fd(fd, dat, reach_ids)
+    size = os.fstat(fd).st_size
+    os.lseek(fd, 0, os.SEEK_SET)
+    payload = os.read(fd, size)
+    if len(payload) != size:
+        raise DatError(f"{dat} 整读不足 {size} 字节（实得 {len(payload)}）")
+
+    data_offset = _FIXED_PREFIX_BYTES + _FLOAT64_BYTES * header.nc
+    values = array("d")
+    values.frombytes(memoryview(payload)[data_offset:])
+    if sys.byteorder != "little":
+        values.byteswap()
+
+    stride = header.nc + 1
+    for row in range(_EXPECTED_ROWS):
+        expected = float(row * _DT_QR_DOWN_MINUTES)
+        got = values[row * stride]
+        if got != expected:
+            raise DatError(f"{dat} 第 {row} 行分钟列为 {got}，期望 {expected}")
+
+    column_by_reach = {
+        reach_id: index for index, reach_id in enumerate(header.column_ids)
+    }
+    return DatFile(
+        _values=values,
+        _stride=stride,
+        _ordered_columns=tuple(
+            column_by_reach[reach_id] for reach_id in sorted(reach_ids)
+        ),
+        _column_by_reach=column_by_reach,
+    )
