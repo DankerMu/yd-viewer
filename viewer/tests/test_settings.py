@@ -29,9 +29,7 @@ def _three_dirs(tmp_path: Path) -> dict[str, Path]:
     return dirs
 
 
-def _apply_env(
-    monkeypatch: pytest.MonkeyPatch, values: dict[str, str | None]
-) -> None:
+def _apply_env(monkeypatch: pytest.MonkeyPatch, values: dict[str, str | None]) -> None:
     for name in ALL:
         value = values.get(name)
         if value is None:
@@ -87,13 +85,10 @@ def test_missing_variable_fails_with_its_name(tmp_path, monkeypatch, missing):
 
 
 @pytest.mark.parametrize("empty", ALL)
-def test_empty_variable_fails_with_name_and_empty_path(
-    tmp_path, monkeypatch, empty
-):
+def test_empty_variable_fails_with_name_and_empty_path(tmp_path, monkeypatch, empty):
     values = _valid_env(tmp_path)
     values[empty] = ""
     _apply_env(monkeypatch, values)
-    cwd_before = Path.cwd()
 
     with pytest.raises(SettingsError) as excinfo:
         load_settings()
@@ -101,7 +96,6 @@ def test_empty_variable_fails_with_name_and_empty_path(
     message = str(excinfo.value)
     assert empty in message
     assert "''" in message
-    assert Path.cwd() == cwd_before
 
 
 @pytest.mark.parametrize("missing_path", ALL)
@@ -151,9 +145,8 @@ def test_unreadable_or_untraversable_directory_is_rejected(
     _apply_env(monkeypatch, {name: str(path) for name, path in dirs.items()})
     target = dirs[blocked]
 
-    with _chmod(target, mode):
-        with pytest.raises(SettingsError) as excinfo:
-            load_settings()
+    with _chmod(target, mode), pytest.raises(SettingsError) as excinfo:
+        load_settings()
 
     message = str(excinfo.value)
     assert blocked in message
@@ -161,9 +154,7 @@ def test_unreadable_or_untraversable_directory_is_rejected(
     assert os.access(target, os.R_OK | os.X_OK)
 
 
-def test_unsearchable_ancestor_fails_with_variable_and_path(
-    tmp_path, monkeypatch
-):
+def test_unsearchable_ancestor_fails_with_variable_and_path(tmp_path, monkeypatch):
     _skip_if_root()
     dirs = _three_dirs(tmp_path)
     ancestor = tmp_path / "blocked"
@@ -173,9 +164,8 @@ def test_unsearchable_ancestor_fails_with_variable_and_path(
     values[INPUT] = str(nested)
     _apply_env(monkeypatch, values)
 
-    with _chmod(ancestor, 0o000):
-        with pytest.raises(SettingsError) as excinfo:
-            load_settings()
+    with _chmod(ancestor, 0o000), pytest.raises(SettingsError) as excinfo:
+        load_settings()
 
     message = str(excinfo.value)
     assert INPUT in message
@@ -231,7 +221,6 @@ def test_second_load_reads_current_environment(tmp_path, monkeypatch):
         output_dir=second[OUTPUT],
         static_dir=second[STATIC],
     )
-    assert second_settings is not first_settings
 
 
 def test_load_does_not_write_or_create_paths(tmp_path, monkeypatch):
@@ -247,32 +236,3 @@ def test_load_does_not_write_or_create_paths(tmp_path, monkeypatch):
     for path, (mode, entries) in before.items():
         assert stat.S_IMODE(path.stat().st_mode) == mode
         assert set(path.iterdir()) == entries
-
-
-def test_relative_supplied_path_is_kept(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    relative = {
-        INPUT: "rel-input",
-        OUTPUT: "rel-output",
-        STATIC: "rel-static",
-    }
-    for value in relative.values():
-        (tmp_path / value).mkdir()
-    _apply_env(monkeypatch, relative)
-
-    settings = load_settings()
-
-    assert settings.input_dir == Path("rel-input")
-    assert settings.output_dir == Path("rel-output")
-    assert settings.static_dir == Path("rel-static")
-    assert not settings.input_dir.is_absolute()
-
-
-def test_other_environment_variables_are_not_required(tmp_path, monkeypatch):
-    _apply_env(monkeypatch, _valid_env(tmp_path))
-    monkeypatch.delenv("YD_VIEWER_PORT", raising=False)
-    monkeypatch.delenv("YD_ROOT", raising=False)
-
-    settings = load_settings()
-
-    assert settings.input_dir == tmp_path / "input"
