@@ -65,7 +65,7 @@ Minimal mergeable slice: 4.1（应用工厂 + health）——只依赖 settings/
 
 ## 5. viewer-frontend：脚手架、纯函数、M11 快照与页面
 
-- [ ] 5.1 脚手架：`viewer/frontend/` Vite 6 + React 18.3 + TS 5.9 + Tailwind + vitest，`packageManager: pnpm@10.11.0`，`base: './'`，`build.outDir` 默认 `dist`；`typecheck`/`test`/`build` 脚本，vitest 配 `passWithNoTests: true`（5.2 前无测试文件也保绿）；空页面可构建
+- [x] 5.1 脚手架：`viewer/frontend/` Vite 6 + React 18.3 + TS 5.9 + Tailwind + vitest，`packageManager: pnpm@10.11.0`，`base: './'`，`build.outDir` 默认 `dist`；`typecheck`/`test`/`build` 脚本，vitest 配 `passWithNoTests: true`（5.2 前无测试文件也保绿）；空页面可构建
 - [ ] 5.2 纯函数模块与 vitest：`lib/api.ts`（相对 URL 拼接与三种响应类型）、`lib/time.ts`（cycle/lead → 北京时间文案）、`lib/color.ts`（≥ 阈值 5 档 + 图例标签，含边界值测试）、`lib/basemaps.ts`（解析 `basemaps.json` → MapLibre 样式；404/`{}`/缺键 → 空样式）、`lib/cycles.ts`（cycles → 下拉项）、`lib/bbox.ts`（boundary GeoJSON → 包围盒）
 - [ ] 5.3 M11 快照：从 NWM `4f8d98263` 复制 `M11DraggableCurveWindow`、`ForecastChart` + `echartsCore`、`m11MapRuntime`（去 key，改读 5.2 `lib/basemaps.ts` 的样式）、`m11MapBuilders`、`m11MapInteractions`、`m11MapPrimitives`、`M11FloatingControls`（只留底图切换）、`overviewDataContracts` 的色带/图例子集；逐文件删除 store、路由、OpenAPI client、代站弹窗、降水叠加、RBAC 六类内容并在 `SNAPSHOT.md` 逐文件登记；每文件 ≤1000 行
 - [ ] 5.4 地图页：全屏 MapLibre、加载几何、按 `map/latest` 着色、右下 colorbar、右上底图按钮、缩放控件与比例尺、初始视野 fit 到 5.2 `bbox`、hover/selected 高亮
@@ -88,3 +88,28 @@ Minimal mergeable slice: 5.1（脚手架 + 空页面可构建）——不含任�
 §9.1 归属：前端构建门禁（6.3）；其余为 M5 镜像前置
 Suggested fixture level: compact - `docker build` 与 entrypoint shell 单测
 Minimal mergeable slice: 6.3（CI job）——只改 ci.yml，5.1 合并后可独立保绿；6.1 为后继（entrypoint 与 Dockerfile 原子：Dockerfile 的运行阶段执行 entrypoint，单独合并任一方都不可启动或 build 失败）；6.2 `Depends on` 6.1
+
+## Issue-workflow risk evidence
+
+Only the current issue's task(s) are implementation scope. The shared fixture and
+its evidence metadata are orchestration artifacts, not permission to implement
+later tasks. Each issue receives its own fixture review and code review.
+
+- Config / project setup — selected: #256 frozen install with pnpm 10.11.0, typecheck, test (no tests yet succeeds), build produce `dist/index.html`.
+- Release / packaging / dependency compatibility — selected: #256 uses Vite 6, React 18.3, TS 5.9 and upstream Tailwind; install uses committed lockfile. Container changes additionally require task 6.1 evidence.
+- Public API / CLI / script entry — selected: #256 preview serves the empty React page and its relative assets at root and a stripped prefix; no API calls are added until their task.
+- Auth / permissions / secrets — selected: #256 source/env and built text contain no `tianditu` or `tk=`; runtime injection only belongs to 6.1.
+- Schema / columns / units / field names — selected for 5.2 onward, explicitly non-goal for #256's empty page; pure-function scenarios in viewer-frontend cover these contracts.
+- Documentation / migration notes — selected: docs/design.md §7 and §9.1 remain authoritative; snapshot provenance only belongs to 5.3 and README to 5.7.
+- File IO / path safety / overwrite — not selected for #256: normal Vite output only, no custom reader/writer or publishing.
+- Concurrency / shared state / ordering — not selected for #256: empty page has no asynchronous application state; 5.4–5.6 must preserve map/curve separation.
+- Resource limits / large input / discovery — not selected for #256: no data loading.
+- Legacy compatibility / examples — not selected for #256: new frontend with no existing consumers; relative asset compatibility is covered above.
+- Error handling / rollback / partial outputs — not selected for #256: no runtime data paths; tool failures must exit nonzero.
+
+#256 required evidence: `corepack pnpm --version` → `10.11.0`;
+`corepack pnpm install --frozen-lockfile && corepack pnpm typecheck && corepack pnpm test && corepack pnpm build`
+→ exit 0, including an empty test suite. HTTP preview of `/` and `/yd/` through
+prefix stripping → 200 HTML and referenced JS/CSS. Inspect generated resource
+URLs → relative; scan generated text → zero `tianditu`/`tk=` matches.
+No permanent tests are required before pure-function task 5.2.

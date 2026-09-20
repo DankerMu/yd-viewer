@@ -82,3 +82,18 @@ Stage 1 grill 已拍板分支（用户）：D1 无 DONE 标记、启动自检；
 ## Open Questions
 
 - 无范围内未决项。`/yd/` 归属（D10）为 M5 部署决策，见 Non-Goals。
+
+## Issue-workflow preservation boundary
+
+For #256 (5.1), the change surface is only the new frontend build project plus
+fixture metadata. Governing invariant: the same key-free static artifact loads
+at `/` and a stripped `/yd/` prefix without runtime API or business dependencies.
+Must preserve: existing producer/backend/CI behavior, upstream dependency major
+versions, and existing user edits outside the issue. Downstream consumers are
+the future frontend CI job (6.3), image build (6.1), and UI modules (5.2–5.6).
+Sibling surfaces: package scripts, lockfile, TypeScript/Vite/Tailwind config,
+HTML entry, React entry, generated JS/CSS and HTTP preview must agree.
+Required evidence is the #256 command/input/output matrix in tasks.md.
+Non-goals: data fetching, components copied from NWM, CI jobs, deployment,
+production secrets, and browser live receipt. Review build reproducibility,
+relative resources, forbidden dependencies and accidental key copying.
