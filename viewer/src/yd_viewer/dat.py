@@ -30,13 +30,29 @@ def read_header(path: str | Path, reach_ids: set[int]) -> DatHeader:
     try:
         fd = os.open(dat, os.O_RDONLY)
     except OSError as exc:
-        raise DatError(f"无法读取 {dat}") from exc
+        raise DatError(f"无法读取 {dat}（{exc}）") from exc
+    primary: BaseException | None = None
+    header: DatHeader | None = None
     try:
-        return _read_header_fd(fd, dat, reach_ids)
-    except OSError as exc:
-        raise DatError(f"无法读取 {dat}") from exc
+        try:
+            header = _read_header_fd(fd, dat, reach_ids)
+        except OSError as exc:
+            raise DatError(f"无法读取 {dat}（{exc}）") from exc
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError as close_error:
+            if primary is None:
+                raise DatError(f"无法读取 {dat}（{close_error}）") from close_error
+            primary.add_note(
+                "DAT descriptor close also failed: "
+                f"{type(close_error).__name__}: {close_error}"
+            )
+    assert header is not None
+    return header
 
 
 def _read_header_fd(fd: int, dat: Path, reach_ids: set[int]) -> DatHeader:

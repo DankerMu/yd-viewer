@@ -48,14 +48,15 @@ def write_dat(
 
     payload = bytearray(_TEXT_HEADER)
     payload[:12] = b"synthetic v2"
-    packed = bytes(payload)
-    packed += struct.pack("<dd", float(st), float(nc))
-    packed += struct.pack(f"<{nc}d", *[float(column_id) for column_id in column_ids])
+    payload.extend(struct.pack("<dd", float(st), float(nc)))
+    payload.extend(
+        struct.pack(f"<{nc}d", *[float(column_id) for column_id in column_ids])
+    )
     for row in cells:
-        packed += struct.pack(f"<{nc + 1}d", *row)
+        payload.extend(struct.pack(f"<{nc + 1}d", *row))
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(packed)
+    path.write_bytes(payload)
     return path
 
 
