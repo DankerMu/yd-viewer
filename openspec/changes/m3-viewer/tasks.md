@@ -66,7 +66,7 @@ Minimal mergeable slice: 4.1（应用工厂 + health）——只依赖 settings/
 ## 5. viewer-frontend：脚手架、纯函数、M11 快照与页面
 
 - [x] 5.1 脚手架：`viewer/frontend/` Vite 6 + React 18.3 + TS 5.9 + Tailwind + vitest，`packageManager: pnpm@10.11.0`，`base: './'`，`build.outDir` 默认 `dist`；`typecheck`/`test`/`build` 脚本，vitest 配 `passWithNoTests: true`（5.2 前无测试文件也保绿）；空页面可构建
-- [ ] 5.2 纯函数模块与 vitest：`lib/api.ts`（相对 URL 拼接与三种响应类型）、`lib/time.ts`（cycle/lead → 北京时间文案）、`lib/color.ts`（≥ 阈值 5 档 + 图例标签，含边界值测试）、`lib/basemaps.ts`（解析 `basemaps.json` → MapLibre 样式；404/`{}`/缺键 → 空样式）、`lib/cycles.ts`（cycles → 下拉项）、`lib/bbox.ts`（boundary GeoJSON → 包围盒）
+- [x] 5.2 纯函数模块与 vitest：`lib/api.ts`（相对 URL 拼接与三种响应类型）、`lib/time.ts`（cycle/lead → 北京时间文案）、`lib/color.ts`（≥ 阈值 5 档 + 图例标签，含边界值测试）、`lib/basemaps.ts`（解析 `basemaps.json` → MapLibre 样式；404/`{}`/缺键 → 空样式）、`lib/cycles.ts`（cycles → 下拉项）、`lib/bbox.ts`（boundary GeoJSON → 包围盒）
 - [ ] 5.3 M11 快照：从 NWM `4f8d98263` 复制 `M11DraggableCurveWindow`、`ForecastChart` + `echartsCore`、`m11MapRuntime`（去 key，改读 5.2 `lib/basemaps.ts` 的样式）、`m11MapBuilders`、`m11MapInteractions`、`m11MapPrimitives`、`M11FloatingControls`（只留底图切换）、`overviewDataContracts` 的色带/图例子集；逐文件删除 store、路由、OpenAPI client、代站弹窗、降水叠加、RBAC 六类内容并在 `SNAPSHOT.md` 逐文件登记；每文件 ≤1000 行
 - [ ] 5.4 地图页：全屏 MapLibre、加载几何、按 `map/latest` 着色、右下 colorbar、右上底图按钮、缩放控件与比例尺、初始视野 fit 到 5.2 `bbox`、hover/selected 高亮
 - [ ] 5.5 曲线窗：点击河段打开可拖拽窗，起报下拉（默认地图 cycle）、GFS/IFS 同轴 168 点、x 轴北京时间；切换只重取曲线
@@ -148,3 +148,49 @@ in `viewer/frontend`, `corepack pnpm install --frozen-lockfile` followed by
 `corepack pnpm typecheck`, `corepack pnpm test`, `corepack pnpm build` in order;
 no continue-on-error or shell suppression → failed step fails the job.
 PR CI run → named `viewer-frontend` check succeeds with each command exit 0.
+
+## #257 fixture — task 5.2 only
+
+Expanded (exported response types, runtime JSON parser and shared UI helpers).
+Scope: six `src/lib/` modules and their pure-function tests, no new dependencies,
+components, fetch side effects, DOM or MapLibre runtime. Downstream consumers:
+5.3 snapshot adapters, 5.4 map/colorbar/basemap controls, 5.5 curves/cycle menu,
+5.6 header; backend response shapes and 6.1 basemaps writer remain the oracle.
+Governing invariant: URLs retain deployment prefix, values/labels share the fixed
+five bands, and UTC cycle plus lead yields host-timezone-independent Beijing time.
+Preserve 5.1 package/toolchain, relative key-free artifacts and 6.3 CI.
+Sibling surfaces: API response types, color function/legend, time/cycle options,
+basemap selection/style, Polygon/MultiPolygon traversal.
+
+Selected risks and evidence:
+- Public API / CLI / script entry; Schema / columns / units / field names:
+  vitest imports real modules; `/yd/` + cycles → `https://h/yd/api/cycles`;
+  root deployment retains `/api/cycles`; types match docs/design.md §6.1.
+  All eleven color inputs in viewer-frontend spec yield their exact colors;
+  threshold and legend agreement tested without configurable themes.
+  `2026082712` → `2026-08-27 20:00`; `2026082700` +5 →
+  `2026-08-27 13:00`; rollover tested; cycles preserve API order.
+- Config / project setup; Error handling / rollback / partial outputs:
+  parse vector/satellite → exactly two choices, vector first/default even if
+  input order differs; base plus optional annotation raster layers;
+  absent/404 payload, `{}`, unknown-only keys → zero choices and empty style.
+  No network layer is introduced: later caller maps 404 to absent input.
+- Resource limits / large input / discovery: bbox traverses all Polygon and
+  MultiPolygon coordinates without spread-argument limits; both example shapes
+  yield `[[100,30],[101,31]]`. Geometry validity is backend-owned.
+- Documentation / migration notes: existing docs/spec are sufficient; no README
+  or snapshot provenance until their issues. Named exported helpers feed later UI.
+- Auth/secrets, file IO, concurrency, legacy, release/dependency packs not selected:
+  no credentials, IO, shared state, migration or dependency changes.
+
+Required proof: focused vitest cases above fail against the pre-implementation
+module tree (missing new APIs is the expected red), then pass with implementation;
+all six modules covered by observable boundary scenarios. Parent runs frozen
+install/typecheck/test/build; throwaway smoke executes exported helpers without
+DOM. No generic framework, validation layer, i18n or theme work.
+Explicit sibling cases: cycles `2026082712`, `2026082700` → labels
+`2026-08-27 20:00`, `2026-08-27 08:00` in input order; cycle `2026082712`
+lead 5 → `2026-08-28 01:00` (Beijing rollover).
+Recognized basemap keys are exactly vector/satellite/terrain with that priority;
+satellite-only defaults to satellite, terrain-only defaults to terrain.
+`annotation: null` from task 6.1 remains a valid choice with only its base layer.
