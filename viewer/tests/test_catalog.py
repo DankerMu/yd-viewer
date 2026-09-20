@@ -181,27 +181,41 @@ def test_symlink_done_is_excluded_even_with_valid_regular_target(
     assert _groups(_list(output_dir)) == [(CYCLE_00, ["ifs"])]
 
 
-def test_directory_done_is_excluded(tmp_path: Path) -> None:
+def test_directory_done_is_excluded(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     output_dir = tmp_path / "output"
     directory_done = _source_dir(output_dir, CYCLE_00, "gfs") / "DONE"
     directory_done.mkdir(parents=True)
+    _write_dat(output_dir, CYCLE_00, "gfs")
     _write_eligible(output_dir, CYCLE_00, "ifs")
 
     assert directory_done.is_dir()
     assert not stat.S_ISREG(directory_done.lstat().st_mode)
-    assert _groups(_list(output_dir)) == [(CYCLE_00, ["ifs"])]
+    with caplog.at_level(logging.WARNING, logger=CATALOG_LOGGER):
+        assert _groups(_list(output_dir)) == [(CYCLE_00, ["ifs"])]
+    assert _warning_messages(caplog) == []
 
 
-def test_invalid_cycle_and_source_names_are_ignored(tmp_path: Path) -> None:
+def test_invalid_cycle_and_source_names_are_ignored(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     output_dir = tmp_path / "output"
     write_done(output_dir / "tmp" / "gfs" / "DONE")
+    _write_dat(output_dir, "tmp", "gfs")
     write_done(output_dir / CYCLE_06 / "gfs" / "DONE")
+    _write_dat(output_dir, CYCLE_06, "gfs")
     write_done(output_dir / CYCLE_00 / "GFS" / "DONE")
+    _write_dat(output_dir, CYCLE_00, "GFS")
     write_done(output_dir / f"{CYCLE_00}\n" / "gfs" / "DONE")
+    _write_dat(output_dir, f"{CYCLE_00}\n", "gfs")
     write_done(output_dir / f"{CYCLE_00}x" / "gfs" / "DONE")
+    _write_dat(output_dir, f"{CYCLE_00}x", "gfs")
     _write_eligible(output_dir, CYCLE_12, "gfs")
 
-    assert _groups(_list(output_dir)) == [(CYCLE_12, ["gfs"])]
+    with caplog.at_level(logging.WARNING, logger=CATALOG_LOGGER):
+        assert _groups(_list(output_dir)) == [(CYCLE_12, ["gfs"])]
+    assert _warning_messages(caplog) == []
 
 
 def test_neighbor_plain_files_do_not_break_traversal(tmp_path: Path) -> None:
