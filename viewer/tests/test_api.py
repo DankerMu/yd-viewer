@@ -5,7 +5,9 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import os
 import shutil
+import stat
 import struct
 from pathlib import Path
 
@@ -142,6 +144,11 @@ def _assert_default_detail(
         text = json.dumps(detail)
     assert str(tmp_path) not in text
     assert str(output_dir) not in text
+
+
+def _skip_if_root() -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory mode bits")
 
 
 def test_empty_output_returns_ok_with_null_latest_cycle(tmp_path: Path) -> None:
@@ -851,3 +858,37 @@ def test_curve_does_not_reread_geometry_files(tmp_path: Path) -> None:
         "lead_hours": LEAD_HOURS,
         "series": {"gfs": GFS_SERIES},
     }
+
+
+@pytest.mark.parametrize(
+    "path",
+    [HEALTH, CYCLES, MAP_LATEST, _curve(CYCLE_00, 1)],
+    ids=["health", "cycles", "map", "curve"],
+)
+def test_unreadable_output_returns_503_then_recovers_without_restart(
+    tmp_path: Path, path: str
+) -> None:
+    _skip_if_root()
+    settings = _settings(tmp_path)
+    _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    client = TestClient(create_app(settings))
+
+    first = client.get(path)
+    assert first.status_code == 200
+    first_body = first.json()
+
+    original_mode = stat.S_IMODE(settings.output_dir.stat().st_mode)
+    try:
+        settings.output_dir.chmod(0o000)
+        response = client.get(path)
+        _assert_default_detail(response, 503, tmp_path, settings.output_dir)
+        content_type = response.headers.get("content-type", "")
+        assert "json" in content_type
+        assert "html" not in content_type
+    finally:
+        settings.output_dir.chmod(original_mode)
+
+    assert stat.S_IMODE(settings.output_dir.stat().st_mode) == original_mode
+    restored = client.get(path)
+    assert restored.status_code == 200
+    assert restored.json() == first_body
