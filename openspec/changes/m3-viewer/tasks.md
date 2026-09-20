@@ -80,7 +80,7 @@ Minimal mergeable slice: 5.1（脚手架 + 空页面可构建）——不含任�
 
 ## 6. viewer-container：镜像、entrypoint、compose、CI
 
-- [ ] 6.1 `viewer/entrypoint.sh` + `viewer/Dockerfile`（同一 PR）：entrypoint 按 6 个 env 生成 `$YD_VIEWER_STATIC_DIR/basemaps.json`（缺键缺席、全缺 `{}`、URL 不进日志）后 `exec uvicorn --host 0.0.0.0 --port 8000`（容器内端口固定 8000，宿主端口由 compose `127.0.0.1:${YD_VIEWER_PORT}:8000` 映射），shell 单测以非 root 用户给定 env 断言 JSON 与日志不含 URL；Dockerfile 多阶段（Node 22 pnpm build → Python 3.12 `uv sync --frozen --no-dev` → `ENV YD_VIEWER_STATIC_DIR=<镜像内固定路径>`，该目录属运行用户 → 非 root 执行 `entrypoint.sh`）；`docker build` 通过；镜像内 `USER` 非 root 且静态目录可写含 `index.html`
+- [x] 6.1 `viewer/entrypoint.sh` + `viewer/Dockerfile`（同一 PR）：entrypoint 按 6 个 env 生成 `$YD_VIEWER_STATIC_DIR/basemaps.json`（缺键缺席、全缺 `{}`、URL 不进日志）后 `exec uvicorn --host 0.0.0.0 --port 8000`（容器内端口固定 8000，宿主端口由 compose `127.0.0.1:${YD_VIEWER_PORT}:8000` 映射），shell 单测以非 root 用户给定 env 断言 JSON 与日志不含 URL；Dockerfile 多阶段（Node 22 pnpm build → Python 3.12 `uv sync --frozen --no-dev` → `ENV YD_VIEWER_STATIC_DIR=<镜像内固定路径>`，该目录属运行用户 → 非 root 执行 `entrypoint.sh`）；`docker build` 通过；镜像内 `USER` 非 root 且静态目录可写含 `index.html`
 - [ ] 6.2 `viewer/compose.example.yml`：两个 `:ro` 挂载、`127.0.0.1:${YD_VIEWER_PORT}:8000`、`env_file`、project/service/container/network/image 全 `yd-` 前缀；`viewer/env.example` 列出 `YD_VIEWER_{INPUT,OUTPUT}_DIR`、`YD_VIEWER_PORT`、六个 `YD_BASEMAP_*`，不含 `YD_VIEWER_STATIC_DIR`
 - [x] 6.3 ci.yml 新增 `viewer-frontend` job（install --frozen-lockfile、typecheck、test、build）；现有 job 不变
 
@@ -394,3 +394,56 @@ Close then click same reach → window reopens. Real dist at `/yd/` requests
 then `/yd/api/cycles` and `/yd/api/cycles/{cycle}/reaches/{id}`; root has no prefix.
 Dist tianditu.gov.cn/tk= scan →0hits; browser exceptions→0; smoke resources removed.
 Downstream5.7 proxy/README and6.1 image copy consume this production entry only.
+
+## #264 fixture — task 6.1 only
+
+Expanded: container entrypoint, filesystem output, permissions and dependency
+packaging. Scope viewer/Dockerfile, viewer/entrypoint.sh, tests/test_entrypoint.sh.
+No compose/env.example/healthcheck/supervisor/deployment or backend route changes.
+Actual app entry is `yd_viewer.app:create_app --factory`, uvicorn fixed host
+0.0.0.0 and port8000; YD_VIEWER_PORT cannot change it. Input/output directory
+configuration and geometry remain existing backend startup contracts.
+
+Governing invariant: same non-root identity writes only image-owned static
+basemaps.json then execs the real viewer; no URL reaches logs and no dependency
+installation/network resolution occurs at runtime. Preserve relative frontend
+build, public basemap JSON shape, read-only input/output and Python3.12 backend.
+Sibling surfaces: six env names, JSON serializer, staticdir ENV/ownership,
+frontend parser, uvicorn factory/PID/argv, build/runner venv path and dependencies.
+Downstream #265 mounts two directories readonly and maps hostport; #262 uses
+packaged backend/frontend contracts. No M5 health or remote receipt claim.
+
+Build: Node22 frozen pnpm10.11 install/build; Python3.12 matching builder/runner,
+uv0.9.18 pinned, `uv sync --frozen --no-dev` (non-editable install or preserve
+required source explicitly). Copy explicit manifests/source only, not whole repo,
+localvenv/node_modules/env. Runtime has no Node/pnpm/uvcache/project devdeps.
+Keeping uv executable is permitted for offline/no-project/no-cache stdlib JSON
+execution under the repository uv-only rule; no startup sync/download.
+
+Selected risks/evidence:
+- Public CLI/config/schema: shell test runs real entrypoint with PATH uvicorn
+  sentinel; vector+annotation/satellite -> exact2 keys, annotationarray/null,
+  no terrain; annotation-only has no basekey; all six absent ->{} and exec exit0.
+  Sentinel records factory/--factory/--host0.0.0.0/--port8000, even PORT env differs.
+- FileIO/permissions/auth: tests assert effectiveuid!=0; staticdir is writable
+  for image default USER and contains index.html. Quoted/backslash/newline
+  synthetic URL round-trips via JSON serializer; `tk=SECRET` absent stdout/stderr.
+  Static write failure -> nonzero and no uvicorn exec; no silent stale-config use.
+- Release/dependency: repository-root `docker build -f viewer/Dockerfile .` ->
+  success; inspect image default USER !=root, Python3.12, import actual yd_viewer,
+  no node/pnpm/pytest/ruff/httpx or uv caches. Execute image entrypoint with
+  non-root sentinel and synthetic env to verify packaged script too.
+- Error/partial outputs: serializer/write error fails beforeexec; no runtime
+  retries or secret-bearing diagnostics; shell errexit, no xtrace.
+- Resource/concurrency: exec replaces shell, no supervisor/background worker;
+  single process initialization only, no publish/locking framework.
+- Docs/legacy: existing ops§9.2/spec contract retained; no new public knobs,
+  migration, compatibility layer or remote operations.
+
+Required proof: `bash viewer/tests/test_entrypoint.sh` non-root all cases pass;
+new script's missing-implementation run fails before source is added; actual
+Docker build and image-default-user checks above pass. No mocked Docker build
+or fake production fallback; local packaging proof is not a deployment receipt.
+Exec proof: test launches entrypoint, captures its PID, and asserts uvicorn
+sentinel PID equals that entrypoint PID and effective UID remains non-root;
+matching argv alone is not sufficient to distinguish exec from child spawning.
