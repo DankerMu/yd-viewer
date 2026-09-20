@@ -1,9 +1,7 @@
-import { useEffect, useRef } from 'react'
 import type { FeatureCollection } from 'geojson'
 import type { GeoJSONSource, LayerSpecification, Map as MapLibreMap } from 'maplibre-gl'
 
 import { dischargeColor } from '../../lib/color'
-import { onStyleReady } from './m11MapRuntime'
 import {
   M11_BOUNDARY_LAYER_IDS,
   M11_BOUNDARY_SOURCE_ID,
@@ -83,76 +81,6 @@ export function applyReachColors(
       { color: dischargeColor(entry.value), value: entry.value },
     )
   }
-}
-
-export function M11OverlayPrimitive({
-  map,
-  data,
-  hoverReachId = null,
-  selectedReachId = null,
-}: {
-  map: MapLibreMap | null
-  data: FeatureCollection | null
-  hoverReachId?: number | null
-  selectedReachId?: number | null
-}) {
-  const hoverRef = useRef(hoverReachId)
-  const selectedRef = useRef(selectedReachId)
-  hoverRef.current = hoverReachId
-  selectedRef.current = selectedReachId
-
-  useEffect(() => {
-    if (!map) return
-    const apply = () => {
-      if (data) {
-        registerRiverOverlay(map, data)
-        setRiverHover(map, hoverRef.current ?? null)
-        setRiverSelected(map, selectedRef.current ?? null)
-      } else {
-        unregisterRiverOverlay(map)
-      }
-    }
-    const stop = onStyleReady(map, apply)
-    return () => {
-      stop()
-      unregisterRiverOverlay(map)
-    }
-  }, [map, data])
-
-  useEffect(() => {
-    if (!map) return
-    setRiverHover(map, hoverReachId ?? null)
-  }, [map, hoverReachId])
-
-  useEffect(() => {
-    if (!map) return
-    setRiverSelected(map, selectedReachId ?? null)
-  }, [map, selectedReachId])
-
-  return null
-}
-
-export function M11BoundaryPrimitive({
-  map,
-  data,
-}: {
-  map: MapLibreMap | null
-  data: FeatureCollection | null
-}) {
-  useEffect(() => {
-    if (!map) return
-    const apply = () => {
-      if (data) registerBoundaryOverlay(map, data)
-      else unregisterBoundaryOverlay(map)
-    }
-    const stop = onStyleReady(map, apply)
-    return () => {
-      stop()
-      unregisterBoundaryOverlay(map)
-    }
-  }, [map, data])
-
-  return null
 }
 
 function addLayersIfMissing(map: MapLibreMap, layers: LayerSpecification[]): void {
