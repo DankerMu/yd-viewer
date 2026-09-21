@@ -289,15 +289,15 @@ CI 新增 `viewer-frontend` job，在 `viewer/frontend` 按上述顺序安装、
 
 ### 9.2 node-22 真产物
 
-至少实跑一个 00Z 和一个 12Z：
+每源至少实跑 2 个连续 cycle，IFS/GFS 都覆盖 00Z 与 12Z：
 
 - `START=0`、`DT_QR_DOWN=60`；
 - DAT 恰有 168 行，分钟列 `0..10020`；
 - 3988 个河段；
-- T+12 状态可供下一轮精确接续；
+- T+12 状态可供下一轮精确接续：第二轮 receipt 引用第一轮写出的 `<T+12>.cfg.ic`；
 - IFS/GFS 独立推进；
 - NWM raw 未被 yd 修改；
-- 单源失败不影响另一源完成。
+- 单源失败不影响另一源完成：只观察不诱发，未发生时 receipt 写「未行使」。
 
 ### 9.3 node-27 live receipt
 
@@ -348,9 +348,10 @@ node-22 producer 的以下本地可验证代码：
 
 - 现场填写 `local.toml`（[compute-loop-design.md](compute-loop-design.md) §5、§14）；
 - 经授权执行一次性 `prepare` 与 `init`：二者改变长期状态，须现场 receipt，不得由 cron 调用（agent-ops §8.1）；
-- 至少实跑一个 00Z 和一个 12Z，IFS/GFS 均覆盖，全部满足 §9.2 与 [compute-loop-design.md](compute-loop-design.md) §13.2；
-- 按 [products-contract.md](products-contract.md) §8 与 agent-ops §10 设置发布目录权限；
-- 安装 cron + `flock` 接管日常 `run`，最终分钟点现场确定（agent-ops §8.2、compute-loop §14）。
+- 每源至少实跑 2 个连续 cycle，IFS/GFS 都覆盖 00Z 与 12Z，全部满足 §9.2 与 [compute-loop-design.md](compute-loop-design.md) §13.2；T+12 精确接续以第二轮消费第一轮写出的状态文件为证；
+- 单源失败隔离与 Slurm requeue/PREEMPTED 只观察不诱发，未发生时 receipt 写「未行使」，不写「已验证」；
+- 按 [products-contract.md](products-contract.md) §8 与 agent-ops §10 设置发布目录权限，并在 M4 出口以 node-27 `nwm` 身份实读发布目录；
+- 安装 cron 接管日常 `run`（锁由 CLI 自持，cron 行不套外层 flock），最终分钟点现场确定（agent-ops §8.2、§15、compute-loop §14）。
 
 oracle：node-22 真运行 receipt（agent-ops §11.2）。
 
