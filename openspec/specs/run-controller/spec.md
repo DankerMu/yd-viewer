@@ -160,6 +160,8 @@ run MUST 经作业执行器抽象为每源提交至多一个作业；提交参�
 
 `sbatch` 成功后 Slurm accounting 有数秒滞后，此窗口内普通轮询 `sacct -j <id> -X` 返回 0 行。执行器 MUST 只在注入时钟的当前时刻距该作业 `submitted_at` 不超过 120 s（模块常量，不进 `Config`/`LocalConfig`、`JobSpec.resources` 或任何 argv）时把「0 个非空行」视为 accounting 滞后：返回该作业已有记录，状态保持 `PENDING`，`started_at`/`ended_at` 不变，不替换已落库记录，由既有 poll 间隔继续重查。超过 120 s 仍 0 行、或任何时刻出现多行，MUST 照旧经 `parse_sacct_record` fail closed 为同 job ID 的 `ExecutorError`，进而由 controller 产生 `RunError(phase="poll")` 停源保留 work。放宽只针对行数为 0，MUST NOT 放宽未知状态串、空字段或 JobID 串台的拒绝，也 MUST NOT 伪造任何状态或时间。
 
+执行器在 `sbatch` 返回时以注入时钟写定 `submitted_at`，MUST 先截到整秒（`microsecond=0`，tzinfo 不变）再记录：`sacct` 的 Submit/Start/End 只有秒精度，作业在提交同一秒内启动时（2026-09-21 现场 run attempt 2，job 52782/52783，Submit=Start），带微秒的 `submitted_at` 会让秒精度的 `started_at` 早于它并触发 `JobRecord` 的时序不变式。该规则只截断本仓自己的提交时刻；MUST NOT 为不变式定义任何容差，MUST NOT 伪造或改写 `sacct` 返回的时间；`JobRecord` 不变式、`parse_sacct_record`、120 s accounting 宽限（自截断后的 `submitted_at` 起算）与 controller 行为不变。登录节点与 slurmctld 之间的时钟偏斜不在本规则内。
+
 #### Scenario: job 身份进入运行报告
 - **WHEN** fake executor 返回 job ID 与终态，完成一轮双源 run
 - **THEN** 运行报告含两源各自的 job ID、partition、终态与起止时间
@@ -207,6 +209,10 @@ run MUST 经作业执行器抽象为每源提交至多一个作业；提交参�
 #### Scenario: 超过宽限或多行仍 fail closed
 - **WHEN** 注入时钟使空 stdout 的轮询发生在 `submitted_at + 121 s`，或在窗口内任一次轮询返回 2 个非空行
 - **THEN** `poll` 抛出绑定同一 job ID 的 `ExecutorError`，措辞与 `parse_sacct_record` 既有的「期望恰好 1 行记录，实际 N 行」一致，不伪造状态或时间；`parse_sacct_record` 对 0 行的直接调用行为与措辞不变
+
+#### Scenario: 提交同一秒内启动的作业不被时序不变式拒绝
+- **WHEN** 注入时钟在提交时返回带微秒的时刻 `T0 + 0.4 s`，随后普通轮询 `sacct` 返回 `<id>|RUNNING|<T0 整秒>|Unknown`
+- **THEN** 记录的 `submitted_at` 为 `T0`（微秒为 0、tzinfo 仍为 UTC），`poll` 返回 `RUNNING` 且 `started_at == T0`，不抛 `ExecutorError`；若 `sacct` 的 Start 为 `T0 - 1 s`，仍以 `started_at 不得早于 submitted_at` 拒绝
 
 ### Requirement: 并发与锁
 run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过不排队；锁 MUST 覆盖发现、提交、等待、发布、清理全生命周期。IFS/GFS 最多各一个作业并行。`cron.lock_path` MUST 是绝对路径：相对路径与 `~` 前缀（`Path` 不展开 `~`）MUST 在创建锁文件之前 fail closed，报错 MUST 指名 `cron.lock_path`。
