@@ -1,6 +1,6 @@
 ## 1. Compatible HTTP test client
-- [ ] 1.1 Replace dev client and constrain only required compatibility seam; regenerate minimal lock without unrelated upgrades.
-- [ ] 1.2 Verify clean frozen Python3.12/currentdev suites have no two named warnings, no filters; actual runtime health unchanged.
+- [x] 1.1 Replace dev client and constrain only required compatibility seam; regenerate minimal lock without unrelated upgrades.
+- [x] 1.2 Verify clean frozen Python3.12/currentdev suites have no two named warnings, no filters; actual runtime health unchanged.
 Suggested fixture level: expanded
 Minimal mergeable slice: atomic - manifest/lock/client compatibility proof.
 
