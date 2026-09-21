@@ -15,6 +15,8 @@ r"""合成 `cfg.ic` 生成器（程序化，零二进制入库）。
   与 **`Index Lake_Stage`**（四种拼写解析器都接受，见 `_looks_like_column_header`）
 - 数值记法混合：`0.100000` / `1e-3` / `-0.0` / `2.5E+01`
 - lake 段：缺席 / 非空 / **存在但为空（`lake_count=0`）**
+- 段前导行 `<count> <cols>`：lake 段恒发，river 段由 `river_preamble` 旗标控制（真实
+  `yd.cfg.ic` 两段都有，issue #305）
 """
 
 from __future__ import annotations
@@ -44,6 +46,8 @@ LAKE_COLUMN_HEADER = " ".join(LAKE_COLUMN_HEADER_TOKENS)
 
 #: native header 的第二个数值 token 是 mesh 状态**列数**（不是 river 元素数）。
 MESH_STATE_COLUMNS = 6
+#: river preamble 的第二个 token 是 river 状态列数。
+RIVER_STATE_COLUMNS = 2
 #: lake preamble 的第二个 token 是 lake 状态列数。
 LAKE_STATE_COLUMNS = 2
 #: header 末位的绝对分钟时标（本 issue 不解释其时间语义，只保留文本）。
@@ -64,6 +68,7 @@ class SyntheticCfgIc:
     header_index: int
     mesh_column_header_index: int
     mesh_data_indices: tuple[int, ...]
+    river_preamble_index: int | None
     river_column_header_index: int | None
     river_data_indices: tuple[int, ...]
     lake_preamble_index: int | None
@@ -110,6 +115,7 @@ def build_cfg_ic(
     trailing_newline: bool = True,
     trailing_spaces: bool = False,
     blank_lines: bool = False,
+    river_preamble: bool = False,
     leading_blank_lines: int = 0,
     intra_section_blank_lines: bool = False,
     mixed_notation: bool = False,
@@ -128,6 +134,9 @@ def build_cfg_ic(
     `lake_count`）。`leading_blank_lines` 在 header 之前插空行（偶数位空串、奇数位纯空白），
     用于钉死「header 行 = 首个非空行」。`intra_section_blank_lines` 在每个**至少两行数据**
     的段的首条数据行之后插一条空行，使该段的数据行号不连续。
+    `river_preamble=True` 在 river 列头之前发一行 `<river_count> <river 状态列数>` 段前导
+    （原生 SHUD 的真实布局，issue #305）；默认关，于是既有 fixture 逐字节不变。
+    `blank_lines` 的空行插在**前导行之前**（与 lake 前导写法一致），前导与列头之间不插。
     `mesh_header_tokens` / `river_header_tokens` / `lake_header_tokens` 选择段列头拼写
     （生产拼写见模块头常量）。`mesh_header_tokens` 允许把 `Unsat` 挪出索引 4——4.4 的投影列
     定位按**列头文本**查找，写死索引 4 的实现只有在列序被打乱时才变红；列序固定的 fixture
@@ -166,11 +175,16 @@ def build_cfg_ic(
         if intra_section_blank_lines and element == 1 and mesh_count >= 2:
             emitter.blank()
 
+    river_preamble_index: int | None = None
     river_header_index: int | None = None
     river_data_indices: list[int] = []
     if river_count > 0:
         if blank_lines:
             emitter.blank(whitespace=True)
+        if river_preamble:
+            river_preamble_index = emitter.emit(
+                (str(river_count), str(RIVER_STATE_COLUMNS)), "river_preamble"
+            )
         river_header_index = emitter.emit(river_header_tokens, "column_header")
         for element in range(1, river_count + 1):
             stage = _value(counter, mixed=mixed_notation)
@@ -212,6 +226,7 @@ def build_cfg_ic(
         header_index=header_index,
         mesh_column_header_index=mesh_header_index,
         mesh_data_indices=tuple(mesh_data_indices),
+        river_preamble_index=river_preamble_index,
         river_column_header_index=river_header_index,
         river_data_indices=tuple(river_data_indices),
         lake_preamble_index=lake_preamble_index,
@@ -356,6 +371,7 @@ def build_cfg_ic_rows(
         header_index=header_index,
         mesh_column_header_index=mesh_header_index,
         mesh_data_indices=tuple(mesh_data_indices),
+        river_preamble_index=None,
         river_column_header_index=river_header_index,
         river_data_indices=tuple(river_data_indices),
         lake_preamble_index=lake_preamble_index,

@@ -210,6 +210,30 @@ def test_expected_counts_that_match_pass() -> None:
     assert result.checks["range"]["lake"] == {"rows": 2, "violations": 0}
 
 
+def test_native_river_preamble_is_not_counted_as_a_river_row() -> None:
+    """river 段前导 `<count> <cols>` 是段元数据（#305）：行数比对不得把它算进 river。
+
+    前导若被误归为 river 数据行，river 行数会 +1，此处的 `expected_river_count=4` 立刻
+    判失败——这正是行数门在真实 `yd.cfg.ic` 布局上的把守点。
+    """
+    payload = build_cfg_ic(
+        mesh_count=3, river_count=4, river_preamble=True, delimiter="\t"
+    ).payload
+    assert b"4\t2\n" in payload
+
+    result = state_qc.run_state_variable_qc(
+        payload, expected_mesh_count=3, expected_river_count=4
+    )
+
+    assert result.passed is True, result.reason
+    assert result.checks["row_counts"]["river"] == 4
+    assert result.checks["row_counts"]["mesh"] == 3
+    assert result.checks["range"]["river"] == {"rows": 4, "violations": 0}
+    assert state_qc.state_ic_structure_complete(
+        payload, expected_mesh_count=3, expected_river_count=4
+    )
+
+
 def test_non_finite_state_value_is_rejected_and_named_as_non_finite() -> None:
     result = state_qc.run_state_variable_qc(
         _payload(mesh_rows=[mesh_row(1, unsat="nan")], river_rows=_plain_river(1))
