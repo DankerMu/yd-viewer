@@ -17,7 +17,9 @@
 * **零内置默认**：任何资源参数都没有 fallback 取值；`required_fields`/`clock`/`runner`
   一律 keyword-only 且无默认。未知 `sacct` 状态串不兜底为 `FAILED`（那会把"没见过的
   调度器状态"伪装成"作业自身失败"，销毁 `TIMEOUT`/`FAILED` 分立要保的运维判据），空
-  `sacct` 输出不兜底为 `PENDING`。
+  `sacct` 输出不兜底为 `PENDING`——唯一例外是提交后 `SACCT_ACCOUNTING_GRACE_SECONDS`
+  秒内的 0 行：那是 accounting 滞后，`poll` 原样返回已有记录（不新造状态与时间），窗口
+  外的 0 行与任何时刻的多行仍照旧 fail closed。
 * **不变式不复制**：记录的时序不变式仍由 `JobRecord.__post_init__` 在构造点独家强制，
   本模块只负责把解析结果交给构造器，不自己再写一份。
 * **时区在子进程侧钉死**：`sacct` 默认吐集群本地时间，而 `JobRecord` 对 naive 与非零
@@ -33,7 +35,7 @@ import os
 import shlex
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from .config import _DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
 from .executor import ExecutorError, JobRecord, JobSpec, JobState
@@ -99,6 +101,11 @@ _SACCT_TIME_ABSENT = frozenset({"", "Unknown", "None"})
 
 #: `sacct --format` 的列顺序，即本模块的解析 schema。
 _SACCT_FORMAT = "JobID,State,Start,End"
+
+#: `sbatch` 成功后 Slurm accounting 的滞后宽限（秒）：此窗口内的 0 行 `sacct` 视为尚未
+#: 入账而非作业丢失。见 `docs/compute-loop-design.md` §10 与 `docs/agent-ops.md` §8.3。
+#: 本模块常量，不进 `Config`/`LocalConfig`、`JobSpec.resources` 或任何 argv。
+SACCT_ACCOUNTING_GRACE_SECONDS = 120
 
 
 # --- 纯函数：命令装配与输出解析 ----------------------------------------------
@@ -335,6 +342,12 @@ class SlurmJobExecutor:
         # 叠加而非替换：子进程仍需 `PATH` 与 Slurm 客户端环境；在调用点取 `os.environ`
         env = {**os.environ, **SACCT_ENV}
         stdout = self._run(build_sacct_command(job_id), env=env, job_id=job_id)
+        # accounting 滞后：只在 0 个非空行时问时钟（注入时钟每次调用都可能推进），窗口内
+        # 原样返回已落库记录，不替换 `_records`，由既有轮询间隔继续重查
+        if not stdout.strip() and self._clock() - record.submitted_at <= timedelta(
+            seconds=SACCT_ACCOUNTING_GRACE_SECONDS
+        ):
+            return record
         state, started_at, ended_at = parse_sacct_record(stdout, job_id)
         # 不变式由 `JobRecord.__post_init__` 复检；构造失败即不落库，记录不半更新
         updated = JobRecord(
