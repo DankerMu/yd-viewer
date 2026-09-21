@@ -40,7 +40,7 @@ Kept: river-only draggable shell; `header`/`children` props; Tailwind glass chro
 
 ### `ForecastChart.tsx`
 
-Kept: ECharts line chart; required `data: CurveResponse | null`; all supplied values (168 when present); shared axes; GFS/IFS identifiable (solid cyan / dashed green); Beijing x labels via `lib/time`; tooltip uses the category axis label as-is (no second UTC conversion); fixed `m³/s`; `notMerge` so a dual-source option replaced by one source drops the old series.
+Kept: ECharts line chart; required `data: CurveResponse | null`; all supplied values (168 when present, including JSON `null` gaps); shared axes; GFS/IFS identifiable (solid cyan / dashed green); Beijing x labels via `lib/time`; tooltip uses the category axis label as-is (no second UTC conversion) and does not coerce `null` to `0`; `connectNulls: false` so missing points leave a gap instead of bridging or zero-fill; fixed `m³/s`; `notMerge` so a dual-source option replaced by one source drops the old series.
 
 - store: removed (`@/stores/forecast`)
 - routing: absent

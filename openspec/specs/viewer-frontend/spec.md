@@ -54,6 +54,10 @@ hover 河段 MUST 高亮，点击 MUST 选中并打开可拖拽曲线窗；曲�
 - **WHEN** cycle `2026082700`、lead 5
 - **THEN** x 轴标签为北京时间 `2026-08-27 13:00`
 
+#### Scenario: 缺测流量保持空隙
+- **WHEN** API返回保留168位置且含null的source曲线
+- **THEN** 客户端类型接受null；null处不补零、不跨缺口连线，tooltip不把null显示为0，其他正常点和source保留；地图null河段继续显示缺失色
+
 ### Requirement: 页头
 页头 MUST 显示最新可用 cycle 的起报时间（北京时间，标「起报」与「北京时间」）与「流量 (m³/s)」文案；MUST NOT 显示停更原因、source 失败或任何内部计算状态；无可用 cycle 时显示「暂无数据」。
 

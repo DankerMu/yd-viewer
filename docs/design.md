@@ -180,8 +180,8 @@ output/<cycle>/<source>/
 | 端点 | 说明 |
 |---|---|
 | `GET /api/cycles` | 同一 catalog 枚举：最新结构层可用 cycle 往前 7 天（含边界），cycle 倒序、source 按 gfs/ifs；空态 `200 []` |
-| `GET /api/map/latest` | 按 catalog 顺序尝试候选：最新 cycle 内 GFS 优先、其次 IFS，再更早 cycle；数据层失败 WARNING（路径与原因）后继续，首个成功者取 lead 0；无候选或全部失败 404 |
-| `GET /api/cycles/{cycle}/reaches/{reach_id}` | 对指定 cycle 每个 catalog 可用 source 做数据层读取，成功者入 series，各 168 点；失败 WARNING 并省略，series 为空 404 |
+| `GET /api/map/latest` | 按 catalog 顺序尝试候选：最新 cycle 内 GFS 优先、其次 IFS，再更早 cycle；数据层（结构/分钟）失败 WARNING（路径与原因）后继续，首个成功者取 lead 0；`values` 为 m³/s 或 `null`。无候选或全部数据层失败 404。河段缺测不排除 source、不回落、不 404 |
+| `GET /api/cycles/{cycle}/reaches/{reach_id}` | 对指定 cycle 每个 catalog 可用 source 做数据层读取，成功者入 series，各 168 个 m³/s 或 `null`；数据层失败 WARNING 并省略，series 为空 404。河段缺测不省略 source、不 404 |
 | `GET /api/health` | output 可枚举时 `200 {"status":"ok","latest_cycle":"YYYYMMDDHH"或null}`；latest_cycle 来自同一 catalog 枚举，不另写扫描，不返回内部路径或运行状态 |
 
 `output/` 不可枚举（含启动后删除、权限不可读）时以上四端点均返回 503。cycle 不在可用列表内为 404；格式不匹配 `^\d{10}$`、小时不为 00/12 或 reach_id 不在权威集合内为 4xx，不能 5xx。错误沿用 FastAPI 默认 `{"detail": ...}`，不自定义错误模型/异常处理器。
@@ -204,13 +204,15 @@ output/<cycle>/<source>/
   "cycle": "2026082700",
   "source": "gfs",
   "valid_time": "2026-08-27T00:00:00Z",
-  "values": [12.3, 9.8, 0.4]
+  "values": [12.3, null, 0.4]
 }
 ```
 
-`values` 为按权威 `reach_id` 升序排列的 m³/s 数组，不按 DAT 文件列位置；`valid_time` 是 `UTC(cycle)` 的带 `Z` ISO 8601 时间，12Z 示例为 `2026-08-27T12:00:00Z`。
+`values` 为按权威 `reach_id` 升序排列的 m³/s 或 JSON `null` 数组，不按 DAT 文件列位置；`valid_time` 是 `UTC(cycle)` 的带 `Z` ISO 8601 时间，12Z 示例为 `2026-08-27T12:00:00Z`。OpenAPI/响应类型必须声明该可空性，不得发出 `NaN`/`Infinity` token，也不得依赖框架默认把非有限浮点变成 `null`。
 
-河段曲线形状为 `{"cycle":"2026082700","reach_id":1,"lead_hours":[0,…,167],"series":{"gfs":[168个m³/s值],"ifs":[168个m³/s值]}}`（此处省略号仅说明形状）。缺源省略键，不让前端发两次请求再合并。前端按 `UTC(cycle)+lead` 计算横轴，不从日期头推时刻。
+数据层失败（结构或分钟列，含非有限分钟）仍 WARNING 并回落/省略；河段 NaN/+Inf/-Inf 不是失败。优先 source 即使整行/整列全 `null` 也保留并返回 200，不回落到下一 source、不省略、不 404。例如最新 cycle 的 GFS 含缺测而 IFS 全有限时，map 仍选 GFS 且对应点为 `null`；曲线同时保留两源，缺测位置仍占 168 点。
+
+河段曲线形状为 `{"cycle":"2026082700","reach_id":1,"lead_hours":[0,…,167],"series":{"gfs":[168个m³/s或null],"ifs":[168个m³/s或null]}}`（此处省略号仅说明形状）。缺源（数据层失败）省略键，不让前端发两次请求再合并。前端按 `UTC(cycle)+lead` 计算横轴，不从日期头推时刻。
 
 ## 7. 前端
 
@@ -219,12 +221,12 @@ output/<cycle>/<source>/
 交互以 NWM 当前实际挂载的源页面 `OverviewPage` 为准；可复制组件仍沿用源码中的 `M11*` 命名：
 
 - 全屏地图，加载 `./geometry/rivers.geojson` 与 `./geometry/boundary.geojson`；
-- 河网按 `/api/map/latest` 的 `values` 与升序 `reach_id` 对应着色；
+- 河网按 `/api/map/latest` 的 `values` 与升序 `reach_id` 对应着色；前端类型将 `values`/`series` 声明为可空；`null` 使用下方缺失色，不因缺测改选其他 source；
 - 右上只显示配置中存在的矢量/卫星/地形底图按钮；
 - 右下流量 colorbar 与单位 `m³/s`；
 - 地图缩放控件和比例尺，初始视野 fit 到 boundary 包围盒；无飞行或记忆视野等额外相机逻辑；
 - hover 河段高亮，点击选中并打开可拖拽曲线窗；
-- 曲线窗只有起报 cycle 下拉（来自 cycles，默认地图当前 cycle），series 的可用源各 168 点同轴显示；
+- 曲线窗只有起报 cycle 下拉（来自 cycles，默认地图当前 cycle），series 的可用源各 168 点同轴显示；TypeScript 接受 `null`；缺测点不补零、不跨缺口连线，tooltip 不得把 `null` 显示为 0；
 - 切换历史 cycle 只重取曲线，不改变地图着色或地图 cycle；
 - 页头显示 map/latest 的起报时间（标「起报」「北京时间」）与「流量 (m³/s)」，不显示停更原因、source 失败或内部计算状态；无可用 cycle 显示「暂无数据」。
 
@@ -240,7 +242,7 @@ output/<cycle>/<source>/
 | `100 ≤ v < 1000` | `#08519C` | `100–1000` |
 | `≥1000` | `#CB181D` | `≥1000` |
 
-`null` 用 `#94ADC7`，不是第六个数值档；色带不可配置。
+`null`（含 API 缺测流量）用 `#94ADC7`，不是第六个数值档；色带不可配置。
 
 从 NWM 复制并精简：
 

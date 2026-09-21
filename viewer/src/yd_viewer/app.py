@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
+from typing import TypedDict
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +19,21 @@ _DAT_NAME = "yd.rivqdown.dat"
 _LOGGER = logging.getLogger(__name__)
 _CYCLE_NAME = re.compile(r"^\d{8}(?:00|12)$")
 _LEAD_HOURS = list(range(168))
+_Discharge = float | None
+
+
+class MapLatestResponse(TypedDict):
+    cycle: str
+    source: str
+    valid_time: str
+    values: tuple[_Discharge, ...]
+
+
+class CurveResponse(TypedDict):
+    cycle: str
+    reach_id: int
+    lead_hours: list[int]
+    series: dict[str, tuple[_Discharge, ...]]
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -42,7 +58,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=503) from exc
 
     @app.get("/api/map/latest")
-    def map_latest() -> dict[str, str | tuple[float, ...]]:
+    def map_latest() -> MapLatestResponse:
         try:
             entries = catalog.list_cycles(settings.output_dir, geometry.reach_ids)
         except OSError as exc:
@@ -67,7 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         raise HTTPException(status_code=404)
 
     @app.get("/api/cycles/{cycle}/reaches/{reach_id}")
-    def reach_curve(cycle: str, reach_id: int) -> dict[str, object]:
+    def reach_curve(cycle: str, reach_id: int) -> CurveResponse:
         if _CYCLE_NAME.fullmatch(cycle) is None or reach_id not in geometry.reach_ids:
             raise HTTPException(status_code=400)
         try:
@@ -77,7 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         selected = next((entry for entry in entries if entry["cycle"] == cycle), None)
         if selected is None:
             raise HTTPException(status_code=404)
-        series: dict[str, tuple[float, ...]] = {}
+        series: dict[str, tuple[_Discharge, ...]] = {}
         for source in selected["sources"]:
             path = settings.output_dir / selected["cycle"] / source / _DAT_NAME
             try:
