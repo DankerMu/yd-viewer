@@ -1,7 +1,7 @@
 ## 1. Boundary handoff
-- [ ] 1.1 Commit/push documentation clarification before source, retaining historical archive context.
-- [ ] 1.2 Return single boundary Feature and migrate all affected geometry/prepare consumer tests.
-- [ ] 1.3 Prove regression red→green, real writer→viewer handoff, preservation suites and strict spec validation.
+- [x] 1.1 Commit/push documentation clarification before source, retaining historical archive context.
+- [x] 1.2 Return single boundary Feature and migrate all affected geometry/prepare consumer tests.
+- [x] 1.3 Prove regression red→green, real writer→viewer handoff, preservation suites and strict spec validation.
 
 Suggested fixture level: expanded
 Minimal mergeable slice: atomic - schema cutover and consumer tests together.

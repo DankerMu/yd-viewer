@@ -1171,10 +1171,10 @@ def test_rivers_geojson_empty_layer_returns_empty_collection(
 def test_boundary_geojson_merges_adjacent_units_into_one_polygon(
     adjacent_baseline: SyntheticBaseline,
 ) -> None:
-    doc = build_boundary_geojson(adjacent_baseline.domain_shp)
+    feature = build_boundary_geojson(adjacent_baseline.domain_shp)
 
-    assert len(doc["features"]) == 1
-    feature = doc["features"][0]
+    assert feature["type"] == "Feature"
+    assert "features" not in feature
     assert feature["properties"] == {}
     assert feature["geometry"]["type"] == "Polygon"
 
@@ -1201,8 +1201,8 @@ def test_boundary_geojson_dissolves_shared_edge(
     (lon_a, lat_a), (lon_b, lat_b) = shared_edge_anchors(adjacent_baseline)
     midpoint = Point((lon_a + lon_b) / 2.0, (lat_a + lat_b) / 2.0)
 
-    doc = build_boundary_geojson(adjacent_baseline.domain_shp)
-    merged = shapely_shape(doc["features"][0]["geometry"])
+    feature = build_boundary_geojson(adjacent_baseline.domain_shp)
+    merged = shapely_shape(feature["geometry"])
 
     assert merged.covers(midpoint)
     assert merged.contains(midpoint)
@@ -1214,9 +1214,7 @@ def test_boundary_geojson_preserves_interior_ring(
 ) -> None:
     hole_anchors = adjacent_baseline.domain_anchors[0][1]
 
-    geom = build_boundary_geojson(adjacent_baseline.domain_shp)["features"][0][
-        "geometry"
-    ]
+    geom = build_boundary_geojson(adjacent_baseline.domain_shp)["geometry"]
 
     rings = geom["coordinates"]
     assert len(rings) == 2, "恰保留 1 个内环"
@@ -1227,7 +1225,7 @@ def test_boundary_geojson_disjoint_units_stay_multipolygon(
     baseline: SyntheticBaseline,
 ) -> None:
     """默认布局的两个单元互不相接：结果为 2 成员 MultiPolygon，不额外要求连通性。"""
-    geom = build_boundary_geojson(baseline.domain_shp)["features"][0]["geometry"]
+    geom = build_boundary_geojson(baseline.domain_shp)["geometry"]
 
     assert geom["type"] == "MultiPolygon"
     assert len(geom["coordinates"]) == 2
@@ -1246,7 +1244,7 @@ def test_boundary_geojson_ring_orientation_follows_rfc7946(
         tmp_path / "orient", unit_count=2, adjacent_units=adjacent
     )
 
-    geom = build_boundary_geojson(source.domain_shp)["features"][0]["geometry"]
+    geom = build_boundary_geojson(source.domain_shp)["geometry"]
     polygons = (
         [geom["coordinates"]] if geom["type"] == "Polygon" else geom["coordinates"]
     )
@@ -1305,18 +1303,22 @@ def test_write_viewer_geojson_writes_exactly_two_files(
     for path in (rivers_out, boundary_out):
         text = path.read_text(encoding="utf-8")
         assert "Infinity" not in text and "NaN" not in text
-        assert _strict_loads(text)["type"] == "FeatureCollection"
+        _strict_loads(text)
 
-    # 文件名与内容的绑定：只校验「能解析且是 FeatureCollection」的话，两份文档互换
-    # 落点仍然全绿，而那对 viewer 是灾难（把流域轮廓当河网画，每个 reach_id -> DAT
-    # 列的查找全部落空）。故按文件断言各自的结构判别式。
+    # 文件名与内容的绑定：只校验「能解析」的话，两份文档互换落点仍然全绿，
+    # 而那对 viewer 是灾难（把流域轮廓当河网画，每个 reach_id -> DAT
+    # 列的查找全部落空）。故按文件断言各自的结构判别式：rivers 为
+    # FeatureCollection，boundary 为单个 Feature（products-contract §6）。
     rivers_doc = _strict_loads(rivers_out.read_text(encoding="utf-8"))
     boundary_doc = _strict_loads(boundary_out.read_text(encoding="utf-8"))
+    assert rivers_doc["type"] == "FeatureCollection"
     assert len(rivers_doc["features"]) == len(adjacent_baseline.river_anchors)
     for feature in rivers_doc["features"]:
         assert set(feature["properties"]) == {"reach_id"}
-    assert len(boundary_doc["features"]) == 1
-    assert boundary_doc["features"][0]["properties"] == {}
+    assert boundary_doc["type"] == "Feature"
+    assert "features" not in boundary_doc
+    assert boundary_doc["properties"] == {}
+    assert boundary_doc["geometry"]["type"] in {"Polygon", "MultiPolygon"}
 
 
 def test_write_viewer_geojson_creates_missing_out_dir(
@@ -1476,9 +1478,11 @@ def _file_size_limit(max_bytes: int):
         signal.signal(signal.SIGXFSZ, previous)
 
 
-#: 默认布局 + `river_count=2` 时两份产物的实测字节数（rivers 600 / boundary 611）。
-#: 限额取在 0 与 600 之间即让**第一份**写到中途失败，取在 600 与 611 之间即让
-#: **第二份**写到中途失败——两个顺序都要证明终名上不留截断产物。
+#: 默认布局 + `river_count=2` + `unit_count=3` 时两份产物的实测字节数
+#: （rivers 600 / 单 Feature boundary 707）。单 Feature 比原 FeatureCollection
+#: 包装少约 45 字节；`unit_count=2` 时 boundary 会小于 rivers，无法用一份
+#: RLIMIT_FSIZE 夹住「第二份中途失败」。限额取在 0 与 600 之间即让**第一份**
+#: 写到中途失败，取在 600 与 707 之间即让**第二份**写到中途失败。
 _MIDWRITE_LIMITS = {"first": 300, "second": 605}
 
 
@@ -1492,7 +1496,7 @@ def test_write_viewer_geojson_midwrite_failure_leaves_no_files(
     模式先截断再写，中途失败留下的是一个已存在但内容截断的 `rivers.geojson`，且不在
     回滚账本里——盘上是非法 JSON，消息却声称已回滚。
     """
-    source = write_synthetic_baseline(tmp_path / "src", river_count=2, unit_count=2)
+    source = write_synthetic_baseline(tmp_path / "src", river_count=2, unit_count=3)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
 
@@ -1516,7 +1520,7 @@ def test_midwrite_limits_actually_bracket_the_two_documents(tmp_path) -> None:
     没有这条，产物字节数一旦变化，上面的用例会退化成「限额太小，第一份就失败」的
     单一场景，「第二份中途失败」那条就悄悄不再被覆盖。
     """
-    source = write_synthetic_baseline(tmp_path / "src", river_count=2, unit_count=2)
+    source = write_synthetic_baseline(tmp_path / "src", river_count=2, unit_count=3)
     rivers_out, boundary_out = write_viewer_geojson(
         rivers_shp=source.rivers_shp,
         domain_shp=source.domain_shp,
@@ -1584,8 +1588,10 @@ def test_write_viewer_geojson_writes_into_existing_out_dir(
     assert {key for f in rivers_doc["features"] for key in f["properties"]} == {
         "reach_id"
     }
-    assert len(boundary_doc["features"]) == 1
-    assert boundary_doc["features"][0]["properties"] == {}
+    assert boundary_doc["type"] == "Feature"
+    assert "features" not in boundary_doc
+    assert boundary_doc["properties"] == {}
+    assert boundary_doc["geometry"]["type"] in {"Polygon", "MultiPolygon"}
     assert bystander.read_text(encoding="utf-8") == "无关文件"
     assert sorted(p.name for p in out_dir.iterdir()) == [
         "boundary.geojson",
