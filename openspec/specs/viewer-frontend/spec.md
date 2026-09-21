@@ -14,6 +14,10 @@ TBD - created by archiving change m3-viewer. Update Purpose after archive.
 - **WHEN** 对 `dist/` 全文搜索 `tianditu.gov.cn` 与 `tk=`
 - **THEN** 零命中
 
+#### Scenario: 显式文档URL
+- **WHEN** helper接收 `https://h/yd/index.html` 或 `https://h/yd/viewer` 作为pageUrl并解析相对API/geometry/basemaps路径
+- **THEN** MUST遵循WHATWG document-relative语义解析到 `/yd/` 下的兄弟路径，不将文档当目录；目录base由尾斜杠表达，根路径和 `/yd/` 目录输入行为不变
+
 ### Requirement: 地图着色与色带
 地图 MUST 加载 `./geometry/rivers.geojson` 与 `./geometry/boundary.geojson`，按 `GET /api/map/latest` 的 `values` 以 `reach_id` 对应着色。色带 MUST 用 ≥ 阈值判定：`v ≥ 1000 → #CB181D`、`100 ≤ v < 1000 → #08519C`、`10 ≤ v < 100 → #2171B5`、`1 ≤ v < 10 → #4292C6`、`v < 1 → #7FB8DC`、`null → #94ADC7`；右下 MUST 显示同一分档的 colorbar（标签 `<1`、`1–10`、`10–100`、`100–1000`、`≥1000`）与单位 `m³/s`。
 

@@ -23,8 +23,7 @@ export type CurveResponse = {
 }
 
 export function resolveUrl(pageUrl: string, relativePath: string): string {
-  const base = pageUrl.endsWith('/') ? pageUrl : `${pageUrl}/`
-  return new URL(relativePath, base).href
+  return new URL(relativePath, pageUrl).href
 }
 
 export function cyclesUrl(pageUrl: string): string {
