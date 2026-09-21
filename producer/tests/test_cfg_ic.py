@@ -164,7 +164,18 @@ DIRTY_CASES = {
     "blank_lines": {"blank_lines": True},
     "mixed_notation": {"mixed_notation": True},
     "no_trailing_newline": {"trailing_newline": False},
+    # river 段前导（真实 `yd.cfg.ic` 的布局，#305）：单独一条、叠加空行、与 lake 前导共存。
+    "river_preamble": {"river_preamble": True, "lake_count": None},
+    "river_preamble_blank_lines": {
+        "river_preamble": True,
+        "blank_lines": True,
+        "lake_count": None,
+    },
+    "river_preamble_lake": {"river_preamble": True},
 }
+
+#: 脏矩阵的公共规模参数；个别脏例（如无 lake 的 river 前导布局）按名覆盖它们。
+DIRTY_DEFAULTS = {"river_count": 2, "lake_count": 1}
 
 
 @pytest.mark.parametrize("name", sorted(DIRTY_CASES))
@@ -172,9 +183,7 @@ DIRTY_CASES = {
 def test_dirty_inputs_roundtrip_byte_identical(name: str, mesh_count: int) -> None:
     built = build_cfg_ic(
         mesh_count=mesh_count,
-        river_count=2,
-        lake_count=1,
-        **DIRTY_CASES[name],
+        **{**DIRTY_DEFAULTS, **DIRTY_CASES[name]},  # type: ignore[arg-type]
     )
     doc = cfg_ic.parse(built.payload)
     assert cfg_ic.render(doc) == built.payload
@@ -430,14 +439,16 @@ def test_empty_lake_section_is_distinguishable_from_absent_lake() -> None:
 # --- 全覆盖划分 ---
 
 
+@pytest.mark.parametrize("river_preamble", [False, True])
 @pytest.mark.parametrize("mesh_count", MESH_SIZES)
-def test_every_line_has_exactly_one_role(mesh_count: int) -> None:
+def test_every_line_has_exactly_one_role(mesh_count: int, river_preamble: bool) -> None:
     built = build_cfg_ic(
         mesh_count=mesh_count,
         river_count=2,
         lake_count=1,
         blank_lines=True,
         trailing_spaces=True,
+        river_preamble=river_preamble,
     )
     doc = cfg_ic.parse(built.payload)
     assert len(doc.roles) == len(doc.lines)
@@ -447,6 +458,9 @@ def test_every_line_has_exactly_one_role(mesh_count: int) -> None:
         assert section is not None
         owned.append(section.column_header_index)
         owned.extend(section.data_line_indices)
+    assert (doc.river_preamble_index is not None) is river_preamble
+    if doc.river_preamble_index is not None:
+        owned.append(doc.river_preamble_index)
     assert doc.lake_preamble_index is not None
     owned.append(doc.lake_preamble_index)
     owned.extend(i for i, role in enumerate(doc.roles) if role is cfg_ic.LineRole.BLANK)
@@ -767,7 +781,7 @@ def test_provenance_windows_do_not_leak_into_neighbour_functions() -> None:
 #: 仍在清单外）——对「偏离清单漏登记」这一类恒绿，而那正是它本该守住的东西。
 PARSE_RAISE_CLASSIFICATION = {
     # 模块头逐条登记的、对 pin 的刻意偏离（无 pin 对应物的 fail-closed）。
-    "deliberate_deviations": 8,
+    "deliberate_deviations": 9,
     # 有 pin 对应物：超限 / 非 UTF-8 / 空文件 / 不可读 header / 非数值数据行 /
     # 截断 body / 截断 lake body。
     "pin_counterparts": 7,
@@ -775,10 +789,11 @@ PARSE_RAISE_CLASSIFICATION = {
     "unreachable_invariant": 1,
 }
 
-#: 文档改写 API 的拒绝路径（模块头「模型扩展」一节登记，不计入上面的八条偏离）。
+#: 文档改写 API 的拒绝路径（模块头「模型扩展」一节登记，不计入上面的九条偏离）。
 DOCUMENT_API_RAISE_COUNTS = {
-    # roles/lines 长度、header_index、段列头行号、段数据行号、lake preamble 行号。
-    "CfgIcDocument.__post_init__": 5,
+    # roles/lines 长度、header_index、段列头行号、段数据行号、river preamble 行号、
+    # lake preamble 行号。
+    "CfgIcDocument.__post_init__": 6,
     # 行号非 int、行号越界、替换值含断行字符、被替换的数据行重算不出数值。
     "CfgIcDocument.with_replaced_lines": 4,
 }
@@ -801,7 +816,7 @@ def test_module_documents_the_deliberate_deviations() -> None:
     # 对「八条改回六条」的变异体存活，因为后文「故不计入上面的八条偏离」也含「八条」），
     # 并与代码侧的分类表闭合；分类表又与 `ast` 计数闭合（见下一条）。
     declared = source_probe.declared_deviation_count(head)
-    assert declared == PARSE_RAISE_CLASSIFICATION["deliberate_deviations"] == 8
+    assert declared == PARSE_RAISE_CLASSIFICATION["deliberate_deviations"] == 9
     for ordinal in range(1, declared + 1):
         assert head.count(f"\n{ordinal}. ") == 1, ordinal
     assert f"\n{declared + 1}. " not in head
@@ -1007,6 +1022,10 @@ def test_document_post_init_rejects_out_of_range_section_line_numbers() -> None:
     assert "data line index" in str(excinfo.value)
 
     with pytest.raises(ValueError) as excinfo:
+        dataclasses.replace(doc, river_preamble_index=len(doc.lines))
+    assert "river_preamble_index" in str(excinfo.value)
+
+    with pytest.raises(ValueError) as excinfo:
         dataclasses.replace(doc, lake_preamble_index=len(doc.lines))
     assert "lake_preamble_index" in str(excinfo.value)
 
@@ -1087,3 +1106,313 @@ def test_with_replaced_lines_refuses_a_data_row_replacement_that_is_not_numeric(
         doc.with_replaced_lines({doc.mesh.data_line_indices[0]: "Index Canopy"})
 
     assert "is not a numeric row" in str(excinfo.value)
+
+
+# --- #305：river 段前导行 `<river-count> <state-cols>` ---
+
+#: 现场 `yd.cfg.ic` 的逐行布局（`/ghdc/data/yd/input/yd/yd.cfg.ic`，只读核对得到；真实文件
+#: 不入库，此处按同构缩小到 mesh=3 / river=2）：header 三 token 且 `6` 两侧带空格、Tab 分隔、
+#: mesh 列头、3 行 mesh、`2<Tab>2` river 前导、`Index<Tab>Stage`、2 行 river、**无 lake 段**。
+FIELD_LAYOUT_PAYLOAD = (
+    b"3\t 6 \t13150080.000000\n"
+    b"Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+    b"1\t0.100000\t0.200000\t0.300000\t0.400000\t0.500000\n"
+    b"2\t0.110000\t0.210000\t0.310000\t0.410000\t0.510000\n"
+    b"3\t0.120000\t0.220000\t0.320000\t0.420000\t0.520000\n"
+    b"2\t2\n"
+    b"Index\tStage\n"
+    b"1\t1.500000\n"
+    b"2\t1.600000\n"
+)
+#: 由**构造**登记的行号（不是解析器回读）。
+FIELD_LAYOUT_ROLES = (
+    "header",
+    "column_header",
+    "data",
+    "data",
+    "data",
+    "river_preamble",
+    "column_header",
+    "data",
+    "data",
+)
+
+
+def test_field_layout_with_a_river_preamble_parses_and_roundtrips() -> None:
+    """现场布局：mesh 已满后的 `2\t2` 是 river 段前导，不是多余 mesh 行（#305）。
+
+    改动前此输入以 `surplus sectioned IC mesh row` 被拒，M4 的 prepare / init / tracker
+    三条路径全部撞上。
+    """
+    doc = cfg_ic.parse(FIELD_LAYOUT_PAYLOAD)
+
+    assert cfg_ic.render(doc) == FIELD_LAYOUT_PAYLOAD
+    assert _roles(doc) == FIELD_LAYOUT_ROLES
+    assert doc.header_index == 0
+    assert doc.declared_mesh_count == 3
+    assert doc.mesh.column_header_index == 1
+    assert doc.mesh.data_line_indices == (2, 3, 4)
+    assert doc.mesh.row_count == 3
+    assert doc.river_preamble_index == 5
+    assert doc.declared_river_count == 2
+    assert doc.river is not None
+    assert doc.river.column_header_index == 6
+    assert doc.river.data_line_indices == (7, 8)
+    assert doc.river.row_count == 2
+    assert doc.river.rows == ((1.0, 1.5), (2.0, 1.6))
+    # 前导是段元数据：既不进 mesh 也不进 river 的数据行。
+    assert doc.river_preamble_index not in doc.mesh.data_line_indices
+    assert doc.river_preamble_index not in doc.river.data_line_indices
+    # 现场文件没有 lake 段。
+    assert doc.lake is None
+    assert doc.lake_preamble_index is None
+    assert doc.declared_lake_count is None
+
+
+@pytest.mark.parametrize("mesh_count", MESH_SIZES)
+@pytest.mark.parametrize("delimiter", [" ", "\t"])
+def test_river_preamble_layout_indexes_match_construction(
+    mesh_count: int, delimiter: str
+) -> None:
+    built = build_cfg_ic(
+        mesh_count=mesh_count,
+        river_count=3,
+        delimiter=delimiter,
+        river_preamble=True,
+    )
+    assert built.river_preamble_index is not None
+
+    doc = cfg_ic.parse(built.payload)
+
+    assert cfg_ic.render(doc) == built.payload
+    assert _roles(doc) == built.roles
+    assert _roles(doc)[built.river_preamble_index] == "river_preamble"
+    assert doc.river_preamble_index == built.river_preamble_index
+    assert doc.declared_river_count == 3
+    assert doc.mesh.data_line_indices == built.mesh_data_indices
+    assert doc.mesh.row_count == mesh_count
+    assert doc.river is not None
+    assert doc.river.data_line_indices == built.river_data_indices
+    assert doc.river.row_count == 3
+    assert doc.lake is None
+
+
+@pytest.mark.parametrize("mesh_count", MESH_SIZES)
+def test_river_and_lake_preambles_each_land_in_their_own_role(mesh_count: int) -> None:
+    """两个段前导同时在场时各归各位，两个 count 都被校验。"""
+    built = build_cfg_ic(
+        mesh_count=mesh_count,
+        river_count=3,
+        lake_count=2,
+        delimiter="\t",
+        river_preamble=True,
+    )
+    assert built.river_preamble_index is not None
+    assert built.lake_preamble_index is not None
+    assert built.river_preamble_index < built.lake_preamble_index
+
+    doc = cfg_ic.parse(built.payload)
+
+    assert cfg_ic.render(doc) == built.payload
+    assert _roles(doc) == built.roles
+    assert _roles(doc)[built.river_preamble_index] == "river_preamble"
+    assert _roles(doc)[built.lake_preamble_index] == "lake_preamble"
+    assert doc.river_preamble_index == built.river_preamble_index
+    assert doc.lake_preamble_index == built.lake_preamble_index
+    assert doc.declared_river_count == 3
+    assert doc.declared_lake_count == 2
+    assert doc.river is not None and doc.lake is not None
+    assert doc.river.data_line_indices == built.river_data_indices
+    assert doc.lake.data_line_indices == built.lake_data_indices
+    for index in (doc.river_preamble_index, doc.lake_preamble_index):
+        assert index not in doc.mesh.data_line_indices
+        assert index not in doc.river.data_line_indices
+        assert index not in doc.lake.data_line_indices
+
+
+def test_river_body_shorter_than_the_preamble_count_is_refused() -> None:
+    built = build_cfg_ic(mesh_count=3, river_count=4, river_preamble=True)
+    kept = [
+        line
+        for index, line in enumerate(built.lines)
+        if index != built.river_data_indices[-1]
+    ]
+
+    with pytest.raises(ValueError) as excinfo:
+        cfg_ic.parse("".join(kept).encode("utf-8"))
+
+    message = str(excinfo.value)
+    assert "truncated sectioned IC river body" in message
+    # 实际与声明两个数字都必须报出来（spec Scenario）。
+    assert "river=3" in message and "river=4" in message
+
+
+def test_river_body_longer_than_the_preamble_count_is_refused() -> None:
+    built = build_cfg_ic(mesh_count=3, river_count=2, river_preamble=True)
+    lines = list(built.lines)
+    lines.insert(built.river_data_indices[-1] + 1, "9 1.000000\n")
+
+    with pytest.raises(ValueError) as excinfo:
+        cfg_ic.parse("".join(lines).encode("utf-8"))
+
+    message = str(excinfo.value)
+    assert "truncated sectioned IC river body" in message
+    assert "river=3" in message and "river=2" in message
+
+
+def test_three_token_numeric_row_after_a_full_mesh_is_still_surplus() -> None:
+    """偏离 1 的实质不变：只有**两整数 + 紧邻 river 列头**才是前导。"""
+    built = build_cfg_ic(mesh_count=3, river_count=2, river_preamble=True)
+    preamble_index = built.river_preamble_index
+    assert preamble_index is not None
+    lines = list(built.lines)
+    lines.insert(preamble_index, "2 2 1\n")
+
+    with pytest.raises(ValueError, match="surplus sectioned IC mesh row"):
+        cfg_ic.parse("".join(lines).encode("utf-8"))
+
+
+def test_two_integer_row_not_followed_by_a_river_header_is_still_surplus() -> None:
+    """两整数行但下一有效行不是 river 列头（这里是另一条两整数行）→ 维持拒绝。"""
+    built = build_cfg_ic(mesh_count=3, river_count=2, river_preamble=True)
+    preamble_index = built.river_preamble_index
+    assert preamble_index is not None
+    lines = list(built.lines)
+    lines.insert(preamble_index, "2 2\n")
+
+    with pytest.raises(ValueError, match="surplus sectioned IC mesh row"):
+        cfg_ic.parse("".join(lines).encode("utf-8"))
+
+
+def test_two_integer_row_followed_by_a_lake_header_is_not_a_river_preamble() -> None:
+    """后继列头开启的是 lake 段时不得判为 river 前导（无 river 段即无处可归）。"""
+    payload = (
+        b"2 6 27000000.000000\n"
+        b"Index Canopy Snow Surface Unsat GW\n"
+        b"1 0.1 0.2 0.3 0.4 0.5\n"
+        b"2 0.1 0.2 0.3 0.4 0.5\n"
+        b"1 2\n"
+        b"Index LakeStage\n"
+        b"1 0.5\n"
+    )
+
+    with pytest.raises(ValueError, match="surplus sectioned IC mesh row"):
+        cfg_ic.parse(payload)
+
+
+def test_river_preamble_requires_an_immediately_following_river_header() -> None:
+    assert (
+        cfg_ic._native_river_section_preamble(
+            "2 2", next_line=RIVER_COLUMN_HEADER, stage_section_count=0
+        )
+        == 2
+    )
+    # 声明 0 行是合法的（与 lake 前导同构：只拒负数）。
+    assert (
+        cfg_ic._native_river_section_preamble(
+            "0 2", next_line=RIVER_COLUMN_HEADER, stage_section_count=0
+        )
+        == 0
+    )
+    # 后继列头开启的不是 river 段。
+    assert (
+        cfg_ic._native_river_section_preamble(
+            "2 2", next_line=LAKE_COLUMN_HEADER, stage_section_count=0
+        )
+        is None
+    )
+    assert (
+        cfg_ic._native_river_section_preamble(
+            "2 2", next_line=RIVER_COLUMN_HEADER, stage_section_count=1
+        )
+        is None
+    )
+    # 后继行不是列头 / 没有后继行。
+    assert (
+        cfg_ic._native_river_section_preamble(
+            "2 2", next_line="2 0.350000", stage_section_count=0
+        )
+        is None
+    )
+    assert (
+        cfg_ic._native_river_section_preamble(
+            "2 2", next_line=None, stage_section_count=0
+        )
+        is None
+    )
+    # token 数不是 2 / 列数非正 / count 为负。
+    assert (
+        cfg_ic._native_river_section_preamble(
+            "2 2 1", next_line=RIVER_COLUMN_HEADER, stage_section_count=0
+        )
+        is None
+    )
+    assert (
+        cfg_ic._native_river_section_preamble(
+            "2 0", next_line=RIVER_COLUMN_HEADER, stage_section_count=0
+        )
+        is None
+    )
+    assert (
+        cfg_ic._native_river_section_preamble(
+            "-1 2", next_line=RIVER_COLUMN_HEADER, stage_section_count=0
+        )
+        is None
+    )
+    # 非整数字面形态（pin 的 lake 判据同样只认纯整数）。
+    assert (
+        cfg_ic._native_river_section_preamble(
+            "2.0 2", next_line=RIVER_COLUMN_HEADER, stage_section_count=0
+        )
+        is None
+    )
+
+
+def test_river_preamble_helper_claims_no_pin_provenance() -> None:
+    """pin 从不识别 river 前导：本函数是本仓自有实现，不得贴逐字移植标签。"""
+    source = pathlib.Path(cfg_ic.__file__).read_text(encoding="utf-8")
+    segments = _function_source_segments(source)
+    assert "_native_river_section_preamble" in segments
+    assert (
+        segments["_native_river_section_preamble"].count(
+            "NWM@8ae9b8f2 packages/common/state_qc.py"
+        )
+        == 0
+    )
+    assert "_native_river_section_preamble" not in PORTED_HELPERS
+    # lake 版本本体不受影响：仍带且只带一条溯源标签。
+    assert (
+        segments["_native_lake_section_preamble"].count(
+            "NWM@8ae9b8f2 packages/common/state_qc.py"
+        )
+        == 1
+    )
+
+
+def test_with_replaced_lines_treats_the_river_preamble_like_the_lake_preamble() -> None:
+    """前导行不在任何段的 `data_line_indices` 内：替换它不被拒，`rows` 不受影响。"""
+    built = build_cfg_ic(mesh_count=3, river_count=2, lake_count=1, river_preamble=True)
+    doc = cfg_ic.parse(built.payload)
+    assert doc.river_preamble_index is not None
+    assert doc.lake_preamble_index is not None
+    assert doc.river is not None and doc.lake is not None
+    for index in (doc.river_preamble_index, doc.lake_preamble_index):
+        assert index not in doc.mesh.data_line_indices
+        assert index not in doc.river.data_line_indices
+        assert index not in doc.lake.data_line_indices
+
+    replaced = doc.with_replaced_lines(
+        {doc.river_preamble_index: "20 2", doc.lake_preamble_index: "10 2"}
+    )
+
+    assert replaced.mesh.rows == doc.mesh.rows
+    assert replaced.river is not None and replaced.lake is not None
+    assert replaced.river.rows == doc.river.rows
+    assert replaced.lake.rows == doc.lake.rows
+    assert replaced.river.data_line_indices == doc.river.data_line_indices
+    assert replaced.lake.data_line_indices == doc.lake.data_line_indices
+    assert replaced.mesh.data_line_indices == doc.mesh.data_line_indices
+    assert replaced.roles == doc.roles
+    assert replaced.lines[doc.river_preamble_index] == "20 2\n"
+    assert replaced.lines[doc.lake_preamble_index] == "10 2\n"
+    assert doc.lines[doc.river_preamble_index] == "2 2\n"

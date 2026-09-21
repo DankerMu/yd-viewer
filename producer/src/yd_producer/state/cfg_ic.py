@@ -13,7 +13,7 @@ bytes，**绝不由数值重新格式化**。数值视图 `Section.rows` 是只�
 
 行归属是**全覆盖划分**：每一行恰好一个 `LineRole`，无「未归属」行。
 
-对 pin 的**刻意偏离**（八条，此处即全集）。此清单已把 `parse` 里**全部** `raise ValueError`
+对 pin 的**刻意偏离**（九条，此处即全集）。此清单已把 `parse` 里**全部** `raise ValueError`
 逐条对 pin 的 `_parse_sectioned_rows` / `_parse_ic_file` 核对过：其余 `raise` 均有 pin 对应物
 （超限、非 UTF-8、空文件、不可读 header、非数值数据行、截断 body、截断 lake body）；唯一既无
 pin 对应物又未列入的 `raise` 是 `parse` 末尾的 unassigned 全覆盖划分自检——它对**任何**输入
@@ -21,9 +21,12 @@ pin 对应物又未列入的 `raise` 是 `parse` 末尾的 unassigned 全覆盖�
 清单的穷尽性由 `test_cfg_ic.py` 的 `ast` 计数测试机械闭合（`parse` 体内 `raise` 总数 ==
 偏离数 + 有 pin 对应物数 + 不可达自检数），docstring 里的条数写错即变红。
 
-1. **mesh 段超出 header 声明 `mesh_count` 的多余数据行抛 `ValueError`**。pin 的
+1. **mesh 段行数达到 header 声明 `mesh_count` 后出现的「非 river 前导数值行」抛
+   `ValueError`**。pin 的
    `_parse_sectioned_rows`(:531-534，其中 `:532-533` 是 `if len(mesh_rows) < mesh_count:`
    与 `mesh_rows.append(row)` 这一对) 静默丢弃多余 mesh 行；格式保真根不得静默丢状态行。
+   mesh 已满后紧邻 river 列头的那条两整数行是 river 段前导（见偏离 9），归
+   `LineRole.RIVER_PREAMBLE`，不走本条拒绝。
 2. **任何分段列头之前出现的数值行抛 `ValueError`**。pin 的分段走查在 `section is None`
    时让该行穿过所有分支被静默丢弃；同 1 的理由，且全覆盖划分不允许存在无归属的行。
 3. **文件不存在/是目录/不可读的 `OSError` 与 `SafeFilesystemError` 统一封装为 `ValueError`**。pin 的
@@ -58,11 +61,18 @@ pin 对应物又未列入的 `raise` 是 `parse` 末尾的 unassigned 全覆盖�
    `truncated sectioned IC body: have mesh=3; header declares mesh=6`，把运维支到「文件被
    截断」的错误方向；mesh 行数恰等于列数时更会**静默误解析**通过）。故在解码后、任何分段
    判定之前显式拒绝并直说 BOM。
+9. **river 段前导声明的 count 与实际 river 数据行数不符时抛 `ValueError`**
+   （`truncated sectioned IC river body`）。原生 SHUD 在 mesh 末行与 river 列头之间写一行
+   `<river-count> <state-cols>`（真实 yd 基线是 `3988` + Tab + `2`，issue #305）。pin 从不
+   识别这条 river 前导——它落进 pin 的「多余 mesh 行」路径被静默丢掉——故本条 count 校验
+   无 pin 对应物。识别判据与 lake 前导同构（两 token、均为整数、count >= 0、cols > 0、
+   紧邻对应段列头），由本仓自有的 `_native_river_section_preamble` 实现（非移植，故不带
+   pin 溯源标签）。
 
-对 pin 的**模型扩展**（非偏离，pin 无对应面，故不计入上面的八条）：
+对 pin 的**模型扩展**（非偏离，pin 无对应面，故不计入上面的九条）：
 
 - 空行单独归 `LineRole.BLANK`。pin 在分段前先丢空行，本模块必须保留它们才能字节等价，又
-  不能把它们计入任何段的数据行（会污染 #9 继承的段行数与行区间），故显式成为第五类归属。
+  不能把它们计入任何段的数据行（会污染 #9 继承的段行数与行区间），故显式成为独立一类归属。
   **检测路径仍按 pin 归一化**（先 `strip()`、跳过空行再判定），保真只作用于回写侧。
 - `CfgIcDocument.__post_init__` 的构造期不变量校验与 `CfgIcDocument.with_replaced_lines`
   的行替换 API（issue #54 第 5 条）。pin 没有文档模型，故这两处的 `raise ValueError`
@@ -132,6 +142,7 @@ class LineRole(enum.Enum):
     HEADER = "header"
     COLUMN_HEADER = "column_header"
     DATA = "data"
+    RIVER_PREAMBLE = "river_preamble"
     LAKE_PREAMBLE = "lake_preamble"
 
 
@@ -174,8 +185,10 @@ class CfgIcDocument:
     mesh: Section
     river: Section | None
     lake: Section | None
+    river_preamble_index: int | None
     lake_preamble_index: int | None
     declared_mesh_count: int
+    declared_river_count: int | None
     declared_lake_count: int | None
 
     def __post_init__(self) -> None:
@@ -211,6 +224,13 @@ class CfgIcDocument:
                         f"CfgIcDocument {section.name} data line index {index} "
                         f"out of range [0, {line_count})"
                     )
+        if self.river_preamble_index is not None and not (
+            0 <= self.river_preamble_index < line_count
+        ):
+            raise ValueError(
+                f"CfgIcDocument river_preamble_index {self.river_preamble_index} "
+                f"out of range [0, {line_count})"
+            )
         if self.lake_preamble_index is not None and not (
             0 <= self.lake_preamble_index < line_count
         ):
@@ -367,6 +387,8 @@ def parse(
     river_rows: list[tuple[float, ...]] = []
     lake_rows: list[tuple[float, ...]] = []
     column_header_indices: dict[str, int] = {}
+    river_preamble_index: int | None = None
+    declared_river_count: int | None = None
     lake_preamble_index: int | None = None
     declared_lake_count: int | None = None
     section: str | None = None
@@ -402,6 +424,20 @@ def parse(
             )
         if section == "mesh":
             if len(mesh_rows) >= declared_mesh_count:
+                # 原生 SHUD 在 mesh 末行与 river 列头之间写一行 `<river-count>
+                # <river-state-columns>`：那是段元数据，不是多余的 mesh 状态行
+                # （真实 yd 基线即此布局，issue #305）。判据与 lake 前导同构。
+                next_text = body[position + 1][1] if position + 1 < len(body) else None
+                preamble = _native_river_section_preamble(
+                    text,
+                    next_line=next_text,
+                    stage_section_count=stage_section_count,
+                )
+                if preamble is not None:
+                    declared_river_count = preamble
+                    river_preamble_index = line_index
+                    roles[line_index] = LineRole.RIVER_PREAMBLE
+                    continue
                 # 刻意偏离 pin：pin 静默丢弃超出声明数的 mesh 行（见模块头偏离 1）。
                 raise ValueError(
                     "surplus sectioned IC mesh row: "
@@ -440,6 +476,13 @@ def parse(
         raise ValueError(
             "truncated sectioned IC body: "
             f"have mesh={len(mesh_rows)}; header declares mesh={declared_mesh_count}"
+        )
+    if declared_river_count is not None and len(river_rows) != declared_river_count:
+        # 刻意偏离 pin：pin 不识别 river 前导，故无此校验（见模块头偏离 9）。
+        raise ValueError(
+            "truncated sectioned IC river body: "
+            f"have river={len(river_rows)}; "
+            f"section declares river={declared_river_count}"
         )
     if declared_lake_count is not None and len(lake_rows) != declared_lake_count:
         raise ValueError(
@@ -488,8 +531,10 @@ def parse(
             if "lake" in column_header_indices
             else None
         ),
+        river_preamble_index=river_preamble_index,
         lake_preamble_index=lake_preamble_index,
         declared_mesh_count=declared_mesh_count,
+        declared_river_count=declared_river_count,
         declared_lake_count=declared_lake_count,
     )
 
@@ -533,6 +578,44 @@ def render(doc: CfgIcDocument) -> bytes:
     记法上丢字节，而在「干净」输入上恒绿、看不出来。
     """
     return "".join(doc.lines).encode("utf-8")
+
+
+# --- 本仓自有的分段识别辅助（pin 无对应物，故不带 NWM 溯源标签） ---
+
+
+def _native_river_section_preamble(
+    line: str,
+    *,
+    next_line: str | None,
+    stage_section_count: int,
+) -> int | None:
+    """返回原生 SHUD river 段前导行声明的 river 行数，不是前导行则返回 None。
+
+    原生 SHUD 在 mesh 段末行与 river 列头之间写一行 `<river-count>
+    <river-state-columns>`（真实 yd 基线即此布局，issue #305）：它是段元数据，不是一条
+    多余的 mesh 状态行。两个元数据 token 都以纯整数写出；同时要求**整数字面形态**与
+    **紧邻其后的 river 列头**，才不会把某条恰好长成两整数的数据行误判成段元数据。
+
+    与 `_native_lake_section_preamble` 判据同构，但 NWM pin 从不识别 river 前导（那条行在
+    pin 里落进「多余 mesh 行」路径被静默丢弃），故本函数是本仓自有实现、**不是**移植。
+    """
+    if next_line is None or not _looks_like_column_header(next_line):
+        return None
+    if (
+        _section_from_column_header(next_line, stage_section_count=stage_section_count)
+        != "river"
+    ):
+        return None
+    tokens = line.split()
+    if len(tokens) != 2:
+        return None
+    try:
+        river_count, state_column_count = (int(token) for token in tokens)
+    except ValueError:
+        return None
+    if river_count < 0 or state_column_count <= 0:
+        return None
+    return river_count
 
 
 # --- 以下为 NWM pin 移植的分段识别辅助（判定语义逐字一致） ---
