@@ -290,6 +290,43 @@ def test_poll_lets_job_record_invariant_reject_backwards_start():
     assert excinfo.value.job_id == "12345"
 
 
+def test_submit_floors_submitted_at_so_same_second_start_is_accepted():
+    """提交时刻截到整秒：秒精度的 `Start` 落在提交同一秒内不再被时序不变式拒绝。
+
+    注入时钟在提交时返回 `T0 + 0.4 s`（现场挂钟带微秒），`sacct` 只能给出整秒的 `T0`；
+    截断后 `submitted_at == started_at == T0`，轮询正常给出 RUNNING。
+    """
+    executor, runner = make_executor(
+        ["12345\n", f"12345|RUNNING|{T0.strftime('%Y-%m-%dT%H:%M:%S')}|Unknown"],
+        clock=StepClock(start=T0 + timedelta(microseconds=400_000), step=STEP),
+    )
+    submitted = executor.submit(make_spec())
+    record = executor.poll("12345")
+
+    assert runner.calls[1][0] == build_sacct_command("12345")
+    assert record.state is JobState.RUNNING
+    assert record.started_at == T0
+    assert record.submitted_at == T0
+    assert record.submitted_at.microsecond == 0
+    assert record.submitted_at.tzinfo is UTC
+    assert submitted.submitted_at == T0
+
+
+def test_floored_submitted_at_still_rejects_genuinely_earlier_start():
+    """截断只抹掉本仓自己的亚秒，不引入容差：早 1 整秒的 `Start` 照旧拒绝。"""
+    earlier = (T0 - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    executor, _ = make_executor(
+        ["12345\n", f"12345|RUNNING|{earlier}|Unknown"],
+        clock=StepClock(start=T0 + timedelta(microseconds=400_000), step=STEP),
+    )
+    executor.submit(make_spec())
+
+    with pytest.raises(ExecutorError) as excinfo:
+        executor.poll("12345")
+    assert excinfo.value.job_id == "12345"
+    assert "`started_at` 不得早于 `submitted_at`" in str(excinfo.value)
+
+
 @pytest.mark.parametrize("omitted", ["required_fields", "clock", "runner"])
 def test_executor_constructor_has_no_defaults(omitted):
     """验收 3：三个构造参数均不可省（零内置默认）。"""

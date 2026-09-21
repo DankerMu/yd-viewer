@@ -322,7 +322,9 @@ class SlurmJobExecutor:
             name=spec.name,
             state=JobState.PENDING,
             resources=spec.resources,
-            submitted_at=self._clock(),
+            # `sacct` 的 Submit/Start/End 只有秒精度（compute-loop §10，2026-09-21 run
+            # attempt 2 现场实证），故提交时刻截到整秒后再记录，不设任何容差
+            submitted_at=self._clock().replace(microsecond=0),
             started_at=None,
             ended_at=None,
         )
