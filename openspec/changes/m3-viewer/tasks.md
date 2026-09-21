@@ -71,7 +71,7 @@ Minimal mergeable slice: 4.1（应用工厂 + health）——只依赖 settings/
 - [x] 5.4 地图页：全屏 MapLibre、加载几何、按 `map/latest` 着色、右下 colorbar、右上底图按钮、缩放控件与比例尺、初始视野 fit 到 5.2 `bbox`、hover/selected 高亮
 - [x] 5.5 曲线窗：点击河段打开可拖拽窗，起报下拉（默认地图 cycle）、GFS/IFS 同轴 168 点、x 轴北京时间；切换只重取曲线
 - [x] 5.6 页头：最新起报时间（北京时间，标「起报」）与「流量 (m³/s)」；无数据显示「暂无数据」；`App.tsx` 装配
-- [ ] 5.7 本地开发：`vite.config` 代理 `/api`、`/geometry`、`/basemaps.json` 到本地后端；README 一条命令用 2.1 生成器起全栈
+- [x] 5.7 本地开发：`vite.config` 代理 `/api`、`/geometry`、`/basemaps.json` 到本地后端；README 一条命令用 2.1 生成器起全栈
 
 依赖：5.1 需 0；5.2 需 5.1；5.3 需 5.1、5.2（`m11MapRuntime` 读 `lib/basemaps.ts`）；5.4–5.6 需 5.2、5.3（响应形状按 spec，可用 mock JSON 开发，不需后端合并）；5.7 需 2.1 与组 4 实际可运行（不可用 mock 顶替）
 §9.1 归属：前端
@@ -487,3 +487,44 @@ examples green via uv run pytest tests/test_compose_example.py in viewer, and
 parent reruns before removing it. Preserve oracle/result in local review evidence;
 do not commit source-text assertions or a third deliverable file. This is a
 verification artifact, not a reduced acceptance criterion.
+
+## #262 fixture — task 5.7 only
+
+Expanded instead of upstream compact: dev proxy integration and documented
+process/file lifecycle cross frontend, backend and local resource boundaries.
+Only product changes: viewer/frontend/vite.config.ts and viewer/README.md.
+Dependencies completed; use actual app factory and existing tests/synthetic.py,
+never HTTP mocks, producer imports, new generator/launcher files or dev compose.
+Preserve base './', all production request paths, frontend APIs and UI behavior.
+
+README provides one copy-paste command block from viewer, with tool prerequisites:
+uv and corepack pnpm. Generate an exclusive temporary YD_ROOT via existing
+write_geometry/write_dat/write_done; at least one cycle and both sources, 168 rows.
+Generator defaults are small m3/day flows and coincident [0,0]–[1,1] rivers;
+explain synthetic geometry and use reversed column IDs between sources to make
+curves distinct without modifying generator or hand-writing a DAT format.
+Create separate temporary static dir with basemaps.json {}; no credentials or
+external tiles. Set the existing three backend path envs only for local children.
+Launch actual uvicorn factory on loopback8000 and Vite on loopback5173 strictPort.
+Vite dev proxies /api, /geometry and /basemaps.json to http://127.0.0.1:8000.
+
+Selected risk/evidence:
+- Config/integration: execute README command itself, not a substitute harness;
+  real browser through Vite must get geometry/latest/cycles/reach responses from
+  backend and see river plus dual-source curves after an actual river click.
+- FileIO/resource: only uniquely created temporary paths are removed; record
+  owned child PIDs and stop/wait them on exit/interrupt, no pkill or broad cleanup.
+  Startup failure/occupied fixed port must fail rather than silently select a
+  new port. No general launcher framework/retry system or extra env knobs.
+- Security: local-only listeners, empty basemaps, no private config reads,
+  producer imports, live URLs or deployment operations.
+- Preservation: frozen pnpm install, typecheck, existing21tests and production
+  build pass; backend suite and ruff remain green. No permanent DOM tests.
+- Docs/verification: capture actual browser screenshot, successful proxy routes
+  and 168-point GFS/IFS payload, visible curve window, no page exceptions.
+  Stop command, confirm both owned servers exited and temp data gone.
+
+This is synthetic local fullstack proof, not node27/M5 receipt. No production
+UI fixes or backend changes are authorized by this slice. Workflow metadata is
+additional to the two product files. After merge, archive shared M3 only if all
+task groups are completed and strict archive validation succeeds.
