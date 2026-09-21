@@ -289,15 +289,15 @@ CI 新增 `viewer-frontend` job，在 `viewer/frontend` 按上述顺序安装、
 
 ### 9.2 node-22 真产物
 
-至少实跑一个 00Z 和一个 12Z：
+每源至少实跑 2 个连续 cycle，IFS/GFS 都覆盖 00Z 与 12Z：
 
 - `START=0`、`DT_QR_DOWN=60`；
 - DAT 恰有 168 行，分钟列 `0..10020`；
 - 3988 个河段；
-- T+12 状态可供下一轮精确接续；
+- T+12 状态可供下一轮精确接续：第二轮 receipt 引用第一轮写出的 `<T+12>.cfg.ic`；
 - IFS/GFS 独立推进；
 - NWM raw 未被 yd 修改；
-- 单源失败不影响另一源完成。
+- 单源失败不影响另一源完成：只观察不诱发，未发生时 receipt 写「未行使」。
 
 ### 9.3 node-27 live receipt
 

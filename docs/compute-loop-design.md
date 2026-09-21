@@ -461,7 +461,7 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 
 ### 13.2 node-22 真运行
 
-至少选择一个 00Z 和一个 12Z，IFS/GFS 均覆盖：
+每源至少 2 个连续 cycle，IFS/GFS 均覆盖 00Z 与 12Z（第 6 条以第二轮消费第一轮状态为证；第 7 条与 Slurm requeue/PREEMPTED 只观察不诱发，未发生时 receipt 写「未行使」）：
 
 1. raw 扫描只读且未改变 NWM 文件；
 2. direct-grid forcing 的首行 `Time_Day=0` 对应 cycle；
