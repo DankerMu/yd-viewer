@@ -1,4 +1,4 @@
-"""create_app() validates geometry at factory time and serves health, cycles, map, and curves."""
+"""create_app() validates geometry, serves APIs, and hosts static geometry/SPA."""
 
 from __future__ import annotations
 
@@ -144,6 +144,31 @@ def _assert_default_detail(
         text = json.dumps(detail)
     assert str(tmp_path) not in text
     assert str(output_dir) not in text
+
+
+INDEX_HTML = b"<!doctype html><title>yd</title>"
+SHADOW_API_NOPE = b"<p>static-api-nope</p>"
+SHADOW_404 = b"<h1>static-404</h1>"
+
+
+def _hosted(tmp_path: Path) -> tuple[Settings, TestClient]:
+    settings = _settings(tmp_path)
+    for rel, payload in (
+        ("geometry/rivers.geojson", b'{"shadow":"rivers"}'),
+        ("geometry/boundary.geojson", b'{"shadow":"boundary"}'),
+        ("index.html", INDEX_HTML),
+        ("404.html", SHADOW_404),
+        ("assets/app.js", b"window.YD=1"),
+        ("api/nope", SHADOW_API_NOPE),
+        ("api/health", b'{"status":"shadow-health"}'),
+        ("api/map/latest", b'{"source":"shadow-map"}'),
+        ("api/cycles/index.html", b"<p>shadow-cycles</p>"),
+        (f"api/cycles/{CYCLE_00}/reaches/1", b'{"series":{"shadow":true}}'),
+    ):
+        path = settings.static_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    return settings, TestClient(create_app(settings))
 
 
 def _skip_if_root() -> None:
@@ -892,3 +917,67 @@ def test_unreadable_output_returns_503_then_recovers_without_restart(
     restored = client.get(path)
     assert restored.status_code == 200
     assert restored.json() == first_body
+
+
+def test_geometry_bytes_match_input_not_static_shadow(tmp_path: Path) -> None:
+    settings, client = _hosted(tmp_path)
+    for name in ("rivers.geojson", "boundary.geojson"):
+        expected = (settings.input_dir / name).read_bytes()
+        shadow = (settings.static_dir / "geometry" / name).read_bytes()
+        response = client.get(f"/geometry/{name}")
+        assert response.status_code == 200
+        assert response.content == expected != shadow
+
+
+def test_root_serves_index_and_assets_without_history_fallback(
+    tmp_path: Path,
+) -> None:
+    _, client = _hosted(tmp_path)
+    index, asset = client.get("/"), client.get("/assets/app.js")
+    missing = client.get("/nowhere")
+    assert index.status_code == 200
+    assert index.content == INDEX_HTML
+    assert asset.status_code == 200
+    assert asset.content == b"window.YD=1"
+    assert missing.status_code == 404
+    assert INDEX_HTML not in missing.content
+
+
+def test_unknown_api_is_non_html_404_despite_static_files(tmp_path: Path) -> None:
+    settings, client = _hosted(tmp_path)
+    for path in ("/api/nope", "/api/also-missing"):
+        response = client.get(path)
+        _assert_default_detail(response, 404, tmp_path, settings.output_dir)
+        assert "html" not in response.headers.get("content-type", "")
+        assert SHADOW_API_NOPE not in response.content
+        assert SHADOW_404 not in response.content
+        assert INDEX_HTML not in response.content
+
+
+def test_existing_api_routes_keep_precedence_over_static_shadows(
+    tmp_path: Path,
+) -> None:
+    settings, client = _hosted(tmp_path)
+    _write_eligible(settings.output_dir, CYCLE_00, "gfs")
+    health = client.get(HEALTH)
+    cycles = client.get(CYCLES)
+    latest = client.get(MAP_LATEST)
+    curve = client.get(_curve(CYCLE_00, 1))
+    assert health.status_code == 200
+    assert health.json() == OK_00Z
+    assert cycles.status_code == 200
+    assert cycles.json() == [{"cycle": CYCLE_00, "sources": ["gfs"]}]
+    assert latest.status_code == 200
+    assert latest.json() == {
+        "cycle": CYCLE_00,
+        "source": "gfs",
+        "valid_time": VALID_TIME_00Z,
+        "values": [float(n) / 86400.0 for n in range(1, 6)],
+    }
+    assert curve.status_code == 200
+    assert curve.json() == {
+        "cycle": CYCLE_00,
+        "reach_id": 1,
+        "lead_hours": LEAD_HOURS,
+        "series": {"gfs": [float(n) / 86400.0 for n in range(1, 169)]},
+    }
