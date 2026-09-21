@@ -14,7 +14,7 @@
 
 命令会先按 frozen lockfile 安装前端、再 `uv sync --frozen` 安装后端，然后用现有 `tests/synthetic.py` 的 `write_geometry` / `write_dat` / `write_done` 在独占临时目录写一份双源、168 行的合成 `YD_ROOT`。静态目录另建，只写入 `basemaps.json` 为 `{}`（无瓦片、无 key、不读私有 env）。只把已有的三个目录变量传给后端子进程环境副本。随后启动真实 `yd_viewer.app:create_app` 工厂（`127.0.0.1:8000`）和 Vite（`127.0.0.1:5173 --strictPort`）。Vite 把 `/api`、`/geometry`、`/basemaps.json` 代理到该后端。
 
-8000 或 5173 已被占用时直接失败，不会换端口，也不会留半套进程。Ctrl-C、SIGTERM 或任一子进程退出时，向本命令记录的进程组发信号并等待它们退出，再删除本命令创建的临时目录。
+8000 或 5173 已被占用时直接失败，不会换端口，也不会留半套进程。Ctrl-C、SIGTERM、SIGHUP（关闭终端）或任一子进程退出时，向本命令记录的进程组发信号并等待它们退出，再删除本命令创建的临时目录。
 
 打开 <http://127.0.0.1:5173/>，点图上那条对角线河段，应出现 GFS 与 IFS 两条 168 点曲线。生成器把每条河都画成重合的 `[0,0]–[1,1]`，边界是 `[0,0]–[1,0]–[1,1]` 三角形，所以地图只是占位。默认单元格是很小的 m³/day 值，API 再除以 86400，流量都落在 `<1` 色档。两个 source 的列编号互为反序，曲线才能分开；没有改生成器，也没有手写 DAT。
 
@@ -59,6 +59,7 @@ def signal_groups(sig: int) -> None:
 def stop() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
     signal_groups(signal.SIGTERM)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and any(
@@ -78,10 +79,14 @@ def stop() -> None:
 
 
 def terminate(_signum, _frame) -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
     raise SystemExit(1)
 
 
 signal.signal(signal.SIGTERM, terminate)
+signal.signal(signal.SIGHUP, terminate)
 reach_ids = (1, 2)
 try:
     root = Path(tempfile.mkdtemp(prefix="yd-viewer-dev-"))
