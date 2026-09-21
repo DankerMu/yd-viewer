@@ -212,7 +212,7 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 - forcing 与 SHUD 重任务都在 Slurm 作业内执行，不在登录节点直接计算；
 - 同源最多一个 job，IFS/GFS 最多各一个；
 - 只通过 yd CLI 提交，避免手拼 `sbatch` 参数；
-- 普通轮询用 `sacct` 读取 job ID/state/start/end，不取 `ExitCode`；提交后 120 s 内 `sacct` 返回 0 行按 accounting 滞后视为仍 PENDING 继续轮询（compute-loop §10），超窗仍 0 行或任何多行照旧 fail closed；仅在同一 yd job 已终态 `FAILED`/`TIMEOUT` 后，由失败收尾 provider 单独执行一次 `sacct -j <job_id> -X -n -P --format=ExitCode`，所得字符串进入失败日志；
+- 普通轮询用 `sacct` 读取 job ID/state/start/end，不取 `ExitCode`；提交后 120 s 内 `sacct` 返回 0 行按 accounting 滞后视为仍 PENDING 继续轮询（compute-loop §10），超窗仍 0 行或任何多行照旧 fail closed；`submitted_at` 按整秒记录，与 `sacct` 的秒精度对齐（compute-loop §10）；仅在同一 yd job 已终态 `FAILED`/`TIMEOUT` 后，由失败收尾 provider 单独执行一次 `sacct -j <job_id> -X -n -P --format=ExitCode`，所得字符串进入失败日志；
   - `-X`（`--allocations`）不可省：它和普通轮询一样只选 job allocation，排除 `.batch` / `.extern` 等 step；不能在解析器里取首行、去重或猜 allocation。即使带 `-X` 仍出现多非空行，也按查询失败保留 work。
 - 取消必须使用本次 yd receipt 中的精确 job ID；禁止 `scancel -u`、名称通配或模糊匹配；
 - 不为未观察到的作业卡死编写 watchdog；walltime 属 Slurm 作业配置，异常由日志和人工操作处理；
@@ -525,3 +525,5 @@ receipt 目录 `/scratch/frd_muziyao/yd/receipts/`；每行一步，失败也登
 - 2026-09-21 阶段 3 prepare：第 1 次因真实 `yd.cfg.ic` 的 river 段前导行被解析器拒绝（#305 → PR #306）；第 2 次（checkout `e61917e`）成功，四终名齐全，无 staging 残留。`m4-stage3-prepare-attempt1-20260921.md`、`m4-stage3-prepare-20260921.md`。`output/` 由人工 `mkdir -m 755` 预建（run 要求预存在）。
 - 2026-09-21 阶段 4 init：两源首轮 T=2026091412，`states/{gfs,ifs}/2026091412.cfg.ic`。`m4-stage4-init-20260921.md`。
 - 2026-09-21 阶段 5 run attempt 1：双源停止、零发布。ifs：sacct 提交后 0 行 → poll fail closed（A）；作业 52756 因 grid_signature 不一致 FAILED（B：prepare 用 checkout grid.json，运行期用 object-store grid）；gfs：apcp 缺 `idx_selector`（C：manifest v3 形态）。裁决 A/B/C/D 见 `m4-stage5-run1-20260921.md`；本节 §15.2 已按 B 增 `canonical_root`。修复合并后按 D 清理 `input/models`、`input/viewer`、`states`、失败 work，重跑 prepare → init → run。
+- 2026-09-21 阶段 5 重跑前置（#308 PR #312、#309 PR #314、#310 PR #316 合并后）：checkout ff-only `e61917e` → `cc1ade8`，`uv sync --frozen`；`local.toml` `[nwm]` 增 `canonical_root`（备份 `receipts/local.toml.bak-20260921-pre-canonical`）；决策 D 清理四项（`m4-stage5-rerun-cleanup-20260921.txt`）；prepare 成功且 #309 oracle 通过：两源 handoff `grid_signature = 6c008901…`，两份 object-store grid.json 仅 `grid_id` 不同、经纬度相同（`m4-stage5-rerun-prepare-20260921.log`）；init 两源首轮 T=2026091500（`m4-stage5-rerun-init-20260921.log`）。
+- 2026-09-21 阶段 5 run attempt 2：sbatch 52782/52783 成功、双源 work 建立（gfs raw staging 含 #310 apcp 自证通过），控制器随即在 `phase=poll` 因 `started_at 不得早于 submitted_at` 停源（E：sacct Submit=Start 同一秒，`submitted_at` 带微秒）。裁决 E1：提交时刻截到整秒（compute-loop §10）。作业不取消，待其自然结束；修复合并后删 `loop/work/{gfs,ifs}/2026091500` 只重跑 run。`m4-stage5-rerun-20260921.md`、`rerun-raw-stat-before.txt`。

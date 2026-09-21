@@ -396,6 +396,8 @@ Slurm 的 partition/account/资源/walltime 来自 `local.toml`。同一表的 `
 
 `sbatch` 成功后 Slurm accounting 有数秒滞后，此窗口内 `sacct -j <id> -X` 返回 0 行（2026-09-21 现场实证）。轮询对「0 行」只在 `submitted_at` 起 120 s 内放宽：记录保持 PENDING、不更新 start/end，继续按 poll 间隔重查；超过 120 s 仍 0 行、或任何时刻出现多行，照旧 fail closed 停源保留 work。放宽只针对行数为 0，不改变未知状态串与空字段的拒绝。
 
+`submitted_at` 由执行器在 `sbatch` 返回时以注入时钟写定，MUST 截到整秒再记录：`sacct` 的 Submit/Start/End 只有秒精度，2026-09-21 现场实证（run attempt 2，job 52782/52783）空闲分区在提交同一秒内启动作业，带微秒的 `submitted_at` 会让秒精度的 `started_at` 早于它，触发 `JobRecord` 的时序不变式而停源。规则只截断本仓自己的提交时刻，MUST NOT 定义任何容差、MUST NOT 伪造或改写 `sacct` 返回的时间；登录节点与 slurmctld 之间的时钟偏斜不在本规则内（现场未见证据，出现即另立 issue）。
+
 ## 11. 发布、崩溃恢复与幂等
 
 ### 11.1 成功条件
