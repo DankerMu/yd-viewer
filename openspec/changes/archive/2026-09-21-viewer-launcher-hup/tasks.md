@@ -1,6 +1,6 @@
 ## 1. Terminal cleanup
-- [ ] 1.1 Route SIGHUP into existing cleanup, mask repeat hangups while stopping, document supported trigger.
-- [ ] 1.2 Prove old/new README terminal hangup redgreen and retained cleanup modes with actual local services.
+- [x] 1.1 Route SIGHUP into existing cleanup, mask repeat hangups while stopping, document supported trigger.
+- [x] 1.2 Prove old/new README terminal hangup redgreen and retained cleanup modes with actual local services.
 Suggested fixture level: expanded
 Minimal mergeable slice: atomic - executable command and cleanup proof.
 
