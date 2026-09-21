@@ -9,7 +9,7 @@ export type MapLatestResponse = {
   cycle: string
   source: ForecastSource
   valid_time: string
-  values: number[]
+  values: Array<number | null>
 }
 
 export type CurveResponse = {
@@ -17,8 +17,8 @@ export type CurveResponse = {
   reach_id: number
   lead_hours: number[]
   series: {
-    gfs?: number[]
-    ifs?: number[]
+    gfs?: Array<number | null>
+    ifs?: Array<number | null>
   }
 }
 

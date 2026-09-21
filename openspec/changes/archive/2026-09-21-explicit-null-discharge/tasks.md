@@ -1,7 +1,7 @@
 ## 1. Explicit nullable discharge
-- [ ] 1.1 Publish docs/products-contract and docs/design policy clarification before source edits.
-- [ ] 1.2 Implement nullable row/column and truthful API/TS schemas, chart gaps/tooltip without zero coercion.
-- [ ] 1.3 Prove accessor redgreen, HTTP contracts and actual browser gap behavior; run preservation gates.
+- [x] 1.1 Publish docs/products-contract and docs/design policy clarification before source edits.
+- [x] 1.2 Implement nullable row/column and truthful API/TS schemas, chart gaps/tooltip without zero coercion.
+- [x] 1.3 Prove accessor redgreen, HTTP contracts and actual browser gap behavior; run preservation gates.
 Suggested fixture level: expanded
 Minimal mergeable slice: atomic - one nullable value contract across producer-independent reader/API/frontend.
 

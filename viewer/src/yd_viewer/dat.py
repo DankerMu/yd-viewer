@@ -21,6 +21,12 @@ _EXPECTED_ROWS = (_END_DAYS - _START_DAYS) * _MINUTES_PER_DAY // _DT_QR_DOWN_MIN
 _M3_PER_DAY = 86400.0
 
 
+def _as_discharge(value: float) -> float | None:
+    if math.isfinite(value):
+        return value / _M3_PER_DAY
+    return None
+
+
 class DatError(Exception):
     """DAT files are missing or do not match the viewer structure contract."""
 
@@ -39,18 +45,18 @@ class DatFile:
     _ordered_columns: tuple[int, ...]
     _column_by_reach: dict[int, int]
 
-    def row(self, lead: int) -> tuple[float, ...]:
+    def row(self, lead: int) -> tuple[float | None, ...]:
         base = lead * self._stride + 1
         return tuple(
-            self._values[base + index] / _M3_PER_DAY for index in self._ordered_columns
+            _as_discharge(self._values[base + index]) for index in self._ordered_columns
         )
 
-    def column(self, reach_id: int) -> tuple[float, ...]:
+    def column(self, reach_id: int) -> tuple[float | None, ...]:
         index = self._column_by_reach[reach_id]
         stride = self._stride
         values = self._values
         return tuple(
-            values[row * stride + 1 + index] / _M3_PER_DAY
+            _as_discharge(values[row * stride + 1 + index])
             for row in range(_EXPECTED_ROWS)
         )
 

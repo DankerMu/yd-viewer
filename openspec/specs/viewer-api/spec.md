@@ -15,7 +15,7 @@ MUST 返回 viewer-catalog 结果的 JSON 数组，元素形如 `{"cycle":"YYYYM
 - **THEN** 返回 200 与 `[]`
 
 ### Requirement: GET /api/map/latest
-MUST 按 catalog 顺序取候选：最新 cycle 内 `gfs` 优先、其次 `ifs`，再更早 cycle；对候选执行 viewer-dat-reader 数据层读取，失败即 WARNING 并尝试下一候选；返回首个成功者的 `{"cycle","source","valid_time","values"}`，`valid_time` 为 `UTC(cycle)` 的 ISO 8601 带 `Z` 字符串，`values` 为 lead 0 行按 `reach_id` 升序的 m³/s 数组。无候选或全部失败 MUST 返回 404。
+MUST 按 catalog 顺序取候选：最新 cycle 内 `gfs` 优先、其次 `ifs`，再更早 cycle；对候选执行 viewer-dat-reader 数据层读取，失败即 WARNING 并尝试下一候选；返回首个成功者的 `{"cycle","source","valid_time","values"}`，`valid_time` 为 `UTC(cycle)` 的 ISO 8601 带 `Z` 字符串，`values` 为 lead 0 行按 `reach_id` 升序的 m³/s 或 null 数组。无候选或全部失败 MUST 返回 404。
 
 #### Scenario: GFS 优先
 - **WHEN** 最新 cycle 双源可用
@@ -37,8 +37,12 @@ MUST 按 catalog 顺序取候选：最新 cycle 内 `gfs` 优先、其次 `ifs`�
 - **WHEN** 无任何 `DONE`
 - **THEN** 返回 404 且体含 `detail`
 
+#### Scenario: 非有限流量不排除源
+- **WHEN** 结构和分钟合法，优先 source 含 NaN/+Inf/-Inf（含整源全部缺测）
+- **THEN** 该 source 保留，响应200；对应点显式为JSON null，不回落、不省略、不因缺测返回404；API schema允许这些null，其余排序/单位/168点不变
+
 ### Requirement: GET /api/cycles/{cycle}/reaches/{reach_id}
-MUST 返回 `{"cycle","reach_id","lead_hours":[0..167],"series":{...}}`：对该 cycle 每个 catalog 可用 source 执行数据层读取，成功者进入 `series`（168 个 m³/s），失败者 WARNING 并省略；`series` 为空 MUST 404。`cycle` 不在可用列表内 MUST 404；`cycle` 不匹配 `^\d{10}$` 或小时 ∉ {00,12}、或 `reach_id` 不在权威集合内 MUST 返回 4xx（非 5xx）。
+MUST 返回 `{"cycle","reach_id","lead_hours":[0..167],"series":{...}}`：对该 cycle 每个 catalog 可用 source 执行数据层读取，成功者进入 `series`（168 个 m³/s 或 null），失败者 WARNING 并省略；`series` 为空 MUST 404。`cycle` 不在可用列表内 MUST 404；`cycle` 不匹配 `^\d{10}$` 或小时 ∉ {00,12}、或 `reach_id` 不在权威集合内 MUST 返回 4xx（非 5xx）。
 
 #### Scenario: 双源曲线
 - **WHEN** 请求可用双源 cycle 的 reach 1
@@ -59,6 +63,10 @@ MUST 返回 `{"cycle","reach_id","lead_hours":[0..167],"series":{...}}`：对该
 #### Scenario: cycle 不存在
 - **WHEN** `cycle` 为合法格式但无可用 source
 - **THEN** 返回 404
+
+#### Scenario: 非有限流量不排除源
+- **WHEN** 结构和分钟合法，优先 source 含 NaN/+Inf/-Inf（含整源全部缺测）
+- **THEN** 该 source 保留，响应200；对应点显式为JSON null，不回落、不省略、不因缺测返回404；API schema允许这些null，其余排序/单位/168点不变
 
 ### Requirement: 错误与不可用
 `output/` 不可枚举时四个端点（cycles、map/latest、曲线、health）MUST 返回 503；错误响应体 MUST 使用 FastAPI 默认的 `{"detail": ...}` 形状，MUST NOT 自定义错误模型或异常处理器。

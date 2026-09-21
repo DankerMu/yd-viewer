@@ -670,3 +670,55 @@ def test_read_dat_close_oserror_preserves_167_row_dat_error(
     notes = getattr(excinfo.value, "__notes__", [])
     assert any("injected close EIO" in note for note in notes)
     _assert_fd_closed(captured)
+
+
+def test_row_maps_nonfinite_discharge_to_none_keeping_sorted_ids(
+    tmp_path: Path,
+) -> None:
+    path = write_dat(tmp_path / "mixed-row.dat", column_ids=(3, 1, 2))
+    _set_dat_cell(path, nc=3, row=0, column=2, value=86400.0)
+    _set_dat_cell(path, nc=3, row=0, column=3, value=math.nan)
+    _set_dat_cell(path, nc=3, row=0, column=1, value=math.inf)
+    _set_dat_cell(path, nc=3, row=1, column=1, value=-math.inf)
+
+    datfile = dat_mod.read_dat(path, {1, 2, 3})
+
+    assert datfile.row(0) == (1.0, None, None)
+    assert datfile.row(1) == (3.0 / 86400.0, 4.0 / 86400.0, None)
+
+
+def test_column_maps_mixed_nonfinite_discharge_to_none_keeping_168(
+    tmp_path: Path,
+) -> None:
+    path = write_dat(tmp_path / "mixed-col.dat", column_ids=(3, 1, 2))
+    for row in range(168):
+        _set_dat_cell(path, nc=3, row=row, column=2, value=float((row + 1) * 86400))
+    _set_dat_cell(path, nc=3, row=5, column=2, value=math.nan)
+    _set_dat_cell(path, nc=3, row=6, column=2, value=math.inf)
+    _set_dat_cell(path, nc=3, row=7, column=2, value=-math.inf)
+
+    column = dat_mod.read_dat(path, {1, 2, 3}).column(1)
+
+    assert len(column) == 168
+    assert column[0] == 1.0
+    assert column[4] == 5.0
+    assert column[5] is None
+    assert column[6] is None
+    assert column[7] is None
+    assert column[8] == 9.0
+    assert column[167] == 168.0
+
+
+def test_all_nonfinite_row_and_column_keep_source_positions(
+    tmp_path: Path,
+) -> None:
+    path = write_dat(tmp_path / "all-null.dat", column_ids=IDS_1_TO_5)
+    for column in range(1, 6):
+        _set_dat_cell(path, nc=5, row=0, column=column, value=math.nan)
+    for row in range(168):
+        _set_dat_cell(path, nc=5, row=row, column=1, value=-math.inf)
+
+    datfile = dat_mod.read_dat(path, AUTHORITY_1_TO_5)
+
+    assert datfile.row(0) == (None, None, None, None, None)
+    assert datfile.column(1) == tuple(None for _ in range(168))

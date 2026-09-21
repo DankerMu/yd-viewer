@@ -39,12 +39,13 @@ interface TooltipParam {
   axisValue?: string | number
   marker?: string
   seriesName?: string
-  value?: number | string | Array<number | string>
+  value?: number | string | null | Array<number | string | null>
 }
 
-function tooltipValue(param: TooltipParam) {
-  if (Array.isArray(param.value)) return Number(param.value[1])
-  return Number(param.value)
+function tooltipValue(param: TooltipParam): number | null {
+  const raw = Array.isArray(param.value) ? param.value[1] : param.value
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null
+  return raw
 }
 
 function tooltipFormatter(params: TooltipParam | TooltipParam[]) {
@@ -54,7 +55,7 @@ function tooltipFormatter(params: TooltipParam | TooltipParam[]) {
   const lines = [`时间: ${timeLabel}`]
   items.forEach((param) => {
     const value = tooltipValue(param)
-    if (!Number.isFinite(value)) return
+    if (value === null) return
     lines.push(`${param.marker ?? ''}${param.seriesName ?? 'series'}: ${value.toFixed(2)} m³/s`)
   })
   return lines.join('\n')
@@ -63,7 +64,7 @@ function tooltipFormatter(params: TooltipParam | TooltipParam[]) {
 export function ForecastChart({ data }: ForecastChartProps) {
   const packed = useMemo(() => {
     if (!data) return null
-    const series: Array<{ source: ForecastSource; values: number[] }> = []
+    const series: Array<{ source: ForecastSource; values: Array<number | null> }> = []
     for (const source of SOURCE_ORDER) {
       const values = data.series[source]
       if (values && values.length > 0) series.push({ source, values })
@@ -120,6 +121,7 @@ export function ForecastChart({ data }: ForecastChartProps) {
         id: entry.source,
         smooth: true,
         showSymbol: false,
+        connectNulls: false,
         data: entry.values,
         lineStyle: {
           width: 2.5,
