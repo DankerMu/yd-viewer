@@ -158,6 +158,8 @@ run MUST 经作业执行器抽象为每源提交至多一个作业；提交参�
 
 客户端 timeout 只证明 submit/query 调用没有及时返回，MUST NOT 伪造 `JobState.TIMEOUT`。若发生在 submit，controller 产生保留该 `ExecutorError` 为 cause 的 `RunError(phase="submit", job_id=None)`；若发生在普通 poll，产生 `RunError(phase="poll", job_id=<已知 job>)`。两者都必须保留 exact work、零 ExitCode provider/finalizer/collect/publish/DONE。若调度器已明确返回 terminal `FAILED/TIMEOUT`，但随后 ExitCode `sacct` 客户端 timeout，则产生绑定同一 job ID 的 `RunError(phase="cleanup")`，保留 work 与已在 scratch 的 job log，零失败日志提交/删除。三者都终止本源 worker并经 `RunSourcesError` 聚合，兄弟 source 继续到自己的结局，且均不自动重试。由于 `sbatch` timeout 可能发生在服务端已接收之后，下一 tick 仍由无 DONE work 的人工闸保护，不得自动删除重提。
 
+`sbatch` 成功后 Slurm accounting 有数秒滞后，此窗口内普通轮询 `sacct -j <id> -X` 返回 0 行。执行器 MUST 只在注入时钟的当前时刻距该作业 `submitted_at` 不超过 120 s（模块常量，不进 `Config`/`LocalConfig`、`JobSpec.resources` 或任何 argv）时把「0 个非空行」视为 accounting 滞后：返回该作业已有记录，状态保持 `PENDING`，`started_at`/`ended_at` 不变，不替换已落库记录，由既有 poll 间隔继续重查。超过 120 s 仍 0 行、或任何时刻出现多行，MUST 照旧经 `parse_sacct_record` fail closed 为同 job ID 的 `ExecutorError`，进而由 controller 产生 `RunError(phase="poll")` 停源保留 work。放宽只针对行数为 0，MUST NOT 放宽未知状态串、空字段或 JobID 串台的拒绝，也 MUST NOT 伪造任何状态或时间。
+
 #### Scenario: job 身份进入运行报告
 - **WHEN** fake executor 返回 job ID 与终态，完成一轮双源 run
 - **THEN** 运行报告含两源各自的 job ID、partition、终态与起止时间
@@ -197,6 +199,14 @@ run MUST 经作业执行器抽象为每源提交至多一个作业；提交参�
 #### Scenario: 三条 Slurm 命令共享一个客户端时限
 - **WHEN** 生产装配以显式非默认 `command_timeout_seconds` 分别执行 sbatch、普通 sacct 与失败 ExitCode sacct
 - **THEN** 三次底层 subprocess 调用的 `timeout` 均逐字等于该配置值，且 `JobSpec.resources`/sbatch argv 中不含 `command_timeout_seconds`
+
+#### Scenario: 提交后 120 s 内 sacct 0 行视为 accounting 滞后
+- **WHEN** 作业已提交，注入 runner 的首两次普通轮询 `sacct` 返回空 stdout，第三次返回 `<id>|RUNNING|<start>|Unknown`，且三次轮询的注入时钟均在 `submitted_at + 120 s` 之内（含恰好 120 s）
+- **THEN** 前两次 `poll` 返回状态仍为 `PENDING`、`started_at`/`ended_at` 为 `None` 的既有记录，执行器内部记录未被替换；第三次返回 `RUNNING` 与解析出的 `started_at`；全过程无 `ExecutorError`，sacct argv 与 sbatch argv 不变
+
+#### Scenario: 超过宽限或多行仍 fail closed
+- **WHEN** 注入时钟使空 stdout 的轮询发生在 `submitted_at + 121 s`，或在窗口内任一次轮询返回 2 个非空行
+- **THEN** `poll` 抛出绑定同一 job ID 的 `ExecutorError`，措辞与 `parse_sacct_record` 既有的「期望恰好 1 行记录，实际 N 行」一致，不伪造状态或时间；`parse_sacct_record` 对 0 行的直接调用行为与措辞不变
 
 ### Requirement: 并发与锁
 run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过不排队；锁 MUST 覆盖发现、提交、等待、发布、清理全生命周期。IFS/GFS 最多各一个作业并行。`cron.lock_path` MUST 是绝对路径：相对路径与 `~` 前缀（`Path` 不展开 `~`）MUST 在创建锁文件之前 fail closed，报错 MUST 指名 `cron.lock_path`。
