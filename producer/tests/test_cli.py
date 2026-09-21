@@ -383,8 +383,11 @@ def test_prepare_with_executable_interpreter_reaches_real_builder(capsys, tmp_pa
 
     checkout = tmp_path.resolve() / "nwm" / "checkout"
     checkout.mkdir(parents=True)
+    # canonical 根同样要过 invoke 预检，否则这条用例会停在 ConfigError 上，永远走不到 driver。
+    canonical = tmp_path.resolve() / "nwm" / "canonical"
+    canonical.mkdir(parents=True)
     write_baseline_package(tmp_path / "baseline")
-    argv = _prepare_argv(tmp_path, checkout_root=checkout)
+    argv = _prepare_argv(tmp_path, checkout_root=checkout, canonical_root=canonical)
     record = tmp_path.resolve() / "record.json"
     yd_root = tmp_path.resolve() / "yd"
 

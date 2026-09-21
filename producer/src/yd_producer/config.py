@@ -156,9 +156,14 @@ class Config:
 
 @dataclass(frozen=True, kw_only=True)
 class NwmLocal:
-    """NWM raw 根、checkout 根与解释器路径（compute-loop §5）。"""
+    """NWM raw 根、object-store canonical 根、checkout 根与解释器路径（compute-loop §5）。
+
+    `canonical_root` 是 NWM object-store 的 canonical 根，仅 prepare 读，是 grid.json
+    的唯一权威（compute-loop §6.1 step 4）；它与 `checkout_root` 互不推导、互不回退。
+    """
 
     raw_root: str
+    canonical_root: str
     checkout_root: str
     python: str
 
@@ -511,6 +516,7 @@ def load_config(path: str | os.PathLike[str]) -> Config:
 def _build_nwm(table: Mapping[str, Any]) -> NwmLocal:
     return NwmLocal(
         raw_root=_require_str(table, "raw_root", "nwm"),
+        canonical_root=_require_str(table, "canonical_root", "nwm"),
         checkout_root=_require_str(table, "checkout_root", "nwm"),
         python=_require_str(table, "python", "nwm"),
     )

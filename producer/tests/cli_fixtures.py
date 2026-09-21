@@ -63,6 +63,7 @@ shud_binary = {shud_binary}
 
 [nwm]
 raw_root = {raw_root}
+canonical_root = {canonical_root}
 checkout_root = {checkout_root}
 python = {python}
 
@@ -139,6 +140,7 @@ def write_local(
     tmp_path: Path,
     *,
     yd_root: Path | str | None = None,
+    canonical_root: Path | str | None = None,
     checkout_root: Path | str | None = None,
     python: Path | str | None = None,
     name: str = "local.toml",
@@ -154,6 +156,9 @@ def write_local(
         "scratch_root": root / "scratch",
         "shud_binary": root / "bin" / "shud",
         "raw_root": root / "nwm" / "raw",
+        "canonical_root": root / "nwm" / "canonical"
+        if canonical_root is None
+        else canonical_root,
         "checkout_root": root / "nwm" / "checkout"
         if checkout_root is None
         else checkout_root,

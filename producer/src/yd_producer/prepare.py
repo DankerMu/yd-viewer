@@ -395,8 +395,9 @@ def _reject_unsupported_physics(baseline_root: Path) -> None:
 def default_builder(local: LocalConfig, request: VariantBuildRequest) -> None:
     """生产 builder：以绑定的 local 调用固定 NWM 解释器与随包 driver。
 
-    解释器/checkout 预检失败抛 `ConfigError`（零 runner 调用）。子进程非零退出保留
-    实际 stderr，包装为 `PrepareError`。
+    解释器/checkout/canonical 根预检失败抛 `ConfigError`（零 runner 调用）。子进程非零
+    退出保留实际 stderr，包装为 `PrepareError`。grid.json 的权威根以 `--canonical-root`
+    显式交给 driver（compute-loop §6.1 step 4），driver 不从 cwd 或环境推断。
     """
     from yd_producer.nwm import invoke_mapping_builder
 
@@ -411,6 +412,8 @@ def default_builder(local: LocalConfig, request: VariantBuildRequest) -> None:
             str(request.baseline_root),
             "--output",
             str(request.variant_root),
+            "--canonical-root",
+            local.nwm.canonical_root,
         ),
     )
     if completed.returncode == 0:

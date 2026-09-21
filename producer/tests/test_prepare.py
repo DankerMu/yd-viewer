@@ -820,31 +820,38 @@ def test_default_builder_invokes_packaged_driver_with_bound_local(env, monkeypat
     assert "--grid-id" in args and "fixture-grid-gfs" in args
     assert str(env.package.root) in args
     assert str(env.scratch_root / "gfs") in args
+    # grid.json 的权威根只经这一个显式 flag 交给 driver（compute-loop §6.1 step 4）。
+    assert args[args.index("--canonical-root") + 1] == env.local.nwm.canonical_root
 
 
+@pytest.mark.parametrize("field", ["checkout_root", "canonical_root"])
 @pytest.mark.parametrize("case", ["missing", "non-directory"])
-def test_run_prepare_preserves_checkout_config_error(env, monkeypatch, tmp_path, case):
-    """Public run_prepare keeps checkout ConfigError and does not start a process."""
+def test_run_prepare_preserves_checkout_config_error(
+    env, monkeypatch, tmp_path, case, field
+):
+    """Public run_prepare keeps the NWM root ConfigError and starts no process.
+
+    `canonical_root` 用例必须先把解释器与 checkout 换成合法值，否则会停在更早的
+    checkout 预检上、点名错的字段。`checkout_root` 用例刻意保留 env 里并不存在的
+    canonical 根：真要把 canonical 预检排到 checkout 之前，这两条就会点名 canonical。
+    """
     interpreter = write_fake_interpreter(
         tmp_path / "fake-python", tmp_path / "record.json"
     )
-    checkout = tmp_path / "invalid-checkout"
+    valid_checkout = tmp_path / "valid-checkout"
+    valid_checkout.mkdir()
+    invalid = tmp_path / f"invalid-{field}"
     if case == "non-directory":
-        checkout.write_text("not a checkout directory\n", encoding="utf-8")
-    local = replace(
-        env.local,
-        nwm=replace(
-            env.local.nwm,
-            python=str(interpreter),
-            checkout_root=str(checkout),
-        ),
-    )
+        invalid.write_text("not a directory\n", encoding="utf-8")
+    overrides = {"python": str(interpreter), "checkout_root": str(valid_checkout)}
+    overrides[field] = str(invalid)
+    local = replace(env.local, nwm=replace(env.local.nwm, **overrides))
     before = tree_snapshot(env.yd_root)
     runner_calls: list = []
 
     def forbidden_runner(*args, **kwargs):
         runner_calls.append(args)
-        raise AssertionError("invalid checkout reached process execution")
+        raise AssertionError("invalid NWM root reached process execution")
 
     real_invoke = nwm.invoke_mapping_builder
 
@@ -864,7 +871,7 @@ def test_run_prepare_preserves_checkout_config_error(env, monkeypatch, tmp_path,
             builder=None,
         )
 
-    assert captured.value.path == "nwm.checkout_root"
+    assert captured.value.path == f"nwm.{field}"
     assert runner_calls == []
     assert tree_snapshot(env.yd_root) == before
     assert tree_snapshot(env.scratch_root) == {}

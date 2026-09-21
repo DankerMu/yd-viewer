@@ -1,4 +1,10 @@
-"""Prepare-only NWM library driver. Runs under the pinned NWM interpreter."""
+"""Prepare-only NWM library driver. Runs under the pinned NWM interpreter.
+
+The grid definition authority is the NWM object-store canonical root handed in as
+`--canonical-root` (compute-loop §6.1 step 4): `grid.json` comes only from that root,
+while `grid_snapshot_metadata.json` comes only from the checkout this script runs in.
+The two roots never substitute for each other.
+"""
 
 from __future__ import annotations
 
@@ -170,12 +176,26 @@ def _copy_native_files(baseline: pathlib.Path, output: pathlib.Path) -> None:
 
 
 def _grid_paths(
-    checkout: pathlib.Path, source: str, grid_id: str
+    canonical_root: pathlib.Path, checkout: pathlib.Path, source: str, grid_id: str
 ) -> tuple[pathlib.Path, pathlib.Path, str]:
+    """grid.json from the object-store canonical root, metadata from the checkout.
+
+    compute-loop §6.1 step 4: the object-store grid.json is byte-identical to the grid
+    the runtime converter writes, the checkout snapshot is not; only the checkout holds
+    `grid_snapshot_metadata.json`. `uri` stays the canonical object key.
+    """
     physical = _SOURCE_GRID_DIR[source]
     uri = f"canonical/{physical}/grid/{grid_id}/grid.json"
-    directory = checkout / "canonical" / physical / "grid" / grid_id
-    return directory / "grid.json", directory / "grid_snapshot_metadata.json", uri
+    grid_json = canonical_root / physical / "grid" / grid_id / "grid.json"
+    metadata = (
+        checkout
+        / "canonical"
+        / physical
+        / "grid"
+        / grid_id
+        / "grid_snapshot_metadata.json"
+    )
+    return grid_json, metadata, uri
 
 
 def _used_cells_for_sampler(used_cells) -> tuple[UsedCell, ...]:
@@ -228,10 +248,17 @@ def _write_handoff(
 
 
 def build_variant(
-    *, source: str, grid_id: str, baseline: pathlib.Path, output: pathlib.Path
+    *,
+    source: str,
+    grid_id: str,
+    baseline: pathlib.Path,
+    output: pathlib.Path,
+    canonical_root: pathlib.Path,
 ) -> None:
     if source not in _SOURCES:
         _fail(f"source must be gfs or ifs, got {source!r}")
+    if not canonical_root.is_absolute():
+        _fail(f"canonical_root must be an absolute path: {canonical_root}")
     baseline = _require_directory(baseline, "baseline")
     output = _require_directory(output, "output")
     leftover = [name for name in os.listdir(output) if name not in {".", ".."}]
@@ -247,9 +274,9 @@ def build_variant(
     )
 
     checkout = pathlib.Path.cwd()
-    grid_json, metadata, uri = _grid_paths(checkout, source, grid_id)
-    _require_file(grid_json, "canonical grid.json")
-    _require_file(metadata, "canonical grid_snapshot_metadata.json")
+    grid_json, metadata, uri = _grid_paths(canonical_root, checkout, source, grid_id)
+    _require_file(grid_json, "canonical_root grid.json")
+    _require_file(metadata, "checkout grid_snapshot_metadata.json")
     model_crs_wkt = verify_package_crs(baseline).wkt
 
     record = read_input_record(
@@ -350,6 +377,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--grid-id", required=True)
     parser.add_argument("--baseline", required=True, type=pathlib.Path)
     parser.add_argument("--output", required=True, type=pathlib.Path)
+    parser.add_argument("--canonical-root", required=True, type=pathlib.Path)
     return parser.parse_args(argv)
 
 
@@ -361,6 +389,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             grid_id=args.grid_id,
             baseline=args.baseline,
             output=args.output,
+            canonical_root=args.canonical_root,
         )
     except (
         PrepareDriverError,
