@@ -212,7 +212,7 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 - forcing 与 SHUD 重任务都在 Slurm 作业内执行，不在登录节点直接计算；
 - 同源最多一个 job，IFS/GFS 最多各一个；
 - 只通过 yd CLI 提交，避免手拼 `sbatch` 参数；
-- 普通轮询用 `sacct` 读取 job ID/state/start/end，不取 `ExitCode`；仅在同一 yd job 已终态 `FAILED`/`TIMEOUT` 后，由失败收尾 provider 单独执行一次 `sacct -j <job_id> -X -n -P --format=ExitCode`，所得字符串进入失败日志；
+- 普通轮询用 `sacct` 读取 job ID/state/start/end，不取 `ExitCode`；提交后 120 s 内 `sacct` 返回 0 行按 accounting 滞后视为仍 PENDING 继续轮询（compute-loop §10），超窗仍 0 行或任何多行照旧 fail closed；仅在同一 yd job 已终态 `FAILED`/`TIMEOUT` 后，由失败收尾 provider 单独执行一次 `sacct -j <job_id> -X -n -P --format=ExitCode`，所得字符串进入失败日志；
   - `-X`（`--allocations`）不可省：它和普通轮询一样只选 job allocation，排除 `.batch` / `.extern` 等 step；不能在解析器里取首行、去重或猜 allocation。即使带 `-X` 仍出现多非空行，也按查询失败保留 work。
 - 取消必须使用本次 yd receipt 中的精确 job ID；禁止 `scancel -u`、名称通配或模糊匹配；
 - 不为未观察到的作业卡死编写 watchdog；walltime 属 Slurm 作业配置，异常由日志和人工操作处理；
@@ -505,7 +505,7 @@ node-22（`frd_muziyao@210.77.77.22`）：
 | `cron.log_dir` | `/scratch/frd_muziyao/yd/logs` |
 | receipts | `/scratch/frd_muziyao/yd/receipts/` |
 | `shud_binary` | 见 15.1 |
-| `[nwm]` | `raw_root=/ghdc/data/nwm/object-store/raw`、`checkout_root=/scratch/frd_muziyao/NWM`、`python=/scratch/frd_muziyao/NWM/.venv/bin/python` |
+| `[nwm]` | `raw_root=/ghdc/data/nwm/object-store/raw`、`canonical_root=/ghdc/data/nwm/object-store/canonical`（grid.json 权威，2026-09-21 首轮 run 实证）、`checkout_root=/scratch/frd_muziyao/NWM`、`python=/scratch/frd_muziyao/NWM/.venv/bin/python` |
 | `[slurm]` | `partition=CPU`、`account=friends`、`cpus=4`、`memory=8G`、`walltime=02:00:00`；`command_timeout_seconds` 取默认 60 |
 | cron | `17 * * * *`，行形态按 §8.2 |
 | `prepare --baseline` | `/ghdc/data/yd/input/yd`（原地，不复制） |
@@ -519,4 +519,9 @@ node-22（`frd_muziyao@210.77.77.22`）：
 
 ### 15.4 执行登记
 
-（按步追记：clone commit、prepare、init、run、权限、cron 各一行，含 receipt 文件名。）
+receipt 目录 `/scratch/frd_muziyao/yd/receipts/`；每行一步，失败也登记。
+
+- 2026-09-21 阶段 2 环境落地：checkout `e0561b3`，uv Python 3.12.13（`/scratch/frd_muziyao/.local/share/uv/python/…`），pytest 3729 passed / 4 skipped，`local.toml` 装载正反验证，锁 `~/yd-run/yd-producer.lock`（ext4）。`m4-stage2-env-20260921.md`。
+- 2026-09-21 阶段 3 prepare：第 1 次因真实 `yd.cfg.ic` 的 river 段前导行被解析器拒绝（#305 → PR #306）；第 2 次（checkout `e61917e`）成功，四终名齐全，无 staging 残留。`m4-stage3-prepare-attempt1-20260921.md`、`m4-stage3-prepare-20260921.md`。`output/` 由人工 `mkdir -m 755` 预建（run 要求预存在）。
+- 2026-09-21 阶段 4 init：两源首轮 T=2026091412，`states/{gfs,ifs}/2026091412.cfg.ic`。`m4-stage4-init-20260921.md`。
+- 2026-09-21 阶段 5 run attempt 1：双源停止、零发布。ifs：sacct 提交后 0 行 → poll fail closed（A）；作业 52756 因 grid_signature 不一致 FAILED（B：prepare 用 checkout grid.json，运行期用 object-store grid）；gfs：apcp 缺 `idx_selector`（C：manifest v3 形态）。裁决 A/B/C/D 见 `m4-stage5-run1-20260921.md`；本节 §15.2 已按 B 增 `canonical_root`。修复合并后按 D 清理 `input/models`、`input/viewer`、`states`、失败 work，重跑 prepare → init → run。

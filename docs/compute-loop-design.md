@@ -167,7 +167,7 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 
 - `yd_root`；
 - `scratch_root`；
-- `[nwm]`：`raw_root`（NWM raw 根）、`checkout_root` 与 `python`（NWM checkout/解释器，仅 prepare）；
+- `[nwm]`：`raw_root`（NWM raw 根）、`canonical_root`（NWM object-store 的 canonical 根，仅 prepare 读 grid 定义）、`checkout_root` 与 `python`（NWM checkout/解释器，仅 prepare）；四键都必需，缺一即 `ConfigError`；
 - `shud_binary`；
 - `[slurm]`：`partition`、`account`、`cpus`、`memory`、`walltime`——键集必须与 `config.toml` 的 `slurm.required_fields` 完全相等，多一项或少一项都拒绝；装载后以 `MappingProxyType` 只读资源映射暴露，调用方不得改写；
 - `[slurm].command_timeout_seconds`：每次 `sbatch`/`sacct` 客户端子进程的正整数秒时限，缺席时版本化默认 60；它从资源映射剥离，不是作业 walltime；
@@ -217,7 +217,7 @@ yd-producer run --config <path> --local <path>
 1. 运行根预检后先枚举 `YD_ROOT` 顶层：若存在任一名字以 `prepare._STAGING_PREFIX` 开头的条目，按排序列出全部路径并拒绝；不跟随、不按类型/PID/mtime分流，不自动删除或回收；
 2. 检查本次将要写的**全部四个终名**——两个变体目录（路径取自 `config.toml` 的 `variants.gfs`/`variants.ifs`，相对 `yd_root`）与两份 viewer GeoJSON `input/viewer/rivers.geojson`、`input/viewer/boundary.geojson`——均不存在；任一存在即拒绝，不提供覆盖参数。被检查的路径与提交时实际写入的路径必须同源计算；
 3. 在既有 prepare scratch 中，用固定 NWM 解释器执行 yd 的薄 driver，直接复用 NWM 的文件网格读取、mapping、FORC 重写、Z sampler 和 binding 库；不调用只输出 resolution 的 CLI，不引入 NWM DB/审批/evidence/rollback 平台；
-4. 按各 source 的已有 grid 文件生成真实 binding 和 rewritten `yd.sp.att`，写出 §5.1 的 v2 handoff；身份只由 builder 一次声明，日常 run 不推导；
+4. 按各 source 的 grid 定义生成真实 binding 和 rewritten `yd.sp.att`，写出 §5.1 的 v2 handoff；身份只由 builder 一次声明，日常 run 不推导。grid 定义的权威是 **NWM object-store 的 canonical grid**：`grid.json` 取自 `local.nwm.canonical_root/<SRC>/grid/<grid_id>/grid.json`（`<SRC>` 用 pin 的存储目录名 `gfs`/`IFS`），它与运行期 yd 转换器写出的 canonical grid 逐字节相同，binding 的格点索引才能与 forcing 产物一致；`grid_snapshot_metadata.json`（download bbox、valid_from）仍取 NWM checkout `canonical/<SRC>/grid/<grid_id>/` 的快照。2026-09-21 现场实证：checkout 内的 `grid.json` 是纬度升序的仓内快照，object-store 与运行期产物为纬度降序，二者签名不同，worker 的 grid_signature 校验会在首个作业拒绝；prepare MUST NOT 再从 checkout 读 `grid.json`；
 5. 两个完整变体固定携带 `yd.cfg.ic`、`yd.cfg.para`、`yd.cfg.calib`、`yd.sp.mesh`、`yd.sp.att`、`yd.sp.riv`、`yd.sp.rivseg`、`yd.para.lc`、`yd.para.soil`、`yd.para.geol`、`yd.tsd.lai`、`yd.tsd.mf`，加 binding/handoff 共 14 文件。当前仅支持无湖泊/无外部 BC 的 yd 模型；prepare 一次性拒绝非零 BC/SS/LAKE，不建设条件资产框架。仍检查顶层率定态唯一并保留四终名事务；
 6. baseline 目录直接包含 `yd.*` 与 `gis/`，从实际 `gis/river.shp` 与 `gis/domain.shp` 生成 EPSG:4326 的 `rivers.geojson` 与 `boundary.geojson`；
 7. 把校验通过的产物搬运到 `YD_ROOT` 之内的本次专属 staging 位置（按发布权限新建条目，不把计算节点的 uid/gid/mode 带进 NFS），再逐个 rename 到四个终名——rename 的源与终名必须同一文件系统，故不能直接把 scratch 目录 rename 过去（scratch 在计算节点本地盘、`YD_ROOT` 在 NFS）；
@@ -270,6 +270,8 @@ native `yd.cfg.para` 必须使用 stock SHUD 可读的 `KEY<TAB>number`，不能
 ### 7.2 临时 raw manifest
 
 完整后，控制器以 `<work>/object-store` 作为 `rawcopy.stage_raw` 的 staging root，把 manifest 声明的本轮 raw 文件复制到 `<work>/object-store/raw/`，并生成 `<work>/object-store/raw-manifest.json`。这样 manifest 的 `raw/...` object key、canonical/forcing 产物与本轮临时 model registry 共用 `<work>/object-store` 这一棵 `LocalObjectStore`；`stage_raw` 自身仍只承诺写到调用方给定 root 下的 `raw/`。manifest 包含 converter 所需的 source、cycle、forecast hours、变量与 GRIB filter 信息，entry 路径只引用该 root 下的临时副本。控制器复制前后均不修改 NWM NFS 原件。
+
+累积量（当前只有 GFS `apcp`）的累积语义必须落到临时 manifest 每条 entry 的单数 `idx_selector` 子 Mapping（`accumulation_type` ∈ {`cumulative_since_cycle`, `interval_bucket`}，后者另带 `step_range`），供 converter 消费。来源分两种：源 manifest 的 entry 已带 `idx_selectors`/`idx_selector`（pin 形态）时原样承接；源 manifest 没有（NWM `gfs-idx-selector-v3` 起，选择结果只体现在下载到的 bundle 里，manifest 只在顶层 `source_policy.apcp_selector_policy` 记策略）时，staging 以 eccodes 只读打开该 bundle、枚举该变量的 GRIB 记录并按 `stepRange` 自证：恰一条记录且 `stepRange` 为 `0-<lead>` → `cumulative_since_cycle`；恰一条记录但起点不为 0 → `interval_bucket` + `step_range`；零条、多条或对不上 lead 的一律 `RawStagingError`。MUST NOT 从策略字符串或默认值推断。2026-09-21 现场实证：GFS 每个 lead 的 bundle 恰含一条 `tp`，`stepRange` 均为 `0-N`。IFS 的 `tp`/`ssr`/`str` 不在本闸门内（既有已知限制不变）。
 
 ### 7.3 DB-free 日常链
 
@@ -391,6 +393,8 @@ cron 每小时调用 `yd-producer run --config <path> --local <path>` 的非阻�
 raw 一次补齐多轮时按时序全补；中间永久缺轮时停在缺口，运维人员补齐原始资料后自动继续。不自动跳过 cycle。
 
 Slurm 的 partition/account/资源/walltime 来自 `local.toml`。同一表的 `command_timeout_seconds` 只限制每次 `sbatch`、轮询 `sacct` 和失败 ExitCode `sacct` 客户端子进程，缺席时版本化默认 60 秒；它不限制 Slurm 作业运行时长，也不重试或取消作业。客户端 timeout 转为 `ExecutorError`：controller 保留 exact work、停止本源，兄弟源继续；不得伪造 `JobState.TIMEOUT`、执行失败 finalizer 或自动重提，因为 `sbatch` 服务端可能已经接收。下一 tick 看到无 `DONE` 的 work 仍按人工闸停源。不为尚未出现的作业卡死增加 CLI watchdog；人工取消时只能按本次 receipt 记录的 yd job ID 操作，不得模糊匹配或取消 NWM 作业。
+
+`sbatch` 成功后 Slurm accounting 有数秒滞后，此窗口内 `sacct -j <id> -X` 返回 0 行（2026-09-21 现场实证）。轮询对「0 行」只在 `submitted_at` 起 120 s 内放宽：记录保持 PENDING、不更新 start/end，继续按 poll 间隔重查；超过 120 s 仍 0 行、或任何时刻出现多行，照旧 fail closed 停源保留 work。放宽只针对行数为 0，不改变未知状态串与空字段的拒绝。
 
 ## 11. 发布、崩溃恢复与幂等
 
