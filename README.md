@@ -9,4 +9,4 @@
 - producer/viewer 文件契约：[docs/products-contract.md](docs/products-contract.md)
 - 节点登录、部署与验证纪律：[docs/agent-ops.md](docs/agent-ops.md)
 
-状态：方案已定稿，尚未开始实现。里程碑见 [docs/design.md §10](docs/design.md#10-里程碑)。
+状态：M1 文档、M2 producer、M3 viewer 已完成并归档；当前进行 M4 node-22 真计算（现场登记见 [docs/agent-ops.md §15](docs/agent-ops.md#15-m4-部署登记node-22-主线-producer)）。里程碑见 [docs/design.md §10](docs/design.md#10-里程碑)。

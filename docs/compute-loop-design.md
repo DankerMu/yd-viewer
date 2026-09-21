@@ -167,11 +167,11 @@ raw 根和精确 source 路径由 `local.toml` 指定，代码不写死账户路
 
 - `yd_root`；
 - `scratch_root`；
-- NWM raw 根和 NWM checkout/解释器（仅 prepare）；
-- SHUD 二进制；
-- Slurm partition、account、CPU、内存和 walltime；装载后以 `MappingProxyType` 只读资源映射暴露，调用方不得改写；
+- `[nwm]`：`raw_root`（NWM raw 根）、`checkout_root` 与 `python`（NWM checkout/解释器，仅 prepare）；
+- `shud_binary`；
+- `[slurm]`：`partition`、`account`、`cpus`、`memory`、`walltime`——键集必须与 `config.toml` 的 `slurm.required_fields` 完全相等，多一项或少一项都拒绝；装载后以 `MappingProxyType` 只读资源映射暴露，调用方不得改写；
 - `[slurm].command_timeout_seconds`：每次 `sbatch`/`sacct` 客户端子进程的正整数秒时限，缺席时版本化默认 60；它从资源映射剥离，不是作业 walltime；
-- cron lock 与日志位置；其中 lock 必须是 node-22 本地文件系统上的专属长期哨兵路径，不能放在任何 NFS 挂载或清理根内。
+- `[cron]`：`lock_path`（cron lock）与 `log_dir`（日志位置）；其中 lock 必须是 node-22 本地文件系统上的专属长期哨兵路径，不能放在任何 NFS 挂载或清理根内。
 
 `yd_root` 在每份 `LocalConfig` 构造（含 `load_local`）时先检查绝对路径拼写，再以 `Path.resolve(strict=False)` 解析一次；同名字段只保存 canonical `Path`，成为 prepare/init/run、清理与发布的唯一根权威。根自身或祖先的合法 symlink 别名可接受；装载后改指向原别名不改变该配置的运行根，消费侧不得重新解析别名。相对路径、`~` 拼写或解析失败均以 `ConfigError(path="yd_root")` 拒绝；装载不要求根已存在，也不创建目录。这是 #110 用户裁决对 #32 归属账的明确增量，其它现场路径的域与归属不变。根内链接与 canonical 路径被替换成链接仍受既有 safe_fs no-follow 闸门约束，不授权放宽它。
 

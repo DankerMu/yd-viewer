@@ -70,7 +70,7 @@ NWM 当前物理角色必须牢记：
 - node-27 是 NWM active production host，运行 PG `:55432`、下载、ingest、display API `:8080` 和前端；
 - node-22 是 NWM 计算/Slurm host，不是活数据库 writer；本机 `:55433` 已归档停用，**不要连接**；
 - node-22 上 NWM checkout 为 `/scratch/frd_muziyao/NWM`；node-27 上为 `/home/nwm/NWM`；
-- yd checkout 的远端实际路径在部署清单中记录，不在代码和本文猜测。操作前先确认路径与 commit。
+- yd checkout 的远端实际路径在 §15「M4 部署登记」中记录，不在代码中猜测。操作前先确认路径与 commit。
 
 ## 4. 存储与可见性
 
@@ -195,8 +195,8 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 
 ### 8.2 cron 与 flock
 
-- cron 只调用 `run`；
-- 使用非阻塞 `flock -n`，已有实例时本 tick 跳过；
+- cron 只调用 `run`，且直接调用 checkout 内 `producer/.venv/bin/yd-producer`；不用裸 `uv run`（每 tick 隐式 sync，违反 §7.1），如需 uv 入口只允许 `uv run --frozen --no-sync`；crontab 顶部须设 `PATH=` 包含 `sbatch`/`sacct` 所在目录（cron 默认 PATH 没有 Slurm 客户端）；
+- 非阻塞 `flock -n` 语义由 CLI 自身的 `runlock` 在 `cron.lock_path` 上提供，已有实例时本 tick 跳过；cron 行**不得**再套外层 `flock -n` 同一文件——外层持有的 open file description 会让 CLI 内部的第二次 `flock` 永远拿不到锁，每 tick 静默跳过；
 - 锁覆盖发现、Slurm 提交、等待、NFS 发布和清理的完整生命周期；
 - 手工 `run` 使用同一把锁，不能绕开；
 - `cron.lock_path` 必须位于 node-22 本地文件系统的专属 `run/` 目录，不得位于 yd/NWM NFS 或其它网络、共享挂载。部署时必须按该路径的实际挂载信息确认并写入 receipt，不能按路径前缀或 hostname 猜测；Linux 在 NFS 上会把 `flock` 仿真为整文件 byte-range lock，本项目依赖的 per-open-file-description 判别前提在那里不成立；
@@ -475,3 +475,48 @@ node-22（`frd_muziyao@210.77.77.22`）：
 - scheduler 回看窗保持 96h（用户裁决）：更老的已拷 raw 只作存档，不会被计算；
 - 首轮全链（cycle 2026082712 双源）≈10–11 min/cycle，state index 已闭合（entry_count 4）；
 - 已知偏差：`AUTOPIPE_MVT_PREWARM_ENABLED=0`（prewarm 会打 `:8080`，属只读越界，已关）。Slurm job-name 偏差已于当日修复（patch 5）。
+
+## 15. M4 部署登记（node-22 主线 producer）
+
+本节是 §3 所指的「部署清单」。值来自 2026-09-21 只读勘察（receipt：`/scratch/frd_muziyao/yd/receipts/m4-recon-20260921.md`）与同日用户裁决；现场执行的每一步 receipt 追加到同一目录，并在本节「执行登记」追记。**本节只登记路径、键名与非敏感值，不含任何密钥。**
+
+### 15.1 勘察结论（2026-09-21，只读）
+
+- 文件系统：`/scratch` 是 NFS（`flash:/scratch`），`/users/frd_muziyao` 是登录节点本地 ext4 且与 `/opt` 一起 NFS 导出给计算节点（`showmount -e`），`/ghdc/data` 是 `ghdc:/home/ghdc` NFSv4；
+- NWM raw 根 `/ghdc/data/nwm/object-store/raw/` 下 source 目录名为 `gfs` 与 `IFS`，与 `rawscan.SOURCE_DIR_NAMES` 逐字一致（#53 销账）；每 cycle 目录另含一份 `manifest.json`，不在 bundle 模式内；
+- 基线包 `/ghdc/data/yd/input/yd/`：12 个 native 文件 + `yd.tsd.forc`、`yd.tsd.rl` + `gis/{domain,river,seg}.{shp,shx,dbf,prj}`，顶层恰一个 `yd.cfg.ic`；`.prj` 为 WGS84 基准 Albers 投影，pyproj 转换 accuracy 0.0、非 ballpark（#36 放行）；
+- `/ghdc/data/yd` 为 `frd_muziyao:nwmuser 770`，`input/models`、`input/viewer`、`states`、`output`、`logs` 均不存在，无 `.yd-prepare-staging*` 残留；node-27 `nwm` 属 `nwmuser`（gid 1107），可穿越；
+- NWM checkout `/scratch/frd_muziyao/NWM` HEAD `87236ca5`，包含 pin `8ae9b8f2`，prepare driver 依赖的全部模块自 pin 起零提交；`canonical/{gfs,IFS}/grid/{gfs_0p25,ifs_0p25}/{grid.json,grid_snapshot_metadata.json}` 在 checkout 内；活动解释器 `/scratch/frd_muziyao/NWM/.venv/bin/python` → `/opt/anaconda3/2024.10/bin/python3`（3.12.7）；
+- Slurm：分区 `CPU`（24 节点，MaxTime 10 天）、账户 `friends`；`sacct -j <id> -X` 对已有作业恰 1 行（#60 样本）；`sbatch`/`sacct` 在 `/usr/bin`；
+- SHUD 二进制（用户裁决 2026-09-21）：`/scratch/frd_muziyao/shud-bin/cpu-accel-v1.1.1/shud`，sha256 `4254222b2180de4bc7697f40cc0c8c19a59ef24d2cfdcbd5a6cef6f281914c5e`（OpenMP 版，PROVENANCE 见同目录）；RUNPATH 指向 `/users/frd_muziyao/sundials/lib` 与 `/scratch/frd_muziyao/local/hypre-3.1.0/lib`；
+- 工具链：`uv` 0.11.25 在 `~/.local/bin`（不在默认 PATH）；出网正常；无 crontab；umask 0022；
+- 副本实例 `yd-compute-scheduler.timer` 每 5 min 活动，作业名前缀 `yd_`，与主线 `yd-{source}-{cycle}` 不同前缀。
+
+### 15.2 路径与配置（用户裁决 2026-09-21）
+
+| 项 | 值 |
+|---|---|
+| checkout | `/scratch/frd_muziyao/yd/checkout`（本仓 master） |
+| venv | `<checkout>/producer/.venv`，uv 托管 Python 3.12（默认目录 `~/.local/share/uv/python`，已导出给计算节点），`uv sync --frozen` |
+| `local.toml` | `<checkout>/producer/local.toml`（gitignored，0600） |
+| `yd_root` | `/ghdc/data/yd` |
+| `scratch_root` | `/scratch/frd_muziyao/yd/loop` |
+| `cron.lock_path` | `/users/frd_muziyao/yd-run/yd-producer.lock`（本地 ext4；`~/yd-run/` 即 §8.2 所说的专属目录，home 内只放此一项） |
+| `cron.log_dir` | `/scratch/frd_muziyao/yd/logs` |
+| receipts | `/scratch/frd_muziyao/yd/receipts/` |
+| `shud_binary` | 见 15.1 |
+| `[nwm]` | `raw_root=/ghdc/data/nwm/object-store/raw`、`checkout_root=/scratch/frd_muziyao/NWM`、`python=/scratch/frd_muziyao/NWM/.venv/bin/python` |
+| `[slurm]` | `partition=CPU`、`account=friends`、`cpus=4`、`memory=8G`、`walltime=02:00:00`；`command_timeout_seconds` 取默认 60 |
+| cron | `17 * * * *`，行形态按 §8.2 |
+| `prepare --baseline` | `/ghdc/data/yd/input/yd`（原地，不复制） |
+
+### 15.3 M4 验证口径（用户裁决 2026-09-21）
+
+- 每源至少 2 个连续 cycle SUCCEEDED，且 IFS/GFS 都覆盖 00Z 与 12Z；第二轮 receipt 必须引用第一轮写出的 `<T+12>.cfg.ic`；
+- 「单源失败不影响另一源」、requeue/PREEMPTED/sacct 多行只观察不诱发；未发生时 receipt 写「未行使」；
+- node-27 以 `nwm` 身份实读 `output/<T>/<source>/{yd.rivqdown.dat,DONE}` 与 `input/viewer/*.geojson` 是 M4 出口条件（§10、§12 步骤 4）；
+- 首次 `run` 为积压追赶（7 天窗内全部完整 cycle），在 tmux 内执行，取证窗口为作业运行中（成功后 exact work 即删除）。
+
+### 15.4 执行登记
+
+（按步追记：clone commit、prepare、init、run、权限、cron 各一行，含 receipt 文件名。）
