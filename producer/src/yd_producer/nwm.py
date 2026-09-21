@@ -7,12 +7,19 @@ import select
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from yd_producer._native_input import native_run_paths
+
+# prepare 专用的 builder 调用层已拆到 `_nwm_builder.py`（1000 行文件守卫），此处再导出保持公开路径不变。
+from yd_producer._nwm_builder import (
+    PREPARE_DRIVER_SCRIPT,
+    check_interpreter,
+    invoke_mapping_builder,
+)
 from yd_producer.assemble import RunDirectory, WorkIdentity, stage_work_registry
 from yd_producer.canonical.converter import (
     CanonicalConversionError,
@@ -21,7 +28,6 @@ from yd_producer.canonical.converter import (
     IFSCanonicalConverter,
     IFSCanonicalConverterConfig,
 )
-from yd_producer.config import ConfigError, LocalConfig
 from yd_producer.controller import AttemptProducts, AttemptRequest, PreparedAttempt
 from yd_producer.executor import JobRecord, JobState
 from yd_producer.forcing.bounded_json import BoundedJSONError, load_bounded_json
@@ -73,11 +79,6 @@ __all__ = [
     "invoke_mapping_builder",
 ]
 
-_INTERPRETER_FIELD = "nwm.python"
-_CHECKOUT_FIELD = "nwm.checkout_root"
-_DRIVER_ENV_DROPS = ("DATABASE_URL", "PYTHONHOME")
-
-PREPARE_DRIVER_SCRIPT = Path(__file__).with_name("_nwm_prepare_driver.py")
 POLL_INTERVAL_SECONDS = 10
 
 WORKER_ENTRY = "yd_producer.nwm"
@@ -183,63 +184,6 @@ _CAPTURE_WAIT = 0.05
 
 class ProductionAttemptError(RuntimeError):
     pass
-
-
-def check_interpreter(local: LocalConfig) -> str:
-    configured = local.nwm.python
-    candidate = Path(configured)
-    if not configured or "/" not in configured:
-        raise ConfigError(
-            f"NWM 解释器路径必须是含斜杠的绝对路径：{configured}",
-            _INTERPRETER_FIELD,
-        )
-    if not candidate.is_absolute():
-        raise ConfigError(
-            f"NWM 解释器路径必须是绝对路径：{configured}", _INTERPRETER_FIELD
-        )
-    if not candidate.exists():
-        raise ConfigError(f"NWM 解释器路径不存在：{configured}", _INTERPRETER_FIELD)
-    if not candidate.is_file():
-        raise ConfigError(
-            f"NWM 解释器路径不是普通文件：{configured}", _INTERPRETER_FIELD
-        )
-    if not os.access(candidate, os.X_OK):
-        raise ConfigError(f"NWM 解释器不可执行：{configured}", _INTERPRETER_FIELD)
-    return configured
-
-
-def invoke_mapping_builder(
-    local: LocalConfig,
-    args: Sequence[str] = (),
-    runner: Callable[..., Any] = subprocess.run,
-) -> subprocess.CompletedProcess[Any]:
-    interpreter = check_interpreter(local)
-    checkout_root = local.nwm.checkout_root
-    checkout = Path(checkout_root)
-    if not checkout_root or not checkout.is_absolute():
-        raise ConfigError(
-            f"NWM checkout 必须是绝对目录：{checkout_root}", _CHECKOUT_FIELD
-        )
-    if not checkout.exists():
-        raise ConfigError(f"NWM checkout 不存在：{checkout_root}", _CHECKOUT_FIELD)
-    if not checkout.is_dir():
-        raise ConfigError(f"NWM checkout 不是目录：{checkout_root}", _CHECKOUT_FIELD)
-    if not PREPARE_DRIVER_SCRIPT.is_file():
-        raise ConfigError(
-            f"prepare driver 脚本不存在：{PREPARE_DRIVER_SCRIPT}",
-            _INTERPRETER_FIELD,
-        )
-    env = dict(os.environ)
-    for name in _DRIVER_ENV_DROPS:
-        env.pop(name, None)
-    env["PYTHONPATH"] = checkout_root
-    return runner(
-        [interpreter, str(PREPARE_DRIVER_SCRIPT), *args],
-        cwd=checkout_root,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
 
 
 class ProductionAttemptDriver:

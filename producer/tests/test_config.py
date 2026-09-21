@@ -199,6 +199,7 @@ VALID_LOCAL: dict[str, Any] = {
     "shud_binary": "/fixture/bin/shud",
     "nwm": {
         "raw_root": "/fixture/nwm/raw",
+        "canonical_root": "/fixture/nwm/object-store/canonical",
         "checkout_root": "/fixture/nwm/checkout",
         "python": "/fixture/nwm/.venv/bin/python",
     },
@@ -347,6 +348,7 @@ EXPECTED_LOCAL_A = LocalConfig(
     shud_binary="/fixture/bin/shud",
     nwm=NwmLocal(
         raw_root="/fixture/nwm/raw",
+        canonical_root="/fixture/nwm/object-store/canonical",
         checkout_root="/fixture/nwm/checkout",
         python="/fixture/nwm/.venv/bin/python",
     ),
@@ -372,6 +374,7 @@ EXPECTED_LOCAL_B = LocalConfig(
     shud_binary="/alternate/bin/shud-model",
     nwm=NwmLocal(
         raw_root="/alternate/nwm/raw-store",
+        canonical_root="/alternate/nwm/object-store-canonical",
         checkout_root="/alternate/nwm/checkout-root",
         python="/alternate/nwm/venv/bin/python",
     ),
@@ -397,6 +400,7 @@ VALID_LOCAL_B: dict[str, Any] = {
     "shud_binary": "/alternate/bin/shud-model",
     "nwm": {
         "raw_root": "/alternate/nwm/raw-store",
+        "canonical_root": "/alternate/nwm/object-store-canonical",
         "checkout_root": "/alternate/nwm/checkout-root",
         "python": "/alternate/nwm/venv/bin/python",
     },
@@ -487,6 +491,7 @@ PINNED_LOCAL_KEYS = (
     # tasks.md:96-99 [nwm]
     "nwm",
     "nwm.raw_root",
+    "nwm.canonical_root",
     "nwm.checkout_root",
     "nwm.python",
     # tasks.md:101-107 [slurm]：只钉表本身，资源键集权威在 config
@@ -897,7 +902,7 @@ def _dataclass_leaf_values(value: object, prefix: str = "") -> dict[str, object]
     ("expected_a", "expected_b", "expected_leaf_count"),
     [
         pytest.param(EXPECTED_CONFIG_A, EXPECTED_CONFIG_B, 18, id="config"),
-        pytest.param(EXPECTED_LOCAL_A, EXPECTED_LOCAL_B, 10, id="local"),
+        pytest.param(EXPECTED_LOCAL_A, EXPECTED_LOCAL_B, 11, id="local"),
     ],
 )
 def test_complete_round_trip_expected_leaves_are_distinct(
@@ -2041,6 +2046,7 @@ def test_old_direct_local_construction_keeps_passed_slurm_mapping_and_defaults_t
         shud_binary="/fixture/bin/shud",
         nwm=config_module.NwmLocal(
             raw_root="/fixture/nwm/raw",
+            canonical_root="/fixture/nwm/object-store/canonical",
             checkout_root="/fixture/nwm/checkout",
             python="/fixture/nwm/python",
         ),
@@ -2196,6 +2202,7 @@ def test_replace_non_absolute_yd_root_raises_config_error():
         shud_binary="/fixture/bin/shud",
         nwm=NwmLocal(
             raw_root="/fixture/nwm/raw",
+            canonical_root="/fixture/nwm/object-store/canonical",
             checkout_root="/fixture/nwm/checkout",
             python="/fixture/nwm/.venv/bin/python",
         ),
@@ -2220,6 +2227,7 @@ def test_direct_constructor_accepts_path_and_string_absolute_roots():
         "shud_binary": "/fixture/bin/shud",
         "nwm": NwmLocal(
             raw_root="/fixture/nwm/raw",
+            canonical_root="/fixture/nwm/object-store/canonical",
             checkout_root="/fixture/nwm/checkout",
             python="/fixture/nwm/.venv/bin/python",
         ),

@@ -218,6 +218,7 @@ def make_local(tmp_path: Path | str, *, config: Config) -> LocalConfig:
         shud_binary=str(root / "bin" / "shud"),
         nwm=NwmLocal(
             raw_root=str(root / "nwm" / "raw"),
+            canonical_root=str(root / "nwm" / "canonical"),
             checkout_root=str(root / "nwm" / "checkout"),
             python=str(root / "nwm" / ".venv" / "bin" / "python"),
         ),
