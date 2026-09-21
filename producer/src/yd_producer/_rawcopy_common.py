@@ -63,6 +63,10 @@ STEP_RANGE_KEYS: tuple[str, ...] = ("step_range", "stepRange")
 # 取 `interval_bucket` 时必须一并声明区间范围的那个类型。
 INTERVAL_BUCKET = "interval_bucket"
 
+# `ACCUMULATION_TYPES` 的另一项。承接侧只判「是否在词表内」用不到它，
+# 但 bundle 自证（`_derive_accumulation_selector`）要**写出**这个取值。
+CUMULATIVE_SINCE_CYCLE = "cumulative_since_cycle"
+
 # manifest 级 forecast hours 键。源侧**只强制** `forecast_hours`——它是 converter
 # `_configured_forecast_hours`(:1611-1622) 唯一读的键，缺了会回落到 :1622 的
 # `sorted({entry["forecast_hour"]})`，用「实际有的」当「应该有的」，完整性检查恒为真。

@@ -93,6 +93,7 @@ from yd_producer._rawcopy_metadata import (  # noqa: F401
     _check_accumulation,
     _check_carried_grib_short_names,
     _check_carried_times,
+    _derive_accumulation_selector,
     _entry_instant,
     _load_source_manifest,
     _reject_lossy_forecast_hours,
@@ -236,6 +237,23 @@ def _build_entries(
                     "source-manifest",
                 )
             metadata = _carried_metadata(source_entry, lead, variable, cycle)
+            if (
+                variable in ACCUMULATION_VARIABLES
+                and IDX_SELECTORS_KEY not in metadata
+                and IDX_SELECTOR_KEY not in metadata
+            ):
+                # 源侧两个 idx 键都缺席（NWM `gfs-idx-selector-v3` 形态）：累积语义只
+                # 存在于 bundle 里，从 raw 原件自证（`docs/compute-loop-design.md`
+                # §7.2）。pin 形态（任一 idx 键在场）一律短路，**不开任何文件**。
+                # 落盘只写单数键：复数键是 pin 侧「按变量收全部选择器」的形态，本仓
+                # 自证的是这一条 entry 的语义，发明一个复数 Mapping 等于声称查过了
+                # 其它变量。R4B2 闸门在下一行照常复核这份自证结果。
+                metadata[IDX_SELECTOR_KEY] = _derive_accumulation_selector(
+                    source_path,
+                    lead=lead,
+                    variable=variable,
+                    grib_short_name=metadata[ENTRY_GRIB_SHORT_NAME_KEY],
+                )
             _check_accumulation(metadata, lead, variable)
             entries.append(
                 ManifestEntry(

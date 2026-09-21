@@ -5,6 +5,7 @@
 
 import json
 import os
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -356,6 +357,35 @@ def bundle_bytes(lead: int) -> bytes:
     return b"GRIB\xff\x00lead-%03d" % lead
 
 
+def grib_bundle_bytes(records: Sequence[tuple[str, str]]) -> bytes:
+    """按 `(shortName, stepRange)` 序列拼一份**真** GRIB2 bundle（多报文串接）。
+
+    造法与 `test_canonical_db_free.py::_encode_grib2` 同源：eccodes 的
+    `regular_ll_sfc_grib2` 样本，逐条设 `shortName` 与 `stepRange`。两端式区间
+    （`"0-3"`）另设 `stepType="accum"`——样本默认是瞬时量，不设的话 `stepRange`
+    写不成区间。单端式（`"3"`，畸形用例）**不设** `stepType`：实测对 `tp` 显式设
+    `"instant"` 会让 `shortName` 回读成 `"unknown"`（tp 在 eccodes 概念表里就是
+    累积量），那会把「stepRange 畸形」这条用例偷换成「shortName 对不上」。
+    `import eccodes` 留在函数内，与 `_encode_grib2` 同一写法：只有真正要造 GRIB 的
+    用例才付加载共享库的代价。
+    """
+    import eccodes
+
+    payload = b""
+    for short_name, step_range in records:
+        handle = eccodes.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+        try:
+            eccodes.codes_set(handle, "stepUnits", 1)
+            eccodes.codes_set(handle, "shortName", short_name)
+            if "-" in step_range:
+                eccodes.codes_set(handle, "stepType", "accum")
+            eccodes.codes_set(handle, "stepRange", step_range)
+            payload += eccodes.codes_get_message(handle)
+        finally:
+            eccodes.codes_release(handle)
+    return payload
+
+
 def build_tree(
     tmp_path: Path,
     source: str = "gfs",
@@ -363,15 +393,21 @@ def build_tree(
     leads=LEADS,
     manifest: dict[str, Any] | None = None,
     write_manifest: bool = True,
+    bundle_bytes_for: Callable[[int], bytes] | None = None,
 ) -> tuple[Path, Path]:
-    """铺一棵 raw fixture 树与一个空 work 根，返回 `(raw_root, work_dir)`。"""
+    """铺一棵 raw fixture 树与一个空 work 根，返回 `(raw_root, work_dir)`。
+
+    `bundle_bytes_for` 逐 lead 给 bundle 字节，默认仍是占位字节 `bundle_bytes`；
+    需要真 GRIB 内容的用例传 `grib_bundle_bytes(...)` 的包装。
+    """
     raw_root = tmp_path / "nwm-raw"
     work_dir = tmp_path / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
     base = cycle_dir(raw_root, source)
     base.mkdir(parents=True, exist_ok=True)
+    make_bundle = bundle_bytes if bundle_bytes_for is None else bundle_bytes_for
     for lead in leads:
-        (base / bundle_name(source, lead)).write_bytes(bundle_bytes(lead))
+        (base / bundle_name(source, lead)).write_bytes(make_bundle(lead))
     if write_manifest:
         payload = manifest if manifest is not None else source_manifest_payload(source)
         (base / SOURCE_MANIFEST_NAME).write_text(json.dumps(payload), encoding="utf-8")

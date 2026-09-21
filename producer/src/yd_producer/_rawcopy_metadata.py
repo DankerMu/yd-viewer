@@ -4,6 +4,8 @@ Moved bodies retain existing comments and structure.
 """
 
 import json
+import os
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,6 +15,7 @@ from yd_producer._rawcopy_common import (
     ACCUMULATION_TYPE_KEYS,
     ACCUMULATION_TYPES,
     ACCUMULATION_VARIABLES,
+    CUMULATIVE_SINCE_CYCLE,
     ENTRY_CFGRIB_FILTER_KEY,
     ENTRY_CFGRIB_SHORT_NAME_KEY,
     ENTRY_CYCLE_TIME_KEY,
@@ -22,6 +25,7 @@ from yd_producer._rawcopy_common import (
     IDX_SELECTOR_KEY,
     IDX_SELECTORS_KEY,
     INTERVAL_BUCKET,
+    O_NOFOLLOW,
     SOURCE_MANIFEST_FILENAME,
     STEP_RANGE_KEYS,
     RawStagingError,
@@ -252,6 +256,134 @@ def _carried_metadata(
     # 源侧无 `idx_selectors`（IFS 的 pin 形态）时两个 idx 键均**缺席**：写一个空
     # Mapping 等于发明一个「查过了、是空的」声明。apcp 的缺失由 R4B2 闸门另行拦截。
     return carried
+
+
+# `stepRange` 的区间形态：恰两个 ASCII 十进制整数、一个连字符、两端无空白无符号
+# （配 `fullmatch` 用，整串必须命中）。用正则而不是 `int(text.split("-"))`：`int`
+# 接受 `" 3"`/`"+3"`/全角数字，把它们当成合法区间等于替源侧的畸形取值做归一。
+# 字符类写 `[0-9]` 而不是 `\d`：后者在 str 模式下连 `３`（全角）都算数字。
+_STEP_RANGE_PATTERN = re.compile(r"([0-9]+)-([0-9]+)")
+
+
+def _collect_step_ranges(stream: Any, grib_short_name: Any) -> list[str]:
+    """顺序枚举 GRIB 记录，收集 `shortName` 命中的那些记录的 `stepRange`。
+
+    句柄逐条 `codes_release`（含异常路径的 `finally`）：bundle 是几百条记录的真实
+    GRIB2，漏释放就是一条随 lead 数线性增长的泄漏。`codes_grib_new_from_file` 返回
+    `None` 即文件读完。
+    `grib_short_name` 不强制是 `str`：它来自外部 JSON，非字符串时 `==` 恒为 False，
+    于是落到「零条」拒绝，而不是在这里抛裸异常。
+    """
+    import eccodes
+
+    step_ranges: list[str] = []
+    while True:
+        handle = eccodes.codes_grib_new_from_file(stream)
+        if handle is None:
+            return step_ranges
+        try:
+            if eccodes.codes_get(handle, "shortName", str) == grib_short_name:
+                step_ranges.append(eccodes.codes_get(handle, "stepRange", str))
+        finally:
+            eccodes.codes_release(handle)
+
+
+def _derive_accumulation_selector(
+    source_path: Path, *, lead: int, variable: str, grib_short_name: str
+) -> dict[str, str]:
+    """源 entry 两个 idx 键都缺席时，从 raw 原件 bundle **自证**累积语义。
+
+    规则来源：`docs/compute-loop-design.md` §7.2 与 spec `raw-scan` 的
+    「manifest 语义键承接与 fail-closed」。NWM `gfs-idx-selector-v3` 起，选择结果只
+    体现在下载到的 bundle 里，manifest 只在顶层 `source_policy.apcp_selector_policy`
+    记策略；2026-09-21 node-22 现场实证（cycle 2026091412）：GFS 每个 lead 的 bundle
+    恰含一条 `shortName=tp`、`stepType=accum` 的记录，`stepRange` 均为 `0-<lead>`。
+    故本函数只认「恰一条、终点 = lead」，其余一律 fail closed——MUST NOT 从策略字符串
+    或默认值推断（那正是 pin converter:1726 的 `or "cumulative_since_cycle"`）。
+
+    读的是 **NWM raw 根下的原件**（复制之前，work 副本尚不存在），于是全程零写入：
+    - 打开走 `os.open(..., O_RDONLY | O_NOFOLLOW)`，与复制步骤（`rawcopy.py` 的
+      `_copy_one`）**同一道闩**。`_reject_symlinks` 的逐段 `lstat` 只证明「判定那一刻
+      不是链」，此后到这里之间存在 TOCTOU 窗口，`O_NOFOLLOW` 是系统调用层的第二道
+      闩：路径此刻已成 symlink 时 open 以 `ELOOP` 失败，不跟随、不为其身份背书。
+      该 `OSError` 归 `accumulation-metadata` 而**不**新铸 `source-symlink`：后者是
+      `_reject_symlinks`(`_rawcopy_paths.py:244-246`) 的专属归类，复制步骤同样把自己
+      的 ELOOP 报成 `copy-failed`，此处沿用同一分工。
+    - 解码走 eccodes 的句柄枚举，MUST NOT 经 cfgrib/xarray（它默认在 GRIB 旁写
+      `.idx`），MUST NOT 把**路径名**交给任何第三方解码器（那等于再开一次、绕开
+      `O_NOFOLLOW`）。
+    """
+    # 惰性 import：`rawcopy` 这一侧只用 stdlib（模块 docstring 的设计约束），而
+    # `import eccodes` 会加载 eccodes 共享库。放在函数内，只有真正走到自证路径的
+    # apcp entry 才付这份代价，controller/CLI 的启动面不受影响。
+    import eccodes
+
+    prefix = f"(lead={lead}, variable={variable!r})"
+    try:
+        # 与 `rawcopy._copy_one` 逐字同形的 no-follow 只读打开；fd 立刻交给 `with`
+        # 托管。内层 `except` 先把读期失败收敛成 `RawStagingError`（不是 `OSError`，
+        # 故不会再被外层接住），外层只剩「打开本身失败」这一类。
+        with open(os.open(source_path, os.O_RDONLY | O_NOFOLLOW), "rb") as stream:
+            try:
+                step_ranges = _collect_step_ranges(stream, grib_short_name)
+            except (eccodes.CodesInternalError, OSError) as exc:
+                # eccodes 的异常基类是 `CodesInternalError`（非 GRIB 字节走
+                # `UnsupportedEditionError`，缺键走 `KeyValueNotFoundError`，均为其
+                # 子类）；读到一半的 IO 错误是 `OSError`。两者都是「这份原件证不了
+                # 累积语义」。
+                raise RawStagingError(
+                    f"{prefix} 无法以 eccodes 读取 raw 原件 {source_path}：{exc}",
+                    "accumulation-metadata",
+                ) from exc
+    except OSError as exc:
+        raise RawStagingError(
+            f"{prefix} 无法以只读不跟随方式打开 raw 原件 {source_path}：{exc}",
+            "accumulation-metadata",
+        ) from exc
+
+    if not step_ranges:
+        raise RawStagingError(
+            f"{prefix} 的 raw 原件 {source_path} 里 shortName={grib_short_name!r} 的"
+            f"记录为零条；lead={lead} 的累积语义只能由该 bundle 里唯一一条该变量的"
+            "记录自证，不得以默认值补齐",
+            "accumulation-metadata",
+        )
+    if len(step_ranges) > 1:
+        raise RawStagingError(
+            f"{prefix} 的 raw 原件 {source_path} 里 shortName={grib_short_name!r} 的"
+            f"记录有 {len(step_ranges)} 条，stepRange 依次为 "
+            + "、".join(step_ranges)
+            + f"；lead={lead} 的累积语义要求恰一条，不得由本模块挑其一",
+            "accumulation-metadata",
+        )
+    observed = step_ranges[0]
+    matched = _STEP_RANGE_PATTERN.fullmatch(observed)
+    if matched is None:
+        raise RawStagingError(
+            f"{prefix} 的 raw 原件 {source_path} 里 shortName={grib_short_name!r} 的"
+            f"唯一一条记录的 stepRange {observed!r} 不是 `<int>-<int>` 区间形态；"
+            f"lead={lead} 的累积语义不得由非区间取值推断",
+            "accumulation-metadata",
+        )
+    start, end = int(matched[1]), int(matched[2])
+    if end != lead:
+        raise RawStagingError(
+            f"{prefix} 的 raw 原件 {source_path} 里 shortName={grib_short_name!r} 的"
+            f"唯一一条记录的 stepRange {observed!r} 终点是 {end}，不是本轮 lead={lead}；"
+            "该 bundle 证不了这条 entry 的累积语义",
+            "accumulation-metadata",
+        )
+    # 两个键取各自的**主键**（`ACCUMULATION_TYPE_KEYS`/`STEP_RANGE_KEYS` 的首项）：
+    # 别名 `accumulation_policy`/`stepRange` 只在承接侧被接受，本仓自己写出的那份
+    # MUST 用消费端 `_apcp_selector_metadata`(converter.py:677) 读的主键。
+    # 取值用解析回来的 `start`/`end` 重写而不是原文本：`"00-3"` 这类等价写法落盘成
+    # 规范形态 `0-3`，与 §7.2 写的 `0-<lead>` 逐字一致。
+    return {
+        ACCUMULATION_TYPE_KEYS[0]: (
+            CUMULATIVE_SINCE_CYCLE if start == 0 else INTERVAL_BUCKET
+        ),
+        STEP_RANGE_KEYS[0]: f"{start}-{end}",
+    }
 
 
 def _check_accumulation(metadata: Mapping[str, Any], lead: int, variable: str) -> None:
