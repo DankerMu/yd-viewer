@@ -192,8 +192,12 @@ def test_geojson_feature_counts_match_the_baseline(env):
 
     rivers = json.loads(report.rivers_geojson.read_text(encoding="utf-8"))
     boundary = json.loads(report.boundary_geojson.read_text(encoding="utf-8"))
+    assert rivers["type"] == "FeatureCollection"
     assert len(rivers["features"]) == env.package.river_feature_count
-    assert len(boundary["features"]) == 1
+    assert boundary["type"] == "Feature"
+    assert "features" not in boundary
+    assert boundary["properties"] == {}
+    assert boundary["geometry"]["type"] in {"Polygon", "MultiPolygon"}
 
 
 # --- 提交面：同盘 rename、staging 位置、提交顺序 -----------------------------

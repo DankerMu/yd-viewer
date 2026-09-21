@@ -3800,6 +3800,8 @@ Must preserve:
 - 生成器现有默认行为保持不变（`river_count=3`、`unit_count=2`、现默认单元间距、DBF 字段定义 `("Index", "N", 10, 0)` 与 `range(1, N+1)` 的索引序列），#18 既有测试逐条继续通过；相邻布局、故障 DBF、越域图层一律以**新增关键字参数或新增函数**引入
 - `config.py` 的 stdlib 中立性；CI 四个 job 全绿
 
+历史说明（#271，2026-09-21）：以下 M2 原始记录中的 boundary `FeatureCollection` 形状已被 products-contract §6 与 `producer-boundary-feature` 取代；现行输出为单个 `Feature`（空 properties，Polygon/MultiPolygon），rivers 仍为 `FeatureCollection`。原文保留用于追溯，不作为当前 producer/viewer 交接契约。
+
 Must add/change:
 - `build_rivers_geojson(shp_path) -> dict`：读基线河网 shapefile，返回 EPSG:4326 的 GeoJSON `FeatureCollection`
   - 要素数量与基线河段数严格相等，**顺序与 DBF 记录顺序一致**（确定性输出，逐次运行字节一致）

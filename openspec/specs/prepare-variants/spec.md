@@ -143,7 +143,7 @@ Define source-specific prepared variants and viewer geometry generation with no-
 - **THEN** 得到与 prepare 验证相同的 frozen handoff 与 exact binding/`.sp.att` bytes；不需要 builder 内存、config identity 字段、数据库、目录扫描或第二 parser
 
 ### Requirement: viewer GeoJSON 生成
-`prepare` MUST 从基线 GIS 生成 EPSG:4326 的 `rivers.geojson` 与 `boundary.geojson`，落点固定为 `YD_ROOT/input/viewer/rivers.geojson` 与 `YD_ROOT/input/viewer/boundary.geojson`（products-contract §2）：河段要素带 SHUD `Index` 作为 `reach_id` 且数量与基线河网一致；boundary 为单元合并边界；坐标 MUST 按基线 `.prj` 自定义 Albers 投影重投影。
+`prepare` MUST 从基线 GIS 生成 EPSG:4326 的 `rivers.geojson` 与 `boundary.geojson`，落点固定为 `YD_ROOT/input/viewer/rivers.geojson` 与 `YD_ROOT/input/viewer/boundary.geojson`（products-contract §2）：河段要素带 SHUD `Index` 作为 `reach_id` 且数量与基线河网一致；rivers 顶层 MUST 为 FeatureCollection；boundary 顶层 MUST 为单个 Feature（properties 为空对象），其 geometry 为单元合并后的 Polygon 或 MultiPolygon，MUST NOT 包装为 FeatureCollection；坐标 MUST 按基线 `.prj` 自定义 Albers 投影重投影。
 
 #### Scenario: 河网属性与数量
 - **WHEN** 对含 N 条河段的合成基线 GIS 运行几何生成
@@ -151,7 +151,7 @@ Define source-specific prepared variants and viewer geometry generation with no-
 
 #### Scenario: 边界合并
 - **WHEN** 对合成 domain 单元运行几何生成
-- **THEN** `boundary.geojson` 为合并后的边界要素，坐标为经纬度
+- **THEN** `boundary.geojson` 顶层为单个 Feature，geometry 为合并后的 Polygon 或 MultiPolygon，坐标为经纬度；`rivers.geojson` 仍为 FeatureCollection
 
 ### Requirement: 提交后清理 scratch
 变体与 GeoJSON 提交到 `YD_ROOT` 后，`prepare` MUST 删除 scratch 中间物；运行根 MUST NOT 长期保留基线包。

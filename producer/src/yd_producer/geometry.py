@@ -322,13 +322,15 @@ def build_rivers_geojson(shp_path: str | Path) -> dict:
 
 
 def build_boundary_geojson(shp_path: str | Path) -> dict:
-    """domain 单元面图层 -> 恰含 1 个合并边界要素的 `FeatureCollection`。
+    """domain 单元面图层 -> EPSG:4326 的单个 GeoJSON `Feature`。
 
     合并顺序钉死为「先在基线源投影 CRS 内 `unary_union`，再对合并结果整体重投影」：
     源 CRS 是等积 Albers，共享边在该平面内严格重合；若先转经纬度再合并，共享边在角度
     空间不再逐点重合，会在溶解处留下缝隙与线状伪影。
 
-    `properties` 为空对象——边界没有 `reach_id` 语义，viewer 只把它当流域轮廓画。
+    顶层是单个 `Feature`（`properties` 为空对象），geometry 为合并后的 `Polygon` 或
+    `MultiPolygon`，不包装成 `FeatureCollection`——与 products-contract §6 / viewer
+    启动自检一致。边界没有 `reach_id` 语义，viewer 只把它当流域轮廓画。
     """
     shp_file = Path(shp_path)
     crs, features = read_shapefile(shp_file)
@@ -362,7 +364,7 @@ def build_boundary_geojson(shp_path: str | Path) -> dict:
         "geometry": mapping(orient(reprojected, sign=1.0)),
     }
     _geojson_text(feature, describe)
-    return {"type": "FeatureCollection", "features": [feature]}
+    return feature
 
 
 def _remove_paths(paths: list[Path]) -> list[Path]:
