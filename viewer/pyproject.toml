@@ -10,7 +10,12 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "httpx",
+    # Starlette TestClient prefers httpx2; this replaces #243's httpx.
+    "httpx2>=2.13,<3",
+    # Temporary: Starlette still uses deprecated anyio.abc.BlockingPortal (AnyIO 4.15+).
+    # Remove after Starlette drops that alias and a compatibility matrix is green.
+    # Shared uv.lock also freezes runtime AnyIO at 4.14.2 (approved).
+    "anyio<4.15",
     "pytest>=8",
     "ruff>=0.8",
 ]
