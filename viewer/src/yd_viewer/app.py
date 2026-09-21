@@ -1,4 +1,4 @@
-"""Application factory and HTTP API for health, cycles, map, and reach curves."""
+"""Application factory: APIs, static geometry, and SPA hosting."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import re
 from datetime import UTC, datetime
 
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 
 from yd_viewer import catalog
 from yd_viewer.dat import DatError, read_dat
@@ -92,4 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "series": series,
         }
 
+    app.mount("/api", app.router.not_found)
+    app.mount("/geometry", StaticFiles(directory=settings.input_dir))
+    app.mount("/", StaticFiles(directory=settings.static_dir, html=True))
     return app
