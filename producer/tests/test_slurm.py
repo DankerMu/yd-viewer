@@ -12,6 +12,7 @@ import ast
 import inspect
 import os
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -155,11 +156,13 @@ def make_executor(
     outputs: list[str | Exception],
     *,
     required_fields=REQUIRED_FIVE,
+    clock: Callable[[], datetime] | None = None,
 ) -> tuple[SlurmJobExecutor, RecordingRunner]:
+    """默认时钟仍是 `StepClock(start=T0, step=STEP)`；宽限窗口的用例自带步长。"""
     runner = RecordingRunner(outputs)
     executor = SlurmJobExecutor(
         required_fields=required_fields,
-        clock=StepClock(start=T0, step=STEP),
+        clock=StepClock(start=T0, step=STEP) if clock is None else clock,
         runner=runner,
     )
     return executor, runner
@@ -437,6 +440,14 @@ def test_parse_sacct_record_extra_columns_reports_arity():
     assert "实际 5 列" in str(excinfo.value)
 
 
+def test_parse_sacct_record_empty_output_wording_is_unchanged():
+    """accounting 宽限只落在 `poll` 里：纯函数对 0 行的措辞与绑定 id 一字不改。"""
+    with pytest.raises(ExecutorError) as excinfo:
+        parse_sacct_record("", "12345")
+    assert excinfo.value.job_id == "12345"
+    assert "期望恰好 1 行记录，实际 0 行" in str(excinfo.value)
+
+
 # --- E. 协议一致性与组装 -----------------------------------------------------
 
 
@@ -485,6 +496,86 @@ def test_poll_queries_sacct_and_rebuilds_record_from_submission():
     assert record.name == submitted.name
     assert record.submitted_at == submitted.submitted_at
     assert dict(record.resources) == dict(submitted.resources)
+
+
+def test_poll_treats_empty_sacct_inside_grace_as_accounting_lag():
+    """提交后宽限窗口内的 0 行是 accounting 滞后：返回既有 PENDING 记录，不伪造状态。
+
+    默认 `STEP = 10 s` 时钟，两次空轮询分别发生在 `submitted_at + 10 s / + 20 s`，都在
+    120 s 之内；sacct argv 与既有装配逐元素相同（宽限不改查询）。
+    """
+    executor, runner = make_executor(
+        ["12345\n", "", "\n", "12345|RUNNING|2026-08-28T00:00:30|Unknown"]
+    )
+    submitted = executor.submit(make_spec())
+
+    for _ in range(2):
+        pending = executor.poll("12345")
+        assert pending is submitted
+        assert pending.state is JobState.PENDING
+        assert pending.started_at is None
+        assert pending.ended_at is None
+        # 空轮询 MUST NOT 替换已落库记录
+        assert executor._records["12345"] is submitted
+
+    assert runner.calls[1][0] == build_sacct_command("12345")
+    assert runner.calls[2][0] == build_sacct_command("12345")
+
+    running = executor.poll("12345")
+    assert running.state is JobState.RUNNING
+    assert running.started_at == datetime(2026, 8, 28, 0, 0, 30, tzinfo=UTC)
+    assert running.ended_at is None
+    assert running.submitted_at == submitted.submitted_at
+    assert running.name == submitted.name
+
+
+def test_poll_empty_sacct_at_exact_grace_boundary_is_still_lag():
+    """边界含端点：恰好 `submitted_at + 120 s` 的 0 行仍是滞后（`<=`）。"""
+    executor, _ = make_executor(
+        ["12345\n", ""], clock=StepClock(start=T0, step=timedelta(seconds=120))
+    )
+    submitted = executor.submit(make_spec())
+
+    record = executor.poll("12345")
+    assert record is submitted
+    assert record.state is JobState.PENDING
+    assert record.started_at is None
+    # 窗口宽度钉死在 spec 的 120 s（断言放在行为之后，避免遮蔽行为红）
+    assert slurm_module.SACCT_ACCOUNTING_GRACE_SECONDS == 120
+
+
+def test_poll_empty_sacct_past_grace_fails_closed_with_row_count_wording():
+    """越过窗口的 0 行仍 fail closed，措辞与 `parse_sacct_record` 一致，绑定同一 job。"""
+    executor, _ = make_executor(
+        ["12345\n", ""], clock=StepClock(start=T0, step=timedelta(seconds=121))
+    )
+    submitted = executor.submit(make_spec())
+
+    with pytest.raises(ExecutorError) as excinfo:
+        executor.poll("12345")
+    assert excinfo.value.job_id == "12345"
+    assert "期望恰好 1 行记录，实际 0 行" in str(excinfo.value)
+    assert executor._records["12345"] is submitted
+
+
+def test_poll_multi_row_sacct_inside_grace_still_fails_closed():
+    """放宽只针对 0 行：窗口内的 2 行照旧拒绝，不静默取首行。"""
+    executor, _ = make_executor(
+        [
+            "12345\n",
+            (
+                "12345|RUNNING|2026-08-28T00:00:30|Unknown\n"
+                "12345|COMPLETED|2026-08-28T00:00:30|2026-08-28T01:00:00"
+            ),
+        ]
+    )
+    submitted = executor.submit(make_spec())
+
+    with pytest.raises(ExecutorError) as excinfo:
+        executor.poll("12345")
+    assert excinfo.value.job_id == "12345"
+    assert "实际 2 行" in str(excinfo.value)
+    assert executor._records["12345"] is submitted
 
 
 def test_terminal_poll_is_idempotent_and_stops_calling_runner():
