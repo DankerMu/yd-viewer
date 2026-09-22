@@ -63,11 +63,15 @@ hover 河段 MUST 高亮，点击 MUST 选中并打开可拖拽曲线窗；曲�
 - **THEN** 客户端类型接受null；null处不补零、不跨缺口连线，tooltip不把null显示为0，其他正常点和source保留；地图null河段继续显示缺失色
 
 ### Requirement: 页头
-页头 MUST 显示最新可用 cycle 的起报时间（北京时间，标「起报」与「北京时间」）与「流量 (m³/s)」文案；MUST NOT 显示停更原因、source 失败或任何内部计算状态；无可用 cycle 时显示「暂无数据」。
+页头 MUST 显示系统标题「永登流域水文模拟系统」、最新可用 cycle 的起报时间（北京时间，标「起报」与「北京时间」）与「流量 (m³/s)」文案，标题位于其余两行之前；文档 `<title>` MUST 为同一标题；MUST NOT 显示停更原因、source 失败或任何内部计算状态；无可用 cycle 时显示「暂无数据」。
 
 #### Scenario: 页头时间
 - **WHEN** `map/latest` 的 cycle 为 `2026082712`
 - **THEN** 页头含 `2026-08-27 20:00`
+
+#### Scenario: 页头标题
+- **WHEN** 页头以任意 cycle（含 `null`）渲染
+- **THEN** 标记中含「永登流域水文模拟系统」，且其出现在「流量 (m³/s)」之前；`cycle` 为 `null` 时仍含「暂无数据」
 
 ### Requirement: 复制来源登记与规模
 从 NWM 复制的组件 MUST 在 `viewer/frontend/SNAPSHOT.md` 登记来源 commit、文件清单与逐文件删减；MUST NOT 复制 store、路由、OpenAPI client、代站弹窗、降水叠加、RBAC；任何源文件 MUST ≤ 1000 行且 MUST NOT 新增源文件 large-file-guard 豁免。唯一允许新增的豁免是生成文件 `viewer/frontend/pnpm-lock.yaml`；MUST 保留该 lockfile 供 frozen install 使用，不改变全局行数阈值。
