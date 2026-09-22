@@ -257,7 +257,7 @@ output/<cycle>/<source>/
 
 前端构建 `base: './'`；API、几何及 `basemaps.json` 请求均为相对路径，构建物无以 `/` 开头的绝对资源引用。`https://h/yd/` 下 cycles 请求为 `https://h/yd/api/cycles`，同一构建物兼容根路径与剥前缀部署。
 
-NWM 旧天地图 key 不得复制；构建物不得含 `tianditu.gov.cn` 或 `tk=`。运行时 entrypoint 从六个 env 生成静态 `basemaps.json`：`YD_BASEMAP_VECTOR_URL`、`YD_BASEMAP_SATELLITE_URL`、`YD_BASEMAP_TERRAIN_URL` 与各自 `YD_BASEMAP_*_ANNOTATION_URL`。形状为 `{"vector":{"tiles":[url],"annotation":[url]或null},...}`；缺底图 URL 则键缺席，注记可选，URL 原样写入、不进日志。
+天地图 key 只在运行时经 env 注入：构建物不得含 `tianditu.gov.cn` 或 `tk=`；现役 NWM 天地图 key 可复用（用户裁决 2026-09-22：key 已绑定域名白名单），但只从 node-27 私有 env 复制到 yd 私有 env，不入 Git、不进日志/receipt。运行时 entrypoint 从六个 env 生成静态 `basemaps.json`：`YD_BASEMAP_VECTOR_URL`、`YD_BASEMAP_SATELLITE_URL`、`YD_BASEMAP_TERRAIN_URL` 与各自 `YD_BASEMAP_*_ANNOTATION_URL`。形状为 `{"vector":{"tiles":[url],"annotation":[url]或null},...}`；缺底图 URL 则键缺席，注记可选，URL 原样写入、不进日志。
 
 页面启动 fetch `./basemaps.json`，只列出存在的 `vector`/`satellite`/`terrain`，按该顺序默认选首项；每种底图由 tiles 栅格层与可选 annotation 栅格层组成。404、`{}` 或三键全缺均用无瓦片空样式、无切换按钮，河网与曲线仍可用；无需重建前端。不增加 `/api/config`。
 
@@ -378,9 +378,9 @@ oracle：node-27 live receipt（agent-ops §11.3）。
 
 这些值不得在代码中猜测：
 
-- node-27 viewer 独立端口；
-- node-27 有效天地图配置；
-- `/yd/` 由应急 yd-NWM 副本还是主线 viewer 持有：M5 前另行裁决；当前占用见 agent-ops §14.6，M3 只保证相对路径部署，不做切换；
+- node-27 viewer 独立端口：`127.0.0.1:8082`（用户裁决 2026-09-22，见 agent-ops §16）；
+- node-27 有效天地图配置：复用 NWM 现役天地图 key（用户裁决 2026-09-22，见 §7 与 agent-ops §9.2）；
+- `/yd/` 归属（用户裁决 2026-09-22）：主线 viewer 接管 `test.nwm.ac.cn/yd/`，应急副本继续持有 `nwm.ac.cn/yd/`（agent-ops §14.6）；何时以主线替换 `nwm.ac.cn/yd/` 另行裁决；
 - Slurm partition、account、CPU、内存和 walltime；
 - 外部基线模型包在首次 `prepare` 时的现场路径；
 - 客户服务器的计算、下载和调度形态。
