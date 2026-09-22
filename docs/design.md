@@ -346,6 +346,8 @@ node-22 producer 的以下本地可验证代码：
 
 ### M4 node-22 真计算
 
+完成：2026-09-22（node-22 receipt `m4-stage5-rerun-20260921.md`；登记见 agent-ops §15.4）。
+
 - 现场填写 `local.toml`（[compute-loop-design.md](compute-loop-design.md) §5、§14）；
 - 经授权执行一次性 `prepare` 与 `init`：二者改变长期状态，须现场 receipt，不得由 cron 调用（agent-ops §8.1）；
 - 每源至少实跑 2 个连续 cycle，IFS/GFS 都覆盖 00Z 与 12Z，全部满足 §9.2 与 [compute-loop-design.md](compute-loop-design.md) §13.2；T+12 精确接续以第二轮消费第一轮写出的状态文件为证；
