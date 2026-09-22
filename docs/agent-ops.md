@@ -271,7 +271,7 @@ node-27 是 NWM active production host。yd 只能操作：
 - compose project 名、container 名、network 和 image tag/digest必须带 yd 前缀，避免与 NWM 冲突；
 - 挂载必须显式 `:ro`；不挂整个 `YD_ROOT`；
 - env 文件为 0600、属主 `nwm:nwm`，不入 Git；
-- 天地图 URL/key 只走 env 或部署配置，不打印进 receipt，不复制 NWM 源码中的旧 key；
+- 天地图 URL/key 只走 env 或部署配置，不打印进 receipt；现役 NWM key 可复用（用户裁决 2026-09-22，key 绑定域名白名单），复制只在 node-27 上私有 env 之间进行，不经聊天、Git 或 receipt；
 - 升级前记录当前镜像 digest和 compose 配置位置，保留上一镜像用于回滚。
 
 M3 容器配置合同（这里只规定打包与配置，不执行 M5 部署）：
@@ -531,3 +531,34 @@ receipt 目录 `/scratch/frd_muziyao/yd/receipts/`；每行一步，失败也登
 - 2026-09-21 阶段 6：node-27 以 `nwm` 实读 26 份 `output/<T>/<src>/{yd.rivqdown.dat,DONE}`（sha256 与 22 侧一致）与两份 GeoJSON；发现 `states/`、`input/models` 因 umask 0022 为 755 亦可列，经授权非递归 `chmod 750`（`m4-stage6-chmod-20260921.txt`），27 侧复验 denied、发布目录不变；`input/yd` 基线包保持现场预置的 770 nwmuser（用户裁决，只登记）。
 - 2026-09-22 阶段 7 cron：00:11Z 安装（`m4-stage7-cron-install-20260921.txt`、`crontab-readback-20260921.txt`），行形态按 §8.2/§15.2；锁文件位于本地 ext4（`findmnt /users` → `/dev/nvme1n1`）。tick 1（00:17Z）真跑 2026092112：作业 53091/53092 COMPLETED，发布 + `2026092200.cfg.ic` + DONE，work 清空，随后停在 2026092200 raw 缺口；tick 2（01:17Z）无 raw 无提交，仅追加一行缺口报告。注意：停在缺口的 tick 以 `错误：…raw 未齐…` 写入 `cron.log`（compute-loop §7 的 STOPPED 语义，退出码 3），这是正常等待，不是故障。锁竞争跳过与 #308 grace 未行使；作业内 `model/yd.cfg.para` 未在运行中直读，`START=0/END=7/DT_QR_DOWN=60` 以代码路径 + DAT 结构推导登记。
 - 2026-09-22 阶段 8：M4 出口条件（§15.3、design §9.2、compute-loop §13.2）逐项映射见 `m4-stage5-rerun-20260921.md` 末节；receipt 只留在 node-22 `receipts/`，本仓以本节条目为索引，不入 Git。
+
+## 16. M5 部署登记（node-27 主线 viewer）
+
+### 16.1 勘察结论（2026-09-22，只读，`nwm@210.77.77.27`）
+
+- docker 28.2.2 + compose v2.36.2；`nwm` ∈ `docker` 组；`sudo` 需密码 → Nginx 改动与 reload 由用户手工执行，agent 只准备命令并只读核验（与 §14.6 副本上线同法）；
+- docker daemon 拉不到 Docker Hub（`registry-1.docker.io` 超时，`docker manifest inspect python:3.12-slim-bookworm` 失败），`ghcr.io`/deb/npm/pypi 可达，daemon 未配代理 → 现场不做 `docker build`；
+- 端口占用：`8080` NWM display、`8081` 副本 display、`8086/8088/8089/8787/9090/13000/55432/55434` 已占；`8082–8085`、`18080` 空闲；
+- Nginx 1.30.4；`/etc/nginx/conf.d/nwm.ac.cn.conf` 与 `test.nwm.ac.cn.conf` 各一处 `location /yd/ { proxy_pass http://127.0.0.1:8081/; … }`（副本，§14.6）；公网 `test.nwm.ac.cn/yd/` 200、`/yd/api/health` 404（副本无此端点）；
+- `/home/ghdc/yd`（本机 ext4，NFS 服务端）：`output/`、`input/viewer` 755，文件 644 uid 1103；容器 uid 10001 靠 other 位读取，bind mount 直接挂目标目录，父目录 770 不影响；
+- 磁盘：`/home` 余 1.1T，`/` 余 46G；副本工件位于 `/home/nwm/yd-*`，主线 viewer 不得混用；
+- NWM 天地图形态：`https://t{0-7}.tianditu.gov.cn/DataServer?T=<layer>_w&x={x}&y={y}&l={z}&tk=<key>`，key 在 NWM 私有 display env（`NHMS_TIANDITU_KEY`）；六层为 vec/cva、img/cia、ter/cta；
+- 本机（macOS arm64）docker 29.1.3 + buildx 可交叉构建 `linux/amd64`。
+
+### 16.2 路径与配置（用户裁决 2026-09-22）
+
+| 项 | 值 |
+|---|---|
+| `/yd/` 归属 | 主线 viewer 接管 `test.nwm.ac.cn/yd/`；副本继续持有 `nwm.ac.cn/yd/` |
+| 镜像 | 本机 `docker buildx build --platform linux/amd64 -t yd-viewer:<git sha>`，`docker save \| gzip` → scp → node-27 `docker load`；登记 digest |
+| 回环端口 | `127.0.0.1:8082`（`YD_VIEWER_PORT=8082`） |
+| 部署目录 | `/home/nwm/yd-viewer/`：`compose.yml`、`.env`（0600 nwm:nwm）、`images/`、`receipts/` |
+| 挂载 | `/home/ghdc/yd/input/viewer:/input:ro`、`/home/ghdc/yd/output:/output:ro` |
+| 天地图 | 六个 `YD_BASEMAP_*_URL` 复用 NWM 现役 key（§9.2）；由 agent 在 node-27 上从 NWM 私有 env 复制进 yd `.env`，全程不回显 |
+| Nginx | 仅改 `test.nwm.ac.cn.conf` 的 `/yd/` `proxy_pass` 8081→8082，用户手工：备份 `.bak.$TS` → `sudo nginx -t` → `sudo systemctl reload nginx` |
+| 浏览器 receipt | API 项 curl（回环 + 公网）；页面项本机 headless Chrome 截图留档 + 用户人工逐项确认 |
+| 回滚 | 首次部署无上一镜像：`docker compose down` + 恢复 Nginx 备份并 reload |
+
+### 16.3 执行登记
+
+receipt 目录 `/home/nwm/yd-viewer/receipts/`；每行一步，失败也登记。
