@@ -359,6 +359,8 @@ oracle：node-22 真运行 receipt（agent-ops §11.2）。
 
 ### M5 node-27 真闭环
 
+完成：2026-09-22（`https://test.nwm.ac.cn/yd/`，node-27 receipt `/home/nwm/yd-viewer/receipts/m5-node27-receipt-20260922.md`；登记见 agent-ops §16.3；矢量底图受共用天地图 key 限流，已登记为已知偏差）。
+
 - 以 node-27 `nwm` 身份实际读取验证同一 NFS（agent-ops §10、§12 步骤 4）；
 - 现场确认独立端口并注入天地图等 env 配置（§11、agent-ops §9.2）；
 - 构建/加载 yd 镜像并以只读挂载旁路启动；部署为对外动作，须明确授权（agent-ops §9.2）；

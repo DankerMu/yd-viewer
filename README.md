@@ -9,4 +9,4 @@
 - producer/viewer 文件契约：[docs/products-contract.md](docs/products-contract.md)
 - 节点登录、部署与验证纪律：[docs/agent-ops.md](docs/agent-ops.md)
 
-状态：M1 文档、M2 producer、M3 viewer 已完成并归档；M4 node-22 真计算已于 2026-09-22 完成（cron 接管日常 `run`，现场登记见 [docs/agent-ops.md §15](docs/agent-ops.md#15-m4-部署登记node-22-主线-producer)）；下一步 M5 node-27 真闭环。里程碑见 [docs/design.md §10](docs/design.md#10-里程碑)。
+状态：M1 文档、M2 producer、M3 viewer、M4 node-22 真计算、M5 node-27 真闭环均已完成（M5 于 2026-09-22 上线 `https://test.nwm.ac.cn/yd/`，现场登记见 [docs/agent-ops.md §15](docs/agent-ops.md#15-m4-部署登记node-22-主线-producer)、[§16](docs/agent-ops.md#16-m5-部署登记node-27-主线-viewer)）；`nwm.ac.cn/yd/` 仍由应急副本持有，切换另行裁决。里程碑见 [docs/design.md §10](docs/design.md#10-里程碑)。
