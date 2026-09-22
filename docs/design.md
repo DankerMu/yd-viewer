@@ -183,6 +183,7 @@ output/<cycle>/<source>/
 | `GET /api/map/latest` | 按 catalog 顺序尝试候选：最新 cycle 内 GFS 优先、其次 IFS，再更早 cycle；数据层（结构/分钟）失败 WARNING（路径与原因）后继续，首个成功者取 lead 0；`values` 为 m³/s 或 `null`。无候选或全部数据层失败 404。河段缺测不排除 source、不回落、不 404 |
 | `GET /api/cycles/{cycle}/reaches/{reach_id}` | 对指定 cycle 每个 catalog 可用 source 做数据层读取，成功者入 series，各 168 个 m³/s 或 `null`；数据层失败 WARNING 并省略，series 为空 404。河段缺测不省略 source、不 404 |
 | `GET /api/health` | output 可枚举时 `200 {"status":"ok","latest_cycle":"YYYYMMDDHH"或null}`；latest_cycle 来自同一 catalog 枚举，不另写扫描，不返回内部路径或运行状态 |
+| `GET /api/basemap/tianditu/{layer}/{z}/{x}/{y}` | 同源天地图瓦片反代（用户裁决 2026-09-22，参照 NWM `apps/api/routes/basemap.py`）：`layer` ∈ `vec/cva/img/cia/ter/cta`，`0 ≤ z ≤ 18`，`x`/`y` 为该 z 下合法整数，否则 4xx；服务端持 `YD_TIANDITU_KEY`，上游 `https://t{0..7}.tianditu.gov.cn/DataServer?T=<layer>_w&x&y&l&tk`（按瓦片坐标选子域），固定浏览器 UA、不转发访客 Referer/Cookie，超时 10 s；命中先写 `YD_BASEMAP_CACHE_DIR/<layer>/<z>/<x>/<y>`（tmp + `os.replace`）再回 `Cache-Control: public, max-age=604800` 与 `X-Tile-Cache: hit|miss`，正文须以 PNG/JPEG 签名开头才算命中；上游失败（非 200、超时、非图片）永不缓存，回 502/503 且 `Cache-Control: no-store`；某层上游 429 后该层冷却 60 s 内直接 503（不打上游，不影响其它层）；未设 `YD_TIANDITU_KEY` 时该路由 404。不使用第三方 HTTP 客户端（标准库 `urllib` + 线程池），不做清理/配额统计 |
 
 `output/` 不可枚举（含启动后删除、权限不可读）时以上四端点均返回 503。cycle 不在可用列表内为 404；格式不匹配 `^\d{10}$`、小时不为 00/12 或 reach_id 不在权威集合内为 4xx，不能 5xx。错误沿用 FastAPI 默认 `{"detail": ...}`，不自定义错误模型/异常处理器。
 
@@ -256,7 +257,7 @@ output/<cycle>/<source>/
 不复制 NWM 的 OpenAPI client、store、路由、登录/RBAC、MVT、代站弹窗、降水叠加、多流域、监控和运维链接。来源为 NWM `4f8d98263` 对应快照；在 `viewer/frontend/SNAPSHOT.md` 登记完整来源 commit、复制文件清单和逐文件删减（包括上述禁复内容），之后独立维护。任何源文件 ≤1000 行，不新增源文件 large-file-guard 豁免；唯一允许新增的豁免是生成文件 `viewer/frontend/pnpm-lock.yaml`；色带/图例只取必要片段。
 
 前端构建 `base: './'`；API、几何及 `basemaps.json` 请求均为相对路径，构建物无以 `/` 开头的绝对资源引用。`https://h/yd/` 下 cycles 请求为 `https://h/yd/api/cycles`，同一构建物兼容根路径与剥前缀部署。
-
+天地图 key 只在运行时经 env 注入：构建物不得含 `tianditu.gov.cn` 或 `tk=`；现役 NWM 天地图 key 可复用（用户裁决 2026-09-22：key 已绑定域名白名单），但只从 node-27 私有 env 复制到 yd 私有 env，不入 Git、不进日志/receipt。运行时 entrypoint 生成静态 `basemaps.json`：设置了 `YD_TIANDITU_KEY` 时（反代模式，用户裁决 2026-09-22）六条 URL 固定为相对路径 `api/basemap/tianditu/<layer>/{z}/{x}/{y}`（vector=vec/cva、satellite=img/cia、terrain=ter/cta），忽略六个 `YD_BASEMAP_*_URL`；未设置时沿用六个 env：`YD_BASEMAP_VECTOR_URL`、`YD_BASEMAP_SATELLITE_URL`、`YD_BASEMAP_TERRAIN_URL` 与各自 `YD_BASEMAP_*_ANNOTATION_URL`。形状为 `{"vector":{"tiles":[url],"annotation":[url]或null},...}`；缺底图 URL 则键缺席，注记可选，URL 原样写入、不进日志。前端把 `basemaps.json` 中的每条瓦片 URL 先以页面目录解析为绝对 URL（同 API 的 `resolveUrl`）再交给 MapLibre，绝对 URL 原样保留。
 天地图 key 只在运行时经 env 注入：构建物不得含 `tianditu.gov.cn` 或 `tk=`；现役 NWM 天地图 key 可复用（用户裁决 2026-09-22：key 已绑定域名白名单），但只从 node-27 私有 env 复制到 yd 私有 env，不入 Git、不进日志/receipt。运行时 entrypoint 从六个 env 生成静态 `basemaps.json`：`YD_BASEMAP_VECTOR_URL`、`YD_BASEMAP_SATELLITE_URL`、`YD_BASEMAP_TERRAIN_URL` 与各自 `YD_BASEMAP_*_ANNOTATION_URL`。形状为 `{"vector":{"tiles":[url],"annotation":[url]或null},...}`；缺底图 URL 则键缺席，注记可选，URL 原样写入、不进日志。
 
 页面启动 fetch `./basemaps.json`，只列出存在的 `vector`/`satellite`/`terrain`，按该顺序默认选首项；每种底图由 tiles 栅格层与可选 annotation 栅格层组成。404、`{}` 或三键全缺均用无瓦片空样式、无切换按钮，河网与曲线仍可用；无需重建前端。不增加 `/api/config`。
