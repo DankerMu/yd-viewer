@@ -360,7 +360,7 @@ oracle：node-22 真运行 receipt（agent-ops §11.2）。
 
 ### M5 node-27 真闭环
 
-完成：2026-09-22（`https://test.nwm.ac.cn/yd/`，node-27 receipt `/home/nwm/yd-viewer/receipts/m5-node27-receipt-20260922.md`；登记见 agent-ops §16.3；矢量底图受共用天地图 key 限流，已登记为已知偏差）。
+完成：2026-09-22（`https://test.nwm.ac.cn/yd/`，node-27 receipt `/home/nwm/yd-viewer/receipts/m5-node27-receipt-20260922.md`；登记见 agent-ops §16.3；矢量底图曾受共用天地图 key 限流，2026-09-23 上线同源反代 `yd-viewer:1fdb7fd` 后解除，见 agent-ops §16.3）。
 
 - 以 node-27 `nwm` 身份实际读取验证同一 NFS（agent-ops §10、§12 步骤 4）；
 - 现场确认独立端口并注入天地图等 env 配置（§11、agent-ops §9.2）；
@@ -383,7 +383,7 @@ oracle：node-27 live receipt（agent-ops §11.3）。
 
 - node-27 viewer 独立端口：`127.0.0.1:8082`（用户裁决 2026-09-22，见 agent-ops §16）；
 - node-27 有效天地图配置：复用 NWM 现役天地图 key（用户裁决 2026-09-22，见 §7 与 agent-ops §9.2）；
-- `/yd/` 归属（用户裁决 2026-09-22）：主线 viewer 接管 `test.nwm.ac.cn/yd/`，应急副本继续持有 `nwm.ac.cn/yd/`（agent-ops §14.6）；何时以主线替换 `nwm.ac.cn/yd/` 另行裁决；
+- `/yd/` 归属（用户裁决 2026-09-22）：主线 viewer 先接管 `test.nwm.ac.cn/yd/`，同日用户裁决并手工把 `nwm.ac.cn/yd/` 也切到主线（agent-ops §16.3）；应急副本实例（agent-ops §14.6）仍在运行但不再被引用，停用另行裁决；
 - Slurm partition、account、CPU、内存和 walltime；
 - 外部基线模型包在首次 `prepare` 时的现场路径；
 - 客户服务器的计算、下载和调度形态。
