@@ -476,6 +476,15 @@ node-22（`frd_muziyao@210.77.77.22`）：
 - 首轮全链（cycle 2026082712 双源）≈10–11 min/cycle，state index 已闭合（entry_count 4）；
 - 已知偏差：`AUTOPIPE_MVT_PREWARM_ENABLED=0`（prewarm 会打 `:8080`，属只读越界，已关）。Slurm job-name 偏差已于当日修复（patch 5）。
 
+### 14.7 停用与清理登记（2026-09-23，用户裁决）
+
+`nwm.ac.cn/yd/` 已于 2026-09-22 切到主线（§16.3），副本无引用后用户裁决清理。两阶段执行，receipt：27 `/home/nwm/yd-viewer/receipts/replica-retire-node27-20260923.txt`，22 `/scratch/frd_muziyao/yd/receipts/replica-retire-node22-20260923.txt`。
+
+- 阶段 1（01:01Z，可回退）：27 `disable --now` `yd-display-api.service` 与 `yd-node27-{autopipe,download,raw-retention,timeseries-retention}.timer`，`docker stop yd-db`，`:8081`/`:55434` 监听归零；22 `disable --now` `yd-compute-scheduler.timer`、`yd-scheduler-file-provider-refresh.timer`、`yd-slurm-gateway.service`，`:8092` 归零，squeue 无 `yd_` 作业。
+- 阶段 2（01:01–01:03Z）：27 删 9 个 `yd-*` unit 文件、`yd-db` 容器、`/home/nwm/{yd-NWM,yd-pgdata(32G),yd-db.secret,yd-*-logs,yd-*-work,yd-evidence,yd-provision-work,yd-tablespace-ghdc-stub}`；22 删 5 个 `yd-*` unit 文件、`/scratch/frd_muziyao/{yd-NWM,yd-nwm-prod(16G),yd-nwm}`。NFS `yd-nwm/`（5.2G）的 object-store/published 文件属 `frd_muziyao`，27 侧 `rm` 5556 条 Permission denied，改由 22 侧以 `frd_muziyao` 删除，27 侧复核 `/home/ghdc/yd-nwm` 不存在。
+- 保留：两份 2026-09-01 部署 receipt 与 `yd-backup-basins_yd_vbasins-geom-20260901.json`，移入各自 `receipts/replica-archive/`；docker 镜像未动。
+- 前后核验：NWM `nhms-*` 9 个 active、`:8080` 200、`nhms-db` 运行、`nwm.ac.cn/` 200；主线 `yd-web` 运行、`nwm.ac.cn/yd/api/health` 200、`/home/ghdc/yd` 与 node-22 cron 未动。§14.1–14.6 与 §16.1 中对副本端口/路径的描述自此为历史记录。
+
 ## 15. M4 部署登记（node-22 主线 producer）
 
 本节是 §3 所指的「部署清单」。值来自 2026-09-21 只读勘察（receipt：`/scratch/frd_muziyao/yd/receipts/m4-recon-20260921.md`）与同日用户裁决；现场执行的每一步 receipt 追加到同一目录，并在本节「执行登记」追记。**本节只登记路径、键名与非敏感值，不含任何密钥。**
