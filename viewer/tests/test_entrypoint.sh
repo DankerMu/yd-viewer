@@ -54,6 +54,7 @@ uv_py() {
 }
 
 clear_basemap_env() {
+  unset YD_TIANDITU_KEY
   unset YD_BASEMAP_VECTOR_URL
   unset YD_BASEMAP_SATELLITE_URL
   unset YD_BASEMAP_TERRAIN_URL
@@ -119,12 +120,15 @@ assert_secret_absent() {
   fi
 }
 
+PROXY_EXPECTED='{"vector": {"tiles": ["api/basemap/tianditu/vec/{z}/{x}/{y}"], "annotation": ["api/basemap/tianditu/cva/{z}/{x}/{y}"]}, "satellite": {"tiles": ["api/basemap/tianditu/img/{z}/{x}/{y}"], "annotation": ["api/basemap/tianditu/cia/{z}/{x}/{y}"]}, "terrain": {"tiles": ["api/basemap/tianditu/ter/{z}/{x}/{y}"], "annotation": ["api/basemap/tianditu/cta/{z}/{x}/{y}"]}}'
+
 VECTOR_SATELLITE_EXPECTED='{"vector": {"tiles": ["https://example.test/vec/{z}/{x}/{y}.png?tk=SECRET&q=\"quote\"\\slash"], "annotation": ["https://example.test/cva/{z}/{x}/{y}.png?tk=SECRET&nl=\nend"]}, "satellite": {"tiles": ["https://example.test/img/{z}/{x}/{y}.png?tk=SECRET"], "annotation": None}}'
 
 run_case() {
   rm -f "$LAUNCH_LOG" "$STATIC_DIR/basemaps.json" "$OUT"
   set +e
-  env -u YD_BASEMAP_VECTOR_URL \
+  env -u YD_TIANDITU_KEY \
+    -u YD_BASEMAP_VECTOR_URL \
     -u YD_BASEMAP_SATELLITE_URL \
     -u YD_BASEMAP_TERRAIN_URL \
     -u YD_BASEMAP_VECTOR_ANNOTATION_URL \
@@ -163,6 +167,22 @@ if [ ! -f "$LAUNCH_LOG" ]; then
 fi
 assert_exec "$LAUNCH_LOG" "$launched"
 assert_json_equal "$STATIC_DIR/basemaps.json" "$VECTOR_SATELLITE_EXPECTED"
+
+# proxy mode: key set -> six relative paths, URL envs ignored
+clear_basemap_env
+run_case \
+  YD_TIANDITU_KEY='SECRET' \
+  YD_BASEMAP_VECTOR_URL='https://example.test/vec/{z}/{x}/{y}.png?tk=SECRET' \
+  YD_BASEMAP_VECTOR_ANNOTATION_URL='https://example.test/cva/{z}/{x}/{y}.png?tk=SECRET' \
+  YD_BASEMAP_SATELLITE_URL='https://example.test/img/{z}/{x}/{y}.png?tk=SECRET'
+if [ "$status" -ne 0 ]; then
+  echo "proxy case exited $status" >&2
+  cat "$OUT" >&2
+  exit 1
+fi
+assert_secret_absent "$OUT"
+assert_json_equal "$STATIC_DIR/basemaps.json" "$PROXY_EXPECTED"
+assert_exec "$LAUNCH_LOG" "$launched"
 
 # empty env -> {}
 clear_basemap_env
@@ -209,7 +229,8 @@ chmod a-w "$readonly_dir"
 rm -f "$LAUNCH_LOG" "$OUT"
 clear_basemap_env
 set +e
-env -u YD_BASEMAP_VECTOR_URL \
+env -u YD_TIANDITU_KEY \
+  -u YD_BASEMAP_VECTOR_URL \
   -u YD_BASEMAP_SATELLITE_URL \
   -u YD_BASEMAP_TERRAIN_URL \
   -u YD_BASEMAP_VECTOR_ANNOTATION_URL \

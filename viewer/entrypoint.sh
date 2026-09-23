@@ -11,16 +11,26 @@ static_dir = os.environ.get("YD_VIEWER_STATIC_DIR")
 if not static_dir:
     raise SystemExit("YD_VIEWER_STATIC_DIR is required")
 
+PROXY_LAYERS = (("vector", "vec", "cva"), ("satellite", "img", "cia"), ("terrain", "ter", "cta"))
+PROXY_PATH = "api/basemap/tianditu/%s/{z}/{x}/{y}"
+
 payload = {}
-for name in ("vector", "satellite", "terrain"):
-    base = os.environ.get("YD_BASEMAP_%s_URL" % name.upper())
-    if not base:
-        continue
-    annotation = os.environ.get("YD_BASEMAP_%s_ANNOTATION_URL" % name.upper())
-    payload[name] = {
-        "tiles": [base],
-        "annotation": [annotation] if annotation else None,
-    }
+if os.environ.get("YD_TIANDITU_KEY"):
+    for name, base_layer, annotation_layer in PROXY_LAYERS:
+        payload[name] = {
+            "tiles": [PROXY_PATH % base_layer],
+            "annotation": [PROXY_PATH % annotation_layer],
+        }
+else:
+    for name, _base_layer, _annotation_layer in PROXY_LAYERS:
+        base = os.environ.get("YD_BASEMAP_%s_URL" % name.upper())
+        if not base:
+            continue
+        annotation = os.environ.get("YD_BASEMAP_%s_ANNOTATION_URL" % name.upper())
+        payload[name] = {
+            "tiles": [base],
+            "annotation": [annotation] if annotation else None,
+        }
 
 Path(static_dir, "basemaps.json").write_text(
     json.dumps(payload, ensure_ascii=False),

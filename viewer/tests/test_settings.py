@@ -15,7 +15,10 @@ from yd_viewer.settings import Settings, SettingsError, load_settings
 INPUT = "YD_VIEWER_INPUT_DIR"
 OUTPUT = "YD_VIEWER_OUTPUT_DIR"
 STATIC = "YD_VIEWER_STATIC_DIR"
+TIANDITU_KEY = "YD_TIANDITU_KEY"
+CACHE_DIR = "YD_BASEMAP_CACHE_DIR"
 ALL = (INPUT, OUTPUT, STATIC)
+OPTIONAL = (TIANDITU_KEY, CACHE_DIR)
 
 
 def _three_dirs(tmp_path: Path) -> dict[str, Path]:
@@ -30,6 +33,8 @@ def _three_dirs(tmp_path: Path) -> dict[str, Path]:
 
 
 def _apply_env(monkeypatch: pytest.MonkeyPatch, values: dict[str, str | None]) -> None:
+    for name in OPTIONAL:
+        monkeypatch.delenv(name, raising=False)
     for name in ALL:
         value = values.get(name)
         if value is None:
@@ -70,6 +75,45 @@ def test_valid_directories_return_immutable_settings(tmp_path, monkeypatch):
     )
     with pytest.raises(FrozenInstanceError):
         settings.input_dir = tmp_path / "other"
+
+
+def test_optional_basemap_variables_default_without_failing(tmp_path, monkeypatch):
+    _apply_env(monkeypatch, _valid_env(tmp_path))
+
+    settings = load_settings()
+
+    assert settings.tianditu_key is None
+    assert settings.basemap_cache_dir == Path("/cache")
+
+
+@pytest.mark.parametrize("value", ["", None])
+def test_empty_or_unset_key_is_none_and_empty_cache_dir_falls_back(
+    tmp_path, monkeypatch, value
+):
+    _apply_env(monkeypatch, _valid_env(tmp_path))
+    for name in OPTIONAL:
+        if value is not None:
+            monkeypatch.setenv(name, value)
+
+    settings = load_settings()
+
+    assert settings.tianditu_key is None
+    assert settings.basemap_cache_dir == Path("/cache")
+
+
+def test_optional_basemap_variables_are_read_from_the_environment(
+    tmp_path, monkeypatch
+):
+    _apply_env(monkeypatch, _valid_env(tmp_path))
+    cache_dir = tmp_path / "absent-cache"
+    monkeypatch.setenv(TIANDITU_KEY, "a-key")
+    monkeypatch.setenv(CACHE_DIR, str(cache_dir))
+
+    settings = load_settings()
+
+    assert settings.tianditu_key == "a-key"
+    assert settings.basemap_cache_dir == cache_dir
+    assert not cache_dir.exists()
 
 
 @pytest.mark.parametrize("missing", ALL)
