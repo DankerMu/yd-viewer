@@ -10,7 +10,7 @@ from typing import TypedDict
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 
-from yd_viewer import catalog
+from yd_viewer import basemap, catalog
 from yd_viewer.dat import DatError, read_dat
 from yd_viewer.geometry import load_geometry
 from yd_viewer.settings import Settings, load_settings
@@ -109,6 +109,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "series": series,
         }
 
+    basemap.register(app, settings)
     app.mount("/api", app.router.not_found)
     app.mount("/geometry", StaticFiles(directory=settings.input_dir))
     app.mount("/", StaticFiles(directory=settings.static_dir, html=True))

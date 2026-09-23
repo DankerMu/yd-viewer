@@ -147,6 +147,8 @@ export function MapPage({ onReachSelect, onLatestChange }: MapPageProps) {
           result.body !== null && typeof result.body === 'object'
             ? (result.body as BasemapsConfig)
             : {},
+          result.status,
+          pageDir,
         )
         setParsedBasemaps(parsed)
         setBasemap(parsed.defaultKey)

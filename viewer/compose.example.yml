@@ -19,9 +19,14 @@ services:
     volumes:
       - /example/host/yd-products/input/viewer:/input:ro
       - /example/host/yd-products/output:/output:ro
+      - yd-basemap-cache:/cache
     networks:
       - yd-network
 
 networks:
   yd-network:
     name: yd-network
+
+volumes:
+  yd-basemap-cache:
+    name: yd-basemap-cache

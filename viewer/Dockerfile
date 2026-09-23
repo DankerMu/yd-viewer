@@ -24,6 +24,7 @@ COPY viewer/entrypoint.sh /app/entrypoint.sh
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid 10001 --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin app \
     && chmod 755 /usr/local/bin/uv /app/entrypoint.sh \
+    && mkdir -p /cache && chown 10001:10001 /cache \
     && chown -R 10001:10001 /app/static
 ENV PATH="/app/.venv/bin:/usr/local/bin:${PATH}" \
     YD_VIEWER_STATIC_DIR=/app/static

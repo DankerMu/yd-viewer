@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { parseBasemaps, type MapStyle } from './basemaps'
+import { parseBasemaps, resolveTileUrl, type MapStyle } from './basemaps'
 
 const VECTOR_TILES = ['https://tiles.example/vector/{z}/{x}/{y}.png']
 const VECTOR_ANNO = ['https://tiles.example/vector-anno/{z}/{x}/{y}.png']
@@ -111,5 +111,51 @@ describe('basemaps.json parsing', () => {
       expect(parsed.styles).toEqual({})
       expectEmptyStyle(parsed.selectedStyle)
     }
+  })
+})
+
+describe('tile URL resolution', () => {
+  const PAGE_DIR = 'https://h/yd/'
+  const PROXY_VEC = 'api/basemap/tianditu/vec/{z}/{x}/{y}'
+  const PROXY_CVA = 'api/basemap/tianditu/cva/{z}/{x}/{y}'
+  const ABSOLUTE = 'https://t0.example/vec/{z}/{x}/{y}'
+
+  it('prefixes a relative template with the page directory, braces intact', () => {
+    const resolved = resolveTileUrl(PAGE_DIR, PROXY_VEC)
+    expect(resolved).toBe('https://h/yd/api/basemap/tianditu/vec/{z}/{x}/{y}')
+    expect(resolved).not.toContain('%7B')
+  })
+
+  it('leaves absolute URLs byte-for-byte unchanged', () => {
+    expect(resolveTileUrl(PAGE_DIR, ABSOLUTE)).toBe(ABSOLUTE)
+    expect(resolveTileUrl(PAGE_DIR, 'HTTPS://t0.example/a/{z}')).toBe(
+      'HTTPS://t0.example/a/{z}',
+    )
+    expect(resolveTileUrl(PAGE_DIR, 'data:image/png;base64,AAA')).toBe(
+      'data:image/png;base64,AAA',
+    )
+  })
+
+  it('resolves proxy tiles and annotation in the built style', () => {
+    const parsed = parseBasemaps(
+      {
+        vector: { tiles: [PROXY_VEC], annotation: [PROXY_CVA] },
+        satellite: { tiles: [ABSOLUTE], annotation: null },
+      },
+      200,
+      PAGE_DIR,
+    )
+    expect(layerTileSets(parsed.selectedStyle)).toEqual([
+      ['https://h/yd/api/basemap/tianditu/vec/{z}/{x}/{y}'],
+      ['https://h/yd/api/basemap/tianditu/cva/{z}/{x}/{y}'],
+    ])
+    expect(layerTileSets(parsed.styles.satellite as MapStyle)).toEqual([[ABSOLUTE]])
+  })
+
+  it('keeps relative templates unchanged when no page directory is given', () => {
+    const parsed = parseBasemaps({
+      vector: { tiles: [PROXY_VEC], annotation: null },
+    })
+    expect(layerTileSets(parsed.selectedStyle)).toEqual([[PROXY_VEC]])
   })
 })
