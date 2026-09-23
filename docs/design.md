@@ -383,7 +383,7 @@ oracle：node-27 live receipt（agent-ops §11.3）。
 
 - node-27 viewer 独立端口：`127.0.0.1:8082`（用户裁决 2026-09-22，见 agent-ops §16）；
 - node-27 有效天地图配置：复用 NWM 现役天地图 key（用户裁决 2026-09-22，见 §7 与 agent-ops §9.2）；
-- `/yd/` 归属（用户裁决 2026-09-22）：主线 viewer 先接管 `test.nwm.ac.cn/yd/`，同日用户裁决并手工把 `nwm.ac.cn/yd/` 也切到主线（agent-ops §16.3）；应急副本实例（agent-ops §14.6）仍在运行但不再被引用，停用另行裁决；
+- `/yd/` 归属（用户裁决 2026-09-22）：主线 viewer 先接管 `test.nwm.ac.cn/yd/`，同日用户裁决并手工把 `nwm.ac.cn/yd/` 也切到主线（agent-ops §16.3）；应急副本实例（agent-ops §14.6）已于 2026-09-23 停用并清理（agent-ops §14.7）；
 - Slurm partition、account、CPU、内存和 walltime；
 - 外部基线模型包在首次 `prepare` 时的现场路径；
 - 客户服务器的计算、下载和调度形态。
