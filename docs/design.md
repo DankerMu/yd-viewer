@@ -256,12 +256,12 @@ output/<cycle>/<source>/
 - 底图切换器和 MapLibre 样式生成；
 - 河段 hover/selected 高亮；
 - discharge 色带和图例；
-- 起报下拉的纯 UI 外壳。
+- 起报下拉的纯 UI 外壳；
 - 页头横栏 `SiteHeader` 及品牌图 `assets/brand/logo.png`、`sponsors.png`；
 - 图层切换卡片 `M11FloatingLayerSwitcher` 的外观（仅水文组一项）与图例卡片 `M11FloatingLegend` 的外观；
 - 曲线面板 `M11RiverForecastPanel` 的头部、起报行、源图例行外观与 `ForecastChart` 的 `zoomable` 分支。
 
-不复制 NWM 的 OpenAPI client、store、路由、登录/RBAC、MVT、代站弹窗、降水叠加、多流域、监控和运维链接。来源为 NWM `4f8d98263` 对应快照；在 `viewer/frontend/SNAPSHOT.md` 登记完整来源 commit、复制文件清单和逐文件删减（包括上述禁复内容），之后独立维护。任何源文件 ≤1000 行，不新增源文件 large-file-guard 豁免；唯一允许新增的豁免是生成文件 `viewer/frontend/pnpm-lock.yaml`；色带/图例只取必要片段。品牌图不进豁免：`logo.png`（NWM 原图 720×720，按行计超限）缩放为 96×96 后入库，`sponsors.png` 原样入库，均在 SNAPSHOT.md 登记来源与处理。上述 2026-09-24 外观对齐补充复制的文件与片段在 NWM `4f8d98263` 至 `c9f363b38` 之间未改动，来源 pin 不变。
+不复制 NWM 的 OpenAPI client、store、路由、登录/RBAC、MVT、代站弹窗、降水叠加、多流域、监控和运维链接。来源为 NWM `4f8d98263` 对应快照；在 `viewer/frontend/SNAPSHOT.md` 登记完整来源 commit、复制文件清单和逐文件删减（包括上述禁复内容），之后独立维护。任何源文件 ≤1000 行，不新增源文件 large-file-guard 豁免；唯一允许新增的豁免是生成文件 `viewer/frontend/pnpm-lock.yaml`；色带/图例只取必要片段。品牌图不进豁免：`logo.png`（NWM 原图 720×720，按行计超限）缩放为 96×96 后入库，`sponsors.png` 原样入库，均在 SNAPSHOT.md 登记来源与处理。2026-09-24 外观对齐补充复制的来源（`SiteHeader.tsx`、`M11FloatingControls.tsx`、`M11RiverForecastPanel.tsx`、`ForecastChart.tsx`、`index.css`、`assets/brand/*`）在 NWM `4f8d98263` 至 `c9f363b38` 之间未改动，来源 pin 不变。
 
 前端构建 `base: './'`；API、几何及 `basemaps.json` 请求均为相对路径，构建物无以 `/` 开头的绝对资源引用。`https://h/yd/` 下 cycles 请求为 `https://h/yd/api/cycles`，同一构建物兼容根路径与剥前缀部署。
 
