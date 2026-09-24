@@ -9,4 +9,4 @@
 - producer/viewer 文件契约：[docs/products-contract.md](docs/products-contract.md)
 - 节点登录、部署与验证纪律：[docs/agent-ops.md](docs/agent-ops.md)
 
-状态：M1 文档、M2 producer、M3 viewer、M4 node-22 真计算、M5 node-27 真闭环均已完成（M5 于 2026-09-22 上线 `https://test.nwm.ac.cn/yd/`，现场登记见 [docs/agent-ops.md §15](docs/agent-ops.md#15-m4-部署登记node-22-主线-producer)、[§16](docs/agent-ops.md#16-m5-部署登记node-27-主线-viewer)）；`nwm.ac.cn/yd/` 已于 2026-09-22 切到主线（agent-ops §16.3），应急副本已于 2026-09-23 停用并清理（agent-ops §14.7）；天地图瓦片自 2026-09-23 起经同源反代 `api/basemap/tianditu`（design §6.1）。里程碑见 [docs/design.md §10](docs/design.md#10-里程碑)。
+状态：M1 文档、M2 producer、M3 viewer、M4 node-22 真计算、M5 node-27 真闭环均已完成（M5 于 2026-09-22 上线 `https://test.nwm.ac.cn/yd/`，现场登记见 [docs/agent-ops.md §15](docs/agent-ops.md#15-m4-部署登记node-22-主线-producer)、[§16](docs/agent-ops.md#16-m5-部署登记node-27-主线-viewer)）；`nwm.ac.cn/yd/` 已于 2026-09-22 切到主线（agent-ops §16.3），应急副本已于 2026-09-23 停用并清理（agent-ops §14.7）；天地图瓦片自 2026-09-23 起经同源反代 `api/basemap/tianditu`（design §6.1）。页面外观自 2026-09-24 起与 NWM 首页对齐（design §7，`yd-viewer:bdc837d`）；NWM 底部时间轴待另立 change（#340）。里程碑见 [docs/design.md §10](docs/design.md#10-里程碑)。
