@@ -6,6 +6,15 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { emptyMapStyle, type MapStyle } from '../../lib/basemaps'
 import type { LngLatBounds } from '../../lib/bbox'
 
+/**
+ * Expanded attribution. Passing any options object replaces MapLibre's default,
+ * so its MapLibre credit is restated here to keep 「© 天地图 | MapLibre」.
+ */
+export const M11_ATTRIBUTION_CONTROL = {
+  compact: false,
+  customAttribution: '<a href="https://maplibre.org/" target="_blank">MapLibre</a>',
+}
+
 export interface M11MapCameraFit {
   bounds: LngLatBounds
   padding?: number
@@ -23,7 +32,7 @@ export function createM11Map(
   const map = new MapLibreMap({
     container,
     style,
-    attributionControl: { compact: true },
+    attributionControl: M11_ATTRIBUTION_CONTROL,
     ...(fitTo
       ? {
           bounds: fitTo.bounds,
@@ -31,7 +40,7 @@ export function createM11Map(
         }
       : { center: [0, 0] as [number, number], zoom: 1 }),
   })
-  map.addControl(new NavigationControl({ showCompass: false }), 'top-right')
+  map.addControl(new NavigationControl({ visualizePitch: true }), 'top-right')
   map.addControl(new ScaleControl({ maxWidth: 120 }), 'bottom-left')
   return map
 }

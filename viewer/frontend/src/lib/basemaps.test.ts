@@ -92,6 +92,20 @@ describe('basemaps.json parsing', () => {
     expect(layerTileSets(style)).toEqual([SATELLITE_TILES])
   })
 
+  it('credits 天地图 on every raster source, tiles and annotation', () => {
+    const parsed = parseBasemaps({
+      vector: { tiles: VECTOR_TILES, annotation: VECTOR_ANNO },
+      satellite: { tiles: SATELLITE_TILES, annotation: null },
+    })
+    const vector = Object.values(parsed.styles.vector?.sources ?? {})
+    const satellite = Object.values(parsed.styles.satellite?.sources ?? {})
+    expect(vector).toHaveLength(2)
+    expect(satellite).toHaveLength(1)
+    for (const source of [...vector, ...satellite]) {
+      expect(source.attribution).toBe('© 天地图')
+    }
+  })
+
   it('uses zero choices and an empty style for 404, empty object, absent payload, and unknown-only keys', () => {
     const empty = [
       parseBasemaps(

@@ -10,14 +10,16 @@ export function App() {
   const [selectedReach, setSelectedReach] = useState<number | null>(null)
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden">
-      <MapPage onLatestChange={setLatest} onReachSelect={setSelectedReach} />
-      <Header cycle={latest?.cycle ?? null} />
-      <RiverCurveWindow
-        reachId={selectedReach}
-        mapCycle={latest?.cycle ?? null}
-        onClose={() => setSelectedReach(null)}
-      />
+    <div className="flex h-screen w-screen flex-col overflow-hidden">
+      <Header />
+      <section className="relative min-h-0 flex-1 overflow-hidden bg-[#d7e7ef]">
+        <MapPage onLatestChange={setLatest} onReachSelect={setSelectedReach} />
+        <RiverCurveWindow
+          reachId={selectedReach}
+          mapCycle={latest?.cycle ?? null}
+          onClose={() => setSelectedReach(null)}
+        />
+      </section>
     </div>
   )
 }
