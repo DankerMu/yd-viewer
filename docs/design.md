@@ -144,7 +144,7 @@ viewer 结构层要求列编号无重复且集合等于几何权威集合；重�
 
 ### 4.3 单位
 
-`yd.rivqdown.dat` 中流量单位为 m³/day。后端统一除以 86400，API 和页面均使用 m³/s。普通页面文案只显示“流量 (m³/s)”；逐小时平均口径由本节和产物契约明确。
+`yd.rivqdown.dat` 中流量单位为 m³/day。后端统一除以 86400，API 和页面均使用 m³/s。普通页面文案只显示“流量”与单位 m³/s（图层卡片副标题与曲线窗副标题沿用 NWM 的 `q_down` 字样）；逐小时平均口径由本节和产物契约明确。
 
 ## 5. 产物发布与窗口
 
@@ -217,19 +217,23 @@ output/<cycle>/<source>/
 
 ## 7. 前端
 
-技术栈：Vite 6 + React 18.3 + TypeScript 5.9 + MapLibre 4.7 + ECharts 6 + echarts-for-react 3 + Tailwind（版本随 NWM），使用 `corepack pnpm`（pnpm 10.11）。保留 NWM 组件的 Tailwind class 子集，不加插件或主题；不引入全局 store、路由或 react-query，状态使用 `useState`。
+技术栈：Vite 6 + React 18.3 + TypeScript 5.9 + MapLibre 4.7 + ECharts 6 + echarts-for-react 3 + Tailwind（版本随 NWM），使用 `corepack pnpm`（pnpm 10.11）。保留 NWM 组件的 Tailwind class 子集，不加插件；主题只复制 NWM `apps/frontend/src/index.css` `@theme` 中的 `--color-primary-*` 色板 token（900 `#0a1929`、800 `#0d2744`、700 `#0f3460`、600 `#1565c0`、500 `#1e88e5`、100 `#e3f2fd`、50 `#f5f9ff`），使复制来的 `primary-*` class 原样可用；图标随 NWM 使用 `lucide-react`（版本随 NWM）；不引入全局 store、路由或 react-query，状态使用 `useState`。
 
 交互以 NWM 当前实际挂载的源页面 `OverviewPage` 为准；可复制组件仍沿用源码中的 `M11*` 命名：
 
-- 全屏地图，加载 `./geometry/rivers.geojson` 与 `./geometry/boundary.geojson`；
+- 页面外观与 NWM 首页对齐（用户裁决 2026-09-24）：纵向为页头横栏 + 其下全幅地图，地图容器底色 `#d7e7ef`；
+- 页头横栏复制 NWM `SiteHeader`：高 84 px、`primary-900→800→700` 横向渐变；左侧 NWM 徽标 + 标题「永登流域水文模拟系统」（用户裁决 2026-09-22）+ 英文副标题「Yongdeng Basin Hydrological Modeling」（大写字距同 NWM），右侧 NWM 合作单位 logo 条（`lg` 及以上宽度显示，用户裁决 2026-09-24）；横栏不放起报、状态或其他控件；文档 `<title>` 同为该标题；
+- 地图加载 `./geometry/rivers.geojson` 与 `./geometry/boundary.geojson`；
 - 河网按 `/api/map/latest` 的 `values` 与升序 `reach_id` 对应着色；前端类型将 `values`/`series` 声明为可空；`null` 使用下方缺失色，不因缺测改选其他 source；
-- 右上只显示配置中存在的矢量/卫星/地形底图按钮；
-- 右下流量 colorbar 与单位 `m³/s`；
-- 地图缩放控件和比例尺，初始视野 fit 到 boundary 包围盒；无飞行或记忆视野等额外相机逻辑；
+- 左上图层卡片复制 NWM `M11FloatingLayerSwitcher` 的外观，只保留「水文」组的唯一一项「流量 · q_down / m³/s」，恒为选中态且不是可点击控件（用户裁决 2026-09-24）；不复制「气象」组（降水、代站），也不放禁用占位；卡片底部一行显示 map/latest 的起报时间「起报 YYYY-MM-DD HH:mm 北京时间」，无可用 cycle 显示「暂无数据」，不显示停更原因、source 失败或内部计算状态；
+- 右上只显示配置中存在的矢量/卫星/地形底图按钮，外观同 NWM `M11FloatingBasemapSwitcher`（`lucide-react` 的 Map/Satellite/Mountain 图标，选中 `primary-600`）；
+- 右下「径流量图例」卡片同 NWM `M11FloatingLegend` 外观（Layers 图标标题），列 5 个数值档与「无径流数据」行（见下表）；
+- 地图右上缩放 + 指南针（NWM `visualizePitch` 同款）与左下比例尺；有底图时版权归属为展开式「© 天地图 | MapLibre」（栅格源 attribution `© 天地图`），无底图时只剩 MapLibre；初始视野 fit 到 boundary 包围盒；无飞行或记忆视野等额外相机逻辑；
 - hover 河段高亮，点击选中并打开可拖拽曲线窗；
+- 曲线窗外观同 NWM `M11RiverForecastPanel`：头部 Waves 图标 + 标题「河段 <reach_id>」+ 副标题「河段 q_down 流量预报 · <实际可用源，以 + 连接>」+ 关闭按钮；其下为起报行（「起报」+ cycle 下拉，下拉项按北京时间显示）与源图例行（GFS 青 `#22d3ee`、IFS 绿 `#34d399`，缺源项置灰划线）；图表可滚轮缩放时间轴（ECharts inside dataZoom，行尾提示「滚轮缩放时间轴」）；
 - 曲线窗只有起报 cycle 下拉（来自 cycles，默认地图当前 cycle），series 的可用源各 168 点同轴显示；TypeScript 接受 `null`；缺测点不补零、不跨缺口连线，tooltip 不得把 `null` 显示为 0；
 - 切换历史 cycle 只重取曲线，不改变地图着色或地图 cycle；
-- 页头显示系统标题「永登流域水文模拟系统」（用户裁决 2026-09-22）、map/latest 的起报时间（标「起报」「北京时间」）与「流量 (m³/s)」，不显示停更原因、source 失败或内部计算状态；无可用 cycle 显示「暂无数据」；文档 `<title>` 同为该标题。
+- NWM 底部控制条（GFS/IFS 切换、时次下拉、lead 时间轴播放）本期不做：需要按 source/lead 取地图值的新 API 并改动 §2「地图默认帧」决策，另立 change（用户裁决 2026-09-24）。
 
 全部页面时间按 `Asia/Shanghai` 显示：cycle `2026082712` → `2026-08-27 20:00`；`2026082700` lead 5 → `2026-08-27 13:00`；下拉保持 API cycle 顺序。API 绝对时间仍为 UTC `Z`。
 
@@ -237,13 +241,13 @@ output/<cycle>/<source>/
 
 | 流量 m³/s | 颜色 | 图例标签 |
 |---|---|---|
-| `<1` | `#7FB8DC` | `<1` |
-| `1 ≤ v < 10` | `#4292C6` | `1–10` |
-| `10 ≤ v < 100` | `#2171B5` | `10–100` |
-| `100 ≤ v < 1000` | `#08519C` | `100–1000` |
-| `≥1000` | `#CB181D` | `≥1000` |
+| `<1` | `#7FB8DC` | `<1 m³/s` |
+| `1 ≤ v < 10` | `#4292C6` | `1–10 m³/s` |
+| `10 ≤ v < 100` | `#2171B5` | `10–100 m³/s` |
+| `100 ≤ v < 1000` | `#08519C` | `100–1000 m³/s` |
+| `≥1000` | `#CB181D` | `≥1000 m³/s` |
 
-`null`（含 API 缺测流量）用 `#94ADC7`，不是第六个数值档；色带不可配置。
+`null`（含 API 缺测流量）用 `#94ADC7`，不是第六个数值档；图例在 5 档之后另列「无径流数据」行（`#94ADC7`），与 NWM 图例同位；色带不可配置，分档沿用本表、不改为 NWM 的 6 档（用户裁决 2026-09-24）。
 
 从 NWM 复制并精简：
 
@@ -252,9 +256,12 @@ output/<cycle>/<source>/
 - 底图切换器和 MapLibre 样式生成；
 - 河段 hover/selected 高亮；
 - discharge 色带和图例；
-- 起报下拉的纯 UI 外壳。
+- 起报下拉的纯 UI 外壳；
+- 页头横栏 `SiteHeader` 及品牌图 `assets/brand/logo.png`、`sponsors.png`；
+- 图层切换卡片 `M11FloatingLayerSwitcher` 的外观（仅水文组一项）与图例卡片 `M11FloatingLegend` 的外观；
+- 曲线面板 `M11RiverForecastPanel` 的头部、起报行、源图例行外观与 `ForecastChart` 的 `zoomable` 分支。
 
-不复制 NWM 的 OpenAPI client、store、路由、登录/RBAC、MVT、代站弹窗、降水叠加、多流域、监控和运维链接。来源为 NWM `4f8d98263` 对应快照；在 `viewer/frontend/SNAPSHOT.md` 登记完整来源 commit、复制文件清单和逐文件删减（包括上述禁复内容），之后独立维护。任何源文件 ≤1000 行，不新增源文件 large-file-guard 豁免；唯一允许新增的豁免是生成文件 `viewer/frontend/pnpm-lock.yaml`；色带/图例只取必要片段。
+不复制 NWM 的 OpenAPI client、store、路由、登录/RBAC、MVT、代站弹窗、降水叠加、多流域、监控和运维链接。来源为 NWM `4f8d98263` 对应快照；在 `viewer/frontend/SNAPSHOT.md` 登记完整来源 commit、复制文件清单和逐文件删减（包括上述禁复内容），之后独立维护。任何源文件 ≤1000 行，不新增源文件 large-file-guard 豁免；唯一允许新增的豁免是生成文件 `viewer/frontend/pnpm-lock.yaml`；色带/图例只取必要片段。品牌图不进豁免：`logo.png`（NWM 原图 720×720，按行计超限）缩放为 96×96 后入库，`sponsors.png` 原样入库，均在 SNAPSHOT.md 登记来源与处理。2026-09-24 外观对齐补充复制的来源（`SiteHeader.tsx`、`M11FloatingControls.tsx`、`M11RiverForecastPanel.tsx`、`ForecastChart.tsx`、`index.css`、`assets/brand/*`）在 NWM `4f8d98263` 至 `c9f363b38` 之间未改动，来源 pin 不变。
 
 前端构建 `base: './'`；API、几何及 `basemaps.json` 请求均为相对路径，构建物无以 `/` 开头的绝对资源引用。`https://h/yd/` 下 cycles 请求为 `https://h/yd/api/cycles`，同一构建物兼容根路径与剥前缀部署。
 
