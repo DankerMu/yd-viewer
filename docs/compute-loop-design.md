@@ -210,6 +210,8 @@ yd-producer run --config <path> --local <path>
 
 `run` 的生产接线属于 M2：入口在同一 `cron.lock_path` 锁内调用 `controller.run_sources`，逐源注入 Slurm executor、生产 attempt driver、固定 10 秒实际等待的 poll policy 与独立 `sacct ExitCode` provider。生产 driver 通过原子、checksum/identity 绑定的 work-local receipt 在 Slurm job 与登录节点之间交接同一 source/cycle/work/job 的 DAT、日志、RunDirectory 与 T+12 checkpoint authority；其 `WorkIdentity` 与 direct-grid asset handoff 必须遵守 §5.1。不得用测试 fake、terminal hook 或目录扫描替代。退出码为：全部报告成功或锁竞争跳过 `0`，任一源 `STOPPED`/`JOB_FAILED`（以及 cleanup pending/运行期错误）`3`，参数或配置错误 `2`。M4 只做真实 node-22 receipt 与 cron 安装，不补写 CLI 业务体。
 
+`run` 写到 stderr 的每一行都以 UTC 时间 `YYYY-MM-DDTHH:MM:SSZ` 加一个空格开头，便于在 `cron.log` 中按时间定位（2026-09-24 用户裁决：旧格式把等待与已发布都记成「错误：」且无时间戳）。取得锁并跑完 `run_sources` 后，为每个 source 的每条结果各写一行 `<时间> <标签>：<detail>`，标签按结果取：`SUCCEEDED` 为「完成」；`STOPPED` 且停因为 `raw_incomplete` 为「等待」；其余（其它停因的 `STOPPED`、`JOB_FAILED`、`SUCCEEDED_CLEANUP_PENDING`）为「错误」；结果无 detail 时以结果名代替。全部成功时同样写「完成」行。锁竞争跳过仍不写任何行。`run` 的其它失败路径（配置、锁、状态守卫、运行期异常）文案不变，仍以「错误：」开头，只加同样的时间前缀；`prepare`/`init` 的输出不变。退出码不变（上段）：「等待」仍随 `STOPPED` 返回 `3`，标签只改日志可读性，不改调度语义。
+
 ### 6.1 `prepare`
 
 输入是外部受控、Git ignored 的 yd 基线模型包，其路径经 `prepare --baseline` 在调用时传入，**不进入 `config.toml` 也不进入 `local.toml`**：`prepare` 是一次性、需当前任务明确授权的人工操作（agent-ops §8.1），把只被它消费一次的路径做成常驻必需字段，等于要求 `init`/`run` 也填一个它们从不读的现场值。流程：
