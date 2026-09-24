@@ -62,7 +62,7 @@ TBD - created by archiving change m3-viewer. Update Purpose after archive.
 - **THEN** 样式中的 tiles 恰为 `["https://h/yd/api/basemap/tianditu/vec/{z}/{x}/{y}"]`（花括号原样，非 `%7B`）；绝对 URL 条目字节不变
 
 ### Requirement: 交互与曲线窗
-hover 河段 MUST 高亮，点击 MUST 选中并打开可拖拽曲线窗；曲线窗 MUST 只有起报 cycle 下拉（来自 `GET /api/cycles`，默认为地图当前 cycle），MUST 在同一坐标轴显示 `series` 中每个可用 source 的 168 点曲线，x 轴为 `UTC(cycle)+lead` 的北京时间；切换下拉 MUST 只重取曲线，MUST NOT 改变地图着色或 cycle。
+hover 河段 MUST 高亮，点击 MUST 选中并打开可拖拽曲线窗；曲线窗 MUST 只有起报 cycle 下拉（来自 `GET /api/cycles`，默认为地图当前 cycle），MUST 在同一坐标轴显示 `series` 中每个可用 source 的 168 点曲线，x 轴为 `UTC(cycle)+lead` 的北京时间；切换下拉 MUST 只重取曲线，MUST NOT 改变地图着色或 cycle。曲线窗外观 MUST 同 NWM `M11RiverForecastPanel`：头部为图标、标题「河段 <reach_id>」、副标题「河段 q_down 流量预报 · <实际可用源以 + 连接>」与关闭按钮；其下为「起报」行（下拉项为北京时间）与源图例行（GFS `#22d3ee`、IFS `#34d399`，缺源项置灰划线）；图表 MUST 支持滚轮缩放时间轴（ECharts inside dataZoom，`filterMode: 'none'`，不随鼠标移动平移），图表内不再另画 ECharts 图例。
 
 #### Scenario: cycles 到下拉项
 - **WHEN** cycles 为 `2026082712`、`2026082700`
@@ -75,6 +75,14 @@ hover 河段 MUST 高亮，点击 MUST 选中并打开可拖拽曲线窗；曲�
 #### Scenario: 缺测流量保持空隙
 - **WHEN** API返回保留168位置且含null的source曲线
 - **THEN** 客户端类型接受null；null处不补零、不跨缺口连线，tooltip不把null显示为0，其他正常点和source保留；地图null河段继续显示缺失色
+
+#### Scenario: 副标题按可用源
+- **WHEN** 曲线响应 `series` 只含非空的 `gfs`
+- **THEN** 副标题为「河段 q_down 流量预报 · GFS」，源图例行中 IFS 置灰划线；两源都在时为「· GFS+IFS」
+
+#### Scenario: 滚轮缩放
+- **WHEN** 构造曲线图表配置
+- **THEN** 恰有一个 `type: 'inside'` 的 dataZoom，`filterMode` 为 `none`、`moveOnMouseMove` 为 false，且配置不含 ECharts `legend`
 
 ### Requirement: 页头
 页头 MUST 为 NWM `SiteHeader` 同款横栏（高 84 px、`primary-900→800→700` 横向渐变）：左侧徽标、系统标题「永登流域水文模拟系统」与英文副标题「Yongdeng Basin Hydrological Modeling」，右侧合作单位 logo 条（`lg` 及以上宽度显示）；横栏 MUST NOT 含起报时间或其它状态；文档 `<title>` MUST 为同一标题。左上图层卡片 MUST 只有「水文」组的一项「流量 · q_down / m³/s」，恒为选中态且不是按钮，MUST NOT 含「气象」组或禁用占位；卡片底部 MUST 显示最新可用 cycle 的起报时间（北京时间，标「起报」与「北京时间」），无可用 cycle 时显示「暂无数据」；MUST NOT 显示停更原因、source 失败或任何内部计算状态。
