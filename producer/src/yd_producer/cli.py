@@ -35,6 +35,7 @@ from yd_producer.controller import (
     RunOutcome,
     RunSourcesError,
     RunSourcesReport,
+    StopReason,
     run_sources,
 )
 from yd_producer.executor import ExecutorError
@@ -225,9 +226,9 @@ def run(local: LocalConfig, config: Config) -> int:
     try:
         locked = run_with_lock(lock_path=local.cron.lock_path, action=action)
     except _StatesGuardFailed as exc:
-        return _fail(str(exc))
+        return _run_fail(str(exc), code=EXIT_GUARD)
     except RunLockError as exc:
-        return _runtime_fail(str(exc))
+        return _run_fail(str(exc))
     if not locked.acquired:
         return 0
     return _run_exit(locked.value)
@@ -238,17 +239,57 @@ def _production_poll_wait() -> None:
 
 
 def _run_exit(report: RunSourcesReport) -> int:
+    """每条结果一行 `<时间> <标签>：<detail>`（compute-loop §6「`run` stderr 行格式」）。
+
+    标签只影响日志可读性；退出码只由结果决定：全部 `SUCCEEDED` 为 `0`，否则 `3`。
+    先判 `SUCCEEDED`，只有 `STOPPED` 才读 `stop_reason`。
+    """
     reports = (*report.ifs, *report.gfs)
+    for item in reports:
+        if item.outcome is RunOutcome.SUCCEEDED:
+            label = "完成"
+        elif (
+            item.outcome is RunOutcome.STOPPED
+            and item.stop_reason is StopReason.RAW_INCOMPLETE
+        ):
+            label = "等待"
+        else:
+            label = "错误"
+        _run_print(f"{label}：{item.detail or item.outcome.value}")
     if all(item.outcome is RunOutcome.SUCCEEDED for item in reports):
         return 0
-    details = [item.detail for item in reports if item.detail]
-    message = "; ".join(details) if details else "run 未全部成功"
-    return _runtime_fail(message)
-
-
-def _runtime_fail(message: str) -> int:
-    print(f"错误：{message}", file=sys.stderr)
     return EXIT_RUNTIME
+
+
+def _stamp() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _run_print(message: str) -> None:
+    """`run` 专用：message 的每个物理行加同一个 UTC 时间前缀后写 stderr。"""
+    stamp = _stamp()
+    for line in message.split("\n"):
+        print(f"{stamp} {line}", file=sys.stderr)
+
+
+def _run_fail(message: str, *extra: str, code: int = EXIT_RUNTIME) -> int:
+    """`run` 失败块：`错误：<message>` 与随后各行作为一条消息整体加前缀。"""
+    _run_print("\n".join((f"错误：{message}", *extra)))
+    return code
+
+
+def _run_context(exc: BaseException) -> tuple[str, ...]:
+    """`source=`/`phase=`/`job=` 行，缺省或为空的属性不写。"""
+    fields = (("source", "source"), ("phase", "phase"), ("job", "job_id"))
+    return tuple(
+        f"{label}={getattr(exc, attr)}"
+        for label, attr in fields
+        if getattr(exc, attr, None)
+    )
+
+
+def _notes(exc: BaseException) -> tuple[str, ...]:
+    return tuple(getattr(exc, "__notes__", ()))
 
 
 def _check_states_dir(states: Path) -> str | None:
@@ -390,8 +431,7 @@ def main(
         local = load_local(args.local.resolve(), config)
     except ConfigError as exc:
         if getattr(args, "command", None) == "run":
-            print(f"错误：{exc}", file=sys.stderr)
-            return EXIT_USAGE
+            return _run_fail(str(exc), code=EXIT_USAGE)
         return _fail(str(exc))
 
     try:
@@ -407,42 +447,23 @@ def main(
         return code
     except ConfigError as exc:
         if args.command == "run":
-            print(f"错误：{exc}", file=sys.stderr)
-            _print_notes(exc)
-            return EXIT_USAGE
+            return _run_fail(str(exc), *_notes(exc), code=EXIT_USAGE)
         code = _fail(str(exc))
         _print_notes(exc)
         return code
+    # 以下三类只由 `run` 抛出（prepare/init 不导入 controller/executor 的错误类型）。
     except RunSourcesError as exc:
-        print(f"错误：{exc}", file=sys.stderr)
-        return EXIT_RUNTIME
+        return _run_fail(str(exc))
     except (RunError, ExecutorError) as exc:
-        print(f"错误：{exc}", file=sys.stderr)
-        if getattr(exc, "source", None):
-            print(f"source={exc.source}", file=sys.stderr)
-        if getattr(exc, "phase", None):
-            print(f"phase={exc.phase}", file=sys.stderr)
-        if getattr(exc, "job_id", None):
-            print(f"job={exc.job_id}", file=sys.stderr)
-        _print_notes(exc)
-        return EXIT_RUNTIME
+        return _run_fail(str(exc), *_run_context(exc), *_notes(exc))
     except OSError as exc:
         if args.command != "run":
             raise
-        print(f"错误：{exc}", file=sys.stderr)
-        return EXIT_RUNTIME
+        return _run_fail(str(exc))
     except Exception as exc:
         if args.command != "run":
             raise
-        print(f"错误：{exc}", file=sys.stderr)
-        if getattr(exc, "source", None):
-            print(f"source={exc.source}", file=sys.stderr)
-        if getattr(exc, "phase", None):
-            print(f"phase={exc.phase}", file=sys.stderr)
-        if getattr(exc, "job_id", None):
-            print(f"job={exc.job_id}", file=sys.stderr)
-        _print_notes(exc)
-        return EXIT_RUNTIME
+        return _run_fail(str(exc), *_run_context(exc), *_notes(exc))
 
 
 if __name__ == "__main__":  # pragma: no cover - 入口点走 [project.scripts]
