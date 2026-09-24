@@ -30,7 +30,7 @@
 ## 6. Registration and gates
 - [x] 6.1 `SNAPSHOT.md`: rows for `components/layout/SiteHeader.tsx` → `src/components/Header.tsx`, `M11FloatingLayerSwitcher`/`M11FloatingLegend`/basemap icons snippets, `index.css` primary tokens, the two brand PNGs (source path, original size, logo resize 720→96 with command); per-file removals (气象 group, precip legend, ops link, react-router `Link`, query-state/store props, `cn`/tailwind-merge helper); pin note: sources unchanged `4f8d98263`→`c9f363b38`.
 - [x] 6.2 Gates: `corepack pnpm --dir viewer/frontend install --frozen-lockfile`, `typecheck`, `test`, `build`; `uv run python scripts/large_file_guard.py` (from `producer/`: `uv run python ../scripts/large_file_guard.py`); grep `viewer/frontend/dist` for `tianditu.gov.cn` (0), `[?&]tk=` (0), `src="/` and `href="/` (0); `openspec validate viewer-nwm-chrome-align --strict --no-interactive`.
-- [ ] 6.3 Local visual evidence (orchestrator): serve the build with local smoke fixture, screenshot 1440×900, compare with NWM homepage screenshot; plus one screenshot with `map/latest` failing (alert visible, not under the card).
+- [x] 6.3 Local visual evidence (orchestrator): serve the build with local smoke fixture, screenshot 1440×900, compare with NWM homepage screenshot; plus one screenshot with `map/latest` failing (alert visible, not under the card).
 
 Suggested fixture level: compact
 Minimal mergeable slice: atomic - the chrome pieces share the new layout, theme tokens and icon dependency; splitting leaves a half-restyled page.
