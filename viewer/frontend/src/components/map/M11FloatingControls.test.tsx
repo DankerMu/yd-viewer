@@ -10,6 +10,8 @@ describe('M11FloatingLayerCard', () => {
     expect(html).toContain('q_down / m³/s')
     expect(html).toContain('流量')
     expect(html).toContain('水文')
+    const footer = html.match(/<div class="([^"]*)">起报 /)
+    expect(footer?.[1]).toContain('whitespace-nowrap')
   })
 
   it('shows 暂无数据 without a cycle and has no buttons, 气象 or 代站', () => {

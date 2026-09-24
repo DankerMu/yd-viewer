@@ -16,7 +16,7 @@ const BASEMAP_OPTION: Record<BasemapKey, { label: string; icon: LucideIcon }> = 
 export function M11FloatingLayerCard({ cycle }: { cycle: string | null }) {
   return (
     <section
-      className={`absolute left-4 top-4 z-[120] w-max max-w-52 p-2 ${GLASS_PANEL}`}
+      className={`absolute left-4 top-4 z-[120] w-max p-2 ${GLASS_PANEL}`}
       aria-label="地图图层"
     >
       <div className="flex items-center gap-2 px-1 pb-2 text-xs font-semibold text-neutral-900">
@@ -33,7 +33,7 @@ export function M11FloatingLayerCard({ cycle }: { cycle: string | null }) {
           <span className="block truncate text-xs text-neutral-600">q_down / m³/s</span>
         </span>
       </div>
-      <div className="mt-2 border-t border-white/50 px-1 pt-2 text-xs text-neutral-700">
+      <div className="mt-2 whitespace-nowrap border-t border-white/50 px-1 pt-2 text-xs text-neutral-700">
         {cycle === null ? '暂无数据' : `起报 ${formatBeijingTime(cycle)} 北京时间`}
       </div>
     </section>
