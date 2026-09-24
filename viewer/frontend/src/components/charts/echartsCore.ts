@@ -1,8 +1,8 @@
 import { LineChart } from 'echarts/charts'
-import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
+import { DataZoomComponent, GridComponent, TooltipComponent } from 'echarts/components'
 import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 
-echarts.use([LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
+echarts.use([LineChart, DataZoomComponent, GridComponent, TooltipComponent, CanvasRenderer])
 
 export { echarts }

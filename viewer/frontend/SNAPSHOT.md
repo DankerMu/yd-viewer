@@ -6,6 +6,8 @@ Copied from NWM `apps/frontend` at that pin, then trimmed for yd-viewer. Files a
 
 2026-09-24 NWM look alignment (issue #338, design §7): the additional sources below (`SiteHeader.tsx`, `M11FloatingControls.tsx` layer switcher/legend/basemap icons, `index.css` primary tokens, `assets/brand/*`) are unchanged between `4f8d98263` and `c9f363b38` (checked with `git show c9f363b38:<path>`), so the source pin stays `4f8d98263`.
 
+2026-09-24 curve window alignment (issue #339, design §7): `M11RiverForecastPanel.tsx`, `M11PopupChrome.tsx`, `ForecastChart.tsx` and `echartsCore.ts` are likewise unchanged between `4f8d98263` and `c9f363b38`; the pin stays `4f8d98263`.
+
 ## Source → target
 
 | Source (NWM pin) | Target |
@@ -34,6 +36,10 @@ Copied from NWM `apps/frontend` at that pin, then trimmed for yd-viewer. Files a
 | `apps/frontend/src/components/map/M11FloatingControls.tsx` `M11FloatingLegend` title row and entry rows | `M11DischargeLegend` in `src/components/map/overviewDataContracts.tsx`. |
 | `apps/frontend/src/index.css` `@theme` `--color-primary-{900,800,700,600,500,100,50}` | `src/index.css` `@theme` (only these seven tokens; the rest of NWM's theme and `:root` variables are not copied). |
 | `apps/frontend/package.json` `lucide-react` `^1.14.0` | Same range in `package.json` (lockfile resolves 1.48.0). |
+| `apps/frontend/src/components/map/M11RiverForecastPanel.tsx` lines 226–251 (header) | `RiverCurveWindow.tsx` header: `Waves` icon tile, title 「河段 <reach_id>」, subtitle from `sourceSubtitle` (actual sources instead of the fixed 「· GFS+IFS」), `X` close button 「关闭面板」 (plus `data-m11-window-no-drag`). The `displayName.meta` line is not copied (it would repeat the reach id). |
+| `apps/frontend/src/components/map/M11RiverForecastPanel.tsx` lines 262–272 (cycle bar) | `RiverCurveWindow.tsx` 「起报」 row with trailing 「GFS + IFS 同步切换」; the control is yd's existing native `<select>`. |
+| `apps/frontend/src/components/map/M11PopupChrome.tsx` `M11IssueTimeSelect` `SelectTrigger` classes (lines 140–141) | Class string on the native `<select>` (NWM `ui/select` base tokens such as `rounded-[var(--radius-md)]`/`focus:ring-primary-500` translated to `rounded-md`/`focus:ring-cyan-400`). Radix `Select`/`SelectContent`/`SelectItem` are not copied. |
+| `apps/frontend/src/components/map/M11RiverForecastPanel.tsx` lines 280–293 (chip row + body) | `SourceChips` in `RiverCurveWindow.tsx` (swatch colors, present/absent classes, trailing 「滚轮缩放时间轴」) and the body container classes. A source is absent when `series` lacks a non-empty array for it. |
 
 ## Per-file kept behavior and six prohibited categories
 
@@ -50,7 +56,7 @@ Kept: river-only draggable shell; `header`/`children` props; Tailwind glass chro
 
 ### `ForecastChart.tsx`
 
-Kept: ECharts line chart; required `data: CurveResponse | null`; all supplied values (168 when present, including JSON `null` gaps); shared axes; GFS/IFS identifiable (solid cyan / dashed green); Beijing x labels via `lib/time`; tooltip uses the category axis label as-is (no second UTC conversion) and does not coerce `null` to `0`; `connectNulls: false` so missing points leave a gap instead of bridging or zero-fill; fixed `m³/s`; `notMerge` so a dual-source option replaced by one source drops the old series.
+Kept: ECharts line chart; required `data: CurveResponse | null`; `compact` look (no ECharts legend — the curve window chip row replaces it; grid `left: 48, right: 16, bottom: 28`; y-axis name at the axis end) and the `zoomable` branch verbatim (`dataZoom: [{ type: 'inside', zoomOnMouseWheel: true, moveOnMouseMove: false, moveOnMouseWheel: false, filterMode: 'none' }]`), both applied unconditionally (no `variant`/`zoomable` props); the option is built by exported `buildForecastOption(data)`; all supplied values (168 when present, including JSON `null` gaps); shared axes; GFS/IFS identifiable (solid cyan / dashed green); Beijing x labels via `lib/time`; tooltip uses the category axis label as-is (no second UTC conversion) and does not coerce `null` to `0`; `connectNulls: false` so missing points leave a gap instead of bridging or zero-fill; fixed `m³/s`; `notMerge` so a dual-source option replaced by one source drops the old series.
 
 - store: removed (`@/stores/forecast`)
 - routing: absent
@@ -61,10 +67,11 @@ Kept: ECharts line chart; required `data: CurveResponse | null`; all supplied va
 
 Also removed: IFS 144h truncation/marker, point budget/degraded, analysis divider, light/dark themes, extra chart kinds.
 Removed unused adapter: optional `{cycle, leadHours, series}` props and `ForecastChartSeries`.
+Deliberate spacing difference: NWM compact uses `grid.top: 16` with `nameGap: 32`, which clips the y-axis name in the curve window; yd uses `grid.top: 28` and `nameGap: 12`.
 
 ### `echartsCore.ts`
 
-Kept: tree-shaken ECharts registrations actually used by `ForecastChart` (LineChart, Grid, Legend, Tooltip, CanvasRenderer).
+Kept: tree-shaken ECharts registrations actually used by `ForecastChart` (LineChart, DataZoom, Grid, Tooltip, CanvasRenderer).
 
 - store: absent
 - routing: absent
@@ -73,7 +80,7 @@ Kept: tree-shaken ECharts registrations actually used by `ForecastChart` (LineCh
 - precipitation: absent
 - authorization: absent
 
-Removed unused Bar/Pie/DataZoom/MarkLine/Title registrations.
+Removed unused Bar/Pie/Legend/MarkLine/Title registrations (DataZoom added and Legend dropped in #339).
 
 ### `m11MapRuntime.tsx`
 
@@ -167,6 +174,19 @@ Kept: `M11DischargeLegend` in NWM `M11FloatingLegend` chrome — `Layers` icon +
 
 Removed six-band NWM legend (`1000–10000` / `>10000`), precip legend section, layer-catalog legend lookup, geometry budgets, and OpenAPI aliases. Color thresholds are not duplicated here; `lib/color.ts` is the single rule.
 Removed unused exports: `DischargeLegendEntry`, `GLASS_PANEL` (class remains file-private).
+
+### `RiverCurveWindow.tsx` (panel snippets from `M11RiverForecastPanel.tsx`)
+
+Kept: header, cycle bar and chip row chrome listed in "Extra origin snippets"; yd's own fetch/state machine (`/api/cycles`, `/api/cycles/<cycle>/reaches/<id>`, 加载中/暂无数据/加载失败), Beijing-time option labels.
+
+Removed: hydroMet loading chain (`loadHydroMetRiverForecast`, product bootstrap, per-source validation), `formatIssueTime` UTC labels, partial-failure reasons list, dual-window `active`/`onActivate`, delayed loading copy, segment display-name meta.
+
+- store: removed (`@/stores/forecast`)
+- routing: absent
+- generated client: removed (hydroMet product/segment identity types)
+- station UI: absent
+- precipitation: absent
+- authorization: absent
 
 ## Downstream APIs for #259 / #260
 
