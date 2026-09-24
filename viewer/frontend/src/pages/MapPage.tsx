@@ -11,7 +11,10 @@ import {
   type ParsedBasemaps,
 } from '../lib/basemaps'
 import { boundaryBbox, type BoundaryFeature } from '../lib/bbox'
-import { M11FloatingBasemapSwitcher } from '../components/map/M11FloatingControls'
+import {
+  M11FloatingBasemapSwitcher,
+  M11FloatingLayerCard,
+} from '../components/map/M11FloatingControls'
 import { attachRiverInteractions } from '../components/map/m11MapInteractions'
 import { reachIdFromUnknown } from '../components/map/m11MapBuilders'
 import {
@@ -182,7 +185,7 @@ export function MapPage({ onReachSelect, onLatestChange }: MapPageProps) {
   const geometryReady = rivers !== null && boundary !== null && !geometryFailed
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-neutral-200">
+    <div className="relative h-full w-full overflow-hidden">
       {geometryReady ? (
         <>
           <GeometryReadyMap
@@ -195,6 +198,7 @@ export function MapPage({ onReachSelect, onLatestChange }: MapPageProps) {
             onHoverReach={setHoverReachId}
             onSelectReach={handleSelectReach}
           />
+          <M11FloatingLayerCard cycle={latest.status === 'ready' ? latest.data.cycle : null} />
           <M11FloatingBasemapSwitcher
             choices={parsedBasemaps.choices}
             basemap={basemap}
@@ -203,7 +207,7 @@ export function MapPage({ onReachSelect, onLatestChange }: MapPageProps) {
           <M11DischargeLegend />
           {failed ? (
             <div
-              className="absolute left-4 top-4 z-[130] rounded-lg border border-white/40 bg-white/80 px-3 py-2 text-sm text-neutral-800 shadow-lg"
+              className="absolute left-1/2 top-4 z-[130] -translate-x-1/2 rounded-lg border border-white/40 bg-white/80 px-3 py-2 text-sm text-neutral-800 shadow-lg"
               role="alert"
             >
               {GENERIC_LOAD_ERROR}

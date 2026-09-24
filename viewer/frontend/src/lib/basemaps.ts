@@ -12,6 +12,7 @@ export type RasterSource = {
   type: 'raster'
   tiles: string[]
   tileSize: 256
+  attribution: string
 }
 
 export type RasterLayer = {
@@ -34,6 +35,7 @@ export type ParsedBasemaps = {
 }
 
 const BASEMAP_KEYS: BasemapKey[] = ['vector', 'satellite', 'terrain']
+const TIANDITU_ATTRIBUTION = '© 天地图'
 
 export const emptyMapStyle: MapStyle = {
   version: 8,
@@ -96,6 +98,7 @@ function rasterStyle(
       type: 'raster',
       tiles: resolveTiles(pageDir, entry.tiles),
       tileSize: 256,
+      attribution: TIANDITU_ATTRIBUTION,
     },
   }
   const layers: RasterLayer[] = [
@@ -106,6 +109,7 @@ function rasterStyle(
       type: 'raster',
       tiles: resolveTiles(pageDir, entry.annotation),
       tileSize: 256,
+      attribution: TIANDITU_ATTRIBUTION,
     }
     layers.push({ id: `${key}-anno`, type: 'raster', source: `${key}-anno` })
   }

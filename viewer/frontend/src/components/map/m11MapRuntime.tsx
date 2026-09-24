@@ -23,7 +23,7 @@ export function createM11Map(
   const map = new MapLibreMap({
     container,
     style,
-    attributionControl: { compact: true },
+    attributionControl: { compact: false },
     ...(fitTo
       ? {
           bounds: fitTo.bounds,
@@ -31,7 +31,7 @@ export function createM11Map(
         }
       : { center: [0, 0] as [number, number], zoom: 1 }),
   })
-  map.addControl(new NavigationControl({ showCompass: false }), 'top-right')
+  map.addControl(new NavigationControl({ visualizePitch: true }), 'top-right')
   map.addControl(new ScaleControl({ maxWidth: 120 }), 'bottom-left')
   return map
 }
