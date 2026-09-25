@@ -269,7 +269,7 @@ node-27 是 NWM active production host。yd 只能操作：
 - yd 端口必须先检查占用，现场确认后写入 node-27 私有 env；
 - host 端口只绑定 `127.0.0.1`，由 Nginx 对外；
 - compose project 名、container 名、network 和 image tag/digest必须带 yd 前缀，避免与 NWM 冲突；
-- 挂载必须显式 `:ro`；不挂整个 `YD_ROOT`；
+- 产品挂载必须显式 `:ro`，唯一可写挂载是与 NWM 共用的瓦片缓存 `/cache`（下文 M3 容器配置合同，用户裁决 2026-09-25）；不挂整个 `YD_ROOT`；
 - env 文件为 0600、属主 `nwm:nwm`，不入 Git；
 - 天地图 URL/key 只走 env 或部署配置，不打印进 receipt；现役 NWM key 可复用（用户裁决 2026-09-22，key 绑定域名白名单），复制只在 node-27 上私有 env 之间进行，不经聊天、Git 或 receipt；
 - 升级前记录当前镜像 digest和 compose 配置位置，保留上一镜像用于回滚。
@@ -278,7 +278,7 @@ M3 容器配置合同（这里只规定打包与配置，不执行 M5 部署）�
 
 - `viewer/Dockerfile` 多阶段构建：Node 22 执行 `corepack pnpm install --frozen-lockfile` 与 `corepack pnpm build`；Python 3.12 用 `uv sync --frozen --no-dev` 安装后端，复制前端 dist；运行镜像不含 Node、pnpm、uv 缓存或 dev 依赖。
 - Dockerfile 以 `ENV YD_VIEWER_STATIC_DIR=<镜像内前端目录>` 固定静态目录，含 `index.html` 且对运行用户可写；运维不得覆盖，`viewer/env.example` 与 `viewer/compose.example.yml` 均不得包含该变量。
-- entrypoint 与 uvicorn 使用同一非 root 用户，entrypoint 首先 `umask 002`（共享瓦片缓存须组可写）；`viewer/entrypoint.sh` 在启动前写 `$YD_VIEWER_STATIC_DIR/basemaps.json`，随后 `exec uvicorn` 固定监听 `0.0.0.0:8000`，容器端口不读 env。
+- entrypoint 与 uvicorn 使用同一非 root 用户，entrypoint 在 `set -eu` 之后、任何写盘之前 `umask 002`（共享瓦片缓存须组可写：新建目录 775、文件 664）；`viewer/entrypoint.sh` 在启动前写 `$YD_VIEWER_STATIC_DIR/basemaps.json`，随后 `exec uvicorn` 固定监听 `0.0.0.0:8000`，容器端口不读 env。
 - 运维 env 清单仅为 `YD_VIEWER_INPUT_DIR`、`YD_VIEWER_OUTPUT_DIR`、`YD_VIEWER_PORT`、`YD_TIANDITU_KEY`、`YD_BASEMAP_CACHE_DIR`、`YD_BASEMAP_VECTOR_URL`、`YD_BASEMAP_SATELLITE_URL`、`YD_BASEMAP_TERRAIN_URL`、`YD_BASEMAP_VECTOR_ANNOTATION_URL`、`YD_BASEMAP_SATELLITE_ANNOTATION_URL`、`YD_BASEMAP_TERRAIN_ANNOTATION_URL`；env.example 列键但无真实值。`YD_TIANDITU_KEY` 设置时走同源反代（design §6.1/§7），六个 URL 键被忽略；`YD_BASEMAP_CACHE_DIR` 为容器内可写缓存目录（默认 `/cache`），compose 以可写 bind 挂到该处；yd 不清理，只在命中时刷新 mtime（design §6.1）。node-27 上该 bind 源为 NWM 反代缓存 `$NHMS_MVT_FILE_CACHE_DIR/basemap/tianditu`（现场 `/home/nwm/.cache/nhms/mvt/basemap/tianditu`，取自 NWM display API 进程 env），两边共用，冷瓦片（mtime 30 天未刷新）由 NWM 每日清理（DankerMu/SHUD-NWM#2627）。共享约定：目录树 `2775`（setgid）属组 nwm(1005)，文件 `664`；yd 容器以 uid 10001 运行并经 compose `group_add` 取得该属组，umask 002；NWM 挪动路径、改布局或权限前须先改本节。
 - 两个目录 env 指向容器内只读挂载；host 端口映射固定形状为 `127.0.0.1:${YD_VIEWER_PORT}:8000`，env_file 指向不入库的私有 env。compose 示例恰有 input/viewer、output 两条 `:ro` 挂载与一条可写缓存 bind（`…:/cache`，不带 `:ro`）、一条 `group_add`（缓存目录属组 gid），均为占位值，不挂整个 `YD_ROOT`，不写现场路径，无命名卷。
 - compose project（`name`）、service、container、network、image 均用 `yd-` 前缀，例如依次为 `yd-viewer`、`yd-web`、`yd-web`、`yd-network`、`yd-viewer:<tag>`，不借用 NWM 对象。
