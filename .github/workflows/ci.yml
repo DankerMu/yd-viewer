@@ -37,6 +37,7 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+      - run: bash tests/test_entrypoint.sh
 
   viewer-frontend:
     runs-on: ubuntu-latest
