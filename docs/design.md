@@ -169,7 +169,7 @@ output/<cycle>/<source>/
 
 ## 6. viewer 后端
 
-单容器内的 FastAPI 同时服务业务 API、预转换 GeoJSON 和构建后的前端。无数据库、无磁盘缓存；「无写路径」指无业务写 API、不写 `YD_ROOT` 只读挂载。容器 entrypoint 在镜像内可写静态目录生成 `basemaps.json` 是唯一运行时配置写入，不是业务产物。
+单容器内的 FastAPI 同时服务业务 API、预转换 GeoJSON 和构建后的前端。无数据库；唯一磁盘缓存是 §6.1 天地图瓦片缓存（`YD_BASEMAP_CACHE_DIR`）。「无写路径」指无业务写 API、不写 `YD_ROOT` 只读挂载。容器 entrypoint 在镜像内可写静态目录生成 `basemaps.json` 是唯一运行时配置写入，不是业务产物。
 
 后端只从 `YD_VIEWER_INPUT_DIR`、`YD_VIEWER_OUTPUT_DIR`、`YD_VIEWER_STATIC_DIR` 三个 env 取目录，不读配置文件、数据库或整个 `YD_ROOT`；任一缺失、非目录或不可读即启动失败，错误带变量名及路径（缺失时说明未设置）。几何启动自检及 DAT 两层消费校验遵循 [products-contract.md](products-contract.md) §5.2/§6。容器内静态目录由镜像固定，不接受运维覆盖，详见 [agent-ops.md](agent-ops.md) §9.2。
 
@@ -183,7 +183,7 @@ output/<cycle>/<source>/
 | `GET /api/map/latest` | 按 catalog 顺序尝试候选：最新 cycle 内 GFS 优先、其次 IFS，再更早 cycle；数据层（结构/分钟）失败 WARNING（路径与原因）后继续，首个成功者取 lead 0；`values` 为 m³/s 或 `null`。无候选或全部数据层失败 404。河段缺测不排除 source、不回落、不 404 |
 | `GET /api/cycles/{cycle}/reaches/{reach_id}` | 对指定 cycle 每个 catalog 可用 source 做数据层读取，成功者入 series，各 168 个 m³/s 或 `null`；数据层失败 WARNING 并省略，series 为空 404。河段缺测不省略 source、不 404 |
 | `GET /api/health` | output 可枚举时 `200 {"status":"ok","latest_cycle":"YYYYMMDDHH"或null}`；latest_cycle 来自同一 catalog 枚举，不另写扫描，不返回内部路径或运行状态 |
-| `GET /api/basemap/tianditu/{layer}/{z}/{x}/{y}` | 同源天地图瓦片反代（用户裁决 2026-09-22，参照 NWM `apps/api/routes/basemap.py`）：`layer` ∈ `vec/cva/img/cia/ter/cta`，`0 ≤ z ≤ 18`，`x`/`y` 为该 z 下合法整数，否则 4xx；服务端持 `YD_TIANDITU_KEY`，上游 `https://t{0..7}.tianditu.gov.cn/DataServer?T=<layer>_w&x&y&l&tk`（按瓦片坐标选子域），固定浏览器 UA、不转发访客 Referer/Cookie，超时 10 s；命中先写 `YD_BASEMAP_CACHE_DIR/<layer>/<z>/<x>/<y>`（tmp + `os.replace`）再回 `Cache-Control: public, max-age=604800` 与 `X-Tile-Cache: hit|miss`，正文须以 PNG/JPEG 签名开头才算命中；上游失败（非 200、超时、非图片）永不缓存，回 502/503 且 `Cache-Control: no-store`；某层上游 429 后该层冷却 60 s 内未命中直接 503（命中仍返回缓存；不打上游，不影响其它层）；未设 `YD_TIANDITU_KEY` 时该路由 404。不使用第三方 HTTP 客户端（标准库 `urllib` + 线程池），不做清理/配额统计 |
+| `GET /api/basemap/tianditu/{layer}/{z}/{x}/{y}` | 同源天地图瓦片反代（用户裁决 2026-09-22，参照 NWM `apps/api/routes/basemap.py`）：`layer` ∈ `vec/cva/img/cia/ter/cta`，`0 ≤ z ≤ 18`，`x`/`y` 为该 z 下合法整数，否则 4xx；服务端持 `YD_TIANDITU_KEY`，上游 `https://t{0..7}.tianditu.gov.cn/DataServer?T=<layer>_w&x&y&l&tk`（按瓦片坐标选子域），固定浏览器 UA、不转发访客 Referer/Cookie，超时 10 s；未命中时上游成功先写 `YD_BASEMAP_CACHE_DIR/<layer>/<z>/<x>/<y>`（tmp + `os.replace`）再回 `Cache-Control: public, max-age=604800` 与 `X-Tile-Cache: hit|miss`，正文须以 PNG/JPEG 签名开头才算命中；上游失败（非 200、超时、非图片）永不缓存，回 502/503 且 `Cache-Control: no-store`；某层上游 429 后该层冷却 60 s 内未命中直接 503（命中仍返回缓存；不打上游，不影响其它层）；未设 `YD_TIANDITU_KEY` 时该路由 404。缓存命中时若文件 mtime 早于当前 24 h 以上，`os.utime(path)` 刷新为当前时间（失败吞掉，不影响响应），供冷瓦片清理判定「30 天无访问」。node-27 上该缓存目录与 NWM 反代共用（用户裁决 2026-09-25：同 key、同上游、同布局，放 `/home`），清理由 NWM 负责（DankerMu/SHUD-NWM#2627），yd 不清理；挂载与权限见 [agent-ops.md](agent-ops.md) §9.2。不使用第三方 HTTP 客户端（标准库 `urllib` + 线程池），不做配额统计 |
 
 `output/` 不可枚举（含启动后删除、权限不可读）时以上四端点均返回 503。cycle 不在可用列表内为 404；格式不匹配 `^\d{10}$`、小时不为 00/12 或 reach_id 不在权威集合内为 4xx，不能 5xx。错误沿用 FastAPI 默认 `{"detail": ...}`，不自定义错误模型/异常处理器。
 
