@@ -226,7 +226,7 @@ def run(local: LocalConfig, config: Config) -> int:
     try:
         locked = run_with_lock(lock_path=local.cron.lock_path, action=action)
     except _StatesGuardFailed as exc:
-        return _run_fail(str(exc), code=EXIT_GUARD)
+        return _run_fail(str(exc), *_notes(exc), code=EXIT_GUARD)
     except RunLockError as exc:
         return _run_fail(str(exc))
     if not locked.acquired:
@@ -382,7 +382,8 @@ def _print_notes(exc: BaseException) -> None:
     test_cleanup_note_reaches_stderr_on_the_exit_one_path——各断言
     `"Traceback" not in err`。）
 
-    `prepare` 与 `run` 的 handler 都直接调用本函数，确保失败清理证据不依赖 traceback。
+    只有 prepare 路径（`PrepareError` 与非 run 的 `ConfigError` handler）调用本函数，确保
+    失败清理证据不依赖 traceback；run 路径经 `_run_fail(..., *_notes(exc))` 加时间前缀输出。
 
     两个调用点逐个交代（spec cli-config「prepare 的清理告警与残留证据 MUST 到达运维」的
     失败路径子句没有退出码限定）：
@@ -451,15 +452,15 @@ def main(
         code = _fail(str(exc))
         _print_notes(exc)
         return code
-    # 以下三类只由 `run` 抛出（prepare/init 不导入 controller/executor 的错误类型）。
+    # 以下三类只在 `run_sources` 调用链上抛出。
     except RunSourcesError as exc:
-        return _run_fail(str(exc))
+        return _run_fail(str(exc), *_notes(exc))
     except (RunError, ExecutorError) as exc:
         return _run_fail(str(exc), *_run_context(exc), *_notes(exc))
     except OSError as exc:
         if args.command != "run":
             raise
-        return _run_fail(str(exc))
+        return _run_fail(str(exc), *_notes(exc))
     except Exception as exc:
         if args.command != "run":
             raise
