@@ -278,9 +278,9 @@ M3 容器配置合同（这里只规定打包与配置，不执行 M5 部署）�
 
 - `viewer/Dockerfile` 多阶段构建：Node 22 执行 `corepack pnpm install --frozen-lockfile` 与 `corepack pnpm build`；Python 3.12 用 `uv sync --frozen --no-dev` 安装后端，复制前端 dist；运行镜像不含 Node、pnpm、uv 缓存或 dev 依赖。
 - Dockerfile 以 `ENV YD_VIEWER_STATIC_DIR=<镜像内前端目录>` 固定静态目录，含 `index.html` 且对运行用户可写；运维不得覆盖，`viewer/env.example` 与 `viewer/compose.example.yml` 均不得包含该变量。
-- entrypoint 与 uvicorn 使用同一非 root 用户；`viewer/entrypoint.sh` 在启动前写 `$YD_VIEWER_STATIC_DIR/basemaps.json`，随后 `exec uvicorn` 固定监听 `0.0.0.0:8000`，容器端口不读 env。
-- 运维 env 清单仅为 `YD_VIEWER_INPUT_DIR`、`YD_VIEWER_OUTPUT_DIR`、`YD_VIEWER_PORT`、`YD_TIANDITU_KEY`、`YD_BASEMAP_CACHE_DIR`、`YD_BASEMAP_VECTOR_URL`、`YD_BASEMAP_SATELLITE_URL`、`YD_BASEMAP_TERRAIN_URL`、`YD_BASEMAP_VECTOR_ANNOTATION_URL`、`YD_BASEMAP_SATELLITE_ANNOTATION_URL`、`YD_BASEMAP_TERRAIN_ANNOTATION_URL`；env.example 列键但无真实值。`YD_TIANDITU_KEY` 设置时走同源反代（design §6.1/§7），六个 URL 键被忽略；`YD_BASEMAP_CACHE_DIR` 为容器内可写缓存目录（默认 `/cache`），compose 以命名卷 `yd-basemap-cache` 挂到该处，不清理。
-- 两个目录 env 指向容器内只读挂载；host 端口映射固定形状为 `127.0.0.1:${YD_VIEWER_PORT}:8000`，env_file 指向不入库的私有 env。compose 示例恰有 input/viewer、output 两条 `:ro` 挂载与一条 `yd-basemap-cache:/cache` 命名卷，不挂整个 `YD_ROOT`，不写挂载路径。
+- entrypoint 与 uvicorn 使用同一非 root 用户，entrypoint 首先 `umask 002`（共享瓦片缓存须组可写）；`viewer/entrypoint.sh` 在启动前写 `$YD_VIEWER_STATIC_DIR/basemaps.json`，随后 `exec uvicorn` 固定监听 `0.0.0.0:8000`，容器端口不读 env。
+- 运维 env 清单仅为 `YD_VIEWER_INPUT_DIR`、`YD_VIEWER_OUTPUT_DIR`、`YD_VIEWER_PORT`、`YD_TIANDITU_KEY`、`YD_BASEMAP_CACHE_DIR`、`YD_BASEMAP_VECTOR_URL`、`YD_BASEMAP_SATELLITE_URL`、`YD_BASEMAP_TERRAIN_URL`、`YD_BASEMAP_VECTOR_ANNOTATION_URL`、`YD_BASEMAP_SATELLITE_ANNOTATION_URL`、`YD_BASEMAP_TERRAIN_ANNOTATION_URL`；env.example 列键但无真实值。`YD_TIANDITU_KEY` 设置时走同源反代（design §6.1/§7），六个 URL 键被忽略；`YD_BASEMAP_CACHE_DIR` 为容器内可写缓存目录（默认 `/cache`），compose 以可写 bind 挂到该处；yd 不清理，只在命中时刷新 mtime（design §6.1）。node-27 上该 bind 源为 NWM 反代缓存 `$NHMS_MVT_FILE_CACHE_DIR/basemap/tianditu`（现场 `/home/nwm/.cache/nhms/mvt/basemap/tianditu`，取自 NWM display API 进程 env），两边共用，冷瓦片（mtime 30 天未刷新）由 NWM 每日清理（DankerMu/SHUD-NWM#2627）。共享约定：目录树 `2775`（setgid）属组 nwm(1005)，文件 `664`；yd 容器以 uid 10001 运行并经 compose `group_add` 取得该属组，umask 002；NWM 挪动路径、改布局或权限前须先改本节。
+- 两个目录 env 指向容器内只读挂载；host 端口映射固定形状为 `127.0.0.1:${YD_VIEWER_PORT}:8000`，env_file 指向不入库的私有 env。compose 示例恰有 input/viewer、output 两条 `:ro` 挂载与一条可写缓存 bind（`…:/cache`，不带 `:ro`）、一条 `group_add`（缓存目录属组 gid），均为占位值，不挂整个 `YD_ROOT`，不写现场路径，无命名卷。
 - compose project（`name`）、service、container、network、image 均用 `yd-` 前缀，例如依次为 `yd-viewer`、`yd-web`、`yd-web`、`yd-network`、`yd-viewer:<tag>`，不借用 NWM 对象。
 - basemaps JSON 的键为 `vector`/`satellite`/`terrain`；有底图 URL 才写 `{"tiles":[url],"annotation":[url]或null}`，全缺写 `{}` 并正常进入 uvicorn。URL 必须原样写入，stdout/stderr 与 receipt 不得出现 URL/key；不得开启 shell trace 打印秘密。文件位于镜像文件系统而非 NFS 挂载。前端消费规则见 [design.md](design.md) §7。
 
@@ -563,8 +563,8 @@ receipt 目录 `/scratch/frd_muziyao/yd/receipts/`；每行一步，失败也登
 | 镜像 | 本机 `docker buildx build --platform linux/amd64 -t yd-viewer:<git sha>`，`docker save \| gzip` → scp → node-27 `docker load`；登记 digest |
 | 回环端口 | `127.0.0.1:8082`（`YD_VIEWER_PORT=8082`） |
 | 部署目录 | `/home/nwm/yd-viewer/`：`compose.yml`、`.env`（0600 nwm:nwm）、`images/`、`receipts/` |
-| 挂载 | `/home/ghdc/yd/input/viewer:/input:ro`、`/home/ghdc/yd/output:/output:ro`、命名卷 `yd-basemap-cache:/cache` |
-| 天地图 | `YD_TIANDITU_KEY` 复用 NWM 现役 key（§9.2；取自 NWM 代码默认值，机器内拷贝不回显），瓦片经 yd 同源反代 `api/basemap/tianditu/…`（design §6.1，用户裁决 2026-09-22）；缓存命名卷 `yd-basemap-cache:/cache` |
+| 挂载 | `/home/ghdc/yd/input/viewer:/input:ro`、`/home/ghdc/yd/output:/output:ro`、`/home/nwm/.cache/nhms/mvt/basemap/tianditu:/cache`（与 NWM 共用，用户裁决 2026-09-25，§9.2）；`group_add: ["1005"]`（nwm） |
+| 天地图 | `YD_TIANDITU_KEY` 复用 NWM 现役 key（§9.2；取自 NWM 代码默认值，机器内拷贝不回显），瓦片经 yd 同源反代 `api/basemap/tianditu/…`（design §6.1，用户裁决 2026-09-22）；缓存与 NWM 共用（见上行），2026-09-25 前为命名卷 `yd-basemap-cache:/cache` |
 | Nginx | 仅改 `test.nwm.ac.cn.conf` 的 `/yd/` `proxy_pass` 8081→8082，用户手工：备份 `.bak.$TS` → `sudo nginx -t` → `sudo systemctl reload nginx` |
 | 浏览器 receipt | API 项 curl（回环 + 公网）；页面项本机 headless Chrome 截图留档 + 用户人工逐项确认 |
 | 回滚 | 首次部署无上一镜像：`docker compose down` + 恢复 Nginx 备份并 reload |
