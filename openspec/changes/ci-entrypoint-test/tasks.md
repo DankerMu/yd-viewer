@@ -7,11 +7,11 @@
 
 ## 1. CI
 
-- [ ] 1.1 `.github/workflows/ci.yml` viewer-backend job：在 `- run: uv run pytest` 之后加 `- run: bash tests/test_entrypoint.sh`；如 runner 上脚本内 `uv run --python 3.12 --no-python-downloads` 找不到解释器，只在该步加最小环境设置（如 `UV_PYTHON`），不改脚本
+- [x] 1.1 `.github/workflows/ci.yml` viewer-backend job：在 `- run: uv run pytest` 之后加 `- run: bash tests/test_entrypoint.sh`；如 runner 上脚本内 `uv run --python 3.12 --no-python-downloads` 找不到解释器，只在该步加最小环境设置（如 `UV_PYTHON`），不改脚本
 
 ## 2. 验证（输入 → 预期）
 
-- [ ] 2.1 本地：`cd viewer && bash tests/test_entrypoint.sh`（非 root）→ `test_entrypoint.sh: all cases passed`，exit 0
+- [x] 2.1 本地：`cd viewer && bash tests/test_entrypoint.sh`（非 root）→ `test_entrypoint.sh: all cases passed`，exit 0
 - [ ] 2.2 本 PR 的 CI：viewer-backend job 日志中新步骤执行并输出 `all cases passed`，job 绿
 - [ ] 2.3 变异（临时 draft PR，基于本分支，验证后关闭并删分支；两个变异各自单独一次 CI run，第二个变异前先恢复 umask，不叠加）：
   - 删除 `viewer/entrypoint.sh` 的 `umask 002` 行 → viewer-backend 在新步骤失败，日志含 `umask='0022', expected '0002'`（`test_entrypoint.sh:97-98`）；
