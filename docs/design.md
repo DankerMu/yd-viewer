@@ -293,7 +293,7 @@ output/<cycle>/<source>/
 | 前端 | `corepack pnpm install --frozen-lockfile`、`corepack pnpm typecheck`（`tsc --noEmit`）、`corepack pnpm test`（`vitest run`）、`corepack pnpm build`；纯函数覆盖色带、相对 URL、北京时间、basemaps 解析、cycles 下拉、boundary 包围盒；不做 DOM/视觉回归 |
 | 容器打包 | 仓库根 `docker build -f viewer/Dockerfile .`；非 root shell 单测覆盖 basemaps 生成与 URL 不进日志；不冒充 M5 现场 health receipt |
 
-CI 新增 `viewer-frontend` job，在 `viewer/frontend` 按上述顺序安装、typecheck、test、build；现有 producer、viewer-backend、openspec job 不变。
+CI 新增 `viewer-frontend` job，在 `viewer/frontend` 按上述顺序安装、typecheck、test、build；现有 producer、openspec job 不变。`viewer-backend` job 在 `pytest` 之后以 runner 的非 root 用户执行 `bash tests/test_entrypoint.sh`，使 entrypoint 契约（`umask 002`、URL/key 不进日志、`exec` 不 fork、写盘失败不启动）任一回归都让 CI 变红（#358）。
 
 ### 9.2 node-22 真产物
 
