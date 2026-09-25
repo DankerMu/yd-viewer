@@ -27,7 +27,6 @@ ENV_KEYS = (
     "YD_BASEMAP_SATELLITE_ANNOTATION_URL",
     "YD_BASEMAP_TERRAIN_ANNOTATION_URL",
 )
-CACHE_VOLUME = "yd-basemap-cache"
 
 
 def _entries(text: str) -> list[str]:
@@ -56,25 +55,30 @@ def _block(text: str, key: str) -> list[str]:
     raise AssertionError(f"missing block: {key}")
 
 
-def test_compose_mounts_two_read_only_binds_and_one_cache_volume():
+def test_compose_mounts_two_read_only_binds_and_one_writable_cache_bind():
     mounts = _entries("\n".join(_block(COMPOSE, "volumes")))
 
-    binds = [mount for mount in mounts if mount.startswith("/")]
-    assert len(binds) == 2
-    assert all(mount.endswith(":ro") for mount in binds)
-    assert [mount for mount in mounts if not mount.startswith("/")] == [
-        f"{CACHE_VOLUME}:/cache"
-    ]
+    assert len(mounts) == 3
+    assert all(mount.startswith("/") for mount in mounts)
+    read_only = [mount for mount in mounts if mount.endswith(":ro")]
+    writable = [mount for mount in mounts if not mount.endswith(":ro")]
+    assert len(read_only) == 2
+    assert len(writable) == 1
+    assert writable[0].endswith(":/cache")
     assert "YD_ROOT" not in COMPOSE
+    # agent-ops §16.2 holds the live paths; the example must stay synthetic.
+    assert "/home/" not in COMPOSE
 
 
-def test_compose_declares_the_cache_volume_by_name_at_top_level():
-    top_level = re.search(r"^volumes:\n((?:[ \t].*\n?)+)", COMPOSE, flags=re.MULTILINE)
-    assert top_level is not None
-    assert top_level.group(1).rstrip("\n").splitlines() == [
-        f"  {CACHE_VOLUME}:",
-        f"    name: {CACHE_VOLUME}",
-    ]
+def test_compose_adds_exactly_one_placeholder_cache_group():
+    groups = re.findall(r"^\s*group_add:\s*\[(.*)\]\s*$", COMPOSE, flags=re.MULTILINE)
+
+    assert groups == ['"1000"']
+
+
+def test_compose_declares_no_named_volume():
+    assert re.search(r"^volumes:", COMPOSE, flags=re.MULTILINE) is None
+    assert "yd-basemap-cache" not in COMPOSE
 
 
 def test_compose_publishes_only_the_loopback_port():

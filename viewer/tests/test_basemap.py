@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import logging
+import os
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -30,6 +32,9 @@ VEC_UPSTREAM = f"https://t0.tianditu.gov.cn/DataServer?T=vec_w&x=0&y=0&l=1&tk={K
 IMG_UPSTREAM = f"https://t5.tianditu.gov.cn/DataServer?T=img_w&x=3&y=2&l=2&tk={KEY}"
 PUBLIC_CACHE = "public, max-age=604800"
 NO_STORE = "no-store"
+# viewer-api spec: a hit refreshes mtime only when it is older than 24 h.
+STALE_AGE = 25 * 3600
+FRESH_AGE = 1 * 3600
 
 
 class _FakeResponse:
@@ -109,8 +114,21 @@ def _install(monkeypatch: pytest.MonkeyPatch, upstream: _Upstream) -> _Upstream:
 
 def _freeze_clock(monkeypatch: pytest.MonkeyPatch, now: list[float]) -> None:
     monkeypatch.setattr(
-        basemap, "time", SimpleNamespace(monotonic=lambda: now[0]), raising=True
+        basemap,
+        "time",
+        SimpleNamespace(monotonic=lambda: now[0], time=time.time),
+        raising=True,
     )
+
+
+def _seed(cache_dir: Path, body: bytes, *, age: float) -> Path:
+    """Put a tile at the VEC_TILE cache path with its mtime `age` seconds ago."""
+    path = cache_dir / "vec" / "1" / "0" / "0"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(body)
+    past = time.time() - age
+    os.utime(path, (past, past))
+    return path
 
 
 def test_miss_fetches_upstream_then_hit_serves_the_cached_tile(
@@ -320,3 +338,75 @@ def test_key_never_reaches_logs_or_response_bodies(
     assert "tianditu.gov.cn" not in caplog.text
     for response in responses:
         assert KEY not in response.text
+
+
+def test_hit_refreshes_a_stale_mtime(tmp_path, cache_dir, monkeypatch):
+    upstream = _install(monkeypatch, _Upstream((200, JPEG)))
+    tile = _seed(cache_dir, PNG, age=STALE_AGE)
+    before = tile.stat().st_mtime
+    client = _client(tmp_path, cache_dir)
+
+    response = client.get(VEC_TILE)
+
+    after = tile.stat().st_mtime
+    assert time.time() - before > STALE_AGE - 60
+    assert abs(time.time() - after) < 60
+    assert response.status_code == 200
+    assert response.headers["x-tile-cache"] == "hit"
+    assert response.content == PNG
+    assert upstream.requests == []
+
+
+def test_hit_leaves_a_fresh_mtime_alone(tmp_path, cache_dir, monkeypatch):
+    upstream = _install(monkeypatch, _Upstream((200, JPEG)))
+    tile = _seed(cache_dir, PNG, age=FRESH_AGE)
+    before = tile.stat().st_mtime_ns
+    client = _client(tmp_path, cache_dir)
+
+    response = client.get(VEC_TILE)
+
+    assert tile.stat().st_mtime_ns == before
+    assert response.status_code == 200
+    assert response.headers["x-tile-cache"] == "hit"
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize("error", [PermissionError, FileNotFoundError])
+def test_refresh_failure_still_serves_the_hit(tmp_path, cache_dir, monkeypatch, error):
+    """No group write, or NWM deleted the tile between read and utime."""
+    upstream = _install(monkeypatch, _Upstream((200, JPEG)))
+    tile = _seed(cache_dir, PNG, age=STALE_AGE)
+    before = tile.stat().st_mtime_ns
+    calls: list[object] = []
+
+    def failing_utime(path, *args, **kwargs):
+        calls.append(path)
+        raise error(path)
+
+    monkeypatch.setattr(os, "utime", failing_utime)
+    client = _client(tmp_path, cache_dir)
+
+    response = client.get(VEC_TILE)
+
+    assert calls == [tile]
+    assert tile.stat().st_mtime_ns == before
+    assert response.status_code == 200
+    assert response.headers["x-tile-cache"] == "hit"
+    assert response.content == PNG
+    assert upstream.requests == []
+
+
+def test_non_image_cache_file_is_a_miss_and_keeps_its_mtime(
+    tmp_path, cache_dir, monkeypatch
+):
+    upstream = _install(monkeypatch, _Upstream((500, b"upstream is broken")))
+    tile = _seed(cache_dir, HTML, age=STALE_AGE)
+    before = tile.stat().st_mtime_ns
+    client = _client(tmp_path, cache_dir)
+
+    response = client.get(VEC_TILE)
+
+    assert upstream.urls == [VEC_UPSTREAM]
+    assert response.status_code == 502
+    assert tile.read_bytes() == HTML
+    assert tile.stat().st_mtime_ns == before

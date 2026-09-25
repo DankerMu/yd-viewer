@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 002  # 与 NWM 共享的瓦片缓存须组可写：目录 775、文件 664（agent-ops §9.2）
 
 UV_OFFLINE=1 UV_NO_CACHE=1 UV_PYTHON_DOWNLOADS=never \
   uv run --offline --no-project --no-cache --no-python-downloads --python 3.12 python -c '
