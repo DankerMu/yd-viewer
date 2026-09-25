@@ -6,6 +6,7 @@
 非 run 输出（prepare/init/`DATABASE_URL` 守卫/argparse）MUST NOT 带前缀。
 """
 
+import os
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -130,12 +131,16 @@ def _argv(command, tmp_path, **local_kwargs):
     return argv, local
 
 
-def _ready_run_argv(tmp_path):
+def _ready_run(tmp_path):
     argv, local = _argv("run", tmp_path)
     source_states = Path(local.yd_root) / "states" / "gfs"
     source_states.mkdir(parents=True, exist_ok=True)
     (source_states / "2026010200.cfg.ic").write_bytes(b"presence")
-    return argv
+    return argv, local
+
+
+def _ready_run_argv(tmp_path):
+    return _ready_run(tmp_path)[0]
 
 
 def _prepare_argv(tmp_path):
@@ -448,6 +453,92 @@ def test_runtime_failure_lines_are_all_stamped(
     assert _unstamped(err) == expected
     assert len(_stamps(err)) == 1
     assert "Traceback" not in err
+
+
+# --- #350：真实 run_with_lock 途中锁 identity 漂移，外层异常的 note 不丢 ------------------
+
+
+def _drift_lock(local):
+    """记下持锁 identity 后 unlink 锁文件，返回 runlock 退出时附上的真实 note。"""
+    lock_path = Path(local.cron.lock_path)
+    info = os.stat(lock_path)
+    lock_path.unlink()
+    return (
+        f"cron.lock_path {local.cron.lock_path} identity drifted: "
+        f"expected (st_dev, st_ino)={(info.st_dev, info.st_ino)}; actual unavailable"
+    )
+
+
+def _assert_note_after_error(err, error_text, note):
+    lines = _unstamped(err)
+    assert "\n".join(lines) == f"错误：{error_text}\n{note}"
+    assert len(_stamps(err)) == 1
+    assert err.count("identity drifted") == 1
+    assert "Traceback" not in err
+
+
+def test_states_guard_failure_keeps_lock_drift_note(monkeypatch, capsys, tmp_path):
+    argv, local = _argv("run", tmp_path)
+    drift = {}
+
+    def guard(states):
+        drift["note"] = _drift_lock(local)
+        return f"injected states refusal: {states}"
+
+    monkeypatch.setattr(cli, "_check_states_dir", guard)
+    assert _exit_code(argv, env={}) == 1
+    refusal = f"injected states refusal: {Path(local.yd_root) / 'states'}"
+    _assert_note_after_error(capsys.readouterr().err, refusal, drift["note"])
+
+
+def test_run_sources_error_keeps_outer_lock_drift_note(monkeypatch, capsys, tmp_path):
+    argv, local = _ready_run(tmp_path)
+    error = RunSourcesError(
+        {"ifs": (), "gfs": ()},
+        {
+            "ifs": RunError("ifs boom", phase="submit", source="ifs", job_id="11"),
+            "gfs": RunError("gfs boom", phase="poll", source="gfs", job_id="22"),
+        },
+    )
+    drift = {}
+
+    def boom(**_):
+        drift["note"] = _drift_lock(local)
+        raise error
+
+    monkeypatch.setattr(cli, "run_sources", boom)
+    assert _exit_code(argv, env={}) == 3
+    err = capsys.readouterr().err
+    _assert_note_after_error(err, str(error), drift["note"])
+    assert err.count("ifs boom") == err.count("gfs boom") == 1
+
+
+def test_run_os_error_keeps_lock_drift_note(monkeypatch, capsys, tmp_path):
+    argv, local = _ready_run(tmp_path)
+    drift = {}
+
+    def boom(**_):
+        drift["note"] = _drift_lock(local)
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(cli, "run_sources", boom)
+    assert _exit_code(argv, env={}) == 3
+    _assert_note_after_error(capsys.readouterr().err, "disk gone", drift["note"])
+
+
+def test_prepare_os_error_with_note_still_reraises_silently(
+    monkeypatch, capsys, tmp_path
+):
+    def raising(**_):
+        exc = OSError("prepare disk gone")
+        exc.add_note("prepare os note")
+        raise exc
+
+    monkeypatch.setattr(cli, "run_prepare", raising)
+    with pytest.raises(OSError, match="prepare disk gone") as caught:
+        cli.main(_prepare_argv(tmp_path), env={})
+    assert caught.value.__notes__ == ["prepare os note"]
+    assert capsys.readouterr().err == ""
 
 
 # --- 2.6：非 run 输出不带前缀、逐字节不变 ----------------------------------------------
