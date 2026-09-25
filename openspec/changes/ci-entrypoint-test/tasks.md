@@ -12,10 +12,10 @@
 ## 2. 验证（输入 → 预期）
 
 - [x] 2.1 本地：`cd viewer && bash tests/test_entrypoint.sh`（非 root）→ `test_entrypoint.sh: all cases passed`，exit 0
-- [ ] 2.2 本 PR 的 CI：viewer-backend job 日志中新步骤执行并输出 `all cases passed`，job 绿
-- [ ] 2.3 变异（临时 draft PR，基于本分支，验证后关闭并删分支；两个变异各自单独一次 CI run，第二个变异前先恢复 umask，不叠加）：
+- [x] 2.2 本 PR 的 CI：viewer-backend job 日志中新步骤执行并输出 `all cases passed`，job 绿（job 107945174641）
+- [x] 2.3 变异（临时 draft PR，基于本分支，验证后关闭并删分支；两个变异各自单独一次 CI run，第二个变异前先恢复 umask，不叠加）：
   - 删除 `viewer/entrypoint.sh` 的 `umask 002` 行 → viewer-backend 在新步骤失败，日志含 `umask='0022', expected '0002'`（`test_entrypoint.sh:97-98`）；
   - 恢复后把 `exec uvicorn` 改为 `uvicorn` → 新步骤失败，日志含 `PID mismatch`（`:91-94`）；
   - 两次 run 中 `uv sync`、ruff、pytest 步骤均为绿（`viewer/tests/*.py` 不引用 entrypoint），失败只在新步骤，排除环境原因误判；
-  - 本 PR 描述记录两次 run 链接与失败行
-- [ ] 2.4 `openspec validate ci-entrypoint-test --strict --no-interactive` → valid
+  - 本 PR 描述记录两次 run 链接与失败行（job 107945118705、107945136106）
+- [x] 2.4 `openspec validate ci-entrypoint-test --strict --no-interactive` → valid
