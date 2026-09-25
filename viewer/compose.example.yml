@@ -4,7 +4,10 @@
 # Service env_file injects container env; --env-file is required because
 # env_file does not supply Compose interpolation of ${YD_VIEWER_PORT}.
 # Rendered config can expose populated basemap secrets; keep .env private.
-# Host bind sources below are synthetic placeholders, not node paths.
+# Host bind sources and the group_add gid below are synthetic placeholders,
+# not node values; live values are in docs/agent-ops.md §16.2.
+# The /cache bind is the one writable mount: a tile cache shared with NWM
+# (setgid dir tree, group-writable); yd never deletes tiles, NWM prunes them.
 
 name: yd-viewer
 
@@ -19,14 +22,12 @@ services:
     volumes:
       - /example/host/yd-products/input/viewer:/input:ro
       - /example/host/yd-products/output:/output:ro
-      - yd-basemap-cache:/cache
+      - /example/host/basemap-cache/tianditu:/cache
+    # gid owning the shared cache dir; live value in docs/agent-ops.md §16.2.
+    group_add: ["1000"]
     networks:
       - yd-network
 
 networks:
   yd-network:
     name: yd-network
-
-volumes:
-  yd-basemap-cache:
-    name: yd-basemap-cache

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Non-root shell tests for viewer/entrypoint.sh.
 set -eu
+# Ambient umask of a default login shell; the entrypoint must override it.
+umask 022
 
 if [ "$(id -u)" -eq 0 ]; then
   echo "test_entrypoint.sh must run as non-root" >&2
@@ -37,6 +39,7 @@ log="${YD_TEST_LAUNCH_LOG:?}"
 {
   printf 'pid=%s\n' "$$"
   printf 'uid=%s\n' "$(id -u)"
+  printf 'umask=%s\n' "$(umask)"
   printf 'argc=%s\n' "$#"
   i=1
   for arg in "$@"; do
@@ -91,6 +94,8 @@ if fields.get("pid") != launched:
     )
 if fields.get("uid") == "0":
     raise SystemExit("sentinel ran as root")
+if fields.get("umask") != "0002":
+    raise SystemExit(f"umask={fields.get('umask')!r}, expected '0002'")
 if fields.get("argc") != "6":
     raise SystemExit(f"argc={fields.get('argc')!r}, expected 6")
 expected = {
@@ -104,6 +109,18 @@ expected = {
 for key, value in expected.items():
     if fields.get(key) != value:
         raise SystemExit(f"{key}={fields.get(key)!r}, expected {value!r}")
+PY
+}
+
+assert_mode_664() {
+  uv_py - "$1" <<'PY'
+import os
+import stat
+import sys
+
+mode = stat.S_IMODE(os.stat(sys.argv[1]).st_mode)
+if mode != 0o664:
+    raise SystemExit(f"{sys.argv[1]} mode {mode:o}, expected 664")
 PY
 }
 
@@ -167,6 +184,7 @@ if [ ! -f "$LAUNCH_LOG" ]; then
 fi
 assert_exec "$LAUNCH_LOG" "$launched"
 assert_json_equal "$STATIC_DIR/basemaps.json" "$VECTOR_SATELLITE_EXPECTED"
+assert_mode_664 "$STATIC_DIR/basemaps.json"
 
 # proxy mode: key set -> six relative paths, URL envs ignored
 clear_basemap_env
@@ -182,6 +200,7 @@ if [ "$status" -ne 0 ]; then
 fi
 assert_secret_absent "$OUT"
 assert_json_equal "$STATIC_DIR/basemaps.json" "$PROXY_EXPECTED"
+assert_mode_664 "$STATIC_DIR/basemaps.json"
 assert_exec "$LAUNCH_LOG" "$launched"
 
 # empty env -> {}

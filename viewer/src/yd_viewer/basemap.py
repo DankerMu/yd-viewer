@@ -31,6 +31,8 @@ _SUBDOMAINS = 8
 _TIMEOUT_SECONDS = 10
 _COOLDOWN_SECONDS = 60.0
 _MAX_AGE_SECONDS = 604800
+# 命中刷新 mtime 的节流阈值；NWM 以 mtime 30 天判冷清理共享缓存（design §6.1）。
+_REFRESH_SECONDS = 86400
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -127,7 +129,14 @@ def _read_cached(path: Path) -> tuple[bytes, str] | None:
     except OSError:
         return None
     media_type = _media_type(body)
-    return None if media_type is None else (body, media_type)
+    if media_type is None:
+        return None
+    try:
+        if time.time() - path.stat().st_mtime > _REFRESH_SECONDS:
+            os.utime(path)  # 不用 Path.touch：文件被并发删除时会重建空文件
+    except OSError:
+        pass  # 刷新失败不影响命中；瓦片从不删除，清理归 NWM
+    return body, media_type
 
 
 def _write_cached(path: Path, body: bytes) -> None:
