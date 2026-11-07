@@ -21,12 +21,22 @@ import numpy as np
 # 以免夜间 shortwave 产品被 forcing 当不可用剔除;超阈值的负值仍标 warn 供诊断。
 IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2 = 1.0
 
-# 累积降水去累积的负 delta 噪声容差(mm/步)。IFS tp(米,GRIB 16-bit 打包)的量化步长
-# ≈1000×2⁻¹⁶=0.0153mm,会让晚时次(累积量大)出现伪负 delta;原 0.01mm 阈值比量化步长还
-# 小,把量化噪声误判为 warning_negative_precip → 被 forcing(只收 quality_flag==ok)剔除致缺产品。
-# SHUD 模型自身对 precip<0 即钳 0 并量化到 4 位,故亚阈值负值与 0 等价。默认 0.1mm 覆盖
-# IFS tp 量化步长和 GFS APCP 常见 1/16mm 量化噪声;超阈值的负值仍标 warn 供诊断。
+# 累积降水去累积的负 delta 噪声容差下限(mm/步)。GRIB 打包量化会让晚时次(累积量大)出现
+# 伪负 delta;阈值比量化步长还小时,量化噪声被误判为 warning_negative_precip → 被 forcing
+# (只收 quality_flag==ok)剔除致缺产品。SHUD 模型自身对 precip<0 即钳 0 并量化到 4 位,
+# 故亚阈值负值与 0 等价。0.1mm 覆盖 GFS APCP 常见 1/16mm 量化噪声,对 IFS tp 只是下限:
+# IFS 实际容差取 max(0.1, 两条消息的有效量化格距)(#369:ECMWF 自 2026102012 起把 tp 由
+# 16 bit 改为 12 bit 打包,步长 0.12–0.24mm;NWM 裁剪重打包后区域值保留全球粗格,有效格距
+# 是文件步长的 2 的幂倍)。超容差的负值仍标 warning_negative_precip 供诊断。
 PRECIP_NEGATIVE_NOISE_TOLERANCE_MM = 0.1
+
+# cfgrib `read_keys` 读取的 GRIB 打包键;cfgrib 写成 data_array.attrs["GRIB_<key>"],
+# 读取层以原键名放进 RawRecord.metadata(三键齐全且为 int 时),供 IFS tp 有效量化格距使用。
+GRIB_QUANTIZATION_KEYS: tuple[str, str, str] = (
+    "binaryScaleFactor",
+    "decimalScaleFactor",
+    "bitsPerValue",
+)
 
 VARIABLE_MAPPING: dict[str, str] = {
     "tmp2m": "air_temperature_2m",

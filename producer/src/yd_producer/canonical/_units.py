@@ -234,6 +234,41 @@ def compute_ifs_relative_humidity_values(
     )
 
 
+def _grib_int_key(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int | np.integer):
+        return None
+    return int(value)
+
+
+def effective_quantization_step_mm(
+    values_m: tuple[float, ...] | list[float] | np.ndarray,
+    binary_scale_factor: Any,
+    decimal_scale_factor: Any,
+    bits_per_value: Any,
+) -> float | None:
+    """一条 GRIB 消息的有效量化格距 S(mm);拿不到时返回 None(#369,compute-loop §7.3)。
+
+    文件步长 s = 2**E × 10**(−D)(m);g 为有限格点整数偏移 rint((v − min v)/s) 的 gcd 中
+    最大的 2 的幂因子(防稀疏场放大 gcd);S = 1000 × s × g。键缺失/非 int、bitsPerValue
+    ≤ 0(常量场)、无有限值或 gcd 为 0 时没有 S。
+    """
+    exponent = _grib_int_key(binary_scale_factor)
+    decimal = _grib_int_key(decimal_scale_factor)
+    bits = _grib_int_key(bits_per_value)
+    if exponent is None or decimal is None or bits is None or bits <= 0:
+        return None
+    values = np.asarray(values_m, dtype=np.float64).ravel()
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return None
+    step_m = 2.0**exponent * 10.0 ** (-decimal)
+    offsets = np.rint((values - values.min()) / step_m).astype(np.int64)
+    gcd = int(np.gcd.reduce(offsets))
+    if gcd == 0:
+        return None
+    return 1000.0 * step_m * (gcd & -gcd)
+
+
 def convert_ifs_precipitation_with_metadata(
     values_m: tuple[float, ...] | list[float] | np.ndarray,
     previous_values_m: tuple[float, ...] | list[float] | np.ndarray | None = None,
@@ -241,6 +276,8 @@ def convert_ifs_precipitation_with_metadata(
     forecast_hour: int | None = None,
     previous_forecast_hour: int | None = None,
     consecutive_negative_count: int = 0,
+    quantization_step_mm: float | None = None,
+    previous_quantization_step_mm: float | None = None,
 ) -> tuple[UnitConversionResult, int, float]:
     current = tuple(float(value) for value in values_m)
     previous = (
@@ -259,11 +296,25 @@ def convert_ifs_precipitation_with_metadata(
         (current_value - previous_value) * 1000.0
         for current_value, previous_value in zip(current, previous)
     )
-    # 容差用 PRECIP_NEGATIVE_NOISE_TOLERANCE_MM 覆盖 IFS tp 的 GRIB 量化步长(≈0.0153mm),
-    # 否则量化噪声被判 significant→warning_negative_precip→被 forcing 当不可用剔除致缺产品。
-    _tol = PRECIP_NEGATIVE_NOISE_TOLERANCE_MM
-    small_negatives = tuple(delta for delta in deltas_mm if -_tol < delta < 0.0)
-    significant_negatives = tuple(delta for delta in deltas_mm if delta <= -_tol)
+    # 偏离（#369，compute-loop §7.3）：容差 = max(0.1mm, 两条消息的有效量化格距),缺失的一侧
+    # 不参与;否则 12-bit 打包的量化噪声被判 significant→warning_negative_precip→缺产品。
+    tolerance_mm = max(
+        (
+            PRECIP_NEGATIVE_NOISE_TOLERANCE_MM,
+            *(
+                step
+                for step in (previous_quantization_step_mm, quantization_step_mm)
+                if step is not None
+            ),
+        )
+    )
+    noise_floor_mm = -tolerance_mm * (1.0 + 1e-6)
+    small_negatives = tuple(
+        delta for delta in deltas_mm if noise_floor_mm <= delta < 0.0
+    )
+    significant_negatives = tuple(
+        delta for delta in deltas_mm if delta < noise_floor_mm
+    )
     anomalies: list[dict[str, Any]] = []
     next_consecutive_negative_count = 0
     quality_flag = "ok"
@@ -276,6 +327,7 @@ def convert_ifs_precipitation_with_metadata(
                 "previous_forecast_hour": previous_forecast_hour,
                 "negative_count": len(small_negatives),
                 "min_delta_mm": min(small_negatives),
+                "tolerance_mm": tolerance_mm,
             }
         )
     if significant_negatives:
@@ -291,6 +343,7 @@ def convert_ifs_precipitation_with_metadata(
                 "negative_count": len(significant_negatives),
                 "min_delta_mm": min(significant_negatives),
                 "consecutive_negative_count": next_consecutive_negative_count,
+                "tolerance_mm": tolerance_mm,
             }
         )
 
