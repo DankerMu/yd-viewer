@@ -33,4 +33,4 @@
 - [x] 3.1 `cd producer && uv run ruff check . && uv run ruff format --check . && uv run pytest` → 全绿（pinned `test_negative_precipitation_handling_all_cases` 断言未改）
 - [x] 3.2 `uv run python scripts/large_file_guard.py`（仓库根）→ passed
 - [x] 3.3 `openspec validate ifs-tp-quantization-tolerance --strict --no-interactive` → valid
-- [ ] 3.4 现场（orchestrator）：node-22 用合并后的代码跑 `diag_ifs_canonical.py convert`，2026102012 与缺口 cycle 全部 `canonical_ready`；2026102000 对照组产品值不变
+- [x] 3.4 现场（orchestrator）：node-22 用合并后的代码跑 `diag_ifs_canonical.py convert`，2026102012 与缺口 cycle 全部 `canonical_ready`；2026102000 对照组产品值不变（job 113084，代码 f2aeed9 = PR 代码头，其后提交仅 docs/tasks：36/36 `canonical_ready`、prcp ok=53；2026102000 的 424 个 NetCDF 数组逐一相同）
