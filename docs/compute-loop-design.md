@@ -453,6 +453,8 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 | scratch raw 副本/canonical/forcing/raw-manifest | 本轮临时工件，随 work 删除 |
 | node-22 本地 `cron.lock_path` 及其专属 `run/` 目录 | 长期互斥哨兵，所有 producer/retention/work/staging 清理与外部清理均不得 unlink、rename、replace 或删除 |
 
+14 天窗口的执行时机（#372，2026-11-07 核实 `cleanup.plan_retention`/`execute_retention_plan` 此前没有调用方）：`run` 的每个 source worker 在本 tick 的追赶循环正常结束后执行一次，无论最后一个结果是成功还是 STOPPED；循环以 `RunError` 结束时跳过。锚点只取**本 source 自己**最新的普通文件 `DONE`（两源落后程度可以不同，不得互借），没有 DONE 时为空计划。该源的窗口外删除只针对 `output/<T>/<source>/` 与 `logs/<source>/<T>.log`；删除 `output/<T>/<source>/` 后若 `output/<T>/` 已空，一并 `rmdir`，非空或已不存在则保留，不报错。整个执行过程持有双源共用的发布锁，避免兄弟源正在向同一 `output/<T>/` 发布。每个 tick 都执行，因此幂等，中断后下一 tick 继续完成。删除结果以 `retention cleanup:` 前缀追加在该源本 tick 最后一条报告的 detail 末尾，内容为删除的 output 目录数、失败日志数和逐条绝对路径；没有删除时不加。plan 或 execute 失败时转为该源的 `RunError(phase="cleanup")`，正文以 `retention` 开头，保留原 `CleanupError` 作为 cause；本 tick 已发布的 DONE 与报告保留，兄弟源不受影响，退出码走 `RunSourcesError` 的既有路径。窗口值 14 天不变，不入配置。
+
 清理只允许作用于经 `realpath` 确认位于 yd 自己根目录下的对象；不得跟随路径进入 NWM raw 根。`cron.lock_path` 及其专属本地 `run/` 目录必须位于这些清理根之外，也是显式禁区；任何删除候选中的 symlink 都不得被跟随到该哨兵。
 
 ## 13. 验证计划
