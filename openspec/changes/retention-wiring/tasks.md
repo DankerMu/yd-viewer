@@ -23,7 +23,7 @@
 - [x] 2.1 两源锚点不同（ifs 比 gfs 落后 17 天）：各自只删自己窗口外的条目，ifs 在 `[D−31d, D−14d)` 的条目保留
 - [x] 2.2 窗口边界端到端：等于 cutoff 保留，早 12 h 删除；logs 同理
 - [x] 2.3 空 cycle 目录：两源都在窗口外 → `output/<T>` 被 rmdir；只有一源在窗口外 → 保留
-- [ ] 2.3b 预先就空的窗口外 `output/<T>` 被删除并计入 k；rmdir 部分失败（EIO 注入）→ 其余候选照试，error note 恰含一次已删审计，下一 tick 收掉遗留空目录
+- [x] 2.3b 预先就空的窗口外 `output/<T>` 被删除并计入 k；rmdir 部分失败（EIO 注入）→ 其余候选照试，error note 恰含一次已删审计，下一 tick 收掉遗留空目录
 - [x] 2.4 报告：有删除时 detail = 原文 + `\n` + `retention cleanup: …` 逐条绝对路径；无删除时 detail 逐字不变
 - [x] 2.5 锁：plan、execute、rmdir 都在 `publish_lock` 内执行
 - [x] 2.6 失败映射：execute 抛 CleanupError → RunSourcesError，该源 error.phase == "cleanup"，正文含 "retention"，cause 是原异常；已有 SUCCEEDED 报告与 DONE 保留；兄弟源报告不变

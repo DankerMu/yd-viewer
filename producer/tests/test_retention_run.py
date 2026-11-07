@@ -11,7 +11,10 @@ from __future__ import annotations
 import errno
 import os
 import pathlib
+import threading
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Self
 
 import pytest
 from controller_sources_fixtures import (
@@ -241,6 +244,96 @@ def test_cycle_dir_with_foreign_content_is_kept_silently(tmp_path) -> None:
     assert audit == _audit((old,), (), ())
 
 
+def test_preexisting_empty_cycle_dir_before_cutoff_is_swept_and_counted(
+    tmp_path,
+) -> None:
+    config, local = write_dual_tree(tmp_path, raw=False)
+    _anchor(local, "gfs", D)
+    output_root = _yd(local) / "output"
+    stale = output_root / _cid(OLD_BOTH)
+    stale.mkdir()
+    in_window = output_root / _cid(RECENT)
+    in_window.mkdir()
+    not_a_cycle = output_root / "not-a-cycle"
+    not_a_cycle.mkdir()
+
+    report = _tick(config, local)
+
+    gfs = _single_waiting(report.gfs, "gfs")
+    base, _, audit = gfs.detail.partition("\n")
+    _assert_waiting_base(base, "gfs", D)
+    assert audit == _audit((), (), (stale,))
+    assert not stale.exists()
+    assert in_window.is_dir()
+    assert not_a_cycle.is_dir()
+
+
+#: 三个两源都在窗口外的 T（都早于 ifs cutoff 2026-07-26T12）。
+SWEEP_TS = (
+    datetime(2026, 7, 1, 0, tzinfo=UTC),
+    datetime(2026, 7, 2, 0, tzinfo=UTC),
+    datetime(2026, 7, 3, 0, tzinfo=UTC),
+)
+
+
+def test_partial_rmdir_failure_keeps_sweeping_notes_audit_and_recovers(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, local = write_dual_tree(tmp_path, raw=False)
+    _anchor(local, "gfs", D)
+    _anchor(local, "ifs", D_IFS)
+    for cycle in SWEEP_TS:
+        for source in ("gfs", "ifs"):
+            _plant_output(local, source, cycle)
+    output_root = _yd(local) / "output"
+    first, second, third = (output_root / _cid(cycle) for cycle in SWEEP_TS)
+    original_rmdir = os.rmdir
+
+    def rmdir(path, *args, **kwargs):
+        if path == first.name and "dir_fd" in kwargs:
+            raise OSError(errno.EIO, "injected EIO", path)
+        return original_rmdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rmdir", rmdir)
+    with pytest.raises(RunSourcesError) as info:
+        _tick(config, local)
+
+    assert set(info.value.errors) == {"gfs", "ifs"}
+    swept: list[str] = []
+    for source in ("gfs", "ifs"):
+        error = info.value.errors[source]
+        assert error.phase == "cleanup"
+        assert str(error).startswith(f"{source}: retention 失败：")
+        assert error.__cause__.errno == errno.EIO
+        notes = error.__notes__
+        assert len(notes) == 1
+        assert "\n".join(notes).count(PREFIX) == 1
+        assert str(info.value).count(notes[0]) == 1
+        _, items = _audit_items("base\n" + notes[0])
+        outputs = [str(_output(local, source, cycle)) for cycle in SWEEP_TS]
+        assert items[:3] == outputs
+        swept += items[3:]
+        _single_waiting(info.value.reports[source], source)
+        assert PREFIX not in info.value.reports[source][0].detail
+    # 其余两个 T 在同一 tick 被删，且恰由一个源计入 k；第一个 T 留下空目录。
+    assert sorted(swept) == [str(second), str(third)]
+    assert not second.exists()
+    assert not third.exists()
+    assert first.is_dir()
+    assert os.listdir(first) == []
+
+    monkeypatch.setattr(os, "rmdir", original_rmdir)
+    report = _tick(config, local)
+
+    assert not first.exists()
+    details = [
+        _single_waiting(report.gfs, "gfs").detail,
+        _single_waiting(report.ifs, "ifs").detail,
+    ]
+    audits = [detail.partition("\n")[2] for detail in details]
+    assert sorted(audits) == ["", _audit((), (), (first,))]
+
+
 # --- 2.4 / 2.9：报告文本；每 tick 执行且幂等 ------------------------------------------------
 
 
@@ -277,13 +370,41 @@ def test_audit_is_appended_to_last_report_and_second_tick_adds_nothing(
     )
 
 
+class _OwnerLock:
+    """发布锁替身：记录当前持有者线程。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.owner: int | None = None
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        acquired = self._lock.acquire(blocking, timeout)
+        if acquired:
+            self.owner = threading.get_ident()
+        return acquired
+
+    def release(self) -> None:
+        self.owner = None
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def __enter__(self) -> Self:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.release()
+
+
 # --- 2.5：plan、execute、rmdir 都在发布锁内 ------------------------------------------------
 
 
 def test_plan_execute_and_rmdir_run_under_the_shared_publish_lock(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from yd_producer import _controller_run
+    from yd_producer import _controller_run, _controller_sources
 
     config, local = write_dual_tree(tmp_path, raw=False)
     _anchor(local, "gfs", D)
@@ -291,6 +412,7 @@ def test_plan_execute_and_rmdir_run_under_the_shared_publish_lock(
     _plant_output(local, "gfs", OLD_BOTH)
     _plant_output(local, "ifs", OLD_BOTH)
     cycle_name = _cid(OLD_BOTH)
+    created: list[_OwnerLock] = []
     locks: list = []
     seen: list[tuple[str, bool]] = []
     original_run_once = _controller_run.run_once
@@ -298,12 +420,18 @@ def test_plan_execute_and_rmdir_run_under_the_shared_publish_lock(
     original_execute = cleanup.execute_retention_plan
     original_rmdir = os.rmdir
 
+    def make_lock() -> _OwnerLock:
+        lock = _OwnerLock()
+        created.append(lock)
+        return lock
+
     def capturing_run_once(**kwargs):
         locks.append(kwargs["publish_lock"])
         return original_run_once(**kwargs)
 
     def held() -> bool:
-        return bool(locks) and locks[0].locked()
+        # 不只是"有人持锁"：必须是正在执行该钩子的线程自己持有发布锁。
+        return len(created) == 1 and created[0].owner == threading.get_ident()
 
     def plan(yd_root, source):
         seen.append((f"plan:{source}", held()))
@@ -318,6 +446,9 @@ def test_plan_execute_and_rmdir_run_under_the_shared_publish_lock(
             seen.append(("rmdir", held()))
         return original_rmdir(path, *args, **kwargs)
 
+    monkeypatch.setattr(
+        _controller_sources, "threading", SimpleNamespace(Lock=make_lock)
+    )
     monkeypatch.setattr(_controller_run, "run_once", capturing_run_once)
     monkeypatch.setattr(cleanup, "plan_retention", plan)
     monkeypatch.setattr(cleanup, "execute_retention_plan", execute)
@@ -325,9 +456,10 @@ def test_plan_execute_and_rmdir_run_under_the_shared_publish_lock(
 
     _tick(config, local)
 
-    assert len(locks) == 2
-    assert locks[0] is locks[1]
-    assert not locks[0].locked()
+    assert len(created) == 1
+    assert locks == [created[0], created[0]]
+    assert not created[0].locked()
+    assert created[0].owner is None
     assert sorted(name for name, _ in seen) == [
         "execute:gfs",
         "execute:ifs",
@@ -405,6 +537,8 @@ def test_cycle_dir_rmdir_error_becomes_cleanup_error(
     assert error.phase == "cleanup"
     assert str(error).startswith("gfs: retention 失败：")
     assert error.__cause__ is denied
+    # execute 已完成：已删审计作为 note 挂在错误上，不追加到报告。
+    assert error.__notes__ == [_audit((old,), (), ())]
     gfs = _single_waiting(info.value.reports["gfs"], "gfs")
     _assert_waiting_base(gfs.detail, "gfs", D)
     assert not old.exists()
