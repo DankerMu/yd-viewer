@@ -30,6 +30,7 @@
 - [ ] 2.9 每 tick 执行且幂等：raw 缺口的 tick 也删除；紧接的第二个 tick 无删除、无审计文本
 - [ ] 2.10 cli：带审计文本的末项报告（STOPPED/raw_incomplete）→ 第一行带「等待：」标签，审计行只带时间前缀，退出码不变
 - [ ] 2.12 cli `RunSourcesError`：ifs (SUCCEEDED, STOPPED) 且 retention 失败、gfs (STOPPED + 审计) → 先按 ifs、gfs 顺序输出全部结果行（含审计行），再输出「错误：」块，退出码 3；
+- [ ] 2.14 改写 `test_controller_startup_hygiene.py` 的 6 个用例（`output/` 根是文件、DONE 非普通文件）：期望 `RunSourcesError`，ifs 的 error 为 cleanup/retention，原 STOPPED 报告保留，快照不变
 - [ ] 2.13 `RunSourcesError` 构造：errors 源 (SUCCEEDED, STOPPED) 接受，(STOPPED, SUCCEEDED)、(STOPPED, STOPPED) 拒绝；改写 `test_controller_sources.py:905-909`；改写 `test_run_sources_error_is_printed_once_with_every_line_stamped` 以适应新顺序（reports 为空的情形输出逐字不变）
 - [ ] 2.11 红跑：还原 src 后，2.1、2.3、2.4、2.5、2.6、2.9、2.12、2.13 失败
 

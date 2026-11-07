@@ -25,6 +25,7 @@ Governing invariant: 对任一 source S，retention 只删除 `cycle < latest_DO
 
 Sibling surfaces:
 - `cli.py` 的 run 结果渲染：多行 detail 的时间前缀规则已有测试（`test_cli_run_log.py`），审计文本走同一路径，补一个用例。`RunSourcesError` 输出变化影响所有聚合错误路径：`test_cli_run_log.py::test_run_sources_error_is_printed_once_with_every_line_stamped`（~L330，逐字钉住输出）必须改为先有报告行再有错误块；该用例的 reports 为空时输出逐字不变。
+- `test_controller_startup_hygiene.py` 的 6 个用例必须改写：`test_output_root_failure_stops_without_second_scan_or_delete[file]` 与 `test_nonregular_or_missing_done_is_unknown_not_delete[directory|fifo|symlink|dangling|parent-symlink]`。这些状态下 hygiene 以 STOPPED 停源，随后 `plan_retention` 对同一异常（`output/` 根是普通文件、DONE 不是普通文件）fail-closed，`run_sources` 改为抛 `RunSourcesError`。改写后断言：`errors["ifs"].phase == "cleanup"` 且正文含 `retention`；`reports["ifs"]` 仍是原来那条 STOPPED 报告，stop_reason 与 cycle 不变；预置的 work 与 `output/` 快照不变。退出码仍为 3。`[missing]` 情形下 plan 为空，行为不变。这些状态本来就需要人工介入（参见 3.4）。
 - `residue` 在发布锁外删除本源的 NFS 半成品 `output/<T>/<source>`（`_controller_run.py` ~L540）。它不删 `output/<T>` 本身；兄弟源 rmdir 遇到它留下的内容得到 ENOTEMPTY，静默跳过。本源半成品晚于本源最新 DONE，永远在窗口内。
 - `residue` / startup hygiene：读取 `output/<T>/<source>/DONE`。rmdir 只删空目录，不影响它们。
 - viewer catalog：只枚举有 DONE 的 source 目录、最新往前 7 天；被删的目录都在 14 天外。
