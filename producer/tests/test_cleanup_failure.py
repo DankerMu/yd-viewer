@@ -120,12 +120,15 @@ def test_failed_cycle_leaves_one_log_and_does_not_move_the_state_chain(
     assert builder.source_output_dir(D, SOURCE).joinpath("DONE").is_file()
 
 
-def test_repeat_failure_on_the_same_cycle_atomically_replaces_the_old_log(
+def test_repeat_failure_on_the_same_cycle_atomically_appends_to_the_old_log(
     tmp_path: Path,
 ) -> None:
+    """#370：追加写——旧内容逐字节为前缀，经临时文件原子 rename（换 inode）。"""
     root = _yd_root(tmp_path)
     _seed_states_and_output(root)
-    old = _write_log(root, SOURCE, T, b"previous job\n")
+    previous = FAILED_HEADER + b"previous job\n"
+    old = _write_log(root, SOURCE, T, previous)
+    old_inode = old.stat().st_ino
     work_root = _work_root(tmp_path)
     work_dir, log_path = _make_work(work_root)
     before_output = snapshot_tree(root / "output")
@@ -137,8 +140,9 @@ def test_repeat_failure_on_the_same_cycle_atomically_replaces_the_old_log(
     names = sorted(path.name for path in log_dir.iterdir())
     assert names == [f"{T}.log"]
     assert not any(name.endswith(".tmp") or ".tmp." in name for name in names)
-    assert (log_dir / f"{T}.log").read_bytes() == FAILED_HEADER + FAILED_LOG_BYTES
-    assert old.read_bytes() == FAILED_HEADER + FAILED_LOG_BYTES
+    assert old.read_bytes() == previous + FAILED_HEADER + FAILED_LOG_BYTES
+    assert old.stat().st_ino != old_inode
+    assert not work_dir.exists()
     assert snapshot_tree(root / "output") == before_output
     assert snapshot_tree(root / "states") == before_states
 

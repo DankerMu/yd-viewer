@@ -236,6 +236,25 @@ def test_failure_outcomes_are_labelled_error_and_exit_three(
     ]
 
 
+def test_retry_exhausted_stop_is_a_stamped_error_line_and_exit_three(
+    monkeypatch, capsys, tmp_path
+):
+    """#370：`retry_exhausted` 停源在 cron.log 落为带时间前缀的「错误：」行，退出码 3。"""
+    detail = (
+        "ifs: 待跑 T=2026010212；同一 cycle 已失败 3 次（上限 3），停源待人工；"
+        "确认根因后把 /yd/logs/ifs/2026010212.log 移出 logs/ifs/ 再等下一 tick"
+    )
+    report = RunSourcesReport(
+        ifs=(_stopped("ifs", detail, StopReason.RETRY_EXHAUSTED),),
+        gfs=(_stopped("gfs", "gfs: raw 未齐"),),
+    )
+    assert _run_with_report(monkeypatch, tmp_path, report) == 3
+    err = capsys.readouterr().err
+    lines = err.splitlines()
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z 错误：ifs: ", lines[0])
+    assert _unstamped(err) == [f"错误：{detail}", "等待：gfs: raw 未齐"]
+
+
 def test_empty_detail_falls_back_to_outcome_name(monkeypatch, capsys, tmp_path):
     report = RunSourcesReport(
         ifs=(

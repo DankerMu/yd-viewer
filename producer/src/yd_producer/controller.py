@@ -125,7 +125,7 @@ MAX_HEADER_LINE_BYTES = 64 * 1024
 
 
 class StopReason(enum.Enum):
-    """本次不提交该源的原因。闭合词表（7 项），逐项可区分。"""
+    """本次不提交该源的原因。闭合词表（8 项），逐项可区分。"""
 
     #: 该源既无任何 `DONE`，也没有任何合法命名的状态文件（链尚未由 init 建立）。
     NO_INITIAL_STATE = "no_initial_state"
@@ -145,6 +145,8 @@ class StopReason(enum.Enum):
     RAW_INCOMPLETE = "raw_incomplete"
     #: 精确 `work/<source>/<T>` 预存任何形态：未验证跨进程残留。
     UNVERIFIED_WORK_RESIDUE = "unverified_work_residue"
+    #: `logs/<source>/<T>.log` 已有 ≥ 3 条失败 header，或该日志不可判定：停源待人工。
+    RETRY_EXHAUSTED = "retry_exhausted"
 
 
 @dataclass(frozen=True)

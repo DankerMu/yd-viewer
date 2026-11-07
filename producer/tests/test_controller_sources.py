@@ -945,6 +945,7 @@ def test_public_structure_is_frozen_keyword_only() -> None:
         "HEADER_TIME_MISMATCH": "header_time_mismatch",
         "RAW_INCOMPLETE": "raw_incomplete",
         "UNVERIFIED_WORK_RESIDUE": "unverified_work_residue",
+        "RETRY_EXHAUSTED": "retry_exhausted",
     }
     annotations = c.run_sources.__annotations__
     assert annotations["return"] == "RunSourcesReport"

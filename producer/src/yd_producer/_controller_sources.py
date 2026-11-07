@@ -297,6 +297,37 @@ def classify_unverified_work(
     )
 
 
+def retry_exhausted_stop(
+    yd_root: Path, *, source: str, cycle: datetime
+) -> RunReport | None:
+    """residue 之后、raw 之前：同一 cycle 失败 ≥ 上限或失败日志不可判定即停源。"""
+    from yd_producer import _failure_attempts as attempts
+    from yd_producer import controller
+    from yd_producer._controller_run import _stopped_report
+
+    log_path = attempts.failure_log_path(yd_root, source, cycle)
+    prefix = f"{source}: 待跑 T={controller.cycle_id(cycle)}；"
+    try:
+        count = attempts.count_failure_attempts(yd_root, source, cycle)
+    except attempts.FailureLogUndeterminable as error:
+        detail = (
+            f"{prefix}失败日志不可判定：{error.reason}；停源待人工，检查 {log_path}"
+        )
+    else:
+        if count < attempts.FAILURE_ATTEMPT_LIMIT:
+            return None
+        detail = (
+            f"{prefix}同一 cycle 已失败 {count} 次（上限 {attempts.FAILURE_ATTEMPT_LIMIT}），"
+            f"停源待人工；确认根因后把 {log_path} 移出 logs/{source}/ 再等下一 tick"
+        )
+    return _stopped_report(
+        source,
+        cycle=cycle,
+        stop_reason=controller.StopReason.RETRY_EXHAUSTED,
+        detail=detail,
+    )
+
+
 def finalize_failed_attempt(
     *,
     local: LocalConfig,
