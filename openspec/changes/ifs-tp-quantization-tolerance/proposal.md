@@ -17,7 +17,7 @@ Evidence floor: producer ruff + format + pytest 全绿；新增容差场景测�
 
 - `canonical/converter.py` `_read_record_with_xarray`：cfgrib 打开时请求 `read_keys=["binaryScaleFactor","decimalScaleFactor","bitsPerValue"]`，把三键写入 `RawRecord.metadata`（缺键不写；NetCDF 回退不写）。
 - `canonical/_units.py`：新增有效量化格距 helper（文件步长 × 整数偏移 gcd，覆盖 NWM 裁剪重打包后残留的全球粗格）；`convert_ifs_precipitation_with_metadata` 新增可选关键字参数，`tol = max(0.1, S_prev, S_curr)`，判据 `delta ≥ −tol·(1+1e-6)`，anomaly 增记 `tolerance_mm`。缺 S 即退回 0.1。
-- `canonical/converter.py` IFS 降水调用点从两条 `RawRecord.metadata` 推出 step 后传入。
+- `canonical/converter.py` IFS 降水调用点用两条 record 的 values 与 metadata 调 helper，得到 S 后传入。
 - `nwm.py` `_convert_canonical`：非 ready 时异常消息附 readiness evidence 摘要。
 - `_types.py:18-29` 注释同步更新。
 

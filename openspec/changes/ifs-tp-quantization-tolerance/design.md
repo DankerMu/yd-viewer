@@ -2,14 +2,14 @@ Change surface: `IFSCanonicalConverter` 的 GRIB 读取（`converter.py:_read_re
 
 Must preserve:
 - 拿不到 S 时 tol 退回 0.1。S 缺失的情形：NetCDF 回退、cfgrib 未返回键、键非 int、值非有限、`bitsPerValue == 0` 的常量场、gcd 为 0。在 pinned 输入上（delta −0.001、−1.0 mm，`test_ifs_canonical.py:290-316`）结果与现状完全一致；只有区间 (−0.1·(1+1e-6), −0.1] 的判定由显著改为噪声。pinned oracle `test_negative_precipitation_handling_all_cases` 不改断言即可通过。
-- 输出值仍为 `max(0, delta)·24/step_hours`。容差只影响 flag 和 anomaly，不改数值。
+- 输出值仍为 `max(0, delta)·24/step_hours`。容差只影响 flag 和 anomaly，不改数值。 稀疏场下 g 仍可能偏大，代价只是可能漏报显著负值的 flag，接受（见 Must add）。
 - `filter_by_keys`/`indexpath` 约定、no-follow staged 读取、GFS 路径、shortwave 路径都不变。
 - `FORCING_USABLE_CANONICAL_QUALITY_FLAGS`、连续计数与 `error_precip_accumulation` 升级规则不变。
 - 新增的 `tolerance_mm` 进入 lineage_json，带 anomaly 的产品 checksum 会因此改变；重新转换旧 cycle 时会重写这些产品，数值不变。canonical 是 work 内的本轮工件，不跨轮复用，下游不受影响。
 
 Must add/change:
-- 文件步长 s（mm）= `1000 × 2**binaryScaleFactor × 10**(−decimalScaleFactor)`。`read_keys` 取 `binaryScaleFactor`、`decimalScaleFactor`、`bitsPerValue` 三个键，三者都必须是 int（bool 不算）且 `bitsPerValue > 0`，否则视为没有 s。
-- **有效量化格距** S = s × g，g = `gcd(rint((v − min(v)) / s))`，在该消息全部有限格点上计算。g == 0 时（常量场）视为没有 S。理由：raw bundle 是 NWM 下载器从全球场裁剪后重新打包的，区域值保留全球 12 bit 的粗格，现场实测 g 为 1、2、4、8。只用 s 会漏判，缺口内多数 cycle 仍会 `canonical_incomplete`。
+- 单位：helper 接收原始 tp 值（m），原生文件步长 s_m = `2**binaryScaleFactor × 10**(−decimalScaleFactor)`（m）；偏移 `rint((v − min v)/s_m)` 在 m 下计算，结果 S 才乘 1000 换成 mm。`read_keys` 取 `binaryScaleFactor`、`decimalScaleFactor`、`bitsPerValue` 三个键，三者都必须是 int（bool 不算）且 `bitsPerValue > 0`，否则视为没有 s。
+- **有效量化格距** S = 1000 × s_m × g（mm）。g = gcd(全部有限格点的整数偏移) 中最大的 2 的幂因子（`g & -g`）。g == 0（常量场）时视为没有 S。取 2 的幂因子的理由：两次编码都是 D=0 时，格距比必为 `2^(E_global − E_file)`；稀疏场（例如偏移只有 {0, 24}）会把原始 gcd 放大，取 2 的幂因子后为 8。剩下的放大风险（例如只有 {0, 8} 两个级）不再约束，它只影响 flag 的检测，不改数值（输出恒为 max(0, delta)），这一点接受。理由：raw bundle 是 NWM 下载器从全球场裁剪后重新打包的，区域值保留全球 12 bit 的粗格，现场实测 g 为 1、2、4、8。只用 s 会漏判，缺口内多数 cycle 仍会 `canonical_incomplete`。
 - 计算放在一个纯函数 helper 里（例如 `_units.effective_quantization_step_mm(values, binary_scale_factor, decimal_scale_factor, bits_per_value) -> float | None`），在 IFS 降水调用点用 record 的 values 和 metadata 调用。读取层只负责把三个键放进 metadata。
 - tol = `max(PRECIP_NEGATIVE_NOISE_TOLERANCE_MM, S_prev, S_curr)`，缺失的一侧不参与；第一个时效（previous 为 None）只用 S_curr。
 - 判据：噪声为 `-tol·(1+1e-6) ≤ delta < 0`，显著为 `delta < -tol·(1+1e-6)`。有没有 S 都用这一判据（docs §7.3）。两类 anomaly 都记 `tolerance_mm`。

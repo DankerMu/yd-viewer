@@ -21,10 +21,10 @@
 
 ## 2. 测试（场景驱动；新用例放 `producer/tests/test_ifs_canonical.py` 或同级新文件，单文件 < 1000 行；新 helper 在测试函数内 import，保证红跑时 pinned 用例仍能收集）
 
-- [ ] 2.1 helper：值 = R + 4s·k（s=0.1220703125，k 为多种整数）→ 4s；常量值 → None；`bits_per_value=0` → None；任一键为 None → None
+- [ ] 2.1 helper（值以 m 构造，E=−13、D=0，s_m = 2^-13 m）：值 = R + 4·s_m·k（k 取多种整数）→ 返回 0.48828125 mm；偏移只有 {0, 24}（单位 s_m）→ 返回 8·s_m·1000 = 0.9765625 mm（2 的幂因子）；常量值 → None；`bits_per_value=0` → None；任一键为 None → None
 - [ ] 2.2 纯函数：S=0.1221，delta −0.1221 → `ok`，anomaly 为 `small_negative_ifs_precipitation_delta`，`tolerance_mm` 等于 S，输出值 0；delta −0.2442 → `warning_negative_precip`；连续 3 次仍升级为 `error_precip_accumulation`
 - [ ] 2.3 纯函数（红跑时应通过）：不传 S，delta −0.12 → `warning_negative_precip`；delta −0.05 → `ok` 加 small anomaly；delta −0.5 → `warning_negative_precip`
-- [ ] 2.4 端到端：真实 GRIB2 编码两个时效的 tp，`bitsPerValue=12`、非常量，值落在 4 倍文件步长的格上；部分格点 f(n) = f(n−1) − 3 个文件步长 → `convert_manifest` 返回 `canonical_ready`，该产品 `ok`。断言 metadata 推出的文件步长为 0.1220703125、S 为 0.48828125（编码后用 eccodes 回读确认实际 E/D，不硬编码假设）。变体：lead 0 全零常量场接 lead 3 含 −0.5 mm 且 S < 0.5 → `warning_negative_precip`
+- [ ] 2.4 端到端：真实 GRIB2 编码两个时效的 tp，`bitsPerValue=12`、非常量，值落在 4 倍文件步长的格上；部分格点 f(n) = f(n−1) − 3 个文件步长 → `convert_manifest` 返回 `canonical_ready`，该产品 `ok`。断言 S == 4 × 回读文件步长 × 1000（编码后用 eccodes 回读实际 E/D，不硬编码 E）。注意每条消息以自己的 R（最小值）为原点，要让两条消息都落在 4s 格上又出现 −3s 的 delta，两条消息的最小值须相差 s（模 4s），例如后一条消息的最小格点比前一条小 s。变体：lead 0 全零常量场接 lead 3 含 −0.5 mm 且 S < 0.5 → `warning_negative_precip`
 - [ ] 2.5 `_convert_canonical`：canonical_incomplete（真实缺时效转换或注入）→ `ProductionAttemptError` 消息含 `missing_leads` 和具体 lead
 - [ ] 2.6 红跑：还原 src 后 2.1、2.2、2.4 主用例、2.5 失败（2.1、2.2 因 helper 或参数不存在而失败，不得连累 pinned 用例收集）；2.3 与 2.4 常量场变体通过
 
