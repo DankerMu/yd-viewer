@@ -2,7 +2,9 @@
 
 ## Purpose
 Define ordered forecast progression, attempt ownership, Slurm execution, checkpoint publication, failure handling and safe retention under one run lock.
+
 ## Requirements
+
 ### Requirement: 严格前沿确定待跑 cycle
 每次 run MUST 为每个 source 独立确定严格前沿：只有共享 `output/` 根已确认为可枚举目录、且该源的 `DONE` 集合被确定为空时，才是全新链，待跑 T 为 init 写入的最早状态文件名；否则取最新 `DONE` cycle D，T 固定为 D+12h。`output/` 根遇 `ENOENT` 或 `ENOTDIR` 是根异常，MUST 以 `DISCOVERY_UNREADABLE` 停止本源，MUST NOT 当作空 `DONE` 集合或全新链。`states/<source>/<T>.cfg.ic` 缺失、不可读或时间头不对应绝对 T 时同样 MUST 停止该源；MUST NOT 取更旧状态、跨轮重戳、冷启动或互借另一源状态。
 
@@ -377,11 +379,27 @@ raw staging 失败时 MUST 保持 rawcopy 既有“不留半套”和本控制�
 - **THEN** 该源 `states/` 下只存在最新待跑状态及其前一份
 
 ### Requirement: 失败处理
-作业在 `run_sources` 的当前控制器实例中明确返回 `FAILED`/`TIMEOUT` 时 MUST 不写 `DONE`、不推进状态链；双源组合器 MUST 按「双源独立追赶组合公共契约」调用 MUST 注入的本源失败收尾 provider。该 provider 对同一 job 恰执行一次 `sacct -j <job_id> -X -n -P --format=ExitCode` 并返回非空退出码字符串；轮询通道不得取 `ExitCode`，不得从 `JobState` 猜测，`JobRecord` 七字段不变。组合器 MUST 将该字符串作为 `FailureInputs.exit_code` 传给 `finalize_failed_job`，随后把完整 stdout/stderr、命令、job ID、起止时间与退出码合成一份 `logs/<source>/<T>.log`，日志原子提交成功后才删除整个精确 scratch work。失败收尾完成后，下次 run 从干净 work 对该 cycle 重试。MUST NOT 维护失败计数、退避或 `status.json`。一个源的失败或失败收尾错误 MUST NOT 取消另一源已经启动的作业；双源控制器在两源都结束后才返回或抛出错误。直接六参数 `run_once` 的兼容行为不在此自动收尾要求内：它仍返回 `JOB_FAILED` 并保留 work。
+作业在 `run_sources` 的当前控制器实例中明确返回 `FAILED`/`TIMEOUT` 时 MUST 不写 `DONE`、不推进状态链；双源组合器 MUST 按「双源独立追赶组合公共契约」调用 MUST 注入的本源失败收尾 provider。该 provider 对同一 job 恰执行一次 `sacct -j <job_id> -X -n -P --format=ExitCode` 并返回非空退出码字符串；轮询通道不得取 `ExitCode`，不得从 `JobState` 猜测，`JobRecord` 七字段不变。组合器 MUST 将该字符串作为 `FailureInputs.exit_code` 传给 `finalize_failed_job`，随后把完整 stdout/stderr、命令、job ID、起止时间与退出码合成本次尝试记录，MUST 追加到 `logs/<source>/<T>.log`（已有普通文件时 no-follow、有界读出旧内容原样写入临时文件再接本次记录并原子 rename，旧内容逐字节保留；旧内容不以换行结尾时先补一个换行，使本次 header 单独成行），日志原子提交成功后才删除整个精确 scratch work。失败收尾完成后，下次 run 从干净 work 对该 cycle 重试；但控制器在 `rawscan` 之前 MUST no-follow、有界读取该日志并计数 `schema == "yd-failure-log-v1"` 的 header 行（按字节切行，无法解码或解析的行不是 header，不令文件不可判定），计数 ≥ 3 或日志不可判定时 MUST 以 `retry_exhausted` 停本源，零 staging、零提交，兄弟源不受影响；人工把该日志移出 `logs/<source>/` 后恢复。失败次数 MUST 只以该日志内的尝试记录表达，MUST NOT 维护 `status.json`、独立计数文件或退避。一个源的失败或失败收尾错误 MUST NOT 取消另一源已经启动的作业；双源控制器在两源都结束后才返回或抛出错误。直接六参数 `run_once` 的兼容行为不在此自动收尾要求内：它仍返回 `JOB_FAILED` 并保留 work。
 
 #### Scenario: 失败轮产物
 - **WHEN** fake executor 返回失败
 - **THEN** 该 source/cycle 无 `DONE`、状态链未动、存在唯一含该轮 job ID 的合并日志、work 目录不存在
+
+#### Scenario: 同一 cycle 第三次失败后停源
+- **WHEN** `logs/ifs/<T>.log` 已含 3 条 `yd-failure-log-v1` header，ifs 的待跑 cycle 为 T，且 raw 齐全
+- **THEN** ifs 返回 `STOPPED`，停因为 `retry_exhausted`，零 staging、零 sbatch，detail 含日志绝对路径与计数；gfs 照常推进
+
+#### Scenario: 失败日志追加保真
+- **WHEN** `logs/ifs/<T>.log` 已含 1 条记录，T 再次失败并完成失败收尾
+- **THEN** 新日志的前缀与旧文件逐字节相同，header 计数为 2，work 目录不存在
+
+#### Scenario: 失败日志不可判定时不 fail-open
+- **WHEN** `logs/ifs/<T>.log` 是 symlink、目录或超出字节上界
+- **THEN** ifs 返回 `STOPPED`/`retry_exhausted`，detail 写明不可判定的原因，零 sbatch
+
+#### Scenario: 正文非 UTF-8 的失败日志照常计数
+- **WHEN** `logs/ifs/<T>.log` 是一条记录、stdout 含非 UTF-8 字节且不以换行结尾，T 再次失败并完成失败收尾
+- **THEN** 收尾前计数为 1 且控制器照常提交；收尾后旧文件仍是逐字节前缀、计数为 2
 
 ### Requirement: 保留窗口与安全清理
 清理 MUST 保留最新成功 cycle 往前 14 天的 `output` source 目录，窗口外目录与对应失败日志删除；每个删除目标（含成功轮 work 删除）MUST 先经 `realpath` 确认位于 yd 自己的根内，否则拒绝删除。node-22 本地 `cron.lock_path` 及其专属 `run/` 目录 MUST 位于全部 retention、work、staging 与 residue 清理根之外，并是所有清理的显式禁区；任何删除候选中的 symlink 都不得被跟随到该哨兵。
@@ -404,4 +422,3 @@ controller._read_header_line MUST 使用既有 safe_fs no-follow、O_NONBLOCK、
 #### Scenario: 首行读取拒绝链接与身份漂移
 - **WHEN** 首行读取的叶子/祖先为 symlink 或打开时变成不同普通 inode
 - **THEN** STATE_UNREADABLE，零错误文件内容采信；正常早返回和错误退出均关闭取得的 fd
-
