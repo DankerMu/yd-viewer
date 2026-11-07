@@ -40,4 +40,4 @@
 - [x] 3.1 `cd producer && uv run ruff check . && uv run ruff format --check . && uv run pytest` → 全绿（含原样通过的 `test_cleanup_retention*.py`）
 - [x] 3.2 在仓库根目录执行 `uv run python scripts/large_file_guard.py` → passed
 - [x] 3.3 `openspec validate retention-wiring --strict --no-interactive` → valid
-- [ ] 3.4 现场（orchestrator，需用户授权）：部署前在 node-22 用新代码只读执行 `plan_retention`，并对每个目标跑 `verify_tree_no_symlinks`，列出两源窗口外清单，确认没有 symlink、非目录、不可 stat 的条目（有任一这类条目，首个 tick 就会零删除并以 exit 3 报错，必须先处理）；把将被删除的失败日志复制到 receipts；首个 tick 后核对实际删除与清单一致、窗口内条目完整；node-27 `/api/cycles`、health 正常；留 node-22 / node-27 receipt
+- [x] 3.4 现场（orchestrator，需用户授权）：部署前在 node-22 用新代码只读执行 `plan_retention`，并对每个目标跑 `verify_tree_no_symlinks`，列出两源窗口外清单，确认没有 symlink、非目录、不可 stat 的条目（有任一这类条目，首个 tick 就会零删除并以 exit 3 报错，必须先处理）；把将被删除的失败日志复制到 receipts；首个 tick 后核对实际删除与清单一致、窗口内条目完整；node-27 `/api/cycles`、health 正常；留 node-22 / node-27 receipt（2026-11-07，node-22 `8fb8014`：部署前扫描 158 个目标，异常 0；18:17Z 首个 tick 删除 gfs 78、ifs 78 个目录、2 份日志、78 个空 cycle 目录，与清单一致；剩 29 个 cycle，两源 DONE 各 29，states 未动；node-27 health、`/api/cycles` 与双源曲线正常）
