@@ -14,8 +14,8 @@ Must add/change:
 - 时机：worker 每次以报告正常返回之前执行一次 retention，即循环结束（`report.outcome is not SUCCEEDED`）和 startup hygiene 停源（`stop is not None`，`_controller_sources.py:624-627`）两条路径。worker 以 `RunError` 返回（preflight、hygiene 抛错、循环内抛错）时不执行。startup 停源时照常执行，因为它只说明 scratch work 有残留，`output/` 与 `logs/` 不受影响（compute-loop §12）。
 - 锚点：只用 `plan_retention(local.yd_root, source)`，它内部按本源普通文件 DONE 取最新值；不得把另一源的 DONE 或墙钟传进去。
 - 锁：从 `plan_retention` 到最后一个 `rmdir` 全程持有 `publish_lock`。
-- rmdir 空 cycle 目录：对 `plan.output_dirs` 中每个目录的父目录 `output/<T>`，用 `safe_fs.open_directory_no_follow(output_root, containment_root=yd_root)` 取得 fd，再 `os.rmdir(name, dir_fd=fd)`。`ENOTEMPTY`/`EEXIST`/`ENOENT` 静默跳过（兄弟源还占用，或已经不存在）。其它 OSError/SafeFilesystemError 按 retention 失败处理。只有 rmdir 成功才计入审计。`output/<T>` 是 symlink 时 rmdir 得到 ENOTDIR，按失败处理，不跟随。
-- 审计文本：`retention cleanup: 删除 <n> 个 output 目录、<m> 个失败日志、<k> 个空 cycle 目录：<abs path>, <abs path>, ...`，追加在该源本 tick 最后一条报告 detail 的末尾，用换行分隔（`dataclasses.replace`）。n、m、k 全为 0 时不追加任何文本。
+- rmdir 空 cycle 目录（review round 1 修订，docs #380）：execute 之后仍在锁内，`plan.cutoff` 非 None 时，用 `safe_fs.open_directory_no_follow(output_root, containment_root=yd_root)` 取 fd，枚举 `output/` 下 `parse_cycle_id(name)` 非 None 且早于 `plan.cutoff` 的条目，逐个 `os.rmdir(name, dir_fd=fd)`。`ENOTEMPTY`/`EEXIST`/`ENOENT` 静默跳过；其它错误先记下，所有候选都试完后再抛第一个错误。只统计 rmdir 成功的。这样中断或部分失败后，下一 tick 能收掉遗留的空目录。
+- 审计文本：`retention cleanup: 删除 <n> 个 output 目录、<m> 个失败日志、<k> 个空 cycle 目录：<abs path>, <abs path>, ...`，追加在该源本 tick 最后一条报告 detail 的末尾，用换行分隔（`dataclasses.replace`）。n、m、k 全为 0 时不追加。rmdir 失败而 execute 已完成时，用 n、m 和已成功的 k 生成同格式的审计文本，作为 note 挂到映射出的 `RunError` 上（`add_note`）；n、m、k 全为 0 时不挂 note。
 - 失败：`CleanupError` 或 rmdir 错误转为 `_cleanup_run_error(f"{source}: retention 失败：{orig}", source=source, cycle=None, orig=orig)`。worker 返回 `_SourceWorkerResult(reports=tuple(reports), error=that)`。已经删掉的条目不回滚，也不推断已删清单（`execute_retention_plan` 不返回进度；下一 tick 重新 plan，剩余部分照常删除并审计）。
 - `RunSourcesError` 构造校验（`_controller_sources.py:424-428` `_require_source_reports(..., allow_empty=True)`）放宽为：`errors` 中源的 reports 可为空；非空时非末项必须是 SUCCEEDED，末项可为任意结果。原因：retention 在追赶循环之后执行，此时末项必然是首个非 SUCCEEDED。不在 `errors` 中的源校验不变。`test_controller_sources.py:905-909`（`match="partial"`）必须改为：非末项为 STOPPED 时仍以 ValueError 拒绝，末项为 STOPPED 时接受。
 - cli：`RunSourcesError` handler 先对 `exc.reports` 按 ifs、gfs 顺序调用既有的结果行渲染（标签、多行时间前缀规则相同），再 `_run_fail(str(exc), *_notes(exc))`。没有报告的源不写。退出码不变（3）。
@@ -39,7 +39,8 @@ Seams under test:
 Required evidence:
 - 两源锚点不同：gfs 最新 DONE 为 D，ifs 最新 DONE 为 D−17d。预置两源各自窗口内外的 output 与 logs。tick 结束后，gfs 只删 `< D−14d` 的 gfs 条目；ifs 只删 `< D−31d` 的 ifs 条目；ifs 在 `[D−31d, D−14d)` 的条目保留。
 - 窗口边界：恰等于 cutoff 的 cycle 保留，早 12 h 的删除（沿用 plan 语义，端到端断言一次）。
-- 空 cycle 目录：两源都在窗口外的 T，tick 后 `output/<T>` 不存在；只有一源在窗口外的 T，`output/<T>` 保留另一源的目录。
+- 空 cycle 目录：两源都在窗口外的 T，tick 后 `output/<T>` 不存在；只有一源在窗口外的 T，`output/<T>` 保留另一源的目录。预置一个早于 cutoff、下面没有任何 source 子目录的空 `output/<T>`：tick 后它被删除，且计入 k。
+- rmdir 部分失败可恢复：三个两源都在窗口外的 T，monkeypatch `os.rmdir`，让第一个返回 EIO。第一个 tick：RunSourcesError（cleanup/retention），error 的 notes 恰含一次审计文本，其中有已删的 output 目录路径；其余两个 T 在同一 tick 被删。去掉注入后第二个 tick：第一个 T 的空目录被删除，计入审计。
 - 报告：有删除时最后一条报告 detail 以原文开头，末尾为 `retention cleanup: 删除 n …` 加逐条绝对路径；无删除时 detail 与改动前逐字相同。
 - 每 tick 执行：raw 缺口等待的 tick（结果为 STOPPED/raw_incomplete）同样执行删除；紧接着再跑一个 tick，不再有删除，也不加审计文本。
 - 锁：用一把会记录持有状态的锁替身（或在 `plan_retention` 上 monkeypatch 断言 `publish_lock.locked()`），证明 plan、execute、rmdir 都在锁内。
