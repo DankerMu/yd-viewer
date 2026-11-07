@@ -14,6 +14,7 @@ from typing import Any
 from yd_producer.canonical._types import (
     CFGRIB_VARIABLE_ALIASES,
     FORCING_USABLE_CANONICAL_QUALITY_FLAGS,
+    GRIB_QUANTIZATION_KEYS,
     REQUIRED_STANDARD_VARIABLES_BY_SOURCE,
     STANDARD_UNITS,
     VARIABLE_MAPPING,
@@ -225,10 +226,16 @@ def _manifest_entries(manifest: Any) -> list[dict[str, Any]]:
 def _cfgrib_backend_kwargs(
     entry: Mapping[str, Any], expected_native_variable: str
 ) -> dict[str, Any]:
+    # 偏离（#369）：三个分支都带 read_keys，读出 GRIB 打包键供 IFS tp 有效量化格距使用。
+    read_keys = list(GRIB_QUANTIZATION_KEYS)
     metadata = _mapping_value(entry.get("metadata"))
     explicit = metadata.get("cfgrib_filter_by_keys")
     if isinstance(explicit, Mapping):
-        return {"filter_by_keys": dict(explicit), "indexpath": ""}
+        return {
+            "filter_by_keys": dict(explicit),
+            "indexpath": "",
+            "read_keys": read_keys,
+        }
 
     bundle = metadata.get("bundle")
     if isinstance(bundle, Mapping) and bundle.get("layout") == "per_forecast_hour":
@@ -236,9 +243,13 @@ def _cfgrib_backend_kwargs(
             expected_native_variable
         )
         if short_name:
-            return {"filter_by_keys": {"shortName": short_name}, "indexpath": ""}
+            return {
+                "filter_by_keys": {"shortName": short_name},
+                "indexpath": "",
+                "read_keys": read_keys,
+            }
 
-    return {"indexpath": ""}
+    return {"indexpath": "", "read_keys": read_keys}
 
 
 def _first_cfgrib_alias(native_variable: str) -> str | None:

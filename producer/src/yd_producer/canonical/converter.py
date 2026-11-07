@@ -88,6 +88,7 @@ from yd_producer.canonical._types import (  # noqa: F401
     FORCING_USABLE_CANONICAL_QUALITY_FLAGS,
     GFS_F000_OPTIONAL_INTERVAL_STANDARD_VARIABLES,
     GFS_REQUIRED_STANDARD_VARIABLES,
+    GRIB_QUANTIZATION_KEYS,
     IFS_REQUIRED_STANDARD_VARIABLES,
     IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2,
     IFS_STANDARD_UNITS,
@@ -123,7 +124,19 @@ from yd_producer.canonical._units import (  # noqa: F401
     convert_ifs_shortwave_down_values,
     convert_units,
     convert_units_with_metadata,
+    effective_quantization_step_mm,
 )
+
+
+def _grib_quantization_metadata(attrs: Mapping[str, Any]) -> dict[str, int]:
+    """cfgrib `read_keys` 写入的打包键;三键齐全且都是 int(bool 不算)才返回(#369)。"""
+    found = {key: attrs.get(f"GRIB_{key}") for key in GRIB_QUANTIZATION_KEYS}
+    if all(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in found.values()
+    ):
+        return found
+    return {}
 
 
 class CanonicalConverter(_CanonicalMethods):
@@ -190,6 +203,9 @@ class CanonicalConverter(_CanonicalMethods):
                     )
                     data_array = dataset[data_variable]
                     values = np.asarray(data_array.values, dtype=np.float64).ravel()
+                    metadata = dict(_mapping_value(entry.get("metadata")))
+                    if cfgrib_error is None:
+                        metadata.update(_grib_quantization_metadata(data_array.attrs))
                     return RawRecord(
                         source_file=self.object_store.uri_for_key(local_key),
                         native_variable=expected_native_variable,
@@ -201,7 +217,7 @@ class CanonicalConverter(_CanonicalMethods):
                             int(size)
                             for size in getattr(data_array.values, "shape", ())
                         ),
-                        metadata=dict(_mapping_value(entry.get("metadata"))),
+                        metadata=metadata,
                     )
                 finally:
                     if dataset is not None:
@@ -329,6 +345,7 @@ class IFSCanonicalConverter(CanonicalConverter):
             )
             products: list[CanonicalProductResult] = []
             previous_precipitation: RawRecord | None = None
+            previous_precipitation_step_mm: float | None = None
             previous_ssr: RawRecord | None = None
             previous_str: RawRecord | None = None
             consecutive_negative_precipitation = 0
@@ -454,6 +471,13 @@ class IFSCanonicalConverter(CanonicalConverter):
                     )
                 )
 
+                precipitation_step_mm = effective_quantization_step_mm(
+                    precipitation.values,
+                    *(
+                        precipitation.metadata.get(key)
+                        for key in GRIB_QUANTIZATION_KEYS
+                    ),
+                )
                 (
                     precipitation_conversion,
                     consecutive_negative_precipitation,
@@ -468,6 +492,8 @@ class IFSCanonicalConverter(CanonicalConverter):
                     if previous_precipitation is not None
                     else None,
                     consecutive_negative_count=consecutive_negative_precipitation,
+                    quantization_step_mm=precipitation_step_mm,
+                    previous_quantization_step_mm=previous_precipitation_step_mm,
                 )
                 if (
                     not precipitation_conversion.anomalies
@@ -590,6 +616,7 @@ class IFSCanonicalConverter(CanonicalConverter):
                 )
 
                 previous_precipitation = precipitation
+                previous_precipitation_step_mm = precipitation_step_mm
                 previous_ssr = ssr
                 previous_str = str_
 

@@ -27,6 +27,8 @@ from yd_producer.canonical.converter import (
     CanonicalConverterConfig,
     IFSCanonicalConverter,
     IFSCanonicalConverterConfig,
+    _mapping_value,
+    evaluate_canonical_readiness,
 )
 from yd_producer.controller import AttemptProducts, AttemptRequest, PreparedAttempt
 from yd_producer.executor import JobRecord, JobState
@@ -629,14 +631,46 @@ def _convert_canonical(staged, store: LocalObjectStore) -> None:
         max_bytes=MAX_OBJECT_MANIFEST_BYTES,
         label="raw manifest",
     )
+    converter = _build_converter(staged, store)
     try:
-        result = _build_converter(staged, store).convert_manifest(manifest)
+        result = converter.convert_manifest(manifest)
     except CanonicalConversionError as error:
         raise ProductionAttemptError(f"canonical conversion failed: {error}") from error
     if result.status != "canonical_ready":
         raise ProductionAttemptError(
-            f"canonical conversion did not succeed: {result.status}"
+            f"canonical conversion did not succeed: {result.status}; "
+            + _readiness_summary(converter, manifest, result.products)
         )
+
+
+_SUMMARY_MAX_LEADS = 20
+
+
+def _readiness_summary(converter, manifest: Mapping[str, Any], products) -> str:
+    # ConversionResult 不带 evidence:按转换器同样的输入重算 readiness,让失败日志自证原因（#369）。
+    metadata = _mapping_value(manifest.get("metadata"))
+    evidence = evaluate_canonical_readiness(
+        source_id=converter.config.source_id,
+        cycle_time=manifest["cycle_time"],
+        products=products,
+        forecast_hours=converter._configured_forecast_hours(
+            manifest, list(manifest.get("entries") or [])
+        ),
+        policy_identity=_mapping_value(metadata.get("source_policy")),
+        source_object_identity=_mapping_value(metadata.get("source_object_identity")),
+    ).evidence
+    leads = [
+        (lead["lead_time_hours"], lead["missing_variables"])
+        for lead in evidence["missing_leads"]
+    ]
+    shown = ",".join(f"({hour},{names})" for hour, names in leads[:_SUMMARY_MAX_LEADS])
+    if len(leads) > _SUMMARY_MAX_LEADS:
+        shown += f",...(+{len(leads) - _SUMMARY_MAX_LEADS} more)"
+    return (
+        f"missing_variables={evidence['missing_variables']}; "
+        f"missing_leads=[{shown}]; "
+        f"rejected_quality_flags={evidence['rejected_quality_flags']}"
+    )
 
 
 def _shud_argv(binary: str, project_name: str, output_dir: Path) -> tuple[str, ...]:
