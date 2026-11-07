@@ -32,12 +32,12 @@
 | 调度 | cron 非阻塞 `flock`；控制器持锁至本次全部作业收尾 |
 | 并发 | 同源串行；IFS/GFS 最多各一个 Slurm 作业并行 |
 | 完成真相 | `output/<T>/<source>/DONE` |
-| 失败 | 本次该源停；另一源继续；下次 cron 从干净 work 重试一次 |
+| 失败 | 本次该源停；另一源继续；下次 cron 从干净 work 重试；同一 `<source>/<T>` 累计 3 次失败后停源待人工（§11.3，用户裁决 2026-11-07） |
 | 初始建链 | 显式 `init`；`run` 永不自动 bootstrap |
 | forcing 映射 | source-specific direct-grid；固定生成 `yd_gfs`、`yd_ifs` 两个变体 |
 | NWM 依赖 | NFS raw 只读 + `prepare` 一次性 builder；日常代码为本仓独立快照 |
 
-不实现：旧状态降级、跨轮重戳、冷启动、degraded、状态 registry、血缘 JSON、失败计数、指数退避、下载兜底、常驻服务、自写 watchdog 或自动 `scancel`。
+不实现：旧状态降级、跨轮重戳、冷启动、degraded、状态 registry、血缘 JSON、独立失败计数文件或 `status.json`（失败次数只以失败日志内的尝试记录表达，§11.3）、指数退避、下载兜底、常驻服务、自写 watchdog 或自动 `scancel`。
 
 ## 3. 物理拓扑与目录
 
@@ -289,6 +289,8 @@ native `yd.cfg.para` 必须使用 stock SHUD 可读的 `KEY<TAB>number`，不能
 
 canonical、forcing 和临时 manifest 都是本轮工件，不写 NFS，也不跨轮复用。IFS 网格定义在该临时 object-store 中的唯一键为 `canonical/ifs/grid/ifs_0p25/grid.json`；catalog 行逐字引用该小写键，不保留 `canonical/IFS/` 别名或大小写 fallback。direct-grid forcing 将 canonical 格点直接作为 SHUD forcing 站点，binding 权重为 1；不走旧的 105 站 IDW。
 
+IFS `tp` 去累积的负 delta 噪声容差逐对时效取 `max(0.1 mm, step_prev, step_curr)`，step 为该 GRIB 消息的量化步长 `1000 × 2^binaryScaleFactor × 10^(−decimalScaleFactor)` mm（cfgrib `read_keys` 读取；缺键、NetCDF 回退或非有限值时退回 0.1 mm，不猜测）；`delta ≥ −tol·(1+1e-6)` 视为量化噪声，保持 `ok` 并记 small anomaly，更负的仍按原规则标 `warning_negative_precip`。依据（#369，2026-11-07 node-22 实测）：ECMWF 自 2026102012 起把 `tp` 由 16 bit 降为 12 bit 打包（三个云镜像一致），步长由 0.008–0.03 mm 升到 0.12–0.24 mm，失败时效的负 delta 恰为 −1 步长，固定 0.1 mm 把它误判为 `warning_negative_precip`，readiness 判缺时效导致 `canonical_incomplete`。GFS APCP 与 IFS shortwave 路径不变。`_convert_canonical` 非 ready 时异常消息须带 readiness evidence 摘要（`missing_variables`、`missing_leads`、`rejected_quality_flags`），失败日志自证原因。
+
 IFS/GFS forcing 原生 3 小时并不限制水文输出为 3 小时：SHUD 求解按自身步长推进，forcing 在相邻时刻间保持当前值，`DT_QR_DOWN=60` 独立输出逐小时平均流量。
 
 ## 8. 严格 warm start
@@ -390,7 +392,7 @@ cron 每小时调用 `yd-producer run --config <path> --local <path>` 的非阻�
 9. IFS/GFS 作业可并行，控制器等待两者；同一 tick 的 NFS publish 串行，避免两源同时创建/放宽共享 `output/<T>/` 层级；共享 scratch 祖先不进任一 source 的 staging rollback 账本；
 10. 成功源发布后以前沿规则立即推进到下一个 cycle，直到追到最新完整 raw；
 11. 某源作业明确返回 `FAILED`/`TIMEOUT` 后，独立失败收尾 provider 对同一 job ID 恰执行一次 `sacct -j <job_id> -X -n -P --format=ExitCode`；轮询通道不取 `ExitCode`，`JobRecord` 七字段不变。控制器把所得字符串作为 `FailureInputs.exit_code`，先提交唯一失败日志、再只删除 ownership token 仍匹配的精确 work；本次停止该源，另一源继续追赶；
-12. 下次 cron 对已完成失败收尾的 cycle 从干净 work 重试一次。
+12. 下次 cron 对已完成失败收尾的 cycle 从干净 work 重试；同一 `<source>/<T>` 的失败日志已累计 3 条尝试记录时不再提交，以 `retry_exhausted` 停本源待人工（§11.3）。
 
 raw 一次补齐多轮时按时序全补；中间永久缺轮时停在缺口，运维人员补齐原始资料后自动继续。不自动跳过 cycle。
 
@@ -433,11 +435,11 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 - 不写 `DONE`；
 - 不推进状态链；
 - 由 MUST 注入的失败收尾 provider 对同一 job ID 恰执行一次 `sacct -j <job_id> -X -n -P --format=ExitCode`，所得非空字符串作为 `FailureInputs.exit_code`；轮询通道不取 `ExitCode`，不从终态枚举猜测，`JobRecord` 七字段不变；
-- 把完整 stdout/stderr、命令、开始/结束时间和退出码合成一份 `logs/<source>/<T>.log`；
+- 把完整 stdout/stderr、命令、开始/结束时间和退出码合成本次尝试记录，**追加**到 `logs/<source>/<T>.log`：已有同名普通文件时 no-follow、有界读出旧内容原样写入临时文件，再接本次记录，最后原子 rename，旧内容逐字节保留；
 - 日志提交成功后，只在 ownership token 仍匹配时删除整个精确 scratch work；若日志已提交但 work identity 已漂移，保留日志与当前 work，报告 cleanup error，不把 replacement 当成本 attempt 删除；
-- 下次 cron 干净重跑。进程崩溃留下、无法证明没有孤儿作业的 work 不走此自动删除路径，而是停源待人工确认。
+- 下次 cron 干净重跑，直到同一 `<source>/<T>` 累计 3 次失败（见下）。进程崩溃留下、无法证明没有孤儿作业的 work 不走此自动删除路径，而是停源待人工确认。
 
-不维护失败次数、退避或 `status.json`。
+失败次数只以 `logs/<source>/<T>.log` 内的尝试记录表达（用户裁决 2026-11-07，取代原「不维护失败次数」；起因是 #369 的确定性 canonical 错误让 ifs 2026102012 每小时重提、连续 FAILED 28 次）：控制器为某源确定待跑 T 之后、raw 扫描与 work claim 之前，no-follow、有界读取该文件并计数 header 行（单独成行、可解析为 JSON 对象且 `schema == "yd-failure-log-v1"`）；文件缺席为 0 次，旧版覆盖写出的单记录日志计 1 次。计数 ≥ 3 时零 staging、零提交，以停因 `retry_exhausted` 停本源（`cron.log` 标签「错误」，detail 含日志绝对路径、计数与放行方式），兄弟源照常。日志不可判定（symlink、非普通文件、超界、读失败）同样停源，不 fail-open。人工放行：确认并处理根因后，把该日志移出 `logs/<source>/`（存入运维 receipt 目录），下一 tick 从 0 计数重跑。阈值 3 是版本化常量，不入 `config.toml`；不设退避、`status.json` 或独立计数文件。实测依据：ifs 2026101800 曾因 `SHUD exited 127` 连败 2 次、第 3 次成功，偶发故障在阈值内自愈。
 
 ## 12. 保留与清理
 
@@ -445,7 +447,7 @@ scratch work 的删除还受本 attempt 的 ownership token 约束：删除前�
 |---|---|
 | `output/<T>/<source>/{yd.rivqdown.dat,DONE}` | 保留最新成功 cycle 往前 14 天 |
 | `states/<source>/*.cfg.ic` | 每源保留下一待跑状态及其前一份 |
-| `logs/<source>/<T>.log` | 仅失败轮；与 output 的 14 天窗口一起清理 |
+| `logs/<source>/<T>.log` | 仅失败轮，同一 cycle 的各次尝试追加在同一文件；与 output 的 14 天窗口一起清理 |
 | scratch `work/<source>/<T>` | 本 attempt 的 token 匹配时在成功或失败收尾删除；post-`DONE` 历史孤儿由下一次 run 启动 hygiene 重新冻结并复核 identity 后删除、记入报告；无 `DONE` 或 identity 漂移则保留并响亮报告 |
 | NWM NFS raw 原件 | yd 永不清理 |
 | scratch raw 副本/canonical/forcing/raw-manifest | 本轮临时工件，随 work 删除 |
