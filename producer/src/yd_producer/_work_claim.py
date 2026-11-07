@@ -326,6 +326,12 @@ def stat_claimed(claim: WorkClaim, path: Path) -> os.stat_result:
         os.close(root_fd)
 
 
+def _claimed_stat(path: Path, *, work_root: Path, claim: WorkClaim | None):
+    if claim is not None:
+        return stat_claimed(claim, path)
+    return safe_fs.stat_no_follow(path, containment_root=work_root)
+
+
 def lexists_claimed(claim: WorkClaim, path: Path) -> bool:
     """Any named entry under the claimed root, including symlink/file/dir."""
     parts = _relative_parts(claim, path)

@@ -25,11 +25,11 @@ from yd_producer import tracker as tracker_module
 from yd_producer._work_claim import (
     ClaimLostError,
     WorkClaim,
+    _claimed_stat,
     claim_exact_work,
     lexists_claimed,
     reject_preexisting_work,
     require_plain_work_parent,
-    stat_claimed,
 )
 from yd_producer.assemble import RunDirectory
 from yd_producer.config import Config, LocalConfig
@@ -186,12 +186,6 @@ def _canonical_checkpoint_path(*, attempt: PreparedAttempt, work_dir: Path) -> P
     project = attempt.identity.project_name
     name = f"{project}.f{CHECKPOINT_TARGET_HOUR:03d}.cfg.ic.update"
     return work_dir / RUN_DIRECTORY_NAME / CHECKPOINT_DIR_NAME / name
-
-
-def _claimed_stat(path: Path, *, work_root: Path, claim: WorkClaim | None):
-    if claim is not None:
-        return stat_claimed(claim, path)
-    return safe_fs.stat_no_follow(path, containment_root=work_root)
 
 
 def _require_absent_before_submit(
@@ -569,6 +563,11 @@ def _run_once(
         unverified = classify_unverified_work(work_dir, source=source, cycle=target)
         if unverified is not None:
             return unverified
+    from yd_producer._controller_sources import retry_exhausted_stop
+
+    exhausted = retry_exhausted_stop(local.yd_root, source=source, cycle=target)
+    if exhausted is not None:
+        return exhausted
 
     ctx.phase = "raw"
     try:

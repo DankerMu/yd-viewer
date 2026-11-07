@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
+from yd_producer._failure_attempts import FAILURE_LOG_SCHEMA, read_failure_log
 from yd_producer._work_claim import (
     ClaimLostError,
     WorkClaim,
@@ -52,7 +53,6 @@ __all__ = [
 
 CleanupPhase = Literal["validate", "log", "work", "retention-plan", "retention-execute"]
 
-_FAILURE_LOG_SCHEMA = "yd-failure-log-v1"
 _STDOUT_STDERR_SEPARATOR = b"--- stdout/stderr ---\n"
 _LOG_COPY_CHUNK_BYTES = 64 * 1024
 _RETENTION_WINDOW = timedelta(days=14)
@@ -582,7 +582,7 @@ def _failure_log_header(inputs: FailureInputs) -> bytes:
         "exit_code": inputs.exit_code,
         "job_id": record.job_id,
         "job_name": record.name,
-        "schema": _FAILURE_LOG_SCHEMA,
+        "schema": FAILURE_LOG_SCHEMA,
         "source": inputs.source,
         "started_at": (
             None if record.started_at is None else record.started_at.isoformat()
@@ -666,7 +666,11 @@ def _commit_failure_log(inputs: FailureInputs) -> Path:
     try:
         parent_fd = open_directory_no_follow(parent, containment_root=inputs.root)
         _reject_non_regular_log_target(parent_fd, log_path)
+        previous = read_failure_log(inputs.root, log_path) or b""
         dest_fd = os.open(temp_name, _TEMP_FILE_FLAGS, 0o666, dir_fd=parent_fd)
+        _write_all(dest_fd, previous)
+        if previous and not previous.endswith(b"\n"):
+            _write_all(dest_fd, b"\n")
         _write_all(dest_fd, header)
         src_fd = (
             open_claimed_file(inputs.claim, inputs.merged_log)
