@@ -36,4 +36,4 @@
 - [x] 3.1 `cd producer && uv run ruff check . && uv run ruff format --check . && uv run pytest` → 全绿
 - [x] 3.2 `uv run python scripts/large_file_guard.py` → passed
 - [x] 3.3 `openspec validate <change> --strict --no-interactive` → valid
-- [ ] 3.4 现场（orchestrator）：部署后现有 `logs/ifs/2026102012.log`（旧格式，计 1）不阻塞追赶；cron.log 中不再出现同一 cycle 每小时一次的 FAILED
+- [x] 3.4 现场（orchestrator）：部署后现有 `logs/ifs/2026102012.log`（旧格式，计 1）不阻塞追赶；cron.log 中不再出现同一 cycle 每小时一次的 FAILED（node-22 `460b35c`，2026-11-07：两份旧日志各计 1、对应 cycle 均已 DONE；15:17Z 首 tick gfs 2026110700 发布、两源停在 2026110712 raw 缺口；07:18:36Z 之后 cron.log 无 FAILED）
