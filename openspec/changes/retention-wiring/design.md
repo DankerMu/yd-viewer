@@ -45,7 +45,7 @@ Required evidence:
 - 失败映射：`execute_retention_plan` 抛 `CleanupError` 时 `run_sources` 抛 `RunSourcesError`，该源 error 的 phase 为 "cleanup"、正文含 "retention"、`__cause__` 为原异常；本源已有的 SUCCEEDED 报告与 DONE 保留；兄弟源报告不变。
 - 跳过：preflight 抛 `RunError`、或循环内 `run_one` 抛 `RunError` 时，不调用 `plan_retention`（monkeypatch 计数为 0）。startup hygiene 停源（预置无 DONE 的 work 残留）时照常调用，并执行删除。
 - cli：有审计文本时，cron.log 第一行带标签，后续行只带时间前缀；退出码不变。
-- cli `RunSourcesError`：gfs 报告为 (SUCCEEDED, STOPPED/raw_incomplete，后者 detail 末尾带 `retention cleanup:` 审计)，ifs 报告为 (STOPPED/raw_incomplete) 且 retention 失败 → stderr 依次为带前缀的「完成：gfs: …」、「等待：gfs: …」与审计行、「等待：ifs: …」……实际顺序按 ifs 全部再 gfs 全部，最后是「错误：」聚合块；退出码 3。
+- cli `RunSourcesError`：ifs 报告为 (SUCCEEDED, STOPPED/raw_incomplete) 且 retention 失败；gfs 报告为 (STOPPED/raw_incomplete，detail 末尾带 `retention cleanup:` 审计)。stderr 依次为带前缀的「完成：ifs: …」「等待：ifs: …」「等待：gfs: …」、只带时间前缀的审计行，最后是「错误：」聚合块；退出码 3。
 - RunSourcesError 构造：errors 源 reports 为 (SUCCEEDED, STOPPED) 接受；为 (STOPPED, SUCCEEDED) 或 (STOPPED, STOPPED) 拒绝。
 - 红跑：还原 src 后，上述删除、报告、锁、失败映射的用例失败。
 
