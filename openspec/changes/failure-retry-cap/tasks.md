@@ -7,6 +7,7 @@
 - Resource limits / large input — 选中：读取有字节上界 → 2.5。
 - Documentation / migration notes — 选中：compute-loop 已由 PR #371 先行；本 change 的 spec delta 修改 run-controller「失败处理」→ 3.3。
 - Concurrency / shared state — 选中：双源独立 → 2.7。
+- Schema / columns / units / field names — 不选：header schema `yd-failure-log-v1` 与字段不变，只是一个文件可含多条记录；`docs/products-contract.md:32` 把 `logs/` 排除在 viewer 契约外，无其它读者。
 - Config、Auth、Release — 不选：不新增配置键或依赖。
 
 ## 1. 实现
@@ -19,10 +20,10 @@
 
 ## 2. 测试（场景驱动；新文件 `producer/tests/test_failure_attempts.py` 及必要的既有文件修改，单文件 < 1000 行）
 
-- [ ] 2.1 计数函数：缺席 → 0；1、2、3 条 → 1、2、3；stdout 中含非 header 的 JSON 行时不误计
+- [ ] 2.1 计数函数：缺席 → 0；1、2、3 条 → 1、2、3；stdout 中含非 header 的 JSON 行时不误计；正文含非 UTF-8 字节的单记录日志计 1（控制器正常提交）
 - [ ] 2.2 旧格式（现行 `_failure_log_header` 加 stdout 的单记录文件）→ 1
 - [ ] 2.3 控制器：0、1、2 条 → 正常提交（fake executor submit 1 次）；3 条 → STOPPED/RETRY_EXHAUSTED，submit 0 次，无 work 目录
-- [ ] 2.4 追加保真：已有 1 条时再走一次 `finalize_failed_job` → 新文件前缀与旧文件逐字节相同，计数 2
+- [ ] 2.4 追加保真：已有 1 条时再走一次 `finalize_failed_job` → 新文件前缀与旧文件逐字节相同，计数 2；旧正文不以 `\n` 结尾时同样计 2；改写 `test_repeat_failure_on_the_same_cycle_atomically_replaces_the_old_log` 为追加语义；`test_large_merged_log_is_copied_byte_exact_without_linear_peak` 保持通过
 - [ ] 2.5 不可判定：symlink、目录、超界（用 monkeypatch 调小上界常量）→ STOPPED/RETRY_EXHAUSTED，detail 含「不可判定」，submit 0 次；追加路径遇超界旧文件 → `CleanupError(phase="log")`，work 保留
 - [ ] 2.6 追加后 retention plan 仍能识别并处理 `logs/<source>/<T>.log`（沿用现有 retention 测试即可）
 - [ ] 2.7 双源：ifs 达上限、gfs 正常 → gfs 提交并 SUCCEEDED，ifs STOPPED

@@ -3,6 +3,7 @@ Change surface: `cleanup._commit_failure_log`（覆盖写改为追加写）、`c
 Must preserve:
 - 失败日志的 header 与 stdout/stderr 布局逐字节不变（`_failure_log_header` 与 `_STDOUT_STDERR_SEPARATOR`）；新记录接在旧内容之后。目标为 symlink 或非普通文件时照旧拒绝（`_reject_non_regular_log_target`）。临时文件 O_EXCL 加原子 rename，失败时清理临时文件，这些语义不变。
 - 日志提交成功之后才删除 work（compute-loop §11.3），这一顺序不变。
+- merged log 照旧分块流式复制，不整读：`test_cleanup_failure.py::test_large_merged_log_is_copied_byte_exact_without_linear_peak` 保持通过。
 - 计数 < 3 时控制流与现状完全一致：raw 扫描、claim、提交、失败收尾、下一 tick 重试都照旧。
 - 兄弟源独立。双源 ThreadPool 组合与 `RunSourcesError` 聚合不变。
 - 退出码不变：STOPPED 为 3。`cli.py` 的标签规则不变：`retry_exhausted` 落在「错误」。
@@ -11,11 +12,12 @@ Must preserve:
 
 Must add/change:
 - 常量 `FAILURE_ATTEMPT_LIMIT = 3`。
-- 计数：header 行的判定标准为：单独一行、`json.loads` 得到 dict、且 `schema == "yd-failure-log-v1"`、键集合等于 `_failure_log_header` 的键集合。stdout/stderr 里偶然出现的 JSON 行，只有完全满足这些条件才会被误计，接受这一点。读取走 no-follow（`stat_no_follow`/`open_file_no_follow`，containment_root = yd_root），有字节上界（建议 64 MiB，常量）。
-- 判定：文件缺席（ENOENT）为 0。普通文件按 header 行计数。symlink、非普通文件、超界、其它 OSError 或非 UTF-8，一律 STOPPED/RETRY_EXHAUSTED，detail 写明「失败日志不可判定：<原因>」，不 fail-open。
+- 既有测试 `test_cleanup_failure.py::test_repeat_failure_on_the_same_cycle_atomically_replaces_the_old_log` 断言覆盖写语义，必须改写为追加语义（原子性断言保留）。
+- 计数：header 行的判定标准为：单独一行、`json.loads` 得到 dict、且 `schema == "yd-failure-log-v1"`（与 compute-loop §11.3 一致，不加其它条件）。按字节 `b"\n"` 切行，只对候选行做 UTF-8 解码与 `json.loads`；解码或解析失败的行视为「非 header」，不令整个文件不可判定（日志正文是 SHUD 原始 stdout，可含非 UTF-8 字节）。stdout/stderr 里偶然出现的合格 JSON 行会被误计，接受这一点（只会提前停源，fail-closed）。schema 常量由 `_failure_attempts` 定义、`cleanup` 引用，不形成循环 import。读取走 no-follow（`stat_no_follow`/`open_file_no_follow`，containment_root = yd_root），有字节上界（建议 64 MiB，常量）。
+- 判定：文件缺席（ENOENT）为 0。普通文件按 header 行计数。symlink、非普通文件、超界或其它 OSError（读失败），一律 STOPPED/RETRY_EXHAUSTED，detail 写明「失败日志不可判定：<原因>」，不 fail-open。
 - STOPPED detail：`<source>: 待跑 T=<T>；同一 cycle 已失败 <n> 次（上限 3），停源待人工；确认根因后把 <abs log path> 移出 logs/<source>/ 再等下一 tick`。
-- 追加写：读旧内容复用同一个有界 no-follow reader；旧内容超界时提交失败（CleanupError phase="log"），保留 work。这与现有「日志提交失败保留 work」的语义一致。
-- 计数检查放在 residue 处理之后、`failure_exit_code` 未知 work 分类之后、`rawscan.judge` 之前。这样即使 raw 齐全，也不会产生 staging 或提交。
+- 追加写：读旧内容复用同一个有界 no-follow reader；旧内容超界时提交失败（CleanupError phase="log"），保留 work。这与现有「日志提交失败保留 work」的语义一致。旧内容非空且不以 `\n` 结尾时，先补一个 `\n` 再写本次 header（旧内容仍是新文件的逐字节前缀），保证 header 单独成行。
+- 计数检查放在 residue 处理之后、`failure_exit_code` 未知 work 分类之后、`rawscan.judge` 之前。这样即使 raw 齐全，也不会产生 staging 或提交。优先级：`work/<source>/<T>` 已存在时 `classify_unverified_work`（`_controller_run.py:564-571`）先返回 `UNVERIFIED_WORK_RESIDUE`，先于 `retry_exhausted`。
 
 Governing invariant: 同一 `<source>/<T>` 的失败日志里有 ≥ 3 条有效 header 时，该源本 tick 零 staging、零 sbatch。其它情况下控制流与改动前一致。
 
@@ -36,6 +38,8 @@ Seams under test:
 Required evidence:
 - 计数：日志缺席、1 条、2 条 → 正常提交 sbatch；3 条 → STOPPED/RETRY_EXHAUSTED，executor submit 调用 0 次，work 目录不存在。
 - 旧格式（现行单记录文件）计 1。
+- 正文含非 UTF-8 字节（如 `cleanup_fixtures.FAILED_LOG_BYTES`）的单记录日志计 1，控制器正常提交。
+- 旧日志正文不以 `\n` 结尾（如 `cleanup_fixtures.TIMEOUT_LOG_BYTES`）时再失败一次 → 旧文件仍是逐字节前缀，计数 2。
 - 追加：先有 1 条，再失败一次 → 文件前缀与旧内容逐字节相同，header 计 2。
 - symlink 日志 / 目录 / 超界 → STOPPED/RETRY_EXHAUSTED 且 detail 含「不可判定」，零 submit。
 - 双源：ifs 达上限、gfs 正常 → gfs 照常提交并发布，ifs 停。
