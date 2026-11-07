@@ -188,13 +188,23 @@ def test_output_root_failure_stops_without_second_scan_or_delete(
     monkeypatch.setattr("yd_producer._controller_run.run_once", counting_run_once)
     monkeypatch.setattr(residue_module, "plan_residue", counting_plan)
     gate = TerminalHookGate()
-    report = run_sources(
-        **dual_run_kwargs(
-            config, local, ifs=_idle_ifs(gate=gate), gfs=_idle_gfs(gate=gate)
-        )
+    kwargs = dual_run_kwargs(
+        config, local, ifs=_idle_ifs(gate=gate), gfs=_idle_gfs(gate=gate)
     )
+    if occupy == "missing":
+        report = run_sources(**kwargs)
+        by_source = {"ifs": report.ifs, "gfs": report.gfs}
+    else:
+        # #372：hygiene 停源后 retention 对同一 `output/` 根异常 fail-closed。
+        with pytest.raises(RunSourcesError) as info:
+            run_sources(**kwargs)
+        by_source = dict(info.value.reports)
+        for source in ("ifs", "gfs"):
+            error = info.value.errors[source]
+            assert error.phase == "cleanup"
+            assert "retention" in str(error)
 
-    for source, reports in (("ifs", report.ifs), ("gfs", report.gfs)):
+    for source, reports in by_source.items():
         items = require_source_tuple(reports, source)
         assert cycle_outcomes(items) == [(None, RunOutcome.STOPPED)]
         assert items[0].stop_reason is StopReason.DISCOVERY_UNREADABLE
@@ -385,18 +395,37 @@ def test_nonregular_or_missing_done_is_unknown_not_delete(
         (real_parent / "DONE").write_bytes(b"")
         done.parent.rmdir()
         done.parent.symlink_to(real_parent)
+    planted_before = work_snapshot(planted)
+    hist_output = pathlib.Path(local.yd_root) / "output" / HIST_EARLY
+    output_before = snapshot_tree(hist_output)
     gate = TerminalHookGate()
-    report = run_sources(
-        **dual_run_kwargs(
-            config, local, ifs=_idle_ifs(gate=gate), gfs=_gfs_success(local, gate=gate)
-        )
+    kwargs = dual_run_kwargs(
+        config, local, ifs=_idle_ifs(gate=gate), gfs=_gfs_success(local, gate=gate)
     )
+    if shape == "missing":
+        report = run_sources(**kwargs)
+        ifs_reports = report.ifs
+    else:
+        # #372：hygiene 停源后 retention 对同一非普通文件 DONE fail-closed。
+        with pytest.raises(RunSourcesError) as info:
+            run_sources(**kwargs)
+        assert set(info.value.errors) == {"ifs"}
+        error = info.value.errors["ifs"]
+        assert error.phase == "cleanup"
+        assert "retention" in str(error)
+        ifs_reports = info.value.reports["ifs"]
+        gfs = require_source_tuple(info.value.reports["gfs"], "gfs")
+        assert gfs[0].outcome is RunOutcome.SUCCEEDED
 
-    ifs = require_source_tuple(report.ifs, "ifs")
+    ifs = require_source_tuple(ifs_reports, "ifs")
+    assert len(ifs) == 1
     assert ifs[0].stop_reason is StopReason.UNVERIFIED_WORK_RESIDUE
     assert ifs[0].cycle == CYCLE_EARLY
+    assert "retention cleanup:" not in ifs[0].detail
     assert planted.exists()
     assert (planted / "old.bin").read_bytes() == b"keep-unknown\n"
+    assert work_snapshot(planted) == planted_before
+    assert snapshot_tree(hist_output) == output_before
 
 
 @pytest.mark.parametrize("kind", ["io", "identity_changed", "indeterminate"])

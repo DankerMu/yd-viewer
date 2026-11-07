@@ -353,6 +353,75 @@ def test_run_sources_error_is_printed_once_with_every_line_stamped(
     assert "Traceback" not in err
 
 
+# --- #372：retention 审计行；RunSourcesError 先输出携带的结果行 ---------------------------
+
+_RETENTION_AUDIT = (
+    "retention cleanup: 删除 1 个 output 目录、1 个失败日志、1 个空 cycle 目录："
+    "/yd/output/2025121200/gfs, /yd/logs/gfs/2025121200.log, /yd/output/2025121200"
+)
+
+
+def test_retention_audit_follows_waiting_label_with_stamp_only(
+    monkeypatch, capsys, tmp_path
+):
+    report = RunSourcesReport(
+        ifs=(_stopped("ifs", "ifs: raw 未齐（T=2026010212）"),),
+        gfs=(_stopped("gfs", f"gfs: raw 未齐（T=2026010212）\n{_RETENTION_AUDIT}"),),
+    )
+    assert _run_with_report(monkeypatch, tmp_path, report) == 3
+    err = capsys.readouterr().err
+    assert _unstamped(err) == [
+        "等待：ifs: raw 未齐（T=2026010212）",
+        "等待：gfs: raw 未齐（T=2026010212）",
+        _RETENTION_AUDIT,
+    ]
+    assert err.count("retention cleanup:") == 1
+    last_two = err.split("\n")[1:3]
+    assert last_two[0][:STAMP_WIDTH] == last_two[1][:STAMP_WIDTH]
+
+
+def test_run_sources_error_prints_carried_reports_before_error_block(
+    monkeypatch, capsys, tmp_path
+):
+    orig = RuntimeError("injected retention execute")
+    ifs_error = RunError(
+        "ifs: retention 失败：injected retention execute",
+        phase="cleanup",
+        source="ifs",
+    )
+    ifs_error.__cause__ = orig
+    error = RunSourcesError(
+        {
+            "ifs": (
+                _succeeded("ifs", "ifs: 一轮成功发布完成（T=2026010200）"),
+                _stopped("ifs", "ifs: raw 未齐（T=2026010212）"),
+            ),
+            "gfs": (
+                _stopped("gfs", f"gfs: raw 未齐（T=2026010212）\n{_RETENTION_AUDIT}"),
+            ),
+        },
+        {"ifs": ifs_error},
+    )
+
+    def boom(**_):
+        raise error
+
+    _hold_lock(monkeypatch)
+    monkeypatch.setattr(cli, "run_sources", boom)
+    assert _exit_code(_ready_run_argv(tmp_path), env={}) == 3
+    err = capsys.readouterr().err
+    assert _unstamped(err) == [
+        "完成：ifs: 一轮成功发布完成（T=2026010200）",
+        "等待：ifs: raw 未齐（T=2026010212）",
+        "等待：gfs: raw 未齐（T=2026010212）",
+        _RETENTION_AUDIT,
+        "错误：ifs: phase=cleanup ifs: retention 失败：injected retention execute",
+    ]
+    assert err.count("retention cleanup:") == 1
+    assert err.count("retention 失败") == 1
+    assert "Traceback" not in err
+
+
 # --- 2.5：配置、状态守卫、锁竞争 ------------------------------------------------------
 
 
