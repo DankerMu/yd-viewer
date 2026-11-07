@@ -33,6 +33,7 @@ from yd_producer.controller import (
     STATE_SUFFIX,
     RunError,
     RunOutcome,
+    RunReport,
     RunSourcesError,
     RunSourcesReport,
     StopReason,
@@ -245,6 +246,14 @@ def _run_exit(report: RunSourcesReport) -> int:
     先判 `SUCCEEDED`，只有 `STOPPED` 才读 `stop_reason`。
     """
     reports = (*report.ifs, *report.gfs)
+    _run_print_reports(reports)
+    if all(item.outcome is RunOutcome.SUCCEEDED for item in reports):
+        return 0
+    return EXIT_RUNTIME
+
+
+def _run_print_reports(reports: Sequence[RunReport]) -> None:
+    """按给定顺序为每条结果写一行 `<标签>：<detail>`（多行 detail 逐行加时间前缀）。"""
     for item in reports:
         if item.outcome is RunOutcome.SUCCEEDED:
             label = "完成"
@@ -256,9 +265,6 @@ def _run_exit(report: RunSourcesReport) -> int:
         else:
             label = "错误"
         _run_print(f"{label}：{item.detail or item.outcome.value}")
-    if all(item.outcome is RunOutcome.SUCCEEDED for item in reports):
-        return 0
-    return EXIT_RUNTIME
 
 
 def _stamp() -> str:
@@ -454,6 +460,8 @@ def main(
         return code
     # 以下三类只在 `run_sources` 调用链上抛出。
     except RunSourcesError as exc:
+        # compute-loop §6：先输出该异常携带的结果行（ifs 全部、再 gfs 全部），再输出聚合块。
+        _run_print_reports((*exc.reports["ifs"], *exc.reports["gfs"]))
         return _run_fail(str(exc), *_notes(exc))
     except (RunError, ExecutorError) as exc:
         return _run_fail(str(exc), *_run_context(exc), *_notes(exc))

@@ -904,11 +904,29 @@ def test_public_structure_is_frozen_keyword_only() -> None:
             {"ifs": (), "gfs": (_stopped("gfs"),)},
             {"ifs": gfs_err},
         )
-    with pytest.raises(ValueError, match="partial"):
-        c.RunSourcesError(
-            {"ifs": (_stopped("ifs"),), "gfs": (_stopped("gfs"),)},
-            {"ifs": ifs_err},
-        )
+    # #372：errors 源非末项必须 SUCCEEDED，末项任意（追赶结束后 retention 失败）。
+    last_stopped = c.RunSourcesError(
+        {"ifs": (_stopped("ifs"),), "gfs": (_stopped("gfs"),)},
+        {"ifs": ifs_err},
+    )
+    assert last_stopped.reports["ifs"][-1].outcome is RunOutcome.STOPPED
+    full = c.RunSourcesError(
+        {"ifs": (_succeeded("ifs"), _stopped("ifs")), "gfs": (_stopped("gfs"),)},
+        {"ifs": ifs_err},
+    )
+    assert [item.outcome for item in full.reports["ifs"]] == [
+        RunOutcome.SUCCEEDED,
+        RunOutcome.STOPPED,
+    ]
+    for rejected in (
+        (_stopped("ifs"), _succeeded("ifs")),
+        (_stopped("ifs"), _stopped("ifs")),
+    ):
+        with pytest.raises(ValueError, match="partial"):
+            c.RunSourcesError(
+                {"ifs": rejected, "gfs": (_stopped("gfs"),)},
+                {"ifs": ifs_err},
+            )
     with pytest.raises(ValueError, match="至少"):
         c.RunSourcesError({"ifs": (_succeeded("ifs"),), "gfs": ()}, {"ifs": ifs_err})
     reports = {"ifs": (_succeeded("ifs"),), "gfs": (_stopped("gfs"),)}

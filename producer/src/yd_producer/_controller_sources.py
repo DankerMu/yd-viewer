@@ -421,9 +421,9 @@ def _require_source_reports(
             )
         if not allow_empty and last and report.outcome is RunOutcome.SUCCEEDED:
             raise ValueError(f"{source} 末项必须是首次非 SUCCEEDED")
-        if allow_empty and report.outcome is not RunOutcome.SUCCEEDED:
+        if allow_empty and not last and report.outcome is not RunOutcome.SUCCEEDED:
             raise ValueError(
-                f"{source} 异常前 partial reports 必须全是 SUCCEEDED，"
+                f"{source} 异常前 partial reports 非末项必须是 SUCCEEDED，"
                 f"实得 {report.outcome!r}"
             )
     return reports
@@ -574,6 +574,26 @@ class _SourceWorkerResult:
     error: RunError | None = None
 
 
+def _finish_with_retention(
+    reports: list[RunReport],
+    *,
+    yd_root: Path,
+    source: str,
+    publish_lock: threading.Lock,
+) -> _SourceWorkerResult:
+    """worker 正常返回前跑一次本源 retention；审计追加到末条报告，失败带报告返回。"""
+    from yd_producer._retention_run import run_retention
+
+    try:
+        audit = run_retention(yd_root, source, publish_lock=publish_lock)
+    except RunError as error:
+        return _SourceWorkerResult(reports=tuple(reports), error=error)
+    if audit:
+        last = reports[-1]
+        reports[-1] = dataclasses.replace(last, detail=last.detail + "\n" + audit)
+    return _SourceWorkerResult(reports=tuple(reports), error=None)
+
+
 def run_sources(
     *,
     config: Config,
@@ -629,8 +649,11 @@ def run_sources(
         except RunError as orig:
             return _SourceWorkerResult(reports=(), error=orig)
         if stop is not None:
-            return _SourceWorkerResult(
-                reports=(_attach_startup_audit(stop, deleted),), error=None
+            return _finish_with_retention(
+                [_attach_startup_audit(stop, deleted)],
+                yd_root=local.yd_root,
+                source=source,
+                publish_lock=publish_lock,
             )
         audit_pending = bool(deleted)
         while True:
@@ -654,7 +677,12 @@ def run_sources(
                 audit_pending = False
             reports.append(report)
             if report.outcome is not RunOutcome.SUCCEEDED:
-                return _SourceWorkerResult(reports=tuple(reports), error=None)
+                return _finish_with_retention(
+                    reports,
+                    yd_root=local.yd_root,
+                    source=source,
+                    publish_lock=publish_lock,
+                )
 
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="yd-source") as pool:
         futures = {source: pool.submit(_worker, source) for source in _SOURCE_ORDER}
