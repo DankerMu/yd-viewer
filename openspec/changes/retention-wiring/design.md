@@ -5,7 +5,7 @@ Must preserve:
 - 追赶循环本身不变：每个 cycle 的 `run_one`、startup hygiene、startup audit（`startup cleanup:` 前缀附在**第一条**报告）、遇到非 SUCCEEDED 就结束，这些都不变。retention 只在循环结束之后执行一次。
 - worker 以 `RunError` 结束时（preflight、startup hygiene 抛错、循环内 `run_one` 抛错）不做 retention，`_SourceWorkerResult(reports, error)` 与原来完全一致。
 - 已发布的 DONE、状态链、work 删除不受 retention 成败影响；retention 失败不改已有报告的 outcome。
-- 兄弟源独立：一个源的 retention 失败只给该源产生 error，另一源的报告和发布不变。`RunSourcesError` 的构造与聚合文本（`str(exc)`、notes）不变。
+- 兄弟源独立：一个源的 retention 失败只给该源产生 error，另一源的报告和发布不变。`RunSourcesError` 的聚合文本（`str(exc)`、notes）不变。
 - 退出码规则不变（全部 SUCCEEDED 为 0；STOPPED/错误为 3；`RunSourcesError` 走既有路径）。cron.log 的标签规则不变，审计文本跟在 detail 后面，多行规则沿用 compute-loop §6（标签只在第一行，后续行只加时间前缀）。
 - 发布锁仍是同一把 `threading.Lock`，`run_once` 的发布段照旧使用它。
 - `cleanup.py` ≤ 1000 行（现 997，不加行）；`_controller_sources.py` 及任何新模块 ≤ 1000 行。
@@ -17,6 +17,7 @@ Must add/change:
 - rmdir 空 cycle 目录：对 `plan.output_dirs` 中每个目录的父目录 `output/<T>`，用 `safe_fs.open_directory_no_follow(output_root, containment_root=yd_root)` 取得 fd，再 `os.rmdir(name, dir_fd=fd)`。`ENOTEMPTY`/`EEXIST`/`ENOENT` 静默跳过（兄弟源还占用，或已经不存在）。其它 OSError/SafeFilesystemError 按 retention 失败处理。只有 rmdir 成功才计入审计。`output/<T>` 是 symlink 时 rmdir 得到 ENOTDIR，按失败处理，不跟随。
 - 审计文本：`retention cleanup: 删除 <n> 个 output 目录、<m> 个失败日志、<k> 个空 cycle 目录：<abs path>, <abs path>, ...`，追加在该源本 tick 最后一条报告 detail 的末尾，用换行分隔（`dataclasses.replace`）。n、m、k 全为 0 时不追加任何文本。
 - 失败：`CleanupError` 或 rmdir 错误转为 `_cleanup_run_error(f"{source}: retention 失败：{orig}", source=source, cycle=None, orig=orig)`。worker 返回 `_SourceWorkerResult(reports=tuple(reports), error=that)`。已经删掉的条目不回滚，也不推断已删清单（`execute_retention_plan` 不返回进度；下一 tick 重新 plan，剩余部分照常删除并审计）。
+- `RunSourcesError` 构造校验（`_controller_sources.py:424-428` `_require_source_reports(..., allow_empty=True)`）放宽为：`errors` 中源的 reports 可为空；非空时非末项必须是 SUCCEEDED，末项可为任意结果。原因：retention 在追赶循环之后执行，此时末项必然是首个非 SUCCEEDED。不在 `errors` 中的源校验不变。`test_controller_sources.py:905-909`（`match="partial"`）必须改为：非末项为 STOPPED 时仍以 ValueError 拒绝，末项为 STOPPED 时接受。
 - cli：`RunSourcesError` handler 先对 `exc.reports` 按 ifs、gfs 顺序调用既有的结果行渲染（标签、多行时间前缀规则相同），再 `_run_fail(str(exc), *_notes(exc))`。没有报告的源不写。退出码不变（3）。
 - 每 tick 都执行（包括 raw 缺口等待的 tick），所以幂等，中断后下一 tick 继续完成。首次上线的首个 tick 一次性删完。
 
@@ -44,7 +45,8 @@ Required evidence:
 - 失败映射：`execute_retention_plan` 抛 `CleanupError` 时 `run_sources` 抛 `RunSourcesError`，该源 error 的 phase 为 "cleanup"、正文含 "retention"、`__cause__` 为原异常；本源已有的 SUCCEEDED 报告与 DONE 保留；兄弟源报告不变。
 - 跳过：preflight 抛 `RunError`、或循环内 `run_one` 抛 `RunError` 时，不调用 `plan_retention`（monkeypatch 计数为 0）。startup hygiene 停源（预置无 DONE 的 work 残留）时照常调用，并执行删除。
 - cli：有审计文本时，cron.log 第一行带标签，后续行只带时间前缀；退出码不变。
-- cli `RunSourcesError`：gfs 本 tick 有 SUCCEEDED 报告（detail 带 `retention cleanup:` 审计）、ifs retention 失败 → stderr 先有带前缀的「完成：gfs: …」与审计行，再有「错误：」聚合块；退出码 3。
+- cli `RunSourcesError`：gfs 报告为 (SUCCEEDED, STOPPED/raw_incomplete，后者 detail 末尾带 `retention cleanup:` 审计)，ifs 报告为 (STOPPED/raw_incomplete) 且 retention 失败 → stderr 依次为带前缀的「完成：gfs: …」、「等待：gfs: …」与审计行、「等待：ifs: …」……实际顺序按 ifs 全部再 gfs 全部，最后是「错误：」聚合块；退出码 3。
+- RunSourcesError 构造：errors 源 reports 为 (SUCCEEDED, STOPPED) 接受；为 (STOPPED, SUCCEEDED) 或 (STOPPED, STOPPED) 拒绝。
 - 红跑：还原 src 后，上述删除、报告、锁、失败映射的用例失败。
 
 Non-goals: viewer 清理、窗口值配置化、对 `run_once`/`catch_up_source` 接线、清理 `states/`（另有规则）、清理 scratch work（startup hygiene 负责）、迁移脚本、修改 cleanup.py。

@@ -15,6 +15,7 @@
 - [ ] 1.1 新增私有 retention 步骤（`_controller_sources.py` 内或新模块 `_retention_run.py`）：持 `publish_lock` 执行 plan → execute → rmdir 空 `output/<T>`；返回审计文本（无删除时为空），失败时抛 cleanup `RunError`
 - [ ] 1.2 `run_sources._worker`：循环结束与 startup hygiene 停源两条返回路径都调用 1.1，把审计文本追加到最后一条报告的 detail；失败时带着已有报告返回 error；以 RunError 返回的路径不调用
 - [ ] 1.4 `cli.py` 的 `RunSourcesError` handler：先按既有规则输出 `exc.reports`，再输出聚合错误块
+- [ ] 1.5 `RunSourcesError` 构造：errors 源的 reports 非末项必须 SUCCEEDED、末项任意（`_require_source_reports`）
 - [ ] 1.3 所有文件 ≤ 1000 行，`cleanup.py` 不改
 
 ## 2. 测试（场景驱动；新文件 `producer/tests/test_retention_run.py`，单文件 < 1000 行，复用 `producer/tests/controller_sources_fixtures.py` 夹具）
@@ -27,9 +28,10 @@
 - [ ] 2.6 失败映射：execute 抛 CleanupError → RunSourcesError，该源 error.phase == "cleanup"，正文含 "retention"，cause 是原异常；已有 SUCCEEDED 报告与 DONE 保留；兄弟源报告不变
 - [ ] 2.7 跳过与不跳过：preflight 或循环内抛 RunError → plan_retention 调用 0 次；startup hygiene 停源 → 照常调用并删除
 - [ ] 2.9 每 tick 执行且幂等：raw 缺口的 tick 也删除；紧接的第二个 tick 无删除、无审计文本
-- [ ] 2.10 cli：带审计文本的结果 → 第一行带「完成：」或「等待：」标签，后续行只带时间前缀，退出码不变
-- [ ] 2.12 cli `RunSourcesError`：gfs 有 SUCCEEDED（带审计）、ifs retention 失败 → 先输出带前缀的「完成：gfs: …」与审计行，再输出「错误：」块，退出码 3；改写 `test_run_sources_error_is_printed_once_with_every_line_stamped` 以适应新顺序（reports 为空的情形输出逐字不变）
-- [ ] 2.11 红跑：还原 src 后，2.1、2.3、2.4、2.5、2.6、2.9、2.12 失败
+- [ ] 2.10 cli：带审计文本的末项报告（STOPPED/raw_incomplete）→ 第一行带「等待：」标签，审计行只带时间前缀，退出码不变
+- [ ] 2.12 cli `RunSourcesError`：ifs (SUCCEEDED, STOPPED) 且 retention 失败、gfs (STOPPED + 审计) → 先按 ifs、gfs 顺序输出全部结果行（含审计行），再输出「错误：」块，退出码 3；
+- [ ] 2.13 `RunSourcesError` 构造：errors 源 (SUCCEEDED, STOPPED) 接受，(STOPPED, SUCCEEDED)、(STOPPED, STOPPED) 拒绝；改写 `test_controller_sources.py:905-909`；改写 `test_run_sources_error_is_printed_once_with_every_line_stamped` 以适应新顺序（reports 为空的情形输出逐字不变）
+- [ ] 2.11 红跑：还原 src 后，2.1、2.3、2.4、2.5、2.6、2.9、2.12、2.13 失败
 
 ## 3. 验证
 

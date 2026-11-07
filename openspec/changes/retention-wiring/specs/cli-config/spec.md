@@ -32,6 +32,6 @@
 - **THEN** stderr 在「错误：」行之后含带时间前缀的该 note 行，恰出现一次，不含 traceback；退出码分别为 `1`、`3`、`3`
 
 #### Scenario: 聚合错误前保留已有结果行
-- **WHEN** `run_sources` 抛出 `RunSourcesError`，gfs 携带一条 `SUCCEEDED` 报告（detail 含 `retention cleanup:` 审计行），ifs 携带 retention 失败的 cleanup `RunError`
-- **THEN** stderr 先输出带时间前缀的「完成：gfs: …」与无标签的审计行，再输出「错误：」聚合块；退出码为 `3`
+- **WHEN** `run_sources` 抛出 `RunSourcesError`：ifs 携带 `SUCCEEDED`、`STOPPED`（`raw_incomplete`）两条报告与 retention 失败的 cleanup `RunError`，gfs 携带一条 detail 末尾含 `retention cleanup:` 审计行的 `STOPPED`（`raw_incomplete`）
+- **THEN** stderr 依次为带时间前缀的「完成：ifs: …」「等待：ifs: …」「等待：gfs: …」、无标签的审计行，然后是「错误：」聚合块；退出码为 `3`
 
