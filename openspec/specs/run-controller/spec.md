@@ -154,7 +154,7 @@ staging 任一失败 MUST 变成保留 cause/notes 的 `RunError(phase="prepare"
 - **THEN** 当前阶段 fail closed 且零 `DONE`，不采用 legacy `assemble`、目录扫描或登录侧补跑绕过校验，不写删 replacement work
 
 ### Requirement: 作业提交经执行器抽象且身份可追溯
-run MUST 经作业执行器抽象为每源提交至多一个作业；提交参数（partition、account、CPU、内存、walltime）MUST 全部取自 `local.toml`，代码 MUST NOT 为这些资源内置任何默认值；每次提交的 job ID、partition、终态与起止时间 MUST 记入本次运行报告，失败源的日志 MUST 含同一 job ID。真实 `sbatch`/`sacct` 行为归 M4 oracle，本地以注入 fake 验证。
+run MUST 经作业执行器抽象为每源提交至多一个作业；提交参数（partition、account、CPU、内存、walltime）MUST 全部取自 `local.toml`，代码 MUST NOT 为这些资源内置任何默认值；每次提交的 job ID、partition、终态与起止时间 MUST 记入本次运行报告，失败源的日志 MUST 含同一 job ID。`LocalConfig.slurm_exclude_nodes` 非空时，每次 `sbatch` argv MUST 紧接资源段之后、`--wrap` 之前插入恰一项 `--exclude=<按配置顺序逗号连接的节点名>`；为空时 argv MUST 与无此特性时逐字节相同；`sacct` 命令不受影响。真实 `sbatch`/`sacct` 行为归 M4 oracle，本地以注入 fake 验证。
 
 每一次真实 `sbatch`、普通轮询 `sacct` 与失败 ExitCode `sacct` 客户端子进程 MUST 设置同一个正整数秒数的调用时限，取自 `LocalConfig.slurm_command_timeout_seconds`；其唯一缺省为配置装载器的版本化 60 秒。该值不得进入 `JobSpec.resources` 或 `sbatch` argv，也不是 Slurm job walltime、job watchdog 或取消策略。客户端超时 MUST 经既有异常漏斗转成 `ExecutorError`，不自动重试。
 
@@ -215,6 +215,10 @@ run MUST 经作业执行器抽象为每源提交至多一个作业；提交参�
 #### Scenario: 提交同一秒内启动的作业不被时序不变式拒绝
 - **WHEN** 注入时钟在提交时返回带微秒的时刻 `T0 + 0.4 s`，随后普通轮询 `sacct` 返回 `<id>|RUNNING|<T0 整秒>|Unknown`
 - **THEN** 记录的 `submitted_at` 为 `T0`（微秒为 0、tzinfo 仍为 UTC），`poll` 返回 `RUNNING` 且 `started_at == T0`，不抛 `ExecutorError`；若 `sacct` 的 Start 为 `T0 - 1 s`，仍以 `started_at 不得早于 submitted_at` 拒绝
+
+#### Scenario: 排除节点进入 sbatch
+- **WHEN** 生产装配的 `slurm_exclude_nodes == ("cn02",)`
+- **THEN** 每次 `sbatch` argv 恰含一项 `--exclude=cn02`，轮询与 ExitCode `sacct` argv 不含它；`slurm_exclude_nodes == ()` 时 `sbatch` argv 与改动前逐字节相同
 
 ### Requirement: 并发与锁
 run 入口 MUST 使用非阻塞 flock：已有实例持锁时本次直接跳过不排队；锁 MUST 覆盖发现、提交、等待、发布、清理全生命周期。IFS/GFS 最多各一个作业并行。`cron.lock_path` MUST 是绝对路径：相对路径与 `~` 前缀（`Path` 不展开 `~`）MUST 在创建锁文件之前 fail closed，报错 MUST 指名 `cron.lock_path`。

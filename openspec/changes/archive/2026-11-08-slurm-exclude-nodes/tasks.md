@@ -35,4 +35,4 @@
 - [x] 3.1 `cd producer && uv run ruff check . && uv run ruff format --check . && uv run pytest` → 全绿
 - [x] 3.2 在仓库根目录执行 `uv run python scripts/large_file_guard.py` → passed
 - [x] 3.3 `openspec validate slurm-exclude-nodes --strict --no-interactive` → valid
-- [ ] 3.4 现场（orchestrator）：先把 node-22 checkout ff-only 到新代码，再备份 `local.toml`、加入 `exclude_nodes = ["cn02"]`；首个 tick 正常；之后 yd 作业的 `sacct NodeList` 都不是 cn02；留 receipt。回滚顺序与部署相反：先从 `local.toml` 删除 `exclude_nodes`，再回退 checkout（否则旧代码每个 tick 装载配置都会失败）
+- [x] 3.4 现场（orchestrator）：先把 node-22 checkout ff-only 到新代码，再备份 `local.toml`、加入 `exclude_nodes = ["cn02"]`；首个 tick 正常；之后 yd 作业的 `sacct NodeList` 都不是 cn02；留 receipt。回滚顺序与部署相反：先从 `local.toml` 删除 `exclude_nodes`，再回退 checkout（否则旧代码每个 tick 装载配置都会失败）
