@@ -9,7 +9,7 @@ Issue type: feature
 Fixture level: expanded
 Upstream suggested level: absent (expanded: 命中 production config、public API（导出的 `build_sbatch_command`、`LocalConfig`）、legacy compatibility 和 Slurm/sbatch domain 触发)
 Blast radius: 改错 → 旧配置被拒、run 整体失败，或 argv 变化导致 sbatch 拒绝提交，或空列表误生成 `--exclude=`
-Selected risk packs: Config; Public API / CLI (sbatch argv); Legacy compatibility; Documentation
+Selected risk packs: Config; Schema / field names; Error handling; Public API / CLI (sbatch argv); Legacy compatibility; Documentation
 Evidence floor: producer ruff + format + pytest 全绿；缺省/空列表 argv 逐字节不变、单个/多个节点、非法值报错、不计入资源键集、cli 接线的测试红→绿
 ```
 
