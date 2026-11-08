@@ -392,6 +392,7 @@ EXPECTED_LOCAL_B = LocalConfig(
         log_dir="/alternate/log/producer",
     ),
     slurm_command_timeout_seconds=37,
+    slurm_exclude_nodes=("cn02",),
 )
 
 VALID_LOCAL_B: dict[str, Any] = {
@@ -411,6 +412,7 @@ VALID_LOCAL_B: dict[str, Any] = {
         "ram": "48G",
         "duration": "02:30:00",
         "command_timeout_seconds": 37,
+        "exclude_nodes": ["cn02"],
     },
     "cron": {
         "lock_path": "/alternate/run/producer.lock",
@@ -902,7 +904,7 @@ def _dataclass_leaf_values(value: object, prefix: str = "") -> dict[str, object]
     ("expected_a", "expected_b", "expected_leaf_count"),
     [
         pytest.param(EXPECTED_CONFIG_A, EXPECTED_CONFIG_B, 18, id="config"),
-        pytest.param(EXPECTED_LOCAL_A, EXPECTED_LOCAL_B, 11, id="local"),
+        pytest.param(EXPECTED_LOCAL_A, EXPECTED_LOCAL_B, 12, id="local"),
     ],
 )
 def test_complete_round_trip_expected_leaves_are_distinct(
@@ -2062,19 +2064,25 @@ def test_old_direct_local_construction_keeps_passed_slurm_mapping_and_defaults_t
     assert local.slurm_command_timeout_seconds == DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
 
 
-def test_only_local_command_timeout_field_carries_a_default():
-    """#69 的兼容默认只属于该一个 direct-construction 字段。"""
-    timeout_field = next(
-        field
+def test_only_local_policy_fields_carry_a_default():
+    """兼容默认恰好只属于 #69 timeout 与 #382 exclude_nodes 两个 direct-construction 字段。"""
+    defaulted = {
+        field.name: field
         for field in dataclasses.fields(LocalConfig)
-        if field.name == "slurm_command_timeout_seconds"
-    )
+        if field.default is not dataclasses.MISSING
+        or field.default_factory is not dataclasses.MISSING
+    }
+    assert set(defaulted) == {"slurm_command_timeout_seconds", "slurm_exclude_nodes"}
+    timeout_field = defaulted["slurm_command_timeout_seconds"]
     assert timeout_field.default == DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
     assert timeout_field.default_factory is dataclasses.MISSING
+    exclude_field = defaulted["slurm_exclude_nodes"]
+    assert exclude_field.default == ()
+    assert exclude_field.default_factory is dataclasses.MISSING
 
     for klass in _dataclass_tree(Config) + _dataclass_tree(LocalConfig):
         for field in dataclasses.fields(klass):
-            if klass is LocalConfig and field.name == "slurm_command_timeout_seconds":
+            if klass is LocalConfig and field.name in defaulted:
                 continue
             assert field.default is dataclasses.MISSING, (
                 f"{klass.__name__}.{field.name}"

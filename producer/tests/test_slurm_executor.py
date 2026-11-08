@@ -342,9 +342,19 @@ def test_executor_constructor_has_no_defaults(omitted):
 
 def test_executor_constructor_params_are_keyword_only():
     params = inspect.signature(SlurmJobExecutor.__init__).parameters
+    assert list(params) == [
+        "self",
+        "required_fields",
+        "clock",
+        "runner",
+        "exclude_nodes",
+    ]
     for name in ("required_fields", "clock", "runner"):
         assert params[name].kind is inspect.Parameter.KEYWORD_ONLY
         assert params[name].default is inspect.Parameter.empty
+    # #382：排除节点不是资源，keyword-only 且缺省为空
+    assert params["exclude_nodes"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["exclude_nodes"].default == ()
     with pytest.raises(TypeError):
         SlurmJobExecutor(REQUIRED_FIVE, StepClock(start=T0, step=STEP), lambda *_: "")
 
