@@ -218,6 +218,8 @@ NWM 当前维护窗口约束来自 `NWM/CLAUDE.md` 与 `current-production-ops.m
 - 不为未观察到的作业卡死编写 watchdog；walltime 属 Slurm 作业配置，异常由日志和人工操作处理；
 - 每次 `sbatch`、轮询 `sacct` 与失败 ExitCode `sacct` 客户端命令必须使用 `[slurm].command_timeout_seconds`（缺席默认 60 秒）的同一时限；这不是 job walltime/watchdog。命令 timeout 后保留 work、停本源且不自动重试/删 work，兄弟源继续；`sbatch` 可能已被服务端接收，运维须按保留证据排查，下一 tick 的无 DONE work 闸会阻止重复提交；
 - Slurm partition/account/CPU/内存/walltime 与客户端 command timeout 只放 `local.toml`；timeout 从 JobSpec 资源映射剥离。
+- 计算节点环境缺陷（例如缺共享库导致 SHUD 退出码 127）时，先用 `srun -p CPU -A friends -w <node> ldd <shud>` 与正常节点对照确认，再把该节点写进 `local.toml` 的 `[slurm].exclude_nodes`（compute-loop §5）。改动前备份 `local.toml`，并在 receipt 记录原因与证据。节点修复后移除该项。根治属于集群管理员的职责，yd 不修改计算节点环境。
+
 
 ### 8.4 发布
 
