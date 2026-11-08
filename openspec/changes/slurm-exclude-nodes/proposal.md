@@ -6,8 +6,8 @@
 
 ```text
 Issue type: feature
-Fixture level: compact
-Upstream suggested level: absent (compact: 一个可选现场配置键 + 一个 sbatch flag；不涉及持久状态、NFS 或并发)
+Fixture level: expanded
+Upstream suggested level: absent (expanded: 命中 production config、public API（导出的 `build_sbatch_command`、`LocalConfig`）、legacy compatibility 和 Slurm/sbatch domain 触发)
 Blast radius: 改错 → 旧配置被拒、run 整体失败，或 argv 变化导致 sbatch 拒绝提交，或空列表误生成 `--exclude=`
 Selected risk packs: Config; Public API / CLI (sbatch argv); Legacy compatibility; Documentation
 Evidence floor: producer ruff + format + pytest 全绿；缺省/空列表 argv 逐字节不变、单个/多个节点、非法值报错、不计入资源键集、cli 接线的测试红→绿
@@ -16,8 +16,8 @@ Evidence floor: producer ruff + format + pytest 全绿；缺省/空列表 argv �
 ## What Changes
 
 - `config._build_local`：从 `[slurm]` 表中剥离可选键 `exclude_nodes`（与 `command_timeout_seconds` 一样不计入资源键集），校验后暴露为 additive 字段 `LocalConfig.slurm_exclude_nodes: tuple[str, ...] = ()`。合法值是 TOML 字符串数组，每个元素非空、不含逗号和空白；其它情形抛 `ConfigError`，`path == "slurm.exclude_nodes"`。`required_fields` 不得声明这个保留名。
-- `slurm.build_sbatch_command(spec, *, required_fields, exclude_nodes=())`：`exclude_nodes` 非空时，在资源段之后、其余既有段之前追加一项 `--exclude=<",".join(exclude_nodes)>`；为空时 argv 与改动前逐字节相同。
-- `SlurmJobExecutor(..., exclude_nodes=())` 保存这个值并传给 `build_sbatch_command`。
+- `slurm.build_sbatch_command(spec, *, required_fields, exclude_nodes=())`：`exclude_nodes` 是 keyword-only 参数。非空时紧接资源段之后、`--wrap` 之前插入一项 `--exclude=<",".join(exclude_nodes)>`；为空时 argv 与改动前逐字节相同。
+- `SlurmJobExecutor(*, required_fields, clock, runner, exclude_nodes=())`：`exclude_nodes` 是 keyword-only 参数，保存后传给 `build_sbatch_command`。同时把 docstring「三个构造参数均 keyword-only 且无默认值」改成准确描述。
 - `cli.run` 用 `exclude_nodes=local.slurm_exclude_nodes` 构造 executor。
 
 Must preserve:

@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: 作业提交经执行器抽象且身份可追溯
-run MUST 经作业执行器抽象为每源提交至多一个作业；提交参数（partition、account、CPU、内存、walltime）MUST 全部取自 `local.toml`，代码 MUST NOT 为这些资源内置任何默认值；每次提交的 job ID、partition、终态与起止时间 MUST 记入本次运行报告，失败源的日志 MUST 含同一 job ID。`LocalConfig.slurm_exclude_nodes` 非空时，每次 `sbatch` argv MUST 在资源段之后追加恰一项 `--exclude=<逗号连接的节点名>`；为空时 argv MUST 与无此特性时逐字节相同；`sacct` 命令不受影响。真实 `sbatch`/`sacct` 行为归 M4 oracle，本地以注入 fake 验证。
+run MUST 经作业执行器抽象为每源提交至多一个作业；提交参数（partition、account、CPU、内存、walltime）MUST 全部取自 `local.toml`，代码 MUST NOT 为这些资源内置任何默认值；每次提交的 job ID、partition、终态与起止时间 MUST 记入本次运行报告，失败源的日志 MUST 含同一 job ID。`LocalConfig.slurm_exclude_nodes` 非空时，每次 `sbatch` argv MUST 紧接资源段之后、`--wrap` 之前插入恰一项 `--exclude=<按配置顺序逗号连接的节点名>`；为空时 argv MUST 与无此特性时逐字节相同；`sacct` 命令不受影响。真实 `sbatch`/`sacct` 行为归 M4 oracle，本地以注入 fake 验证。
 
 每一次真实 `sbatch`、普通轮询 `sacct` 与失败 ExitCode `sacct` 客户端子进程 MUST 设置同一个正整数秒数的调用时限，取自 `LocalConfig.slurm_command_timeout_seconds`；其唯一缺省为配置装载器的版本化 60 秒。该值不得进入 `JobSpec.resources` 或 `sbatch` argv，也不是 Slurm job walltime、job watchdog 或取消策略。客户端超时 MUST 经既有异常漏斗转成 `ExecutorError`，不自动重试。
 
