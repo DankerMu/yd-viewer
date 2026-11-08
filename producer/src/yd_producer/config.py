@@ -6,9 +6,10 @@ f000 特例）、`docs/products-contract.md` §5（`forecast_days`/`output_inter
 /`reach_count`）、spec `cli-config`（顶层 key 名逐字钉死）。
 
 设计约束（design.md D4/D5）：只用 stdlib `tomllib`；dataclass 显式校验；任何必需
-字段缺失或类型错误一律 fail closed；唯一默认是由私有版本化 60 支撑的
-`LocalConfig.slurm_command_timeout_seconds`，其余必需字段均无默认值，缺失只能走报错
-路径。全部失败路径收敛到公开异常 `ConfigError`，涉及具体字段的失败以
+字段缺失或类型错误一律 fail closed；默认只有两处：由私有版本化 60 支撑的
+`LocalConfig.slurm_command_timeout_seconds`，与可选排除节点
+`LocalConfig.slurm_exclude_nodes` 的空元组（#382）；其余必需字段均无默认值，缺失只能
+走报错路径。全部失败路径收敛到公开异常 `ConfigError`，涉及具体字段的失败以
 `ConfigError.path` 暴露该字段的完整点分路径。
 
 全部 dataclass 一律 `kw_only=True` 构造：`VariantsConfig(gfs, ifs)` 与 `RawConfig(ifs,
@@ -28,6 +29,9 @@ from types import MappingProxyType
 from typing import Any
 
 _DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS = 60
+
+#: `local.toml` `[slurm]` 中不属于资源键集的可选 policy 键；`required_fields` 不得声明
+_SLURM_RESERVED_KEYS = ("command_timeout_seconds", "exclude_nodes")
 
 __all__ = [
     "CanonicalGridConfig",
@@ -181,7 +185,8 @@ class LocalConfig:
     """`local.toml` 的类型化视图。
 
     `slurm` 以映射暴露而非固定字段，键集由 `Config.slurm.required_fields` 决定；客户端
-    命令时限是独立 policy，默认值仅维持既有程序内直接构造兼容。
+    命令时限与排除节点（只经执行器翻译为 `sbatch --exclude`）是独立 policy，二者的默认值
+    仅维持既有程序内直接构造兼容。
 
     `yd_root` 在每次构造时把绝对输入以 `Path.resolve(strict=False)` 解析一次，仅保存
     canonical `Path`。相对路径与 `~` 拼写在 resolve 之前拒绝；解析的 `OSError`/
@@ -196,6 +201,7 @@ class LocalConfig:
     slurm: Mapping[str, str | int]
     cron: CronLocal
     slurm_command_timeout_seconds: int = _DEFAULT_SLURM_COMMAND_TIMEOUT_SECONDS
+    slurm_exclude_nodes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         raw = self.yd_root
@@ -437,11 +443,12 @@ def _build_slurm_schema(table: Mapping[str, Any]) -> SlurmSchema:
             + "、".join(f"`{name}`" for name in duplicates),
             "slurm.required_fields",
         )
-    if "command_timeout_seconds" in required_fields:
-        raise ConfigError(
-            "配置项 `slurm.required_fields` 不得含保留名 `command_timeout_seconds`",
-            "slurm.required_fields",
-        )
+    for reserved in _SLURM_RESERVED_KEYS:
+        if reserved in required_fields:
+            raise ConfigError(
+                f"配置项 `slurm.required_fields` 不得含保留名 `{reserved}`",
+                "slurm.required_fields",
+            )
     return SlurmSchema(required_fields=required_fields)
 
 
@@ -543,11 +550,40 @@ def _build_local_slurm_command_timeout(table: Mapping[str, Any]) -> int:
     return timeout
 
 
+def _build_local_slurm_exclude_nodes(table: Mapping[str, Any]) -> tuple[str, ...]:
+    """取出并校验可选的排除节点列表（#382）；缺席即空，保持原顺序，不去重不排序。"""
+    path = "slurm.exclude_nodes"
+    nodes = table.get("exclude_nodes", [])
+    if not isinstance(nodes, list):
+        raise ConfigError(
+            f"配置项 `{path}` 类型错误：期望 list[str]，实际 {_type_name(nodes)}",
+            path,
+        )
+    for index, node in enumerate(nodes):
+        if not isinstance(node, str):
+            raise ConfigError(
+                f"配置项 `{path}` 下标 {index} 的元素类型错误：期望 str，"
+                f"实际 {_type_name(node)}",
+                path,
+            )
+        if not node or "," in node or any(char.isspace() for char in node):
+            raise ConfigError(
+                f"配置项 `{path}` 下标 {index} 的节点名必须非空且不含逗号与空白："
+                f"{node!r}",
+                path,
+            )
+    return tuple(nodes)
+
+
 def _build_local_slurm(
     table: Mapping[str, Any], required_fields: tuple[str, ...]
 ) -> Mapping[str, str | int]:
-    """按 `config.toml` 声明的字段名校验现场 `[slurm]` 的资源投影。"""
-    resource_keys = set(table) - {"command_timeout_seconds"}
+    """按 `config.toml` 声明的字段名校验现场 `[slurm]` 的资源投影。
+
+    可选 policy 键 `command_timeout_seconds` 与 `exclude_nodes` 先从键集剥离，不计入
+    资源投影，各由独立的 builder 校验。
+    """
+    resource_keys = set(table) - set(_SLURM_RESERVED_KEYS)
     missing = sorted(set(required_fields) - resource_keys)
     extra = sorted(resource_keys - set(required_fields))
     if missing or extra:
@@ -580,6 +616,7 @@ def _build_local(data: Mapping[str, Any], config: Config) -> LocalConfig:
     slurm_table = _require_table(data, "slurm")
     slurm = _build_local_slurm(slurm_table, config.slurm.required_fields)
     slurm_command_timeout_seconds = _build_local_slurm_command_timeout(slurm_table)
+    slurm_exclude_nodes = _build_local_slurm_exclude_nodes(slurm_table)
     return LocalConfig(
         yd_root=_require_str(data, "yd_root"),
         scratch_root=_require_str(data, "scratch_root"),
@@ -588,6 +625,7 @@ def _build_local(data: Mapping[str, Any], config: Config) -> LocalConfig:
         slurm=slurm,
         cron=_build_cron(_require_table(data, "cron")),
         slurm_command_timeout_seconds=slurm_command_timeout_seconds,
+        slurm_exclude_nodes=slurm_exclude_nodes,
     )
 
 
@@ -595,8 +633,9 @@ def load_local(path: str | os.PathLike[str], config: Config) -> LocalConfig:
     """装载 gitignored `local.toml` 现场值。
 
     `[slurm]` 的资源键集以 `config.slurm.required_fields` 为唯一权威：缺项与除
-    `command_timeout_seconds` 外的多余项都抛 `ConfigError` 并指名该键。唯一例外是该
-    客户端命令时限缺席时采用内部版本化默认值。
+    `command_timeout_seconds`、`exclude_nodes` 外的多余项都抛 `ConfigError` 并指名该
+    键。例外只有两个：客户端命令时限缺席时采用内部版本化默认值；可选排除节点缺席时为
+    空元组。
     """
     location = os.fspath(path)
     data = _read_toml(

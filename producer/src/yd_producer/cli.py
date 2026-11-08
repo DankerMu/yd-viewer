@@ -201,6 +201,7 @@ def run(local: LocalConfig, config: Config) -> int:
                 required_fields=config.slurm.required_fields,
                 clock=lambda: datetime.now(UTC),
                 runner=runner,
+                exclude_nodes=local.slurm_exclude_nodes,
             )
             for source in _SOURCE_ORDER
         }

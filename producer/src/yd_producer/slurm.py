@@ -15,8 +15,8 @@
   声明的字段就是不装配），但反过来 `required_fields` 里出现无 flag 的字段名必须报错：
   静默丢弃等于把一条现场配置的资源约束扔掉后照常提交。
 * **零内置默认**：任何资源参数都没有 fallback 取值；`required_fields`/`clock`/`runner`
-  一律 keyword-only 且无默认。未知 `sacct` 状态串不兜底为 `FAILED`（那会把"没见过的
-  调度器状态"伪装成"作业自身失败"，销毁 `TIMEOUT`/`FAILED` 分立要保的运维判据），空
+  一律 keyword-only 且无默认（`exclude_nodes` 不是资源，keyword-only，缺省为空）。
+  未知 `sacct` 状态串不兜底为 `FAILED`（那会把"没见过的调度器状态"伪装成"作业自身失败"，销毁 `TIMEOUT`/`FAILED` 分立要保的运维判据），空
   `sacct` 输出不兜底为 `PENDING`——唯一例外是提交后 `SACCT_ACCOUNTING_GRACE_SECONDS`
   秒内的 0 行：那是 accounting 滞后，`poll` 原样返回已有记录（不新造状态与时间），窗口
   外的 0 行与任何时刻的多行仍照旧 fail closed。
@@ -112,7 +112,10 @@ SACCT_ACCOUNTING_GRACE_SECONDS = 120
 
 
 def build_sbatch_command(
-    spec: JobSpec, *, required_fields: Sequence[str]
+    spec: JobSpec,
+    *,
+    required_fields: Sequence[str],
+    exclude_nodes: Sequence[str] = (),
 ) -> tuple[str, ...]:
     """把一次提交装配为 `sbatch` argv。
 
@@ -125,6 +128,10 @@ def build_sbatch_command(
 
     资源段按字段名 `sorted()` 升序展开，使产物只依赖键集而不依赖 `config.toml` 里的
     行序。
+
+    `exclude_nodes`（`LocalConfig.slurm_exclude_nodes`，已由装载器校验）非空时，紧接
+    资源段之后、`--wrap` 之前插入恰一项 `--exclude=<按原顺序逗号连接>`；为空时 argv
+    与无此参数时逐字节相同。它不是资源，不经 `SBATCH_FLAGS`。
     """
     declared = set(required_fields)
     present = set(spec.resources)
@@ -162,6 +169,8 @@ def build_sbatch_command(
                 "需要先支持该字段）"
             )
         argv.extend((flag, str(spec.resources[name])))
+    if exclude_nodes:
+        argv.append("--exclude=" + ",".join(exclude_nodes))
     argv.extend(("--wrap", shlex.join(spec.command)))
     return tuple(argv)
 
@@ -297,8 +306,9 @@ class SlurmJobExecutor:
     `sacct` 不提供它们。故只支持"同一 run 进程内提交后轮询"——这正是「并发与锁」的
     形态（单进程持 flock 覆盖提交→等待→发布全生命周期），不做跨进程持久化。
 
-    三个构造参数均 keyword-only 且无默认值：键集权威在外，时钟必须可注入（不读挂钟），
-    进程边界必须可替换。
+    全部构造参数均 keyword-only。`required_fields`/`clock`/`runner` 无默认值：键集权威
+    在外，时钟必须可注入（不读挂钟），进程边界必须可替换。`exclude_nodes` 缺省为空，
+    原样转交 `build_sbatch_command`，只影响 `sbatch` argv，不影响 `sacct`。
     """
 
     def __init__(
@@ -307,14 +317,20 @@ class SlurmJobExecutor:
         required_fields: Sequence[str],
         clock: Callable[[], datetime],
         runner: Callable[..., str],
+        exclude_nodes: Sequence[str] = (),
     ) -> None:
         self._required_fields = tuple(required_fields)
+        self._exclude_nodes = tuple(exclude_nodes)
         self._clock = clock
         self._runner = runner
         self._records: dict[str, JobRecord] = {}
 
     def submit(self, spec: JobSpec) -> JobRecord:
-        argv = build_sbatch_command(spec, required_fields=self._required_fields)
+        argv = build_sbatch_command(
+            spec,
+            required_fields=self._required_fields,
+            exclude_nodes=self._exclude_nodes,
+        )
         stdout = self._run(argv, env=None, job_id=None)
         job_id = parse_sbatch_job_id(stdout)
         record = JobRecord(
