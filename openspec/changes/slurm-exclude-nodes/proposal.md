@@ -25,7 +25,7 @@ Must preserve:
 - `LocalConfig.slurm` 资源映射、`JobSpec.resources`、`JobRecord.resources` 都不含 exclude。
 - `sacct` 两条命令（轮询、ExitCode）不变。
 - `SBATCH_FLAGS` 不变，exclude 不是资源。
-- 现有 `test_config.py`、`test_cli.py`、`test_slurm.py`、`test_slurm_executor.py` 原样通过。`test_cli.py` 已满 1000 行，新用例放进新文件。
+- 现有 `test_cli.py`、`test_slurm.py` 原样通过。`test_slurm_executor.py:331-349` 的构造参数钉子和 `test_config.py` 的两个字段结构钉子（见 tasks 1.4）同步更新，其余原样通过。`test_cli.py` 已满 1000 行，新用例放进新文件。
 
 Non-goals：坏节点自动探测、重试换节点、`--nodelist`、改 NWM、改 `config.toml`。
 

@@ -2,7 +2,7 @@ Change surface: `config._build_local` / `_build_local_slurm`（剥离可选键�
 
 Must preserve:
 - 不含 `exclude_nodes` 的 `local.toml`（或写成 `exclude_nodes = []`）装载结果与改动前相同，sbatch argv 逐字节相同（`tests/slurm_fixtures.py:77` `EXPECTED_SBATCH`）。
-- `LocalConfig(...)`、`SlurmJobExecutor(...)`、`build_sbatch_command(...)` 现有的关键字调用（`cli.py:200`、`tests/slurm_fixtures.py:132`、`test_slurm*.py`）不改也能用。`test_slurm_executor.py:331-349` 对构造参数的钉子，按新增的带默认 keyword-only 参数同步更新。
+- `LocalConfig(...)`、`SlurmJobExecutor(...)`、`build_sbatch_command(...)` 现有的关键字调用（`cli.py:200`、`tests/slurm_fixtures.py:132`、`test_slurm*.py`）不改也能用。`test_slurm_executor.py:331-349` 对构造参数的钉子，按新增的带默认 keyword-only 参数同步更新。`test_config.py` 中两个对 `LocalConfig` 字段结构的钉子同步更新（tasks 1.4），其余原样通过。
 - `LocalConfig.slurm`、`JobSpec.resources`、`JobRecord.resources` 都不含 exclude；`SBATCH_FLAGS` 不变；两条 `sacct` 命令不变。
 - `prepare` 和 `init` 也经 `load_local` 读同一张表：这个键对它们只做校验，不产生其它影响。
 - `load_local` 与 `_build_local_slurm` 的 docstring 里「唯一例外」「除 `command_timeout_seconds` 外」的措辞同步更新。

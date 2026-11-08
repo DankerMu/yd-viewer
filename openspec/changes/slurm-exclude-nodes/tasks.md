@@ -16,6 +16,9 @@
 - [ ] 1.1 `config.py`：剥离并校验 `exclude_nodes`，加 additive 字段 `LocalConfig.slurm_exclude_nodes: tuple[str, ...] = ()`，`required_fields` 拒绝这个保留名
 - [ ] 1.2 `slurm.py`：`build_sbatch_command` 与 `SlurmJobExecutor.__init__` 各增加 keyword-only 参数 `exclude_nodes=()`；更新 executor 的 docstring 和 `test_slurm_executor.py:331-349` 的构造参数钉子；`config.py` 中 `load_local`、`_build_local_slurm` 的 docstring 同步更新
 - [ ] 1.3 `cli.py`：构造 executor 时传入 `local.slurm_exclude_nodes`
+- [ ] 1.4 同步修改 `test_config.py` 的两个字段结构钉子：
+  - `test_only_local_command_timeout_field_carries_a_default`（~L2064）改为：恰好只有 `slurm_command_timeout_seconds` 和 `slurm_exclude_nodes` 两个字段有默认值，并钉死后者的默认值是 `()`。
+  - `test_complete_round_trip_expected_leaves_are_distinct[local]`（~L900）的叶子数从 11 改为 12；在 `VALID_LOCAL_B` / `EXPECTED_LOCAL_B` 中加入 `exclude_nodes = ["cn02"]`，A 保持缺省得到 `()`，使 A/B 的叶子仍逐项不同。
 
 ## 2. 测试（新文件 `producer/tests/test_slurm_exclude_nodes.py`）
 
